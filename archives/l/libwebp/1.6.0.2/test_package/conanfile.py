@@ -19,16 +19,17 @@ class TestConan(ConanFile):
         CMakeDeps(self).generate();CMakeToolchain(self).generate();VirtualRunEnv(self).generate()
     def build(self):
         cmake=CMake(self);cmake.configure();cmake.build()
-        binary=Path(self.build_folder)/"bin/consumer"
         if self.settings.os=="OHOS":
             tools={name:shutil.which(name) for name in ("llvm-readelf","llvm-objcopy","binary-sign-tool")}
             if not all(tools.values()):raise ConanInvalidConfiguration("Missing real signing tools")
-            sections=subprocess.run([tools["llvm-readelf"],"-S",str(binary)],capture_output=True,check=True)
-            if b".codesign" in sections.stdout:self.run(" ".join(shlex.quote(x) for x in (tools["llvm-objcopy"],"--remove-section",".codesign",str(binary))))
-            self.run(" ".join(shlex.quote(x) for x in (tools["binary-sign-tool"],"sign","-inFile",str(binary),"-outFile",str(binary),"-selfSign","1")))
-            after=subprocess.run([tools["llvm-readelf"],"-S",str(binary)],capture_output=True,check=True)
-            if b".codesign" not in after.stdout:raise ConanInvalidConfiguration("Missing actual codesign section")
-            binary.chmod(0o755)
+            for name in ("consumer","harmony_native_loader"):
+                binary=Path(self.build_folder)/"bin"/name
+                sections=subprocess.run([tools["llvm-readelf"],"-S",str(binary)],capture_output=True,check=True)
+                if b".codesign" in sections.stdout:self.run(" ".join(shlex.quote(x) for x in (tools["llvm-objcopy"],"--remove-section",".codesign",str(binary))))
+                self.run(" ".join(shlex.quote(x) for x in (tools["binary-sign-tool"],"sign","-inFile",str(binary),"-outFile",str(binary),"-selfSign","1")))
+                after=subprocess.run([tools["llvm-readelf"],"-S",str(binary)],capture_output=True,check=True)
+                if after.stdout.count(b".codesign")!=1:raise ConanInvalidConfiguration("Missing or duplicate actual codesign section")
+                binary.chmod(0o755)
     def test(self):
         if not can_run(self):raise ConanInvalidConfiguration("Consumer must actually run")
         self.run(shlex.quote(str(Path(self.build_folder)/"bin/consumer")),env="conanrun")
@@ -37,4 +38,5 @@ class TestConan(ConanFile):
             readelf=shutil.which("llvm-readelf")
             if not readelf:raise ConanInvalidConfiguration("Missing actual ELF reader")
             script=Path(self.source_folder)/"harmony_tests/signed_loader.py"
-            self.run(" ".join(shlex.quote(str(x)) for x in (sys.executable,script,package,readelf)),env="conanrun")
+            native=Path(self.build_folder)/"bin/harmony_native_loader"
+            self.run(" ".join(shlex.quote(str(x)) for x in (sys.executable,script,package,readelf,native)),env="conanrun")

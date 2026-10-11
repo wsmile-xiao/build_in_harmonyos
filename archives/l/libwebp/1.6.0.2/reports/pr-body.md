@@ -58,6 +58,10 @@
 - 上游测试用例通过率：76/76（100%）
 - 新增测试用例通过率：5/5（100%）
 
+**当前验收更新（2026-10-11，r005）**：平台 build96229 的原上游及消费者通过，但原 Python ctypes 鸿蒙探针对私有已签名 DSO 返回 Permission denied。现改为独立签名、未预链接被测库的原生 ELF 探针：保留 ELF64/AArch64/签名/SONAME/NEEDED 校验，真实 dlopen/dlsym、同包依赖预加载、RGBA 编解码和 dladdr/maps 包归属断言。库不承诺 Python ctypes 绑定；该调整验证原生库能力，不声称 ctypes 的具体系统策略故障已解决。原失败证据保留，未用 stub、系统替代库或跳过代替专项。
+
+新 run `libwebp-1.6.0.2-finish-step5-20261011-r005`、测试 tree `37d65b023c7ddb8c9d1ba667af99a8275c81b2ba` 中，官方 FinishPipeline.step35_local_ci 实际干净 Conan 构建、原76/76、消费者4/4、鸿蒙1/1均通过，零失败/跳过。独立观察SHA `34bf8d447dc79944adce78e45bf86d0004e4ec5950e65fc723a46bebd99b36c0`；逐源码 ID/ANTLR 原参数观察SHA `27c6c6de9d0e4d6cf910074a41181a4d07aa341cbcc05a0d98f4c7bf29be0d5d`。完整回执链、唯一 launch、release/postrelease、自有进程0已核验。以下 r004 段落及旧哈希是保留的历史验证，不覆盖当前 r005；本地成功不是当前新 HEAD 平台 CI、Review 或提审成功。
+
 2026-10-11 后续整改：真实 AtomCode 检视发现签名入口的格式边界和测试树元数据问题。严格签名模式现在拒绝短头、错误 magic、ELF32、大端以及非执行/共享对象；编译器包装器区分 -c/-S/-E/-fsyntax-only 纯编译动作，不要求签名合法的 ET_REL 对象，真正链接仍保留签名及非零退出失败传播。直接把所有 ET_REL 都判为失败会破坏上游编译探测，因此没有采用这一错误修法。MANIFEST 动态路径与真实 Conan 参数绑定。本机定向12/12后，fresh 官方 FinishPipeline.step35_local_ci r004 实际干净 Conan 构建及76+4+1同run全通过。完整28文件的真实检视报告SHA256为0a5bdc13e322d032c9fb0601e8be5dd881c5cc4169af59790d0fa9a9e34e41bf，公开报告及处置说明为评论193169907；两个大型原始日志仅哈希绑定摘录，该检视不冒充完整逐行日志审核。新提交后另行回读该完整HEAD评审与平台CI。
 
 本文件为 PR #14954 的六节正文。Issue #3565 与本 PR 双向唯一关联，真实修复任务14927（libwebp1.6.0.2，fix/libwebp-1.6.0.2）已领取，账号2301_80739235，活动为开源鸿蒙PC专项积分赛-依赖。当前完整验证 run 为 libwebp-1.6.0.2-finish-step5-20261011-r004，测试候选 tree 为fe03e66cfb341f8f40bf7e4236df857756d5318b。配方仅在 OHOS 路径配置真实 Clang 与签名工具，非 OHOS 保留 Conan toolchain；recipe SHA256 5c01bbe198dc2735f6af6bfc426e311692a503004a80e0d384bb6e04e658e199，签名入口 SHA256 aa57a1b7edda87f7026ef12b16cebd8b429f6c859bdfdde6d179bd2f2d447fca。测试后仅刷新正式生成证据、元数据及正文，运行输入保持测试时字节。探索结果、旧事务和旧 PR #13623 的 Review/CI 不冒充当前 HEAD 门禁。
