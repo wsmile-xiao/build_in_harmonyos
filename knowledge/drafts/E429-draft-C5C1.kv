@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E429.kv，填写各字段
+# 对应的人类文档: doc/E429.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E429
+trigger_tool: mvn|conan|create
+phase: compilation
+error_signature: Downloading from central: .*\.jar
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: build-system, packaging, conan
+match_keywords: mvn -pl, -am, --projects, --also-make, maven-dependency-plugin, Downloading from central, 源码编译口径, reactor, unpack, 现成 jar, jakarta.activation-2.0.0.jar
+title: Maven 多模块 reactor 用 `-pl <module> -am` 裁剪时，maven-dependency-plugin 可能不再取 reactor 产物，而改为从 Maven Central 下载「现成的」同名 jar——构建表面成功但产物已非源码编译所得；制品模块应为全 reactor 构建，或必须核对产物来源
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: jaf-api 的 activationapi 模块并不以 <dependencies> 形式依赖 activation 模块，而是通过 maven-dependency-plugin 的插件配置引用 jakarta.activation:<version>。Maven 的 `-am`（also-make）只把「被依赖模块」纳入 reactor；插件配置里的引用不算依赖关系，故 `-pl activationapi -am` 时 activation 模块不参与构建，插件于是从远程仓库解析——实测日志为 `Downloading from central: .../com/sun/activation/jakarta.activation/2.0.0/jakarta.activation-2.0.0.jar`。结果：API jar 里的类来自中央仓预编译产物，而非本次源码编译，构建"成功"却偏离源码适配口径（且引入对远程仓库的隐式依赖，离线/受限网络下会直接失败）。
+affected_scope: 所有以 Maven 多模块 reactor 构建、且制品模块通过 maven-dependency-plugin / assembly / shade 等插件装配其它模块产物的配方；裁剪 reactor（-pl/-am）时最易踩
+verification_cmd: 构建日志中检索 "Downloading from central: .*<你打算编译的制品名>.*\.jar"；或在 package() 前后对比该 jar 的 sha256 与本地 target/ 下产物的 sha256 是否一致
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: build-full-reactor-and-verify-artifact-origin
+rec_description: ①制品所需的模块一律用全 reactor 构建（`mvn clean package -B -DskipTests=false`），只有确认"该模块体积/耗时不可接受且其产物不被制品使用"（如 servlet 的 tck 模块）时才裁剪；②裁剪时必须在构建日志里确认没有出现 `Downloading from central: ...<制品>.jar`；③必要时在 package() 里断言产物来自 source_folder/<module>/target（本配方即按目录取 jar），并记录 sha256，避免"看似成功、实为拉包"。
+rec_command: mvn clean package -B -DskipTests=false # 全 reactor；裁剪时改 -pl <module> -am 但须核对日志
+rec_auto_fix: false
+rec_impl: manual
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: pin-the-module-as-plugin-dependency
+fallback_description: 若确实必须裁剪（模块极大），可在 activationapi 的插件配置里把待装配模块显式声明为插件的 <dependencies>（或把 plexus 依赖关系补成 reactor 依赖），迫使 Maven 用 reactor 产物而非远程 jar——改动上游 pom，需走 patches/ 并说明理由
+fallback_command:
+fallback_auto_fix: false
+fallback_impl: forbid_1_pattern:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:
+forbid_1_reason:
+forbid_1_consequence:
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E429.md
+last_updated: 2026-10-08
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: C5C1
