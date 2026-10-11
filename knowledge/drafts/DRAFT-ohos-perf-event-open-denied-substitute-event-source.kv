@@ -1,0 +1,127 @@
+#====================================================================
+# DRAFT-ohos-perf-event-open-denied-substitute-event-source.kv
+# OHOS 对 perf_event_open 的所有事件类型返回 EACCES（seccomp）：
+# 硬件 PMU 采样不可用，需要 PMU 的库必须改用替代事件源
+# 来源: paflib 0.3.0 OHOS aarch64 适配（contrib-9274，分支 feat/paflib-0.3.0）
+# 状态: 草稿（待主编审核 promote 为正式 E 条目）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-ohos-perf-event-open-denied-substitute-event-source
+trigger_tool:           runtime|test|conan create
+phase:                  runtime|testing
+error_signature:        perf_event_open.*(EACCES|Operation not permitted|Permission denied)|errno = 13 \(Permission denied\)|perf_event_open\(\) failed|
+                         PERF_EVENT_IOC_ENABLE|PERF_TYPE_RAW.*failed|perf_event_paranoid
+
+# ═══ Layer 1: 识别面 (Recognition) ═══
+severity:               2
+category:               ohos, syscall, detection, kernel, runtime, portability
+match_keywords:         perf_event_open, __NR_perf_event_open, PERF_TYPE_RAW,
+                         PERF_TYPE_HARDWARE, PERF_TYPE_SOFTWARE, PERF_COUNT_HW_INSTRUCTIONS,
+                         PERF_COUNT_SW_CPU_CLOCK, perf_event_paranoid, PMU, hardware counter,
+                         hardware performance counter, sampling, overflow, SIGIO, EACCES,
+                         errno 13, seccomp, substitute event source, setitimer, ITIMER_REAL,
+                         SIGALRM, timer_create, SIGRTMIN, EBB, event-based branching,
+                         event based branch, hardware sampling unavailable, rapl, rdpmc
+title:                  OHOS 对 perf_event_open 的 HW/SW/RAW 三类事件一律返回 EACCES（seccomp，即便
+                        perf_event_paranoid=-1）；需要硬件 PMU/性能计数器的库必须改用替代事件源
+                        （setitimer(ITIMER_REAL)+SIGALRM 实测可用；timer_create(SIGRTMIN) 实测挂起）
+prescan_pattern:        perf_event_open|PERF_COUNT_HW|PERF_TYPE_RAW|PERF_TYPE_HARDWARE|syscall\s*\(\s*__NR_perf_event_open
+prescan_globs:          *.c, *.h, *.cc, *.cpp, CMakeLists.txt, Makefile*, *.mk, *.am, conanfile.py
+
+# ═══ Layer 2: 诊断面 (Diagnosis) ═══
+root_cause:             OHOS 的运行时（seccomp/安全策略）禁止 perf_event_open 系统调用：
+                        对 PERF_TYPE_HARDWARE、PERF_TYPE_SOFTWARE、PERF_TYPE_RAW 全部返回
+                        EACCES（errno=13, Permission denied），即使内核参数
+                        /proc/sys/kernel/perf_event_paranoid = -1（通常意味着"允许用户态 perf"）
+                        也一样被拒。也就是说这不是权限位问题，而是系统调用入口被拦截，用户态无法
+                        打开任何性能计数器，硬件 PMU 采样 / 溢出中断（EBB 等）无从谈起。
+                        判定口径：先读 perf_event_paranoid（可能为 -1），再直接 syscall 打开
+                        HW/SW/RAW 三类事件；若三类都 EACCES，即可判定为平台级不可用，而非配置错误。
+                        注意误导项：paranoid=-1 会让人以为"应该可用"，从而反复调参数、加 CAP，
+                        浪费轮次。
+affected_scope:         所有依赖 perf_event_open / 硬件性能计数器 / PMU 溢出采样的库与工具：
+                        采样 profiler、基于 PMU 的运行时（如 EBB）、性能分析器、
+                        依赖 rdpmc/perf 的实现。适配实证：paflib 0.3.0 的 EBB 设施
+                        （POWER8 Event-Based Branching，原本用 perf_event_open 挂原始 Power 事件）。
+verification_cmd:       读内核参数并逐一试探三类事件：
+                        cat /proc/sys/kernel/perf_event_paranoid          # 实测 = -1
+                        # 三次 syscall(__NR_perf_event_open,...) 分别用
+                        #   PERF_TYPE_HARDWARE/PERF_COUNT_HW_INSTRUCTIONS
+                        #   PERF_TYPE_SOFTWARE/PERF_COUNT_SW_CPU_CLOCK
+                        #   PERF_TYPE_RAW/0x11
+                        # 实测三者 fd 均为 -1 且 errno=13 (EACCES)
+                        # 对比：setitimer(ITIMER_REAL)+SIGALRM 实测可用
+                        #       timer_create(SIGEV_SIGNAL, SIGRTMIN) 实测挂起（不可用）
+
+# ═══ Layer 3: 方案空间 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           substitute-event-source-for-pmu
+rec_description:        所属类别：平台禁用了某类硬件采样/中断入口，但业务只需要"周期性触发一个
+                        回调"的语义。先确认硬件入口确实不可用（见 verification_cmd），不要试图用
+                        perf 参数绕过；然后为依赖 PMU 的 API 提供一个可用的替代事件源，把
+                        "事件触发 → 调用注册的 handler" 这条语义链做实：
+                        · 首选 setitimer(ITIMER_REAL)+SIGALRM（进程级 interval timer，实测可用）；
+                          周期由调用方请求的采样周期映射（如 sample_period/us）。
+                        · 触发时在信号处理器里调用该线程注册的回调与上下文，尊重 enable/disable；
+                          close 时解除定时器。
+                        · 保留原 API 的 register/enable/disable/reset/period/close 全套语义，
+                          只是事件来源从 PMU 变成定时器；在文档中如实说明"触发是周期性的，非微架构事件"。
+                        · 明确不要用 timer_create(SIGEV_SIGNAL, SIGRTMIN)：OHOS 实测会挂起。
+                        ★ 关键点：把"硬件事件"与"事件分发"解耦——库的上层（handler 注册、
+                        enable/disable、上下文、生命周期）保持不变，只替换事件源。这样上游测试
+                        里"handler 被触发 N 次"的用例可在目标平台真实跑过。
+                        · 本仓实例 archives/p/paflib/0.3.0/（EBB 仿真事件源）。
+rec_command:            conan create archives/p/paflib/0.3.0 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64
+rec_auto_fix:           false
+rec_impl:               conan-recipe + setitimer(ITIMER_REAL)/SIGALRM dispatch
+
+fallback_priority:      2
+fallback_approach:      capability-report-and-degrade-explicitly
+fallback_description:   当"周期性回调"确实无法表达原语义（例如必须由微架构事件精确触发）时，
+                        把该能力标记为不可用并让 API 返回明确的 errno（如 ENOSYS/EPERM），
+                        同时在构建/测试中如实记录：这是平台能力缺口，而非库的缺陷。禁止静默假装成功。
+fallback_auto_fix:      false
+fallback_impl:          capability probe + explicit errno + skipped tests with reason
+
+# ★ 禁止策略（均以实测为依据）★
+forbid_1_pattern:       在 OHOS 上假设 perf_event_open 可用/仅靠调 perf_event_paranoid 或加 capability 让其成功
+forbid_1_reason:        实测三类事件均 EACCES，与 paranoid=-1 无关，是系统调用入口被拦。
+forbid_1_consequence:   反复调参、加 CAP、换用户，浪费多轮仍打不开 PMU。
+forbid_2_pattern:       timer_create\s*\([^)]*SIGRTMIN|SIGEV_SIGNAL.*SIGRTMIN
+forbid_2_reason:        OHOS 实测 POSIX timer_create(SIGEV_SIGNAL, SIGRTMIN) 挂起，不可用。
+forbid_2_consequence:   测试/运行挂死，被误判为库的 bug。
+forbid_3_pattern:       用 (rdpmc|__builtin_ia32_rdpmc|PMU 寄存器|mfspr) 直接读硬件计数器绕过 perf
+forbid_3_reason:        aarch64/OHOS 无对应的用户态计数器访问；POWER 的 mfspr 是 Power 专属。
+forbid_3_consequence:   编译失败或 SIGILL，且掩盖了"平台无此能力"的事实。
+forbid_4_pattern:       未做能力探测就直接把 perf_event_open 的失败归因于"权限不足/代码 bug"
+forbid_4_reason:        默认错误常为 EACCES，极易被误判为文件/权限问题；需先用三类事件试探确认。
+forbid_4_consequence:   根因定位错误，去改权限/环境而不是换事件源。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             R34, R39, R51
+
+# ═══ 关系图 (Relations) ═══
+causes:                 依赖 PMU/硬件性能计数器的功能（采样 profiler、EBB 等）在 OHOS 上不可用或需改写
+caused_by:              OHOS 运行时（seccomp/安全策略）拦截 perf_event_open 系统调用
+similar_to:             E314（R 的 ITIMER_PROF/SIGPROF：不同子族，那是 CPU 时间采样的 SIGPROF 用法）, E051（SIGSYS 拦截系统调用）, E303, E008, E496（EACCES 但属文件/socket 场景）
+conflicts_with:         []
+prerequisite_of:        DRAFT-ohos-software-register-model-for-absent-hw-facility
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-ohos-perf-event-open-denied-substitute-event-source.md
+last_updated:           2026-10-03
+source_event:           paflib 0.3.0 OHOS aarch64 conan create；
+                        perf_event_open 三类事件 EACCES 实测；EBB 经 setitimer 仿真事件源，
+                        上游 10 个 EBB 测试实际触发回调并通过
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                frj__
+source_pr:              (本分支 feat/paflib-0.3.0，关联 issue #3711)
+source_commit:
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-10-03
+draft:                  true
+contributor_id:         frj__
