@@ -1,0 +1,88 @@
+#====================================================================
+# DRAFT knowledge entry — 手写 Makefile 的"变量槽位"改造：新增 $(SLOT) 不覆盖变量；丢槽位 token 的指纹判定
+# Source: tetraproc/0.9.2 真机 shadow CI 2026-10-04（r2 迭代 5/6）
+#====================================================================
+
+id: DRAFT-makefile-slot-injection-and-patch-token-fingerprint
+trigger_tool: conan-create|make|ld.lld|apply_conandata_patches
+phase: building|packaging
+error_signature: |
+  "unable to find library -l"（全部外部库同时报）|
+  链接行无 -L|-march=native 仍在编译命令|pkg-config 仍被调用|
+  make 命令行参数在但效果无
+severity: 2
+category: makefile, cross-compile, patch, portability
+match_keywords: Makefile, CPPFLAGS, LDLIBS, target-specific, \+=, 槽位,
+  slot, PCONFCFL, SYSLIBS, CONAN_LDLIBS, -march=native, pkg-config,
+  patch_file, 补丁生效, fingerprint, 指纹
+
+title: >
+  手写 Makefile 交叉编译改造：不覆盖 CPPFLAGS/LDLIBS，而是补丁新增 $(槽位) 变量
+  （配 ?= 默认值）并写进编译/链接行；补丁重生成时槽位 token 易丢，
+  用"命令行参数在但链接行无 -L"等指纹判定
+
+root_cause: >
+  手写 Makefile 普遍用 CPPFLAGS/LDLIBS 的 target-specific `+=` 追加上游自己的
+  宏（-DVERSION/-DSHARED）与库列表。配方若用命令行整体覆盖这些变量，会冲掉
+  上游追加，且不同 target 的差异丢失。正确模式是补丁新增专用槽位变量并在
+  使用点引用 $(槽位)。高危伴生坑：补丁文件重生成（replace_in_file 方案改写为
+  .patch、或刷新 diff）时容易漏抄某个槽位 token——make 命令行参数确实传了，
+  但 Makefile 不再引用它，表现为"所有外部库 unable to find / -L 全部消失"，
+  误导向"依赖没装"。另一伴生坑：补丁结构错误导致补丁根本未应用（见姊妹条目
+  conandata flat patches），build 跑未打补丁源码（-march=native、pkg-config
+  依旧出现），同样离真实原因很远。
+
+affected_scope: >
+  所有手写/半手写 Makefile 的上游（Fons Adriaensen 系、老 CLI/GUI 工具、
+  递归 include 的项目）在 OHOS 交叉编译下的旗标注入；以及任何
+  "补丁声称改了 X 但编译命令行里 X 还在"的排查。
+
+verification_cmd: >
+  # 槽位 token 是否还在补丁里:
+  grep -n 'CONAN_LDLIBS\|PCONFCFL' archives/<x>/<pkg>/<ver>/patches/*.patch
+  # 指纹 1（槽位生效）: make 命令行有参数、链接行有 -L:
+  grep -m1 'make -C' <run>/logs/stdout.log | grep -o 'CONAN_LDLIBS=.\{0,80\}'
+  grep -m1 'clang.*-o '  <run>/logs/stdout.log | grep -c -- '-L/'
+  # 指纹 2（补丁生效）:
+  grep -m1 'clang' <run>/logs/stdout.log | grep -c -- '-march=native'  # 应为 0
+
+rec_priority: 1
+rec_approach: slot-injection-plus-two-fingerprints
+rec_description: |
+  1) 改造模式: 补丁新增槽位变量（?= 默认值，Linux/OHOS 一份 Makefile 两用），
+     在编译行追加 $(PCONFCFL)/$(FREETYPE_CFLAGS)，在每个链接行尾部追加
+     $(SYSLIBS) $(CONAN_LDLIBS)；配方命令行传参。绝不命令行覆盖
+     CPPFLAGS/LDLIBS 本身。
+  2) 伴生坑 A（丢 token）: 重生成补丁后必须 grep 槽位名确认每个使用点都在；
+     "make 命令行参数在 + 链接行 -L 为空" = Makefile 引用点丢失。
+  3) 伴生坑 B（补丁未应用）: 编译命令行里仍出现补丁应删除的内容
+     （-march=native、pkg-config 调用）= 补丁没进配方（查 conandata 结构，
+     见姊妹条目）。
+rec_command: |
+  # Makefile 补丁要点:
+  # PCONFCFL ?= / FREETYPE_CFLAGS ?= / SYSLIBS ?= -lrt
+  # CPPFLAGS += ... $(PCONFCFL)
+  # <target>: LDLIBS += ... $(SYSLIBS) $(CONAN_LDLIBS)
+  # 配方: make -C source -j1 CXX="<profile cxx>" PCONFCFL="..." SYSLIBS="..."
+rec_auto_fix: false
+rec_impl: manual
+fallback_priority: 3
+fallback_approach: full-makefile-rewrite
+fallback_description: >
+  极端情况下（上游链接行过乱）可在补丁里整体重写 link 规则引用配方变量，
+  但 diff 变大、上游升级冲突面大，优先槽位注入。
+conflicts_with: []
+notes: >
+  查重边界：pcaputils-0.8 讲"链接变量名反推+命令行覆盖"（改名场景，其上游无
+  target-specific += 依赖）；simh-3.8.1 讲 CC 全命令覆盖；fasttext-0.9.2 讲
+  CMake 的 -march=native；zerofree-1.1.1 讲 musl 链接旗标。均未覆盖
+  "新增槽位 + 保留 target-specific += + 丢 token/未应用双指纹"。
+  conandata 结构侧由姊妹条目
+  DRAFT-conan2-conandata-keyed-sources-and-flat-patches 承接。
+verify_builds: >
+  tetraproc/0.9.2 真机 2026-10-04：丢 $(CONAN_LDLIBS) 时 8 个外部库
+  unable to find（r2 第 5 轮 fail）；补回后两可执行文件链接成功、
+  编译命令 -march=native 消失（r2 第 6 轮起），最终 exit 0。
+authors: codex
+source_pr: pending
+source_commit: a6f390b22d (feat/tetraproc-0.9.2-codex)
