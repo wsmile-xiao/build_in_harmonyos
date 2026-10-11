@@ -17,7 +17,7 @@
 | 单元测试 | 64 | 官方固定 ANTLR 4.12.0 默认启用原用例，原参数化 IDs 分别 32+32；不关闭 BUILD_TESTING |
 | 集成测试 | 12 | 官方 libwebp 1.6.0 原 tests/fuzzer 入口，含原基础 7、mux 4、info 1；执行其固定 FuzzTest harness，非只统计注册 |
 | 其他测试 | 0 | 该原 CMake 路径未发现独立额外运行入口；精确清单与源审计将附正式证据 |
-| **合计** | **76** | 当前候选在官方 step35 r006 同一事务实际 76/76、零 skip；逐项核对原 FuzzTest IDs 和 ANTLR 原参数，不拼跨run分母 |
+| **合计** | **76** | 当前候选在官方 step35 r007 同一事务实际 76/76、零 skip；逐项核对原 FuzzTest IDs 和 ANTLR 原参数，不拼跨run分母 |
 
 ### 适配后测试用例统计
 
@@ -26,7 +26,7 @@
 | 单元测试 | 64 | 不变 | 原 ANTLR 测试与断言未修改；仅构建平台能力探测修复 |
 | 集成测试 | 16 | +4 | 原 libwebp 12；另有消费者真实无损 RGBA、元数据 mux/demux、有损尺寸/alpha 和坏码流拒绝 4 项 |
 | 鸿蒙特有测试 | 1 | 新增 | HarmonyOS PC AArch64 ELF codesign、实际 SONAME/NEEDED 与自有包运行时命名空间、真实 codec 调用的独立专项 |
-| **合计** | **81** | **+5** | 当前修复候选在官方本地 CI r006 同一事务实际 76+4+1 全通过，不拼跨run分母 |
+| **合计** | **81** | **+5** | 当前修复候选在官方本地 CI r007 同一事务实际 76+4+1 全通过，不拼跨run分母 |
 
 ---
 
@@ -58,7 +58,13 @@
 - 上游测试用例通过率：76/76（100%）
 - 新增测试用例通过率：5/5（100%）
 
-### 当前验证权威（2026-10-11，r006）
+### 当前验证权威（2026-10-11，r007）
+
+本轮唯一事务 `libwebp-1.6.0.2-finish-step5-20261011-r007`：官方 step35、干净 Conan create 真实 RC0；原测试76/76（FuzzTest12、ANTLR64）、消费者4/4、鸿蒙1/1，零失败/跳过。测试tree为7da2a158453f89f09f3ea299defe4e8ae779282c，父HEAD为8e964cf639e8eae0663254077e9856b49e8c1c23；独立观察SHA256为69ec44c1f5fe4c12213d2650537c235bd37bc6cde21c9897a7fb7349d84f0ce1，源码匹配SHA256为83c7bfa98574d51c94f5c6b9db872ccf29b625d8b6d24a457e7ebe5f7beeb5e1，完整原日志SHA256为48f73b073fbd63b701c29f6a3d0bd577f81b47c5be265b8677a705ab1819aa07。完整WAL/receipt链、release/postrelease和自有进程0已独立核验。上述固定结果指本真机事务，非平台CI。
+
+平台worker build97366的消费者4/4通过，但严格映射归属判定报foreign_or_ambiguous_mapping，根因尚未确定。本轮只在原拒绝分支输出实际map路径、realpath、expected包根、errno和拒绝理由，保留dlopen/dlsym、codec、dladdr/maps及所有原拒绝逻辑。真机成功不能证明该worker故障已经修复，也不将未知失败豁免为设备限制；新提交仍须真实平台Review/CI。此r007为唯一当前运行权威；下面r006及更早内容均为保全的历史，不跨run拼接，也不迁移旧HEAD平台成功。
+
+### 历史验证（2026-10-11，r006，以下旧“当前”均限当时）
 
 本次实际修复签名原生装载器捕获失败输出却未向 CI 传播的问题：保留原 argv、120 秒超时、check=True、原异常与退出码，将真实子进程 stdout/stderr 和非零返回码输出后重新抛出同一异常。真实子进程 exit7 正负定向验证 2/2，不用 mock 替代运行结果。
 

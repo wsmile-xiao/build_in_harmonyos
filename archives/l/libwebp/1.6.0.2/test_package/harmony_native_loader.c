@@ -1,6 +1,7 @@
 /* Signed native loader: no DT_NEEDED link to WebP, real dlopen and codec oracle. */
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -63,12 +64,35 @@ int main(int argc, char **argv) {
     const int webp = strstr(path, "/libwebp.so") != NULL;
     const int sharpyuv = strstr(path, "/libsharpyuv.so") != NULL;
     if (!webp && !sharpyuv) continue;
-    if (!realpath(path, canonical) || !within(canonical, package)) { foreign = 1; break; }
-    if (webp) { if (strcmp(canonical, lib)) { foreign = 1; break; } webp_seen = 1; }
-    if (sharpyuv) { if (strcmp(canonical, sharp)) { foreign = 1; break; } sharp_seen = 1; }
+    if (!realpath(path, canonical)) {
+      const int saved_errno = errno;
+      fprintf(stderr, "HARMONY_MAPPING_REJECT=realpath; errno=%d; path=%s\n", saved_errno, path);
+      foreign = 1; break;
+    }
+    if (!within(canonical, package)) {
+      fprintf(stderr, "HARMONY_MAPPING_REJECT=outside_package; path=%s; canonical=%s; package=%s\n", path, canonical, package);
+      foreign = 1; break;
+    }
+    if (webp) {
+      if (strcmp(canonical, lib)) {
+        fprintf(stderr, "HARMONY_MAPPING_REJECT=webp_identity; path=%s; canonical=%s; expected=%s\n", path, canonical, lib);
+        foreign = 1; break;
+      }
+      webp_seen = 1;
+    }
+    if (sharpyuv) {
+      if (strcmp(canonical, sharp)) {
+        fprintf(stderr, "HARMONY_MAPPING_REJECT=sharpyuv_identity; path=%s; canonical=%s; expected=%s\n", path, canonical, sharp);
+        foreign = 1; break;
+      }
+      sharp_seen = 1;
+    }
   }
   const int maps_error = ferror(maps); fclose(maps);
-  if (maps_error || foreign || !webp_seen || !sharp_seen) return fail("foreign_or_ambiguous_mapping");
+  if (maps_error || foreign || !webp_seen || !sharp_seen) {
+    fprintf(stderr, "HARMONY_MAPPING_STATE=read_error:%d,foreign:%d,webp_seen:%d,sharpyuv_seen:%d; library=%s; sharpyuv=%s\n", maps_error, foreign, webp_seen, sharp_seen, lib, sharp);
+    return fail("foreign_or_ambiguous_mapping");
+  }
   printf("{\"actual_loader_and_codec_rc\":0,\"library\":\"%s\","
          "\"webp_mapping\":[\"%s\"],\"sharpyuv_mapping\":[\"%s\"],"
          "\"native_loader\":true,\"width\":1,\"height\":1}\n", lib, lib, sharp);

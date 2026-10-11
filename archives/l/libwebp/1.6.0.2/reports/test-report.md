@@ -1,6 +1,12 @@
 # libwebp 1.6.0.2 真正执行的正式验证
 
-## 当前权威：2026-10-11 r006
+## 当前权威：2026-10-11 r007
+
+本轮唯一事务 `libwebp-1.6.0.2-finish-step5-20261011-r007`：官方 step35、干净 Conan create 真实 RC0；原测试76/76（FuzzTest12、ANTLR64）、消费者4/4、鸿蒙1/1，零失败/跳过。测试tree为7da2a158453f89f09f3ea299defe4e8ae779282c，父HEAD为8e964cf639e8eae0663254077e9856b49e8c1c23；独立观察SHA256为69ec44c1f5fe4c12213d2650537c235bd37bc6cde21c9897a7fb7349d84f0ce1，源码匹配SHA256为83c7bfa98574d51c94f5c6b9db872ccf29b625d8b6d24a457e7ebe5f7beeb5e1，完整原日志SHA256为48f73b073fbd63b701c29f6a3d0bd577f81b47c5be265b8677a705ab1819aa07。完整WAL/receipt链、release/postrelease和自有进程0已独立核验。
+
+平台worker build97366的严格映射归属判定仍真实失败，根因尚未确定。本轮只在原拒绝分支输出实际map路径、realpath、expected包根、errno和拒绝理由，保留dlopen/dlsym、codec、dladdr/maps及所有原拒绝逻辑。真机成功不能证明该worker故障已经修复；新提交仍须实际平台Review/CI。下面r006及更早内容均为保全的历史结果，不跨run拼接。
+
+## 历史：2026-10-11 r006
 
 官方 step35、干净 Conan create 真实 RC0；同一唯一事务原76/76、消费者4/4、鸿蒙1/1，零失败/跳过。测试 tree a7565e8d6933b00a88643ac072ac06d118a73f2c；独立观察SHA256 3e480e02ac65adbc42fb933508be13ccfc33e5dc2651d66b6702454c744434d1；逐源码匹配SHA256 7eb67685a4a2c95a6fe0e8862f423c15dc1ae5a2b45ac45d030359745c97bcec。完整回执链/release/postrelease/自有进程0均独立核验。原生装载器实际失败 stdout/stderr/返回码传播修复已在该输入中，原异常、120秒超时和测试语义不变。下列均为历史记录；不迁移旧平台 CI 或跨 run 拼接。
 
