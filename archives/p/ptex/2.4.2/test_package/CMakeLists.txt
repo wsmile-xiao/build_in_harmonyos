@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(ptex_consumer CXX)
+find_package(Ptex CONFIG REQUIRED)
+add_executable(ptex_consumer consumer.cpp)
+target_link_libraries(ptex_consumer PRIVATE Ptex::Ptex)
