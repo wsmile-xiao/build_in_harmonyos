@@ -34,7 +34,7 @@
 
 原始运行日志保存在候选之外，不把 `.log` 或改扩展名的日志放进 PR。失败 r001/r003/r004/r005 全部保留，各 successor 独立输入、根、receipt 和唯一 launch。聚合 RC1 中主线知识字段及旧收尾目录要求不能通过空 marker 或伪打包解决；当前修复任务身份、最终知识查重、两阶段 Pre-PR 仍需完成。
 
-## 当前 r008：真实默认 Bash 入口修复验证
+## 历史 r008：真实默认 Bash 入口修复验证
 
 - 平台原失败：build96648/request110009，conan-build-test log502403 的真实
   `FileNotFoundError: bash`；不是 Worker 桥接失败。
@@ -55,3 +55,14 @@
 - 预启动 r007 已只读确认 launch0/prepare0、没有 work/runner/receipt；因冻结 profile
   哈希计算顺序错误退役。输入和本地历史保留，r008 fresh transfer/readback后唯一启动，
   未追认 r007 为通过。本地目标结果不能代替新提交后的平台 CI 或提审。
+
+## 当前 r774：测试资源下载入口修复
+
+- 完整实际 AtomCode 检视报告 SHA-256：6f12a4330a9d5269504d93921d345bae57fa5d6c6a1ba934e654a208298f3f89；可定位缺陷是测试下载入口未享受 conandata 的镜像 fallback。
+- 原固定 commit 与加载器 SHA-256 不变，使用 Conan 原生 URL 列表并验证 HTTPS URL；实际函数 7/7 控制通过。
+- run_id：fabric-completion-loader-review-1.0.1-20261011-r774；父 HEAD c36663b94c2513ba285a542aead9d50960bf1496，测试候选 tree 39e852c4cd30b954ef7913a65920b8c31edf0ac7。
+- 配置 SHA-256：96a08c1369797186cc18f42f2f8ace3b60f3f40413064d541d878924da324efd；snapshot-007 SHA-256：3b2e9dd73b2537ed8a55e2b346c5f82dee040039209ff3a2c5020edf56e0e9c2。
+- 同一 run 的真实 Conan create RC0，消费者4/4、Harmony1/1；官方本地 setup/build_and_test RC0，L0/L1通过。完整输入及 WAL/receipt-chain、唯一 launch、自有进程0、release/postrelease经独立核验。
+- 独立观察 SHA-256：9d9d7cc24c9360498bb9e1cd2a0f65b23b85464a960a3ce40f36e80e55abb821；原官方 marker SHA-256：4fa4f6d6716a5588b50cad8568958482441c7cd0ad34b635af9b2bac3b2fae57，日志 SHA-256：8731fa05c948592337d4c52215f832b5613843e2506d02eabdcda2e50b0b7e9e。
+- 该目标运行使用冻结私有源码缓存，不将缓存命中解释为网络镜像实测；镜像所有输入仍强制原文件哈希。没有增加上游或产品测试分母。
+- 原 finish 聚合 RC1继续如实保留；不能把本地成功当平台 CI、发布或提审。此后仅报告和配对草稿增补，生产运行时输入必须与冻结输入逐字节一致。

@@ -7,6 +7,20 @@ from conan import ConanFile
 from conan.tools.build import can_run
 from conan.tools.files import download
 from conan.tools.env import VirtualBuildEnv
+from urllib.parse import urlsplit
+
+def loader_urls(recipe):
+    official = "https://raw.githubusercontent.com/scop/bash-completion/79d225bad8939a3833314b5af93509131c03f2f8/bash_completion"
+    urls = recipe.conf.get("user.fabric-completion:loader_urls", default=[official, "https://gh-proxy.org/" + official], check_type=list)
+    if not urls:
+        raise RuntimeError("At least one HTTPS loader source is required")
+    for url in urls:
+        if not isinstance(url, str):
+            raise RuntimeError("Loader sources must be HTTPS URL strings")
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+            raise RuntimeError("Loader sources must be HTTPS without credentials or fragments")
+    return urls
 
 def target_bash(recipe):
     explicit = recipe.conf.get("user.fabric-completion:bash", default="", check_type=str)
@@ -31,7 +45,7 @@ class FabricCompletionTestConan(ConanFile):
         self.requires(self.tested_reference_str)
 
     def build(self):
-        download(self, "https://raw.githubusercontent.com/scop/bash-completion/79d225bad8939a3833314b5af93509131c03f2f8/bash_completion",
+        download(self, loader_urls(self),
                  os.path.join(self.build_folder, "bash_completion"),
                  sha256="f347b832c91d44358bb335e69fa7576241d67040795a1a4d8897317c739d35b1")
 

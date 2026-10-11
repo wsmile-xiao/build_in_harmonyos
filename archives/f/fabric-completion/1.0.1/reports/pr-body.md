@@ -24,7 +24,7 @@
 | 单元测试 | 0 | 不变 | 不使用空断言或静态扫描冒充执行 |
 | 集成测试 | 4 | +4 | 真实官方 loader 自动加载 fab、任务补全、缓存复用与失效、选项补全；其中任务补全包含加载断言，四场景不重复计数 |
 | 鸿蒙特有测试 | 1 | 新增 | HarmonyOS/aarch64 HMDFS 投影属主 UID 差异、中文带空格路径缓存刷新与清理 |
-| **合计** | **5** | **+5** | 当前 r008 原生 Conan 默认入口中消费者 4/4、HMDFS 专项 1/1 |
+| **合计** | **5** | **+5** | 当前 r774 原生 Conan 默认入口中消费者 4/4、HMDFS 专项 1/1 |
 
 ## 上游测试用例修改说明
 
@@ -50,7 +50,9 @@
 - 上游测试用例通过率：0/0（不适用）
 - 新增测试用例通过率：5/5（100%）
 
-当前运行 fabric-completion-formal-1.0.1-20261011-r008；唯一 launch，冻结 validator 与独立观察通过、所属进程 0、release/postrelease PASS。消费者 4/4，Harmony 专项 1/1。原生 Conan create 与官方 setup.sh/build_and_test.sh 均 RC0，L0/L1 通过。没有显式 Bash conf，仅通过 Conan buildenv 解析真实签名 Bash。这些是目标和官方本地 CI 事实，不是本 PR HEAD 的平台 CI 或提审证明。
+当前运行 fabric-completion-loader-review-1.0.1-20261011-r774；唯一 launch，冻结 validator 与独立观察通过、所属进程 0、release/postrelease PASS。消费者 4/4，Harmony 专项 1/1。原生 Conan create 与官方 setup.sh/build_and_test.sh 均 RC0，L0/L1 通过。没有显式 Bash conf，仅通过 Conan buildenv 解析真实签名 Bash。这些是目标和官方本地 CI 事实，不是本 PR HEAD 的平台 CI 或提审证明。
+
+完整实际代码检视指出测试加载器只有单一 raw.githubusercontent.com 下载入口。现采用 Conan 原生 URL 列表，保留固定官方 commit 和原 SHA-256，增加明确镜像及受限 HTTPS 配置入口；拒绝空列表、带认证信息或片段的 URL。宿主真实函数 7/7 控制通过；全新 r774 从修改后的生产测试配方完成上述真实目标验证。该运行使用哈希绑定的任务私有源码缓存，证明配方调用及加载功能，不声称现场网络镜像故障切换已经实测。独立观察 SHA-256：9d9d7cc24c9360498bb9e1cd2a0f65b23b85464a960a3ce40f36e80e55abb821。旧 r008 的结果保留为历史默认 Bash 修复证明，不跨运行拼接。
 
 实际平台 CI96648/log502403 曾在 Python subprocess 调用裸 bash 时报 FileNotFoundError；虽然 profile 已配置 CONFIG_SHELL，原代码未在该调用边界应用 VirtualBuildEnv。现已修正生产和消费者的环境应用及绝对可执行路径核验；显式无效配置仍失败，不自动绕过。独立观察 SHA-256 d1f25087f6e9fb91e3f7d625c3de0283e42c79236de23258eae57f74fca1507f，完整原日志索引见本次证据与 test-report.md。
 
