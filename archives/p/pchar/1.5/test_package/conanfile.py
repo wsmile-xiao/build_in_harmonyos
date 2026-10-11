@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""Conan test_package for pchar 1.5 (network path characterization tool).
+"""Conan consumer tests for pchar 1.5, including offline trace replay."""
 
-pchar probes a destination host with ICMP/UDP/TCP probes and prints RTT /
-jitter / loss statistics. The test runs the installed binary with its
-version and help flags (both exit 0), which exercises the built binary
-without requiring network access.
-"""
+import os
+import re
 
 from conan import ConanFile
 from conan.tools.layout import basic_layout
@@ -26,8 +23,18 @@ class PcharTestConan(ConanFile):
         pass
 
     def test(self):
-        # Test 1: --version must print the version and exit 0
-        self.run("pchar --version", env="conanrun")
+        fixture = os.path.join(self.source_folder, "fixtures", "replay_ipv4.txt")
+        output = os.path.join(self.build_folder, "replay-output.txt")
+        self.run(
+            f'pchar -r "{fixture}" -n > "{output}"',
+            cwd=self.source_folder,
+            env="conanrun",
+        )
+        with open(output, encoding="utf-8") as result:
+            output_text = result.read()
+        if not re.search(r"Path length:\s+1 hops", output_text):
+            raise RuntimeError("pchar did not report the expected one-hop path")
 
-        # Test 2: --help must print the usage and exit 0
+        # Keep basic CLI smoke checks in addition to the path-analysis assertion.
+        self.run("pchar --version", env="conanrun")
         self.run("pchar --help", env="conanrun")

@@ -8,7 +8,7 @@ plus a slope/intercept regression result table.
 ## Upstream
 - Source: http://www.kitchenlab.org/www/bmah/Software/pchar/pchar-1.5.tar.gz
 - Build: plain autoconf (2001 era, autoconf 2.13 generation) + Makefile.in
-- No official test suite (no `make check` target)
+- The upstream tarball has no bundled test suite or `make check` target. The recipe adds one offline replay regression against the upstream executable; it processes two saved IPv4 probe records and asserts one-hop path-analysis output.
 - License: U.S. government work — Sandia dedicates the software to the
   public, provided as-is (see README)
 
@@ -46,3 +46,4 @@ plus a slope/intercept regression result table.
 - `./pchar -h` / `./pchar --help` → usage, exit 0
 - `./pchar --version` → `pchar 1.5`, exit 0
 - `make install DESTDIR=...` → `bin/pchar`, `man/man8/pchar.8`
+- The newly added trace-replay regression still requires a fresh on-device `conan create` run after this recipe change.
