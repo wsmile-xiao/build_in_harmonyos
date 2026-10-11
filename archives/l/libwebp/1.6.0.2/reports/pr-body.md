@@ -17,7 +17,7 @@
 | 单元测试 | 64 | 官方固定 ANTLR 4.12.0 默认启用原用例，原参数化 IDs 分别 32+32；不关闭 BUILD_TESTING |
 | 集成测试 | 12 | 官方 libwebp 1.6.0 原 tests/fuzzer 入口，含原基础 7、mux 4、info 1；执行其固定 FuzzTest harness，非只统计注册 |
 | 其他测试 | 0 | 该原 CMake 路径未发现独立额外运行入口；精确清单与源审计将附正式证据 |
-| **合计** | **76** | 当前严格签名入口修复候选在官方 step35 r004 同一事务实际 76/76、零 skip；逐项核对原 FuzzTest IDs 和 ANTLR 原参数，不拼跨run分母 |
+| **合计** | **76** | 当前原生签名加载器候选在官方 step35 r005 同一事务实际 76/76、零 skip；逐项核对原 FuzzTest IDs 和 ANTLR 原参数，不拼跨run分母 |
 
 ### 适配后测试用例统计
 
@@ -26,7 +26,7 @@
 | 单元测试 | 64 | 不变 | 原 ANTLR 测试与断言未修改；仅构建平台能力探测修复 |
 | 集成测试 | 16 | +4 | 原 libwebp 12；另有消费者真实无损 RGBA、元数据 mux/demux、有损尺寸/alpha 和坏码流拒绝 4 项 |
 | 鸿蒙特有测试 | 1 | 新增 | HarmonyOS PC AArch64 ELF codesign、实际 SONAME/NEEDED 与自有包运行时命名空间、真实 codec 调用的独立专项 |
-| **合计** | **81** | **+5** | 当前修复候选在官方本地 CI r004 同一事务实际 76+4+1 全通过，不拼跨run分母 |
+| **合计** | **81** | **+5** | 当前修复候选在官方本地 CI r005 同一事务实际 76+4+1 全通过，不拼跨run分母 |
 
 ---
 
@@ -71,6 +71,12 @@
 ---
 
 ## 补充说明
+
+当前证据索引为 `reports/current-runtime-evidence-binding.json`；旧 `raw-log-evidence-index.json` 明确保留为 r001 历史记录。r005 的原 Harmony 输出为486658字节、SHA256 `0e2c7d11e6da1e3c090e0f05a1d59b388be835b5a6c350e8ab8466075ecabab7`；原完整 W3 输出为488182字节、SHA256 `d5b818abed9662d11437592c7f07e406a98a27ec6ad8083078353291f77308a0`。仓内两份 log 路径均投影同一完整 W3 输出，这是既有表格兼容别名，不代表两个独立测试或原 Harmony 输出。检视包装器曾对文本 `.strip()`，导致摘录摘要丢失终止换行；独立按 Git 原始 blob 字节重算后与原 W3 哈希一致，未修改原日志或回执。
+
+原生 r005 验证的是暂存候选 tree `37d65b023c7ddb8c9d1ba667af99a8275c81b2ba`，其父 HEAD 为2232c1f4；不是以父 HEAD 冒称运行候选。提交 b1b9058b 相对此测试 tree 仅有报告和知识草稿差异，实际13个运行输入逐字节相同；本次仅修正 manifest/索引/正文的陈旧标注，不改变配方、源码、补丁、消费者或鸿蒙测试。完整静态检视的解码链接意见经官方 CMake 源码核对：`webp` 自身包含 `webpdecode` 对象及 `WebPDecodeRGBA`，`webpdecoder` 是独立解码-only选择，不是 `WebP::webp` 的必需依赖。保留当前真实 API 消费者及同run4/4证据，不因误报新增链接。
+
+以下 r004 run/tree 及更早字节集段落均为历史记录；当前验证权威是上面的 r005 和索引。新提交后的完整 HEAD、Review、CI 由平台权威回读绑定，不把历史成功迁移为新 HEAD CI。
 
 观察 SHA 字节集：任务原始 CRLF 副本为9c44182d456b890bf788d9c0dc151320809ee11c9ce2bf11902f0dfb9c27cd0d（48727字节）及10f3be25105582c22a1c8db1c3571a8960e4ea67e8f3487658a3186061a69025（7839字节）；仓内 Git LF blob 为d248ac7cb328d2a55fe40a8676f6d0934335c6bd73ef7d3fb3283de6e45326ac及b46560f37ff58aabde82889ca9eba41ae7b03694ab0c80daae153d8adb14dfd3，JSON 值一致。没有重写旧 observer/receipt 或剔除自指字段。
 
