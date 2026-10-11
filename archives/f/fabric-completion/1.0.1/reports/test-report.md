@@ -58,6 +58,8 @@
 
 ## 当前 r774：测试资源下载入口修复
 
+当前运行时输入索引为 raw-log-evidence-index-r774.json：六个生产/补丁/测试输入逐项对照原 r774 冻结 config，全部字节相同。历史 raw-log-evidence-index-r006.json 已纠正 current_sha256 与 same 标记，原 tested_sha256 保持其真实 r006 绑定；不能把旧 run 的结果用作后来变更配方的证明。此次仅索引、报告和草稿注释更新，不改运行输入或原回执。
+
 - 完整实际 AtomCode 检视报告 SHA-256：6f12a4330a9d5269504d93921d345bae57fa5d6c6a1ba934e654a208298f3f89；可定位缺陷是测试下载入口未享受 conandata 的镜像 fallback。
 - 原固定 commit 与加载器 SHA-256 不变，使用 Conan 原生 URL 列表并验证 HTTPS URL；实际函数 7/7 控制通过。
 - run_id：fabric-completion-loader-review-1.0.1-20261011-r774；父 HEAD c36663b94c2513ba285a542aead9d50960bf1496，测试候选 tree 39e852c4cd30b954ef7913a65920b8c31edf0ac7。

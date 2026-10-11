@@ -56,7 +56,7 @@
 
 实际平台 CI96648/log502403 曾在 Python subprocess 调用裸 bash 时报 FileNotFoundError；虽然 profile 已配置 CONFIG_SHELL，原代码未在该调用边界应用 VirtualBuildEnv。现已修正生产和消费者的环境应用及绝对可执行路径核验；显式无效配置仍失败，不自动绕过。独立观察 SHA-256 d1f25087f6e9fb91e3f7d625c3de0283e42c79236de23258eae57f74fca1507f，完整原日志索引见本次证据与 test-report.md。
 
-官方 finish 聚合 RC1 如实保留：已有主线 E219/E253/E305 字段与旧归档收尾目录要求未全部完成。未修改他人知识条目、伪造空 marker 或手工打包；本软件配套草稿已独立完整校验和语义查重。原始 stdout/stderr 位于候选之外，证据索引记录原路径、字节数和 SHA-256；详见 test-report.md 和 raw-log-evidence-index-r006.json。
+官方 finish 聚合 RC1 如实保留：已有主线 E219/E253/E305 字段与旧归档收尾目录要求未全部完成。未修改他人知识条目、伪造空 marker 或手工打包；本软件配套草稿已独立完整校验和语义查重。原始 stdout/stderr 位于候选之外，证据索引记录原路径、字节数和 SHA-256；当前输入证据见 test-report.md 和 raw-log-evidence-index-r774.json。raw-log-evidence-index-r006.json 仅保留历史原测试绑定；其中生产与测试配方后来已改变，不作为当前配方的通过证据。
 
 ## 补充说明
 
