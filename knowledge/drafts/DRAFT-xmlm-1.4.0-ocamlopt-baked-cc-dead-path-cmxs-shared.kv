@@ -1,0 +1,55 @@
+#====================================================================
+# DRAFT: registry OCaml 包的 C 编译器死路径与 cmxs 链接契约 ——
+# `-cc` 覆盖后必须 `-ccopt -shared` 补回（xmlm 1.4.0，PR #14675）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-xmlm-1.4.0-ocamlopt-baked-cc-dead-path-cmxs-shared
+trigger_tool:           ocamlopt|ocamlc|dune|conan
+phase:                  building|linking
+error_signature: >-
+  /data/service/hnp/bin/clang: inaccessible or not found|I/O error: /data/service/hnp/bin/clang -shared|ld.lld: error: undefined symbol: main|undefined symbol: caml_call_gc|undefined symbol: camlStdlib__
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               ohos, toolchain, ocaml
+match_keywords: ocamlopt,cmxs,shared,dune,registry ocaml package,native_c_compiler,cc,ccopt,endian data/service/hnp,clang,lld,undefined symbol,caml_call_gc,plugin
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+title: registry ocaml 包下游 ocamlopt 的 C 链接器死路径覆盖与 cmxs `-shared` 丢失补偿
+root_cause: >
+  registry ocaml/4.14.1.1.4 包的 Config 把 c_compiler / native_c_compiler /
+  bytecomp_c_compiler 烘焙为 CI worker 绝对路径 /data/service/hnp/bin/clang（真机不存在），
+  ocamlopt 任何需要 C 编译器的阶段（链接可执行/cmxs）都报
+  `/data/service/hnp/bin/clang: inaccessible or not found`。用 `-cc <OHOS clang>` 覆盖后，
+  OCaml 4.14 在 `-shared`（cmxs 插件）链接路径上不再向 C 编译器附加 `-shared`——链接行变成
+  普通可执行链接，lld 以 PIE 可执行语义链接（拉入 Scrt1.o）并报
+  `undefined symbol: main` / `caml_call_gc` / `camlStdlib__*`。
+affected_scope: >
+  一切用 registry ocaml 工具链做原生链接（可执行文件、cmxs 动态插件）的下游 OCaml 包；
+  纯字节码（ocamlc -a / ocamlrun）不受影响。
+verification_cmd: ocamlopt -cc /path/to/clang -shared -ccopt -shared -o xmlm.cmxs xmlm.cmx
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach: ocaml-downstream-native-link-cc-override-plus-ccopt-shared
+solution: |
+  # 1) 所有 ocamlopt 调用显式 -cc <OHOS clang>（路径来自 conan conf，R33）：
+  ocamlopt -cc "$CC" -I src src/xmlm.cmxa test/test.ml -o test.exe
+  # 2) cmxs（插件）链接必须补回 -shared（-cc 覆盖路径下 OCaml 未附加）：
+  ocamlopt -cc "$CC" -shared -ccopt -shared -o xmlm.cmxs xmlm.cmx
+  # 3) 字节码链接若也走 C 驱动（-custom）同样需要 -cc；纯 ocamlc -a 不需要。
+fallback: |
+  不产 cmxs 的包可去掉第 2 步；若 -ccopt 亦不可用，退回在 PATH 前置 clang 别名并
+  校验链接行，但显式 -cc/-ccopt 更可复现、无环境污染。
+verify_builds: xmlm 1.4.0 真机 conan create 全绿：xmlm.cmxs 生成成功（ELF）、4/4 上游测试、22 断言消费者测试、设备 e2e
+prescan_pattern: >-
+  data/service/hnp/bin/clang|undefined symbol: caml_call_gc|-shared.*cmxs|cmxs.*shared
+
+# ═══ Layer 4: 证据层 (Evidence) ═══
+evidence_url: https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/merge_requests/14675
+source_commit: xmlm 1.4.0（registry ocaml/4.14.1.1.4 revision 1537a565）
+notes: >
+  与 E253、DRAFT-ocamlopt-lld-static-shadow-explicit-closure（-L 影子归档）区分：本条根因是
+  registry 包烘焙的**绝对路径工具链**与 `-cc` 覆盖附带的 `-shared` 丢失；两条命令互补：
+  `-cc` 治死路径，`-ccopt -shared` 治共享标志。
