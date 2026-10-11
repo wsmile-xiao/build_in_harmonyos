@@ -1,0 +1,35 @@
+#====================================================================
+# Draft: rtapd 1.7 (2001 年 UNIX/C 老代码) 在 aarch64-linux-ohos(musl) 上的
+#        两个"编译期无感"陷阱：strtoq 只在链接期炸，%q 只在运行期静默截断
+#====================================================================
+
+id:                     DRAFT-RTAPD-17-MUSL-STRTOQ-Q-FORMAT-SILENT-TRUNCATION
+trigger_tool:           clang|ld|make|runtime
+phase:                  compilation|linking|runtime
+error_signature:        undefined symbol: strtoq|implicit-function-declaration.*strtoq|non-void function .* should return a value|Wreturn-type|sprintf.*%q|%qX
+
+severity:               3
+category:               libc, musl, portability, runtime, linking
+match_keywords:         strtoq, strtoll, undefined symbol, implicit-function-declaration, %q, %qX, quad_t, Wreturn-type, return without value, musl printf, sprintf 返回 -1, 静默截断, 老 UNIX 代码移植, TNPP, rtapd, vsnppd
+
+prescan_pattern:        \bstrtoq\s*\(|%q[dioxuX]
+prescan_globs:          *.c, *.h, *.cc, *.cpp
+
+title:                  musl 平台移植 glibc/BSD 遗留 C 代码的三层陷阱：int 函数裸 return 是硬 error、strtoq 只在链接期报 undefined symbol、%q 长度修饰符编译全绿但运行期把值截断成空
+
+root_cause:             glibc/BSD 与 musl 的三处差异在"编译是否报错"上完全不成比例。(1) `strtoq` 是 BSD/glibc 的 quad 版 strtol，musl 未提供：clang 15 对它的隐式声明只出 `-Wimplicit-function-declaration` 告警，真正的失败被推迟到链接期（`ld.lld: error: undefined symbol: strtoq`），所以"0 error 的编译日志"并不意味着能交付。(2) `%q` 是 glibc 里 `%ll` 的过时同义写法，musl 的 vfprintf 不实现该长度修饰符：调用点既不产生编译告警也不产生链接错误，实测 `sprintf(buf, "!%qX", v)` 返回 -1 且 buf 只剩 `"!"`——即"值被静默丢失"，只有跑起来断言输出才能发现。(3) `int` 返回值函数里的裸 `return;` 在 clang 15 默认就是 error（`-Wreturn-type`，GCC 14 起同样），出现在 send/失败早退分支里，须补 `return 0`。三者叠加时，只看"编译通过"会同时漏掉第 2、3 项中的第 2 项——这是最危险的一类。
+
+affected_scope:         1995-2005 年间写的 UNIX/C 代码（尤其是守护进程/协议栈/网络工具）移植到 OHOS/musl：使用 BSD 遗留函数（strtoq/strtouq/quad_t 家族、index/rindex）、用 %q 格式化的 quad 输出、以及大量"int 函数懒得写返回值"的失败分支。rtapd 1.7 是本模式的实例：一个补丁同时命中三处。
+
+verification_cmd:       printf '#include <stdio.h>\nint main(void){char b[64];int n=sprintf(b,"!%%qX",0x1234ABCDULL);printf("ret=%%d out=[%%s]\\n",n,b);return 0;}' > /tmp/q.c && clang -o /tmp/q /tmp/q.c && /tmp/q
+
+rec_priority:           1
+rec_approach:           musl-libc-legacy-c-portability-three-layer-audit
+rec_description:        移植老 C 代码到 OHOS 时按"三层"分别取证，不要用编译日志下结论：(1) 源码级 grep 遗留符号与格式符——`\bstrtoq\s*\(`、`\bstrtouq\s*\(`、`%q[diouxX]`、`quad_t`；strtoq→strtoll、%qX→%llX + (long long) 强制转换（OHOS 的 sys/types.h 里 quad_t 就是 long long）。(2) 编译必须看到 linking 阶段，链接失败即真失败；同时把 `-Wreturn-type` 当作 error 处理（clang 15/GCC 14 默认已如此），给失败早退分支补上返回值。(3) 运行期用最小复现程序直接跑格式符/数值路径，并把"日志里的值是否完整"写进 test_package 断言——本例断言守护进程日志出现 `CAP page packet to '!1234ABCD'` 并且不得出现 `'!'`，从而把静默截断变成硬失败。
+rec_command:            make -j1 CC=clang CFLAGS='-O2 -pipe -g'
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# PR 交付后回填
+source_pr:
+source_commit:
