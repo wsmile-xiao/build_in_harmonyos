@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""Conan test package for smpeg: builds a C consumer against the installed
+library and runs it (see test_smpeg.c for the checks it makes)."""
+import os
+
+from conan import ConanFile
+from conan.tools.build import can_run
+from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
+
+
+class SmpegTestConan(ConanFile):
+    settings = "os", "compiler", "build_type", "arch"
+    test_type = "explicit"
+    generators = "CMakeDeps"
+
+    def requirements(self):
+        self.requires(self.tested_reference_str)
+
+    def layout(self):
+        cmake_layout(self)
+
+    def generate(self):
+        tc = CMakeToolchain(self)
+        tc.generate()
+
+    def build(self):
+        cmake = CMake(self)
+        cmake.configure()
+        cmake.build()
+
+    def test(self):
+        if not can_run(self):
+            return
+        exe = os.path.join(self.cpp.build.bindirs[0], "test_smpeg")
+        self.run(exe, env="conanrun")
