@@ -1,0 +1,89 @@
+#====================================================================
+# DRAFT knowledge entry — Conan 2 conandata.yml 结构双坑：sources 按包名嵌套需显式索引；patches 必须平铺列表
+# Source: tetraproc/0.9.2 真机 shadow CI 2026-10-04（r2 迭代 4/5）
+#====================================================================
+
+id: DRAFT-conan2-conandata-keyed-sources-and-flat-patches
+trigger_tool: conan-export|conan-create|source\(\)|apply_conandata_patches|export_conandata_patches
+phase: packaging|building
+error_signature: |
+  "got an unexpected keyword argument '<包名>'"|
+  "Error in source\(\) method"|
+  -march=native|pkg-config.* Permission denied|补丁未生效|patch not applied|
+  exports 阶段未复制 patches/|Unable to apply.*patch
+severity: 2
+category: conan, conandata, recipe-structure, silent-failure
+match_keywords: conandata.yml, conan_data, sources, patches, get\(\),
+  apply_conandata_patches, export_conandata_patches, strip_root,
+  平铺列表, flat list, 静默失效, 补丁没生效
+
+title: >
+  Conan 2 conandata.yml 结构约定：sources 按包名嵌套时 get() 必须显式按名索引
+  （否则 TypeError）；patches 必须是平铺列表——按包名嵌套会让
+  export/apply_conandata_patches 静默为空，补丁从未生效且失败点在几十行之后
+
+root_cause: >
+  Conan 2 的 conandata.yml 消费代码只认固定结构：self.conan_data["sources"]
+  直接 **kwargs 解包进 get()，因此 sources 按包名嵌套时会把包名当关键字参数
+  抛 TypeError；apply_conandata_patches()/export_conandata_patches() 只遍历
+  conan_data["patches"] 平铺列表，按包名嵌套的 patches 被静默忽略——不报错、
+  不告警、export 日志正常，build 阶段跑的是未打补丁的上游源码，真实原因
+  （-march=native 未去除、pkg-config 仍被调用等）被推迟到编译/链接期才暴露。
+
+affected_scope: >
+  所有使用 conandata.yml 的 Conan 2.x 配方（archives/*/*/*/）。两类高危场景：
+  (1) 用模板/工具生成"按包名嵌套"结构的配方；(2) 从其它库复制 conandata.yml
+  后只改 URL/SHA 未核对 patches 层级。
+
+verification_cmd: |
+  # 指纹 1（export 阶段）：补丁文件是否被复制进缓存
+  conan export archives/<x>/<pkg>/<ver> 2>&1 | grep -i patch
+  # 健康样例应出现 "Copied 1 '.patch' file"；只复制 .yml/.py → patches 结构错
+  # 指纹 2（build 阶段）：补丁应生效的修改是否真的出现在编译命令里
+  #   例: 去除 -march=native 的补丁生效后，编译命令中不应再有 -march=native
+
+rec_priority: 1
+rec_approach: structure-contract-plus-two-fingerprints
+rec_description: |
+  结构契约（Conan 2）:
+    sources:        可按包名嵌套，但 source() 必须写
+                    get(self, **self.conan_data["sources"]["<包名>"], strip_root=True)
+    patches:        必须是平铺列表: conan_data["patches"] 下的每个元素含 patch_file
+  两条指纹（任一命中即结构错，不必读 conan 源码）:
+    1. export 阶段 conan-home 缓存目录里没有 patches/*.patch；
+    2. 补丁声称要修改的内容（如 -march=native、pkg-config 调用）仍出现在
+       build 日志的编译/链接命令行里。
+  修复 = 把 patches 展平为列表 + source() 按名索引；重跑前确认两条指纹消失。
+rec_command: |
+  # 正确结构:
+  # sources:
+  #   <pkg>:
+  #     url: "..."; sha256: "..."
+  # patches:
+  #   - patch_file: "patches/0001-....patch"
+  #     patch_description: "..."
+  # conanfile.py:
+  #   get(self, **self.conan_data["sources"]["<pkg>"], strip_root=True)
+  #   def export_sources(self): export_conandata_patches(self)
+  #   def build(self): apply_conandata_patches(self)
+rec_auto_fix: false
+rec_impl: manual
+fallback_priority: 3
+fallback_approach: inline-metadata
+fallback_description: >
+  若不想维护 conandata 结构约定，可把 url/sha256 写进 conanfile.py 常量、
+  补丁改用 exports_sources + patch()（注意避开知识库已记录的 CI conandata
+  预下载 BUILD_DIR 缺陷的取舍），但当前 CI G1 门禁要求 conandata.yml 存在，
+  平铺修正法是首选。
+conflicts_with: []
+notes: >
+  查重边界：E241（数据包模式）、E248/E254/E255（下载/镜像/预下载）均不涉及
+  conandata 的结构约定；DRAFT-shadow-ci-scp-merge-transfer-stale-residue 讲
+  传输污染，与补丁结构无关。全库无既有条目覆盖此失效模式。
+verify_builds: >
+  tetraproc/0.9.2 真机 shadow CI 2026-10-04 实测：嵌套 patches → 编译命令行
+  仍含 -march=native（r2 第 5 轮 fail）；展平后 export 复制 1 个 .patch、
+  编译命令 -march=native 消失，最终 exit 0（r2 第 8 轮）。
+authors: codex
+source_pr: pending
+source_commit: d8e7070f60 (feat/tetraproc-0.9.2-codex)
