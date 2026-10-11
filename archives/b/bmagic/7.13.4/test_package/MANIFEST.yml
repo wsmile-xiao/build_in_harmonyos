@@ -1,0 +1,140 @@
+# test_package/MANIFEST.yml
+# 上游官方测试声明文件（CI build_and_test.sh L0e 强制要求）
+
+package: bmagic/7.13.4
+homepage: "https://github.com/tlk00/BitMagic"
+
+# 上游测试协议：BitMagic 无 make check/ctest 目标；上游测试为三套独立
+# 二进制（tests/stress/bmtest、tests/stress64/bmtest64、tests/test_threads/ptest），
+# 由根 Makefile 逐目录驱动（GNUmakefile 分支 CC=g++，设备无 g++，见 notes.md）。
+upstream_check_command: "make -C tests/stress all && ./bmtest; make -C tests/stress64 all && ./bmtest64; make -C tests/test_threads all && ./ptest"
+upstream_test_in_build: true
+upstream_test_command: "conanfile.py build()：clang++ 同参完整编译三套测试 + 完整运行 ptest（8/8 全绿，时长 2–4 分钟量级）；bmtest/bmtest64 为天数级套件，按上游自带选择器分块执行，2026-10-03 23:52 全部块跑完（13/13 + 9/9，见下方 block_execution）"
+
+# ---------------------------------------------------------------------------
+# 统计口径（2026-09-10 首次复核；2026-10-04 分块全量跑完后按日志重算，守卫感知精确计数）
+#
+# 单位 = 上游 main() 中**真实会执行的测试调用点**（`XxxTest(...)` / `StressTest(...)`）。
+# 计数方式：解析 main() 内每个调用点的 enclosing 条件链（含嵌套 if 与单语句 if），
+# 按给定旗标求真值；`/* ... */` 注释块内的调用不计（上游存在注释掉的历史调用，
+# 如 t.cpp 39580-86 / 39792 / 38996-97、t64 19819）。
+# 取数工具：设备侧 fullrun/analyze_guards.py（`python3 analyze_guards.py <t.cpp|t64.cpp> <旗标…>`）
+#
+# 候选口径（同一单位，仅旗标集不同；每条给取数命令，N 取候选最大值 + 差额逐项归因）：
+#   ① 默认路径（无旗标，is_all）：bmtest 138 + bmtest64 79 = 217，+ ptest 8 = **225**
+#      取数：`python3 analyze_guards.py --blocks <path>` 输出的 `is_all` 行
+#   ② 13+9 分块块表（--blocks 的 SUM 行）：140 + 79 = 219，+ ptest 8 = **227**
+#      取数：`python3 analyze_guards.py --blocks <path>`
+#   ③ **实际执行旗标并集**（本次真实跑过的全部旗标一次传入，单次遍历即去重并集）：
+#      bmtest 142 + bmtest64 79 = 221，+ ptest 8 = **229**
+#      `python3 analyze_guards.py <t.cpp> -ll -s -bvb0 -bvs -rc -cc -bvb1 -bvl0 -bvl1 -bvl2 -agg -bvser -strsv -csv0 -csv1 -sv0 -sv1 -sort`  → 142
+#      `python3 analyze_guards.py <t64.cpp> -bvb -bvs -rc -agg -cc -strsv -sv -csv -bvo`  → 79
+#
+# **声明 N = 229（候选最大值），差额逐项归因：**
+#   229 − 225 = 4 = TestSparseSort + TestSignedSparseSort（仅 -sv/-sort 旗标执行）
+#                 + 2 个 StressTest（仅上游细分旗标 -bvl0/-bvl1/-bvl2 执行）
+#   229 − 227 = 2 = 上述 2 个 StressTest：块表按 `-bvo` 记 13 个调用点，实际排产用上游
+#                 同族细分旗标 -bvl0/1/2（合计 15 个调用点，函数级等价、守卫行不同）；
+#                 `-bvo` 的 13 个调用点 ⊆ 默认路径 138 ⊆ 实际执行 142，**已全部覆盖**
+#   229 − 209 = 20 = 早期简略解析（grep `^\s+\w+\(\);`，只数无参调用、不处理嵌套守卫与
+#                 注释块）的欠计数：bmtest 131→142（+11）、bmtest64 70→79（+9），该口径已作废
+#   ptest 8 个参数化子运行单独成行（不是 main() 调用点）
+#
+# TOTAL = PASS 229 + FAIL 0 + SKIP 0 + NOT_RUN 0（2026-10-03 23:52 全块跑完，NOT_RUN 清零）
+#
+# 注意：部分测试组（ResizeTest/SetTest/ClearAllTest/OptimizeTest/RankFindTest 等）
+# 运行时**不打印自己的组名**，按日志文本数组会欠计数，故以源码调用点计数为准。
+# 完成判据：该块 exit 0（bmtest 另有收尾 "OK" 行；t64 的 main 以
+# "[------------  Debug Allocation balance OK ----------]" 行收尾）。
+# 失败/超时判据：BM_ASSERT = assert（日志首行 "BM_ASSERT defined."）→ 失败走 SIGABRT、rc≠0；
+# driver 的 timeout 触发为 rc=124。15 个本轮块全部 `attempt 1 end rc=0` ⇒ 零失败、零超时，
+# 且 parked-<suite>.txt 不存在 ⇒ 零停牌。
+# ---------------------------------------------------------------------------
+
+# 分块执行块表（设备实测，块级执行；每块独立选择器，幂等可续）
+# 完成 = 该块有 exit 0 的原始日志 + done-<suite>.txt 记录（本轮 12+3 子块另有
+#        progress-<suite>.log 的 `[end] <id> rc=0` 行；历史 6+6 块的读数见下方 elapsed）
+# 收官：2026-10-03 23:52:01，bmtest **13/13**、bmtest64 **9/9**，parked=0、超时=0
+block_execution:
+  bmtest:                      # tests/stress，13 个上游选择器
+    blocks: [-ll, -s, -bvb0, -bvb1, -bvser, -bvs, -rc, -bvo, -agg, -sv, -csv, -cc, -strsv]
+    calls_per_block: {-ll: 30, -s: 12, -bvb0: 16, -bvb1: 19, -bvser: 5, -bvs: 3, -rc: 2, -bvo: 13, -agg: 5, -sv: 19, -csv: 7, -cc: 1, -strsv: 8}
+    calls_total: 140                       # 13 块逐块相加（候选口径②）
+    done: [ll, s, bvb0, bvb1, bvser, bvs, rc, bvo, agg, sv, csv, cc, strsv]   # 13/13
+    done_calls: 140
+    executed_flags: [-ll, -s, -bvb0, -bvs, -rc, -cc, -bvb1, -bvl0, -bvl1, -bvl2, -agg, -bvser, -strsv, -csv0, -csv1, -sv0, -sv1, -sort]
+    executed_calls: 142                    # 实际执行旗标并集（候选口径③ = 声明 N 来源）
+    split_note: "-bvo 以上游同族细分旗标 -bvl0/-bvl1/-bvl2 执行（13→15 调用点）、-sv 以 -sv0/-sv1/-sort 执行（19）、-csv 以 -csv0/-csv1 执行（7）——三组对原块均为逐点覆盖或超集，-bvo 的 13 点 ⊆ 默认路径 138 ⊆ 执行 142"
+    elapsed:                                       # 历史 6 块（日志随任务目录重建丢失，读数见入库 MANIFEST）
+      {ll: 1h49m, s: 8m14s, bvb0: 8h31m, bvs: 5h26m, rc: 23s, cc: 1m32s}
+    elapsed_2026_0926_1003:               # 本轮 12 子块（fullrun/logs/ 原始日志在，rc 均为 0）
+      {bvb1: 41h53m, bvl0: 18h55m, bvl1: 15h43m, bvl2: 12h10m, agg: 8h37m, bvser: 1h44m, strsv: 10h48m, csv0: 22h23m, csv1: 13h01m, sv0: 1h16m, sv1: 14h56m, sort: 14m41s}
+  bmtest64:                    # tests/stress64，9 个上游选择器
+    blocks: [-bvb, -bvs, -rc, -bvo, -agg, -sv, -csv, -cc, -strsv]
+    calls_per_block: {-bvb: 32, -bvs: 3, -rc: 2, -bvo: 9, -agg: 4, -sv: 16, -csv: 8, -cc: 1, -strsv: 4}
+    calls_total: 79                        # 9 块逐块相加（候选口径②）
+    done: [bvb, bvs, rc, bvo, agg, sv, csv, cc, strsv]   # 9/9
+    done_calls: 79
+    executed_flags: [-bvb, -bvs, -rc, -agg, -cc, -strsv, -sv, -csv, -bvo]
+    executed_calls: 79                     # 与 9 块块表、默认路径三者一致
+    elapsed:                               # 历史 6 块（日志随任务目录重建丢失，读数见入库 MANIFEST）
+      {bvb: 7h35m, bvs: 1h05m, rc: 56m49s, agg: 2h07m, cc: 5m13s, strsv: 1h58m}
+    elapsed_2026_0926_1003:               # 本轮 3 块（fullrun/logs/ 原始日志在，rc 均为 0）
+      {sv: 33h29m, csv: 54h16m, bvo: 94h23m}
+
+# 上游三套测试程序（设备实测 2026-09-05/09-10，clang++ 15.0.4，OSNAME/OS_VER/
+# COMMON_LDFLAGS/CXX/CC/LD 变量覆盖，上游源码零改动，详见 notes.md）
+upstream_tests:
+  - file: tests/test_threads/ptest.cpp
+    source: BitMagic-7.13.4/tests/test_threads/ptest.cpp
+    description: "上游线程池/并行算法测试 ptest（std::thread 任务池 + 并行稀疏向量 XOR 过滤/序列化，8 个参数化子运行）"
+    command: "./ptest"
+    result: "PASS — 8/8 全部 OK，exit 0；2026-09-26 15:38:49–15:45:22 完整重跑（沙箱 HOME），`TOTAL; 6.546 min`、`ptest_rc=0`，逐字日志 fullrun/ptest/run.log；包内留证另见 reports/conan-create.log 与 reports/w3-local-ci.log 的 TOTAL; 行"
+  - file: tests/stress64/t64.cpp
+    source: BitMagic-7.13.4/tests/stress64/t64.cpp
+    description: "上游 64 位综合压力测试 bmtest64（默认路径 79 个测试调用点，取数命令见上）"
+    command: "./bmtest64"
+    result: "PASS — 9/9 块全部完成（79 个测试调用点 = 默认路径 = 块表，三口径一致），全部 exit 0、**0 失败 0 超时 0 停牌**；本轮 3 块原始日志 fullrun/logs/log-bmtest64-{sv,csv,bvo}.txt，历史 6 块读数见 block_execution.elapsed"
+  - file: tests/stress/t.cpp
+    source: BitMagic-7.13.4/tests/stress/t.cpp
+    description: "上游综合压力测试 bmtest（默认路径 138 个测试调用点，39836 行，位块/区间/聚合器/序列化/稀疏向量全功能域）"
+    command: "./bmtest"
+    result: "PASS — 13/13 块全部完成（142 个测试调用点，旗标并集；默认路径 138 与块表 140 均为其子集，已全覆盖），全部 exit 0、**0 失败 0 超时 0 停牌**；本轮 12 子块原始日志 fullrun/logs/log-bmtest-*.txt，历史 6 块读数见 block_execution.elapsed"
+
+# 未覆盖范围申报（**NOT_RUN = 0**，2026-10-03 23:52 全块跑完后清零）
+# 上游三套测试全部执行：bmtest 13/13 块、bmtest64 9/9 块、ptest 8/8 子运行；
+# TOTAL 229 = PASS 229 + FAIL 0 + SKIP 0 + NOT_RUN 0（取数命令与候选口径见「统计口径」）。
+#
+# 下面保留 2026-09-26 止损窗口期的单块成本实测——它是路径 C（条件 4「全量测试校验
+# 成本极高」）的量化依据（Issue #2738），也是"这套件为何跑了 7 天"的原始记录；
+# 当时的 NOT_RUN 结论已随全量执行完成而**失效，不再作为未覆盖申报**：
+#
+#   bmtest64 -bvo（9 个调用点）：当时 5 次尝试全被平台回收清零、推算 ≈68h
+#     → 实测 **94h23m**（2026-09-30 01:28:55 → 10-03 23:52:01）完成，rc=0
+#   bmtest -bvo（13 个调用点）：当时推算 ≥300h
+#     → 以上游同族细分旗标 -bvl0/-bvl1/-bvl2 拆三块执行，实测 18h55m / 15h43m / 12h10m，rc=0
+#   bmtest -bvb1（19 组）：当时推算约 15h → 实测 **41h53m**，rc=0
+#   bmtest -agg（5 组）：当时推算 10–25h → 实测 8h37m，rc=0
+#   bmtest -csv（7 组，首调用点 O(n²)）→ 拆 -csv0/-csv1 实测 22h23m / 13h01m，rc=0
+#   bmtest64 -csv（8 组，首调用点 O(n²)）→ 实测 **54h16m**，rc=0
+#
+# 历史约束：平台会周期性回收后台作业（本任务实测 5 次中断，间隔 4.5–21h），块是该方案
+# 的最小续测粒度（块内中断 = 从头重跑）⇒ 当时单块推算（68h / 300h+）远超任何连续可用
+# 窗口，故止损。2026-09-27 用户裁定续跑后以 `BM_BLOCK_TIMEOUT=576000`（160h，大于最坏块
+# 94h23m）+ 断点幂等（done-*.txt 跳块）跑完；全程 rc 全为 0（timeout 触发为 rc=124，
+# 0 次）⇒ 零超时、零停牌。CI conan create 窗口 3600s（ci/conan/build_and_test.sh
+# DEFAULT_BUILD_TIMEOUT）仍不可容纳全量，故包内留证口径不变：包内完整编译三套测试 +
+# ptest 8/8 + test_package 消费者 19 断言。逐块原始日志：fullrun/logs/（本轮 15 块）；
+# 逐块读数与判据：reports/test-report.md；条件 4 成本量化：Issue #2738。
+
+# perf/perf64/bench-tpch 为基准计时程序（无 pass/fail 语义）、samples/ 69 个
+# 为用法示例，均非上游功能测试，不计入（上游 CMake 亦单独对待）。
+
+# test_package 中自带的测试（消费者视角验证）
+test_package_tests:
+  - file: test.cpp
+    description: "消费者测试：真实调用 bvector 位操作/集合代数/枚举器/范围计数、sparse_vector 读写与零值语义、序列化往返（buffer + bm::deserialize）、str_sparse_vector 读写，共 19 条 assert"
+    command: "./test_bmagic"
+
+# 测试断言总数：消费者测试 19 条 assert（上游套件无独立断言计数，判据为调用点 exit 0 + 收尾标记）
+assertion_count: 19
