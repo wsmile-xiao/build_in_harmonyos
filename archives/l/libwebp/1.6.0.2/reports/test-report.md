@@ -1,5 +1,9 @@
 # libwebp 1.6.0.2 真正执行的正式验证
 
+## 当前权威：2026-10-11 r006
+
+官方 step35、干净 Conan create 真实 RC0；同一唯一事务原76/76、消费者4/4、鸿蒙1/1，零失败/跳过。测试 tree a7565e8d6933b00a88643ac072ac06d118a73f2c；独立观察SHA256 3e480e02ac65adbc42fb933508be13ccfc33e5dc2651d66b6702454c744434d1；逐源码匹配SHA256 7eb67685a4a2c95a6fe0e8862f423c15dc1ae5a2b45ac45d030359745c97bcec。完整回执链/release/postrelease/自有进程0均独立核验。原生装载器实际失败 stdout/stderr/返回码传播修复已在该输入中，原异常、120秒超时和测试语义不变。下列均为历史记录；不迁移旧平台 CI 或跨 run 拼接。
+
 ## 当前整改候选的独立验证（2026-10-09）
 
 非OHOS编译器选择修复后的 recipe SHA256：5c01bbe198dc2735f6af6bfc426e311692a503004a80e0d384bb6e04e658e199。实测 staged tree：1f561d3e25f7cc1bcb759ecdb074f1fe13e7bbe0。

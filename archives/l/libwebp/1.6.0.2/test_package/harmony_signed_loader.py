@@ -2,6 +2,21 @@
 import hashlib,json,platform,re,struct,subprocess,sys
 from pathlib import Path
 
+def execute_loader(argv):
+    try:
+        return subprocess.run(argv,capture_output=True,text=True,check=True,timeout=120)
+    except subprocess.CalledProcessError as error:
+        # Preserve the real failing child's stage and exit code.  check=True
+        # alone retains captured output in the exception but hides it from CI.
+        if error.stdout:
+            sys.stdout.write(error.stdout)
+            sys.stdout.flush()
+        if error.stderr:
+            sys.stderr.write(error.stderr)
+            sys.stderr.flush()
+        print('HARMONY_NATIVE_LOADER_FAILED_RC='+str(error.returncode),file=sys.stderr,flush=True)
+        raise
+
 def run(package,readelf,native_loader):
     package=Path(package).resolve();lib=(package/'lib/libwebp.so').resolve()
     assert platform.uname().system=='HarmonyOS','NOT_ACTUAL_HARMONYOS'
@@ -19,7 +34,7 @@ def run(package,readelf,native_loader):
     native=Path(native_loader).resolve();assert native.is_file()
     native_sections=subprocess.run([readelf,'-S',str(native)],capture_output=True,text=True,check=True)
     assert native_sections.stdout.count('.codesign')==1,'UNSIGNED_NATIVE_LOADER'
-    executed=subprocess.run([str(native),str(package),str(lib)],capture_output=True,text=True,check=True,timeout=120)
+    executed=execute_loader([str(native),str(package),str(lib)])
     actual=json.loads(executed.stdout)
     assert isinstance(actual,dict) and actual.get('native_loader') is True and actual.get('actual_loader_and_codec_rc')==0
     assert actual.get('width')==actual.get('height')==1 and actual.get('library')==str(lib)
