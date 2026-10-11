@@ -1,0 +1,115 @@
+#====================================================================
+# DRAFT-ohos-software-register-model-for-absent-hw-facility.kv
+# 当 API 暴露的是"目标平台没有的硬件控制寄存器"（如 Power DSCR/PPR）：
+# 用【线程局部软件寄存器镜像 + 完整特性掩码】保留 API 状态机，而不是一律 ENOSYS
+# 来源: paflib 0.3.0 OHOS aarch64 适配（contrib-9274，分支 feat/paflib-0.3.0）
+# 状态: 草稿（待主编审核 promote 为正式 E 条目）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-ohos-software-register-model-for-absent-hw-facility
+trigger_tool:           clang|conan create|test
+phase:                  compilation|runtime|testing
+error_signature:        mfspr|mtspr|unknown register name|invalid instruction mnemonic|
+                         use of undeclared identifier 'ucontext'.*regs|ENOSYS|errno = 38 \(Function not implemented\)|
+                         unsupported.*(facility|architecture)|AC_MSG_ERROR.*Unsupported architecture
+
+# ═══ Layer 1: 识别面 (Recognition) ═══
+severity:               2
+category:               ohos, portability, api, compat, detection, runtime
+match_keywords:         hardware control register, control register, DSCR, PPR, PMU register,
+                         software register model, per-thread register image, feature mask,
+                         capability mask, mfspr, mtspr, spr, ucontext, uc_mcontext, ENOSYS,
+                         unsupported facility, architecture specific, powerpc, ppc64,
+                         __powerpc__, portability shim, set/get register, EINVAL validation
+title:                  移植"暴露硬件控制寄存器"的库到没有该寄存器的平台：用线程局部软件寄存器镜像 +
+                        完整特性掩码保留 set/get 状态机与越界校验，而不是把全部 API 一律降级为 ENOSYS
+prescan_pattern:        \bmfspr\b|\bmtspr\b|__powerpc__|DSCR|PPR|SPRN_|uc_mcontext\.regs
+prescan_globs:          *.c, *.h, *.cc, *.cpp, *.S, *.s, Makefile*, *.mk, *.am, conanfile.py, configure.ac
+
+# ═══ Layer 2: 诊断面 (Diagnosis) ═══
+root_cause:             一类库的公开 API 只是"读写某个硬件控制寄存器"（如 Power 的 DSCR 数据流控制
+                        寄存器、PPR 程序优先级寄存器）。这类寄存器在目标架构（OHOS/aarch64）不存在，
+                        库的探测代码还会用架构专属手段（SIGILL + ucontext.uc_mcontext.regs->nip、
+                        mfspr/mtspr）去判断内核是否放行，导致：① 编译期就因架构专属 inline asm 失败；
+                        ② 即使跳过探测，函数体仍引用不存在的寄存器。
+                        常见错误处置是"整个 API 一律返回 ENOSYS"——这对"读不到就报不可用"是合理的，
+                        但对"set/get 是有状态的操作"过于粗暴：调用方（很多库用它管理预取/优先级提示）
+                        会认为平台完全无法使用，连基本的状态往返都不做。
+affected_scope:         所有以 get/set 形式暴露硬件控制寄存器/设施寄存器的库（DSCR/PPR、
+                        various SPR、MSR 类寄存器）；适配实证：paflib 0.3.0 的 DSCR 设施。
+verification_cmd:       # 编译期（架构专属 asm）
+                        grep -nE '\bmfspr\b|\bmtspr\b' src/*.c src/*.h
+                        # 运行时：支持掩码 + set/get 往返（软件模型应全过）
+                        ./test_dsc            # 期望 exit 0：DPFD/LSD/URG/HWUE 各字段 set 后 get 一致
+                        ./test_paflib         # 消费者：mask 非 0、set/get 往返、越界 set 返回 EINVAL
+
+# ═══ Layer 3: 方案空间 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           per-thread-software-register-image-with-full-feature-mask
+rec_description:        所属类别：API 语义 = "对一个有状态的硬件寄存器做读写与合法性校验"。当目标平台
+                        没有该寄存器时，提供软件寄存器镜像，把 API 状态机完整保留：
+                        ① 用 __thread（或等价线程局部存储）保存寄存器值，保证并发语义与"每线程一份"一致；
+                        ② paf_xxx_check_support() 返回**完整特性掩码**（如 DSCR_ISA_2_07_MASK），
+                           让上层能正常走 set/get 分支而不是走"不支持"分支；
+                        ③ get → 返回镜像；set → 先按掩码校验（(value|mask)!=mask → EINVAL），
+                           再把 value 存入镜像，保持与硬件版一致的返回码/errno 约定；
+                        ④ 架构专属探测（SIGILL/ucontext、mfspr）用 __powerpc__ 守卫，原逻辑保留。
+                        ★ 关键点：只要 API 是"有状态寄存器"，就应做成软件模型（状态机完整）；
+                        只有"无状态、纯硬件副作用"（如 PPR 的优先级提示）才适合降级为 no-op/no-op。
+                        其中 PPR 帮助函数就是 no-op（无状态提示，无可建模的状态）。
+                        · 本仓实例 archives/p/paflib/0.3.0/（DSCR 软件模型：完整 ISA 2.07 掩码 +
+                          线程局部镜像，上游 test_dsc 全量跑通）。
+rec_command:            conan create archives/p/paflib/0.3.0 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64
+rec_auto_fix:           false
+rec_impl:               conan-recipe + __thread register image + full feature mask
+
+fallback_priority:      2
+fallback_approach:      explicit-unsupported-contract
+fallback_description:   对无状态、纯硬件副作用、无法用软件状态表达的设施，按上游既有的"不支持"
+                        契约返回明确 errno（ENOSYS）并在测试中记录为平台跳过；禁止伪造成功。
+                        注意本方案是**回退**而非首选：能建模为状态机的设施不要走这一条。
+fallback_auto_fix:      false
+fallback_impl:          capability probe + ENOSYS + documented skip
+
+# ★ 禁止策略（均以实测为依据）★
+forbid_1_pattern:       对所有设施一律 return -1 / errno = ENOSYS 而不区分"有状态寄存器"与"无状态提示"
+forbid_1_reason:        有状态寄存器可用软件模型完整保留 API；一律 ENOSYS 会让依赖 set/get 的调用方
+                        直接失效，也让上游测试只能走"不支持"分支。
+forbid_1_consequence:   适配退化为"什么都没做"，消费者无法使用；评审可判定为未完成适配。
+forbid_2_pattern:       set 时只 return 0 却不真正保存镜像（或 get 恒返回 0）
+forbid_2_reason:        状态机会被破坏：set(A) 后 get 应得 A；假成功会让上层逻辑静默出错。
+forbid_2_consequence:   上游 test_dsc 的 set/get 往返断言失败；不可复现的隐性 bug。
+forbid_3_pattern:       报告"支持"却声称有硬件效果（如宣称真的改变了内存预取/线程优先级）
+forbid_3_reason:        软件模型只保证 API 状态与调用语义，不产生硬件副作用。
+forbid_3_consequence:   文档与事实不符，误导使用者。
+forbid_4_pattern:       直接删除/停用暴露该寄存器的公开 API 或整块功能
+forbid_4_reason:        适配应保留 API 表面（ABI），否则破坏依赖方链接。
+forbid_4_consequence:   消费者链接失败，属破坏性改动。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             R34, R39, R51
+
+# ═══ 关系图 (Relations) ═══
+causes:                 暴露不存在寄存器的 API 只能走"不支持"分支；上层 set/get 能力整体失效
+caused_by:              目标架构无该硬件控制寄存器；库用架构专属 asm/ucontext 探测
+similar_to:             E213（本地实现缺失 API：单接口补齐，本条是"有状态寄存器整体建模"）, DRAFT-ohos-perf-event-open-denied-substitute-event-source（同为"能做实就做实"的缺口处置）
+conflicts_with:         []
+prerequisite_of:        DRAFT-ohos-perf-event-open-denied-substitute-event-source
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-ohos-software-register-model-for-absent-hw-facility.md
+last_updated:           2026-10-03
+source_event:           paflib 0.3.0 OHOS aarch64 conan create；
+                        DSCR 软件模型（完整 ISA 2.07 掩码 + 线程局部镜像），上游 test_dsc 全量跑通
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                frj__
+source_pr:              (本分支 feat/paflib-0.3.0，关联 issue #3711)
+source_commit:
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-10-03
+draft:                  true
+contributor_id:         frj__
