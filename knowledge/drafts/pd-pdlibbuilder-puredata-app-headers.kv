@@ -1,0 +1,107 @@
+#====================================================================
+# Draft: pd-ggee 0.28 on OHOS aarch64 -- Pure Data externals via
+#        pd-lib-builder: puredata app package already ships the Pd
+#        API headers, platform comes from `$(CC) -dumpmachine`, and
+#        install-datafiles flattens every data file into one dir
+#====================================================================
+
+id:                     DRAFT-PD-PDLIBBUILDER-PUREDATA-APP-HEADERS
+trigger_tool:           conan|make|clang|pd
+phase:                  source|build|package
+error_signature:        error: m_pd.h: No such file or directory|PDINCLUDEDIR|uname.*HarmonyOS|ld.lld: error: undefined symbol: main|no rule to make target.*pd_linux|extension.*pd_darwin|permission denied.*pd_linux
+
+severity:               2
+category:               build-system|packaging|ohos-platform|dependency
+match_keywords:         pd-lib-builder, Makefile.pdlibbuilder, puredata, m_pd.h, g_canvas.h, PDINCLUDEDIR, pd_linux, pd-externals, Pure Data, Pd, externals, class.sources, install-datafiles, help.pd, dumpmachine, -help.pd, system=Linux
+
+title:                  适配 Pure Data 外部对象库（pd-* 系列，走上游自带 pd-lib-builder）到 OHOS：Pd API 头直接在制品仓的 puredata application 包里（不必再拉 pure-data 源码树）、平台由 `$(CC) -dumpmachine` 而非 uname 判定、install-datafiles 把所有 datafiles 拍平到一个目录——故一个 -path 即可同时拿到外部对象与全部帮助补丁
+
+root_cause:            三个容易踩错的点叠在一起。
+                      (1) 头文件：puredata/0.54.1 是 *application* 类型包，`package_info()` 不导出
+                          `includedirs`，但包内 `include/pd/` 确实装了 `m_pd.h` 与 `g_canvas.h`。
+                          旧先例（pd-maxlib）注释断言「不装 m_pd.h」并为此额外下载整棵 pure-data
+                          源码树——该断言已过时，直接 `os.path.join(dep.package_folder, "include", "pd")`
+                          探测即可，省掉一次十几 MB 源码下载与一个硬编码 URL（R39 风险面变小）。
+                      (2) 平台判定：pd-lib-builder **v0.6.0** 用 `target.triplet := $(subst -, ,$(shell $(CC) -dumpmachine))`
+                          再取含 `linux` 的词来置 `system = Linux`，**不是** uname（更早版本才是 uname）。
+                          OHOS clang 与 CI worker 的 OHOS NDK clang 都报 `aarch64-...-linux-ohos` → 命中
+                          Linux 分支 → `extension = pd_linux`、`-DUNIX`、`-fPIC -shared -rdynamic -lc -lm`；
+                          `target.arch = aarch64` → `arch.c.flags = -mcpu=cortex-a53`（OHOS clang 接受，
+                          不要像 x86 构建机那样清空它）。
+                      (3) 打包布局：`install-datafiles` 是 `$(INSTALL_DATA) '$(v)' "$(installpath)"`
+                          逐文件 install 到**同一个** installpath，**没有 `cp -R`**。而源码里帮助补丁
+                          是按类分目录的（`control/ filters/ gui/ ...`），`datafiles` 用
+                          `$(wildcard */*-help.pd)` 展开。Pd 的 `open_via_helppath()` →
+                          `do_open_via_path()` → `sys_trytoopenone()` 对每个已声明 path 只做一次字面
+                          `open(dir + "/" + name + "-help.pd")`，**不递归子目录**。因此 conan 的
+                          `copy()` 必须对帮助补丁用 `keep_path=False` 拍平，否则帮助补丁 Pd 永远找不到；
+                          拍平后使用方只需 `-path <pkg>/lib/pd-externals` 一个目录。
+                      另：`gui/fatom.c` 这类被上游 Makefile 注释掉的类不构建，但 `fatom.h` 仍被
+                      同目录其他类 include——判定「能否不构建某 .c」要看 undefined 符号
+                      （`nm -D --undefined-only`），不能只看 include 关系。
+
+affected_scope:         走 pd-lib-builder 的全部 Pure Data 外部对象库：pd-ggee、pd-libdir、pd-maxlib、
+                      pd-mjlib 等 `archives/p/pd-*/` 包；以及任何「上游自带 Makefile 助手、
+                      靠 $(CC) -dumpmachine 选平台、datafiles 按目录组织但 install 拍平」的包。
+
+verification_cmd:       conan create <pkgdir> --name=<n> --version=<v> -pr:h=ohos-aarch64-wsl -pr:b=ohos-aarch64-wsl --build=missing \
+                      && ls <pkgfolder>/lib/pd-externals/*.pd_linux | wc -l   # 应等于 Makefile class.sources 条目数 \
+                      && find <pkgfolder>/lib/pd-externals -mindepth 1 -type d | wc -l   # 应为 0（拍平）
+
+rec_priority:           1
+rec_approach:           配方里不引入任何补丁，只做三件事：
+                        ① `requirements()` 声明 `self.requires("puredata/0.54.1")`，写一个
+                           `_pd_include_dir()` 从依赖包目录探测 `include/pd`（找不到 `m_pd.h` 才报错），
+                           作为 `PDINCLUDEDIR` 传给 make——不要再下载 pure-data 源码树。
+                        ② make 命令行传 `system=Linux`（兜底，不依赖 worker clang 三元组拼写）+
+                           `CC=<来自 tools.build:compiler_executables 的编译器>`（R33：不裸用 ${CC}）
+                           + `PDINCLUDEDIR=<探测到的目录>`；保留上游 `arch.c.flags`。
+                        ③ `package()`：外部对象与帮助补丁都 `copy(..., keep_path=False)` 拍平到
+                           `lib/pd-externals/`，`LICENSE.txt`/`README.txt` 进 `licenses/`；
+                           并在 build() 里加**精确计数断言**（`len(produced) == len(class.sources 条目)`），
+                           比先例只断言 `>= MIN` 更严。
+                        测试：用 puredata 包里的 OHOS `pd` 无头加载
+                        `pd -nogui -nosound -path <ext_dir> -open <patch>`，print 出确定性数值再 grep；
+                        脚本启动前先断言 42/42 个 `.pd_linux` 安装到位，防止对残缺安装跑绿。
+                        注意 `; pd quit;` 会与 loadbang 输出竞争导致 print 丢失，用 `timeout N` 收尾。
+rec_description:       Pd API 头取自 puredata 包目录；make 传 system=Linux+PDINCLUDEDIR；帮助补丁 keep_path=False 拍平；build() 断言外部对象数精确相等
+rec_command:           grep -n 'dumpmachine\|^system\|install-datafiles' <src>/pd-lib-builder/Makefile.pdlibbuilder
+rec_auto_fix:          false
+rec_impl:
+fallback_priority:      2
+fallback_approach:      若目标 puredata 版本确实不带 include/pd，退回先例做法：在 source() 里额外拉与
+                        该 puredata 版本对应的 pure-data 源码 tag 并把 PDINCLUDEDIR 指向其 src/；
+                        URL 必须是官方 codeload.github.com（R39）。
+fallback_description:   puredata 包无 Pd API 头时回退到拉 pure-data 源码树
+fallback_command:
+fallback_auto_fix:     false
+fallback_impl:
+forbid_1_pattern:       (cp -R|保留) .*help.*keep_path=True|按类子目录安装帮助补丁
+forbid_1_reason:        Pd 查帮助补丁不递归子目录（sys_trytoopenone 只做字面 open），保留子目录等于帮助补丁不可达；同时上游 install-datafiles 本身就是拍平的，保留子目录属于无理由偏离上游。
+forbid_1_consequence:  编译/安装全绿但 `[类名]` 的 help 补丁 Pd 打不开，属于静默功能缺失，CI 的「产物存在」类门禁查不出来。
+forbid_2_pattern:       (puredata.*不装.*m_pd\.h|额外下载.*pure-data.*源码树.*取.*m_pd\.h)
+forbid_2_reason:        该断言已被 puredata/0.54.1 的实际包内容推翻（include/pd/m_pd.h 与 g_canvas.h 都在）。
+forbid_2_consequence:  多一次十几 MB 源码下载、一个硬编码 URL（R39 审计面），且 sha256 与 puredata 版本脱钩后易腐化。
+principles:             上游构建助手的平台判定要看它真正用的信号（$(CC) -dumpmachine vs uname），不能凭同类包的旧注释推断；打包布局要以「上游自己的 install 目标实际做什么」为准（用 `make -n <target>` 验证），而不是以源码树布局为准。
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+doc_file:               doc/DRAFT-PD-PDLIBBUILDER-PUREDATA-APP-HEADERS.md
+last_updated:           2026-10-04
+source_event:           pd-ggee 0.28 适配（feat/pd-ggee-0.28），W4 四轮审计把「拍平 vs 子目录」「是否复刻上游 cp -R」逐轮改到与上游 make -n install-datafiles 一致
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-10-04
+
+draft: true
+contributor_id: 4F7A
