@@ -1,0 +1,33 @@
+draft: DRAFT-E-musl-regfree-double-free
+status: pending-editor-review
+id: DRAFT-E-musl-regfree-double-free
+title: musl regcomp 后端双重 regfree 段错误（上游测试 cleanup 钩子模式）
+category: platform, behavior
+severity: 2
+error_signature: "Segmentation fault (core dumped) | regfree() | test_*_cleanup | GIT_REGEX_REGCOMP | double free regex_t"
+match_keywords: musl, regcomp, regfree, segfault, regex_t, double free, cleanup hook, GIT_REGEX_REGCOMP, libgit2, userdiff
+error_excerpt: "Segmentation fault (core dumped) ./libgit2_tests -sdiff::userdiff; LD_PRELOAD trace shows final extra [regfree] after all regcomp pairs completed"
+root_cause: musl libc 的 regfree() 对已释放的 regex_t 再次调用时无任何防护（无 re_magic 校验路径命中前的崩溃点在 1.2.x 实现里直接解引用已 free 的指针），直接段错误。上游库若提供 regex 后端抽象且 REGCOMP 后端的 dispose 实现为裸 regfree(r)（无 *r=NULL 防护），则任何"循环内 compile→dispose + 测试 cleanup 钩子再 dispose"的用法都会触发双重释放。libgit2 1.9.6 的 test_diff_userdiff__compile_userdiff_regexps 即此模式：builtin/pcre2 后端 dispose 带 *r=NULL 防护所以上游 CI 无感，REGCOMP 后端必崩。这是 musl 与 glibc 的行为差异：glibc regfree 对已释放结构会命中 re_magic==0 检查静默返回，musl 没有。
+rec_approach: 不要显式指定 REGEX_BACKEND=regcomp（musl libc regcomp）。让上游 CMake 自动检测：OHOS 上（无 regcomp_l、无系统 PCRE）会解析为 bundled PCRE2（libgit2 的 "builtin" 后端），其 git_regexp_dispose 是 pcre2_code_free(*r); *r=NULL 带防护。通用化修法：任何在 musl/OHOS 上用系统 regcomp 的库，检查其 dispose/free 封装是否有双重释放防护；测试崩溃在最后一个 regfree（LD_PRELOAD 拦截 regcomp/regfree 打印可确认多余的 free 调用）时优先怀疑 cleanup 钩子模式而非正则内容本身——用最小 C 程序（compile 一次 + regfree 两次）可 5 秒复现定性。
+solution: |
+  # libgit2 系配方（conanfile.py generate()）：
+  # 删除 tc.cache_variables["REGEX_BACKEND"] = "regcomp"
+  # 不设置 REGEX_BACKEND，让上游 SelectRegex.cmake 自动检测：
+  #   - check_symbol_exists(regcomp_l) -> OHOS musl 无 regcomp_l
+  #   - find_package(PCRE) -> 无系统 PCRE
+  #   - fallback -> "builtin" (bundled PCRE2, deps/pcre2/)
+  # 特性输出确认: "regex, using bundled PCRE"
+
+  # 最小复现（定性 musl regfree 双重释放）：
+  # cat > probe.c <<'EOF'
+  # #include <regex.h>
+  # int main(void){ regex_t r; regcomp(&r,"abc",REG_EXTENDED);
+  #   regfree(&r); regfree(&r); return 0; }  # <- 第二次 regfree 崩溃
+  # EOF
+  # clang -o probe probe.c && ./probe   # Segmentation fault
+fallback: 若上游库不支持 bundled 正则后端且必须用系统 regcomp，则需要 patch 其 dispose 封装加 NULL 防护（dispose 前后置零），或给 regex_t 加生命周期标志位；补丁方式修改源码属于下策，优先换后端。
+verify_builds: 本地 conan create libgit2-tools/1.9.6 OHOS aarch64（bundled PCRE2 后端）+ libgit2_tests offline 3010 用例 0 失败（此前 regcomp 后端在 diff::userdiff 套件 100% 崩溃）
+prescan_pattern: "GIT_REGEX_REGCOMP"
+first_seen: "2026-09-18 libgit2-tools 1.9.6 适配（任务 #13202，PR 见回告）"
+last_updated: 2026-09-18
+author: j669539
