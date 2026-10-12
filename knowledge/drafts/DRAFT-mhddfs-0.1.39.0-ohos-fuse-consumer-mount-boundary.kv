@@ -1,0 +1,43 @@
+#====================================================================
+# DRAFT-mhddfs-0.1.39.0-ohos-fuse-consumer-mount-boundary
+# OHOS PC 普通进程无法完成用户态 FUSE 挂载：/dev/fuse EACCES + 无 fusermount + mount(2) SIGSYS
+#====================================================================
+
+id:                     DRAFT-mhddfs-0.1.39.0-ohos-fuse-consumer-mount-boundary
+trigger_tool:           fuse_main|fusermount|mount|runtime
+phase:                  runtime|testing
+error_signature:        fuse: failed to open /dev/fuse: Permission denied|/dev/fuse.*EACCES|fusermount.*Permission denied|Signal 31 \(core dumped\)|failed to open /dev/fuse|mount\(2\).*SIGSYS
+
+severity:               2
+category:               fuse, mount, runtime, permission, sandbox, ohos, filesystem, capability
+match_keywords:         /dev/fuse, fusermount, fuse_main, EACCES, SIGSYS, CAP_SYS_ADMIN, mount, FUSE, 挂载, libfuse
+title:                  OHOS PC 普通进程无法挂载用户态 FUSE：/dev/fuse stat/open 均 EACCES(13)、PATH 无 fusermount（自带 fusermount 执行即 SIGSYS）、mount(2) 被沙箱以 SIGSYS(31) 终止；内核 FUSE 仅系统服务可用（媒体服务挂载 /data/storage/el2/media/Photo）——libfuse 消费端可构建交付但运行时挂载受阻，须按能力探测给出边界结论与恢复条件
+
+root_cause:             OHOS PC 内核支持 FUSE（/proc/mounts 可见系统媒体服务以 /dev/fuse 挂载），但普通用户进程被三重阻断：① /dev/fuse 的 stat 与 open(O_RDONLY/O_RDWR) 全部返回 EACCES(13)（节点既不可读也不可写，权限/SELinux 策略仅放行系统服务）；② 系统 PATH 无 fusermount/fusermount3，libfuse 制品自带的 fusermount 一执行即被 SIGSYS(31) 终止（rc=159）；③ 绕过 libfuse 直接调用 mount(2)（ctypes libc.mount, fstype="fuse"）同样立即 SIGSYS(31) core dump。进程 CapEff=0x2a（无 CAP_SYS_ADMIN），沙箱把挂载类 syscall 直接以 SIGSYS 杀死而不是返回 EPERM。libfuse 的 fuse_main() 在 fuse_mount 阶段即失败："fuse: failed to open /dev/fuse: Permission denied"（rc=1）。因此所有 libfuse 消费端（mhddfs / tmfs / mtpfs / securefs / kio-fuse 等同簇）当前只能完成构建、打包与 CLI 层验证，无法进行真实挂载运行。
+
+affected_scope:         所有依赖"普通进程用户态 FUSE 挂载"的开源消费端在 OHOS PC（HarmonyOS 6.x，kernel 1.12）普通用户下的运行与功能测试；其测试/验收流程不得以挂载成功为前提；系统服务自带的挂载（媒体 Photo、云盘 hmdfs）不受影响。
+verification_cmd:       python3 -c "import os; os.open('/dev/fuse', os.O_RDWR)"  # errno=13 EACCES；grep fuse /proc/mounts  # 系统服务挂载可见；<libfuse>/bin/fusermount -u /tmp/x  # Signal 31 core dumped；python3 ctypes libc.mount(b"none", tgt, b"fuse", 0, b"")  # Signal 31
+
+rec_priority:           1
+rec_approach:           capability-probe-then-boundary
+rec_description:        适配流程先做三层能力探测（/dev/fuse errno、fusermount 可用性、mount(2)/fuse_main 结果），结论写入版本 notes/reports；交付物保持构建+CLI 契约完整（消费者测试只用平台可确定的行为做硬断言），PR 中如实标注"当前挂载不可用"及恢复条件（平台放开 /dev/fuse 访问或提供系统级挂载服务后，本包无需改动即可挂载）。禁止以任何方式绕过沙箱伪造挂载。
+rec_command:            mhddfs d1,d2 mnt -o mlimit=64m   # 期望边界输出: "fuse: failed to open /dev/fuse: Permission denied" (rc=1)
+rec_auto_fix:           false
+rec_impl:               document-with-recovery-condition
+
+fallback_priority:      2
+fallback_approach:      vendor-system-service-path
+fallback_description:   若验收必须看到挂载态，应协调平台以系统服务身份使用 FUSE 路径（参考媒体服务的 /dev/fuse 挂载），或在内核/权限策略开放的镜像上验证；仓库侧不做 sudo、不改 SELinux、不注入策略绕行。
+fallback_command:       获得平台许可后在具备 FUSE 权限的环境重跑 mhddfs 挂载冒烟（两目录 + 挂载点写读断言）
+fallback_auto_fix:      false
+fallback_impl:          manual-coordination
+
+forbid_1_pattern:       伪造挂载成功|打桩 fuse_main 使其返回 0|sudo chmod 666 /dev/fuse 或改 SELinux 策略绕过|把 /dev/fuse EACCES 当作普通文件权限问题 chmod 节点
+forbid_1_reason:        EACCES/SIGSYS 是平台安全边界表达，不是文件权限问题；chmod/sudo 在本环境不可行且属绕行；伪造挂载结论直接违反 R9/R34 与审计一致性要求。
+forbid_1_consequence:   审计失真一票否决；平台边界结论失真导致后续 FUSE 簇任务重复踩坑。
+
+principles:             P014
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-composefs-1.0.8-hmfs-fsverity-ioctl-eacces, DRAFT-ohos-syscall-capability-matrix-fork-probe
+conflicts_with:         []
