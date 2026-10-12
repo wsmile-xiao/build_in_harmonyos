@@ -1,0 +1,58 @@
+#====================================================================
+# Draft: install-time RPATH re-linking (cmake --install / make install)
+#        produces a binary that HarmonyOS refuses to execve (EPERM).
+#        Build-tree binary runs fine; only the installed copy fails
+#        (conan test_package reports Error 126).  Source event:
+#        schroot 1.6.13, 2026-10-01.
+#====================================================================
+
+id:                     DRAFT-SCHROOT-1613-INSTALL-RPATH-EXEC-EPERM
+trigger_tool:           install|runtime|test
+phase:                  installation
+error_signature:        EPERM|Operation not permitted|Error 126|cannot execute|exec format error|not executable
+
+severity:               3
+category:               cmake, build-system, ohos, limitation
+prescan_pattern:        CMAKE_INSTALL_RPATH|install_rpath|RPATH
+match_keywords:         EPERM, Error 126, install rpath, CMAKE_INSTALL_RPATH, CMAKE_BUILD_RPATH, RPATH re-link, 无法执行, execve, schroot, conan test_package
+
+title:                  安装期 RPATH 重链产物在 HarmonyOS 上 execve 返回 EPERM（表现为 Error 126）：让 CMAKE_INSTALL_RPATH 与构建期 RPATH 一致即可跳过重链，必要时用构建树产物覆盖安装副本
+
+root_cause:             cmake --install 为让产物可重定位，会在安装期用新的 RPATH 字符串重写 ELF 动态段：新串更长时需追加段并改动文件布局（重链）。构建树中的原产物可正常执行，而该重链产物在 HarmonyOS 文件安全策略下 execve 直接返回 EPERM（上层 conan test_package 呈现为 Error 126 / 无法执行）。判据是构建树产物与安装产物的 md5 不同——一旦不同就说明发生过重链。
+affected_scope:         package_type=application 且用 cmake --install / make install 安装可执行文件、又通过 -L/-l 或 find_package 引入需要 RPATH 的依赖（依赖不在默认库路径）的包。schroot 1.6.13 为实证案例；同类 autotools 安装期改写（relink/ldconfig 风格）亦应怀疑。
+verification_cmd:       md5sum <build-tree>/bin/<tool> <package>/bin/<tool>   # 两者不同 = 安装期重链，OHOS 上该副本可能 EPERM
+
+rec_priority:           1
+rec_approach:           align-install-rpath-with-build-rpath
+rec_description:        ①构造阶段就让 CMAKE_BUILD_RPATH 与 CMAKE_INSTALL_RPATH 完全相同（包含所有依赖 libdir），安装期无新串可写、自然跳过重链——这是根治；②若上游/工具链仍触发重链，在 package() 中用构建树产物覆盖包内安装副本（shutil.copyfile），以构建树可执行版本为准；③不要用 patchelf/chrpath 事后改写 RPATH 来"修"，那同样会改写 ELF 且不解决根因；④排查时先用 md5sum 对比构建树与安装副本，确认是否真的发生重链，避免误判为缺依赖或权限问题。
+rec_command:            cmake -DCMAKE_BUILD_RPATH="${RPATH}" -DCMAKE_INSTALL_RPATH="${RPATH}" ...   # 二者一致
+rec_auto_fix:           false
+rec_impl:
+
+fallback_priority:      2
+fallback_approach:      refresh-installed-binary-from-build-tree
+fallback_description:   在 conanfile.py::package() 中把构建树里的可执行文件拷贝覆盖包内已安装副本（构建树版本未经重链、可执行）。注意这只能保证包内产物可用，不改上游安装逻辑，须在 notes.md 说明。
+fallback_command:       python: shutil.copyfile(os.path.join(build_tree, "bin", tool), os.path.join(package_folder, "bin", tool))
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       patchelf.*(--set-rpath|--set-interpreter)|chrpath.*(-r|--replace)
+forbid_1_reason:        事后改写 ELF 只会再次改变动态段，在 OHOS 上可能再次被拒；且掩盖"安装期重链"这一真实根因，让下一个包重复踩坑。
+forbid_1_consequence:   产物在本地/CI 上时好时坏（取决于上游是否重链），排查成本高
+
+principles:             P0
+
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/schroot-1.6.13-install-rpath-exec-eperm.md
+last_updated:           2026-10-01
+source_event:           schroot 1.6.13 conan create：test_package 运行包内 bin/schroot 报 Error 126（EPERM），构建树同一产物可执行
+
+authors:                weijiapan <weijiapan@noreply.gitcode.com>
+# PR 交付后回填（与仓内多数草稿同阶段做法一致）
+source_pr:
+source_commit:
