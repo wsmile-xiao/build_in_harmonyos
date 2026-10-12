@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.18)
+project(test_libmygpo LANGUAGES CXX)
+find_package(Qt5 REQUIRED COMPONENTS Core Network CONFIG)
+find_package(Mygpo-qt5 REQUIRED CONFIG)
+add_executable(test_libmygpo test.cpp)
+target_compile_features(test_libmygpo PRIVATE cxx_std_17)
+target_link_libraries(test_libmygpo PRIVATE mygpo-qt5 Qt5::Core Qt5::Network)
