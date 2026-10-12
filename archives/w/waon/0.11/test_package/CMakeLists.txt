@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_waon C)
+
+if(NOT WAON_BIN)
+    message(FATAL_ERROR "WAON_BIN must point at the packaged waon executable")
+endif()
+if(NOT EXISTS ${WAON_BIN})
+    message(FATAL_ERROR "packaged waon is missing: ${WAON_BIN}")
+endif()
+
+add_executable(test_waon test_waon.c)
+target_compile_definitions(test_waon PRIVATE WAON_BIN="${WAON_BIN}")
+if(CMAKE_SYSTEM_NAME STREQUAL "OHOS" OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(test_waon PRIVATE m)
+endif()
