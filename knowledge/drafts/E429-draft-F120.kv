@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E429.kv，填写各字段
+# 对应的人类文档: doc/E429.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E429
+trigger_tool: conan|create|configure|make|autotools
+phase: building
+error_signature: No rule to make target 'all'|rm: ./confstat.*: Permission denied|mv: bad './confstat.*'|No rule to make target 'config.h'|expected 0, have 2（旧代码）
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 3
+category: autotools, build-system, environment
+match_keywords: builddir, config.status, confstat, config.h.dist, support/configure, out-of-source, --with-zlib, OPTIMIZE, -std=gnu17, C23, conan.tools.gnu, basic_layout
+title: 老式 autotools 工程（本例 irc2）在 Conan 里落地要同时满足 4 条约束——① **真正的 autoconf 可能在子目录**（`support/configure`，按官方做法复制到独立 `builddir` 后在其内 configure）② **`builddir` 必须位于源码树内**（`config.status` 用 `../support/Makefile.in` 这类相对上一级的模板，配合声明 `layout()`）③ **`builddir/config.h` 要先就位**（Makefile 规则依赖它，upstream 由 `support/config.h.dist` 提供）④ **`config.status` 的临时目录套路要求构建目录在可写挂载上**（conan 缓存挂载会 `Permission denied`）；另加两条编译器相关：C23 下 `f()` 等价 `(void)`，且老 Makefile 常以 `CFLAGS = $(OPTIMIZE) …` **覆盖**工具链 CFLAGS → `-std=gnu17` 必须从 configure 的 `OPTIMIZE=` 传入
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: 老式 autotools 工程把"构建目录就是源码树内的一个子目录"当作默认用法（`config.status` 里的 `Makefile:../support/Makefile.in`、`version.c.SH:../ircd/version.c.SH.in` 都是相对上一级的路径）， 而 Conan 默认把 source 与 build 分开（甚至未声明 `layout()` 时两者指向同一处、也不是源码树）： * 模板解析不到 → `config.status` 生成不出 Makefile → `make` 报 `No rule to make target 'all'`； * `builddir/config.h` 没人准备 → `No rule to make target 'config.h'`（upstream 流程靠 `support/config.h.dist`）； * autoconf 的 `config.status` 会建临时子目录并 `rm`/`mv`，实测 conan 缓存挂载会拒绝这些操作 （`Permission denied` / `mv: bad`），换到 `/data/storage/el2/base/cache` 后同一流程正常； * 现代 clang 默认 C23，`int f();` 等价 `int f(void)` → 老代码"声明空参、调用带参"硬报错； 而老 Makefile 往往用 `CFLAGS = $(OPTIMIZE) …` 覆盖工具链注入的 CFLAGS，所以 `-std=gnu17` 只从工具链传是**不生效**的。
+affected_scope: 1990s–2000s 的 autotools C 工程（守护进程/工具链/SDK），尤其是"在源码树内建 builddir"这类约定；以及需要在本环境里跑 `config.status` 的所有构建
+verification_cmd: ① `grep -n 'config_files=' <builddir>/config.status`（看模板相对路径）② `ls <builddir>`（是否有 Makefile / config.h）③ `grep -nE '^CC_CFLAGS|^CFLAGS|^OPTIMIZE' <builddir>/Makefile`（确认标志是否真的进入编译命令）④ 失败时把构建目录换到可写挂载重试
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: source-tree-local-builddir-plus-config-h-plus-writable-mount-plus-optimize-flag
+rec_description: ①分辨工程的真实构建入口：若顶层 `configure` 是自写脚本，去看 Debian 打包（`debian/rules` 的 `override_dh_auto_*`）——本例官方做法是 `mkdir builddir && cp support/configure builddir/ && cd builddir && ./configure …`；②配方里声明 `layout()`（`basic_layout`）让 `source_folder` 指向真正源码树，并把工作目录（含 builddir）放在**源码树内**；③把 `support/config.h.dist` 之类模板复制为 `builddir/config.h`（Debian 用的是它自己的 `debian/maint/config.h`）；④构建目录优先选**可写挂载**（本例 `/data/storage/el2/base/cache`），不可用时退回并在日志说明（`config.status` 的临时目录 rm/mv 在缓存挂载上会失败）；⑤编译标志要落在工程真正使用的位置：老 Makefile 用 `$(OPTIMIZE)` 就传 `OPTIMIZE='-O2 -std=gnu17'`（与 Debian 的 `DEB_CFLAGS_MAINT_APPEND=-std=gnu17` 同源意图），并用 `grep '^CC_CFLAGS' <builddir>/Makefile` 回验；⑥autotools 工具在 Conan 2 里的导入是 `conan.tools.gnu`（不是 `conan.tools.autotools`）。
+rec_command: mkdir builddir && cp support/configure builddir/ && cp support/config.h.dist builddir/config.h && cd builddir && ./configure --with-zlib OPTIMIZE='-O2 -std=gnu17' && make all
+rec_auto_fix: false
+rec_impl: manual
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: bypass-config-status-by-instantiating-templates-manually
+fallback_description: 若某挂载始终无法让 `config.status` 完成（临时目录 rm/mv 被拒且无可用可写挂载），可退而只对**必须的文件**做等价实例化（按 `config_files` 列表用 sed 替换 `@VAR@`），但这条路径很脆（变量多）、且偏离官方流程，必须在 notes 里说明并优先尝试前者。
+fallback_command:
+fallback_auto_fix: false
+fallback_impl: manual forbid_1_pattern:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:
+forbid_1_reason:
+forbid_1_consequence:
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E429.md
+last_updated: 2026-10-08
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: F120
