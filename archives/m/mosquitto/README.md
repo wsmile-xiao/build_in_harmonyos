@@ -1,4 +1,4 @@
-# mosquitto 2.0.18 for HarmonyOS
+# mosquitto for HarmonyOS
 
 ## 概述
 
@@ -9,9 +9,10 @@ mosquitto 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录�
 | 项目 | 值 |
 |------|-----|
 | 名称 | mosquitto |
-| 版本 | 2.0.18 |
-| 下载地址 | https://mosquitto.org/files/source/mosquitto-2.0.18.tar.gz |
-| 官方文档 | {文档链接} |
+| 版本 | 2.0.18 / 2.0.22 |
+| 下载地址 | https://mosquitto.org/files/source/ |
+| 官方文档 | https://mosquitto.org/documentation/ |
+| 上游仓库 | https://github.com/eclipse/mosquitto |
 
 ## 鸿蒙环境
 
@@ -20,81 +21,78 @@ mosquitto 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录�
 | 系统版本 | HarmonyOS HongMeng Kernel 1.11.0 |
 | 架构 | aarch64 |
 | 编译器 | clang (LLVM) |
-| 构建系统 | autotools |
+| 构建系统 | cmake |
 
-## 编译步骤
+## 编译步骤（以 2.0.22 为例）
 
 ```bash
 # 1. 下载源码
-wget https://mosquitto.org/files/source/mosquitto-2.0.18.tar.gz
-tar -xzf {源码包}
-cd {源码目录}
+wget https://mosquitto.org/files/source/mosquitto-2.0.22.tar.gz
 
-# 2. 应用补丁（如有）
-patch -p1 < patches/0001-xxx.patch
+# 2. 应用补丁（pthread_cancel 的 __OHOS__ 守卫）
+patch -p1 < patches/0002-config.h.patch
 
-# 3. 配置
-./configure --prefix=$HOME/usr/local {其他选项}
-
-# 4. 编译
-make -j$(nproc)
-
-# 5. 安装
-make install
+# 3. 构建（经 Conan）
+conan create . -pr:h=ohos-aarch64 -pr:b=ohos-aarch64
 ```
 
 ## 补丁说明
 
-### 0001-xxx.patch
+### 0002-config.h.patch（2.0.18/2.0.22 语义共用，2.0.22 版按新源码树重新生成）
 
-**目的**: {补丁用途说明}
+**目的**: HarmonyOS 不实现 pthread_cancel/pthread_testcancel（与 Android Bionic 同）
 
 **修改文件**:
-- `config.guess`: 添加 HarmonyOS 系统检测
-- `config.sub`: 添加 ohos 操作系统支持
+- `config.h`: `#ifndef ANDROID` → `#if !defined(ANDROID) && !defined(__OHOS__)`
 
-**关键修改详解**:
+### 0004-src-CMakeLists.txt-harmonyos-dynamic-list.patch（2.0.22 新增）
 
-```diff
-# 关键代码片段
-```
+**目的**: CMake 视 HarmonyOS 为未知平台致 `UNIX` 变量未设，上游 `if (UNIX)` 的 broker 插件符号导出（`-Wl,-dynamic-list=src/linker.syms`）被跳过，插件加载报 `mosquitto_* symbol not found`
+
+**修改文件**:
+- `src/CMakeLists.txt`: `if (UNIX)` → `if (UNIX OR CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS")`
+
+> 2.0.18 曾带 0001-CMakeLists.txt.patch（cmake_minimum_required 3.1→3.5）；
+> 上游 2.0.22 已自带 cmake_minimum_required(VERSION 3.18)，该补丁不再需要。
 
 ## 遇到的问题
 
-### 问题1: {问题描述}
+### 问题1: pthread_cancel 未实现
 
-**现象**: {错误信息}
+**现象**: 链接期/运行期找不到 pthread_cancel 符号
 
-**原因**: {根因分析}
+**原因**: HarmonyOS musl/libpthread 不提供 pthread_cancel
 
-**解决**: {解决方案}
+**解决**: config.h 增加 __OHOS__ 守卫，编译期不定义 HAVE_PTHREAD_CANCEL（见 0002 补丁）
 
 ## 测试结果
 
-详见 [test-report.md](./reports/test-report.md)
+详见各版本目录 [notes.md](./2.0.22/notes.md)
 
 | 测试项 | 结果 |
 |--------|------|
-| {功能1} | ✅ |
-| {功能2} | ✅ |
-| {功能3} | ⚠️ 部分功能受限 |
+| mosquitto_lib_init/lib_version | ✅ |
+| mosquitto_new/destroy 实例创建 | ✅ |
+| 消费者链接 libmosquitto | ✅ |
 
 ## 验证安装
 
 ```bash
 # 检查安装
-ls -la $HOME/usr/local/lib/libxxx*
+ls -la lib/libmosquitto*
 
-# 检查功能
-{验证命令}
+# 功能验证
+./test_package/build/Release/test_mosquitto
 ```
 
-## 经验总结
+## 版本历史
 
-1. {经验1}
-2. {经验2}
+| 版本 | 状态 | 说明 |
+|------|------|------|
+| 2.0.18 | uploaded | 初版适配 |
+| 2.0.22 | built | 升级件：2.0.19..2.0.22 bugfix 线（含安全修复 #248 恶意 SUBSCRIBE 泄漏、CVE-2023-28366 追加修复） |
 
 ## 参考资料
 
-- {参考链接1}
-- {参考链接2}
+- https://mosquitto.org/
+- https://github.com/eclipse/mosquitto
