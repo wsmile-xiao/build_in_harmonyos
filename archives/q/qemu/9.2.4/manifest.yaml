@@ -1,0 +1,82 @@
+version: '9.2.4'
+status: built
+build_date: '2026-09-27'
+
+source:
+  url: 'https://github.com/qemu/qemu/archive/refs/tags/v9.2.4.tar.gz'
+  sha256: 'c60f39779f3958152cf181db7aa33cce361a075f727a910679bbc3e3815f156f'
+  tar_format: tar.gz
+
+build:
+  system: meson
+  configure_options:
+    - '--target-list=arm-softmmu,aarch64-softmmu,arm-linux-user,aarch64-linux-user'
+    - '--enable-fdt=system'
+    - '--disable-docs'
+    - '--disable-guest-agent'
+    - '--disable-werror'
+    - '--disable-gtk'
+    - '--disable-sdl'
+    - '--disable-vnc'
+    - '--disable-xen'
+    - '--disable-brlapi'
+    - '--disable-spice'
+    - '--disable-glusterfs'
+    - '--disable-libssh'
+    - '--disable-curl'
+    - '--disable-libnfs'
+    - '--enable-vhost-net'
+    - '--disable-vhost-kernel'
+    - '--disable-rdma'
+    - '--enable-gcrypt'
+    - '--enable-zstd'
+    - '--enable-lzo'
+    - '--enable-snappy'
+    - '--enable-lzfse'
+    - '--enable-bzip2'
+    - '--enable-linux-aio'
+    - '--enable-seccomp'
+    - '--enable-png'
+    - '--enable-capstone'
+  cc: clang
+
+patches_applied:
+  - file: 'patches/0001-meson-build-treat-HarmonyOS-as-Linux-host.patch'
+    target: 'meson.build'
+    reason: 'meson 独立探测 host_machine.system() 得到 harmonyos，而 QEMU 的 configure 依据 __linux__ 判定 host_os=linux，两者不一致会让 user-mode 门禁直接中止配置（Target arm-linux-user is only available on a Linux host）'
+  - file: 'patches/0002-portability-harmonyos-sysroot-headers.patch'
+    targets:
+      - 'subprojects/libvhost-user/libvhost-user.h'
+      - 'linux-user/syscall.c'
+      - 'linux-user/strace.c'
+      - 'linux-user/elfload.c'
+    reason: 'OHOS sysroot 与内核行为差异四处：①<linux/vhost.h> 链入 sysroot 的 virtio uapi 头（与 QEMU 自带 standard-headers 重复定义、且缺 vring_need_event）②musl 的 struct sigevent 无 glibc 私有 _sigev_un union ③sysroot 的 linux/openat2.h 早于 Linux 5.12 缺 RESOLVE_CACHED ④HongMeng 内核（1.12.0）对 MAP_FIXED_NOREPLACE 返回 ENOSYS，导致 guest_base 搜索全部失败（Unable to find a guest_base），改为 ENOSYS 时回退 MAP_FIXED 并校验落点'
+
+knowledge_gained:
+  - 'qemu 自带的 configure 是普通 shell 脚本而非 autotools：它解析 CC/CFLAGS/LDFLAGS 环境变量，创建 ./build 并写出 config-meson.cross，随后用 meson/ninja 驱动；因此配方走 run() 调 configure + ninja，而不是 MesonToolchain'
+  - 'libfdt 在 qemu meson.build 里是用 cc.find_library(\"fdt\") 探测的（不是 dependency()），所以必须把 libfdt 的 include/lib 目录显式放进 CFLAGS/LDFLAGS，仅靠 pkg-config 的 fdt.pc 不够'
+  - '--target-list 必须显式限定为 aarch64-softmmu,arm-softmmu：默认 target-list 会构建全部 30+ 目标，在鸿蒙 PC 上耗时数倍且本适配只需要 ARM 系目标'
+  - '上游 pyproject/meson 要求 meson >= 1.5.0（鸿蒙 PC 自带 1.12.0 满足）；docs 需 sphinx-build，故 --disable-docs 避免引入文档依赖链'
+  - 'qemu 的 bin/ 下全部是宿主 aarch64 ELF，鸿蒙拒绝执行未签名 ELF，故 package() 需对 bin/ 逐个执行 binary-sign-tool sign -selfSign 1（复用 gcc-11-cross 的签名约定）'
+  - 'meson test --exclude 是 meson 1.12 才有的选项，而驱动构建树的 meson 来自 QEMU 随源码附带的 wheel（9.2.4 为 1.5.0）装进私有 venv，故「排除要跳过的测试」在干净构建上不可用；改成「列出要跑的测试」（位置参数，1.5.0/1.11.0/1.12.0 均支持）才与构建树实际使用的 meson 版本无关。--suite 与位置参数是并集而非交集，两者同用会把被排除的用例重新选中'
+  - 'HMDFS 与 /dev/shm 的 fallocate 能力与文件锁能力互斥：HMDFS 上 fcntl(F_SETLK) 可用但 fallocate(PUNCH_HOLE) 返 EACCES，/dev/shm 反之。写者若对文件加锁（QEMU 对每个 raw 映像锁 byte 100），把临时文件挪到 /dev/shm 会把「缺 punch」换成「缺锁」，且失败现象变形为 socket 超时'
+  - '「声明了依赖」不等于「特性被启用」：capstone 曾长期处于 requires(capstone/5.0.7) 却 #undef CONFIG_CAPSTONE 的状态。根因是 PkgConfigDeps 生成的 capstone.pc 写 -I<prefix>/include，而头文件在 <prefix>/include/capstone/capstone.h（包自带 .pc 写的才是正确路径），generators 目录在 PKG_CONFIG_PATH 首位把正确的那份遮蔽，QEMU 的 cc.compiles("#include <capstone.h>") 遂失败；auto 选项下它只在日志里打印 "capstone found: YES 5.0.7" 后静默把该特性置为 not_found，汇总行才显示 NO。修法：显式补 -I<prefix>/include/capstone，并把选项从 auto 改为 --enable-capstone，使其无法再静默降级'
+  - 'qcrypto 的 PBKDF2/hash 后端在制品仓只能选 libgcrypt：nettle 因伴随包 hogweed/3.9.1 依赖 gmp/6.3.0.1 而 nettle/3.9.1 钉 gmp/6.3.0，Conan 报版本冲突；libgcrypt 不依赖 gmp 且提供同等覆盖（crypto/pbkdf-gcrypt.c）。启用后 test-crypto-pbkdf 从空套件（1..0）变为 19 个真实用例'
+  - 'keyutils 已声明又撤除，依据是实测而非推测：启用后 crypto/secret_keyring.c 生效，tests/unit/test-crypto-secret.c 的 keyring 用例（守卫为 #if defined(CONFIG_KEYUTILS) && defined(CONFIG_SECRET_KEYRING)）不再跳过，而宿主 seccomp 直接杀掉 add_key/keyctl（C 探针退出码 159 = 128+31 SIGSYS，/proc/self/status 为 Seccomp:2 / Seccomp_filters:1），套件由「跳过」变「硬失败」——对不支持该能力的主机，不提供该特性优于提供一个会崩的'
+  - '制品仓的 snappy 是静态 C++ 库（libsnappy.a），而 QEMU 只按 C 库探测：cc.find_library + cc.links 会在 C++ 运行时符号上失败（undefined symbol: operator new[](unsigned long)），--enable-snappy 下这是配置期硬错误。修法是把 C++ 运行时以静态形态加进链接行（-Wl,-Bstatic -lstdc++ -Wl,-Bdynamic）：探针通过，且产物不新增 libc++_shared.so 依赖'
+  - '共享依赖需要配方自己发 RPATH。glib/bzip2/lzo/snappy/lzfse/libaio/libseccomp 在制品仓是静态库，而 pixman/libslirp/capstone/libzstd/libgcrypt/libgpg-error 只有 .so，安装后的二进制离开 Conan 运行环境即报 "Error loading shared library libzstd.so.1"（即 L2 冒烟门禁由 pass 变 skip）。本配方直接驱动 configure、没有工具链 helper，故需显式 -Wl,-rpath；且必须是 DT_RPATH 而非 DT_RUNPATH（--disable-new-dtags），否则二级依赖 libgcrypt→libgpg-error 解析不到；rpath 用绝对目录，$ORIGIN 在本平台不稳定'
+  - 'test_package 里执行包内二进制的断言必须带运行期环境：ConanFile.run() 默认 scope="build"，其环境不含链接期依赖的 libdir，二进制在 main() 之前即中止；改用 self.run(cmd, scope="run") 才会 source conanrun 环境（含全部依赖 libdir）。此外 L0 门禁静态要求 test_package 存在真实 self.run 调用，改写成裸 subprocess 会被判定为 stub_test_method'
+
+# ============================================================
+# 验证结果（本地实测回填）
+# ============================================================
+verification:
+  local_static_checks: "pass"
+  upstream_tests: "unit 套件 95 项判定：Ok=93 / Fail=0 / Skipped=2（5 项宿主受限用例按精确名单跳过，见 conanfile.py 的 HOST_LIMITED_UNIT_TESTS）；选择清单由构建树自身 meson-info/intro-tests.json 生成，上游新增测试默认被执行。两处 Skipped 均为上游自行判定：test-seccomp 空套件（宿主 Seccomp:2 已处于受限状态，上游 can_play_with_seccomp() 直接返回 false）、test-io-channel-command 缺 socat"
+  upstream_test_inventory: "三层口径清点（2026-10-01 rule4 修正，详见 test_package/MANIFEST.yml 与 notes.md）：① 用例级（评审核验口径）= 1325 例（unit 758 + qtest 368 + functional 199）；② 程序级 = 本包构建树注册 1720 项（含 qemu-iotests thorough/slow 变体）、默认选择 367 项，其中 unit 99 / qtest 66 / decodetree 44 / softfloat 41 / qapi 3 / func 26 / iotests 133；③ 历史声明 247 为程序级子集（unit 100 + qtest 66 + functional 81），系程序数而非用例数——评审 rule4 以用例级实测 N=732 判其少报，本版已修正为用例级 1325 例（≥ 732），程序级数字保留以便交叉核对"
+  upstream_tests_harness: "unit + qtest 共 161 项全量驱动：Ok=160 / Fail=0 / Skipped=1（qtest 66/66 全通过，含 cdrom-test arm 9/9 与 aarch64 9/9、tpm-tis-device-swtpm-test 2/2 三项目由上游 SKIP 转 PASS；unit 94 项通过，仅 test-seccomp 保持 SKIP）。该口径使用仓库外的 4 个 LD_PRELOAD 宿主能力垫片（补偿 AF_UNIX 路径名 bind EPERM / mkfifo 被 seccomp 拒 / HMDFS 与 /dev/shm 的 fallocate 与锁互斥 / link EPERM）与运行期测试工具（socat、xorrisofs、swtpm），垫片不随配方发布，未修改任何上游测试源码"
+  crypto_backend_enabled: "pass — 启用 libgcrypt/1.11.0 后 cbkdf 套件恢复真实断言：test-crypto-pbkdf 由空套件（1..0）变为 19 个用例（harness 口径判 OK，19 subtests passed；全量 harness 口径 Ok=160 / Fail=0 / Skipped=1），test-crypto-secret 16 subtests、test-crypto-hash 6 subtests、test-crypto-block 1 subtest 全部通过"
+  package_tests: "25/25 assertions passed — 消费者功能测试（5 工具 --version、-M/-cpu 列表、qemu-img 建镜像与回读、包内固件、.codesign 签名段），含决定性的执行级验证：包内 qemu-arm 真实执行 arm-none-eabi-as/-ld 产出的 32 位 ARM ELF 并断言输出 qemu-arm-ok，qemu-aarch64 作负对照；并含 1 个完整端到端消费者用例（consumer_roundtrip.py，鸿蒙特有测试 / rule12：构造确定性语料 → qemu-img/qemu-io 跑通建镜像·写图案·自检·转 raw/压缩 qcow2/vmdk → 与独立参考逐字节比对，内部 12 项检查全过）"
+  official_ci: "pass — 官方流水线在本 PR 上报告「CI 校验通过」（PR 评论 2026-09-28 00:20:21 与 00:20:32 各一轮，构建包 archives/q/qemu/9.2.4）：Conan test_package 通过、L0 门禁（结构完整性）通过、L1 门禁（测试执行验证）通过，7 个构建步骤（worker_preparation / worker-prep / git-clone / checkout-pr / conan-setup / conan-build-test / cleanup）全 ✅；bot 报告构建号 #63177 / #63178、worker OpenHarmonyPCDeveloper-CI-008 / CI-030（号段以 bot 报告为准：公开看板 ?id= 号段与 bot 号段不一致，如 ?id=63178 实为另一排队构建）。覆盖范围为本轮全功能适配的 head be2d6659ab（其构建触发通知 2026-09-27 22:35:22）及其后的 1 行 manifest 文档修正 head f86a79a5f7（触发通知 2026-09-28 00:20:53）。更早的通过轮次：#62825（2026-09-27 16:07:42）、#62782（15:29:09）、#62465（07:52）"
+  local_ci_rehearsal: "pass — 本地 CI 预审退出码 0 / Pass rate 100.0% (1/1)；CI_PACKAGES=archives/q/qemu/9.2.4 zsh ci/conan/build_and_test.sh：L0 pass、L1 pass（upstream tests + test_package executed）、L2 pass、L4 pass、L5 pass；unit 套件 95 selected / 5 host-limited skipped，test_package 25/25 assertions passed（含 1 个完整端到端消费者用例）。本轮全功能适配的新特性（gcrypt/zstd/lzo/snappy/lzfse/bzip2/linux-aio/seccomp/png/capstone）全部在 `--enable-*` 下通过配置期探测，无静默降级"
+  note: "官方 CI 曾有一次失败（#62479），根因为 meson 版本差异（CI venv 的 meson 来自 QEMU 自带 1.5.0 wheel，不识别 --exclude）而非构建缺陷，已在 head 872f98e57c 修复。tests/functional（81 项）需下载 guest 镜像并以网络启动，本机与 CI 均未驱动，已在 test_package/MANIFEST.yml 以 executed_in_build: false 声明。"
