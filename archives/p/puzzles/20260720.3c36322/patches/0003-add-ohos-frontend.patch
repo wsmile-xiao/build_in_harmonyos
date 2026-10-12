@@ -1,0 +1,373 @@
+diff --git a/ohos.c b/ohos.c
+new file mode 100644
+index 0000000..b404019209f32777556d3ad5e9eb7985d245bb35
+--- /dev/null
++++ b/ohos.c
+@@ -0,0 +1,367 @@
++/*
++ * ohos.c: HarmonyOS headless front end for the Puzzle Collection.
++ *
++ * The Puzzle Collection's platform front ends each provide a main()
++ * plus the platform glue functions that the game code expects.  The
++ * GTK front end (gtk.c) already supports the standalone command-line
++ * modes --generate, --test-solve, --list-presets and --time-generation
++ * "to run without an X display"; this HarmonyOS front end provides the
++ * same headless command-line interface without requiring any GUI
++ * toolkit, which is how the collection is built and exercised on
++ * HarmonyOS PC (aarch64-linux-ohos).
++ *
++ * The drawing/printing API wrappers are provided by drawing.c (which
++ * is compiled into the same library), so this front end only supplies
++ * the front-end glue functions (frontend_default_colour, timer
++ * control, get_random_seed, fatal) plus main().
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <stdarg.h>
++#include <errno.h>
++#include <time.h>
++#include <unistd.h>
++#include <sys/time.h>
++#include <sys/resource.h>
++
++#include "puzzles.h"
++
++void frontend_default_colour(frontend *fe, float *output) {}
++void deactivate_timer(frontend *fe) {}
++void activate_timer(frontend *fe) {}
++void document_add_puzzle(document *doc, const game *game, game_params *par,
++			 game_ui *ui, game_state *st, game_state *st2) {}
++
++struct savefile_write_ctx {
++    FILE *fp;
++    int error;
++};
++
++static void savefile_write(void *vctx, const void *buf, int len)
++{
++    struct savefile_write_ctx *ctx = (struct savefile_write_ctx *)vctx;
++    if (fwrite(buf, 1, len, ctx->fp) < (size_t)len)
++        ctx->error = ferror(ctx->fp);
++}
++
++void fatal(const char *fmt, ...)
++{
++    va_list ap;
++    va_start(ap, fmt);
++    fprintf(stderr, "fatal error: ");
++    vfprintf(stderr, fmt, ap);
++    va_end(ap);
++    fprintf(stderr, "\n");
++    exit(1);
++}
++#ifdef DEBUGGING
++void debug_printf(const char *fmt, ...)
++{
++    va_list ap;
++    va_start(ap, fmt);
++    vfprintf(stderr, fmt, ap);
++    va_end(ap);
++}
++#endif
++
++/*
++ * Random seed source for the HarmonyOS platform.
++ *
++ * The mid-end asks the front end for a fresh random seed whenever a
++ * new game is generated.  On HarmonyOS (bionic libc) the standard
++ * non-blocking source of entropy is /dev/urandom; fall back to a
++ * time+pid based seed if it cannot be opened, so that generation
++ * still works in restricted environments.
++ */
++void get_random_seed(void **randseed, int *randseedsize)
++{
++    FILE *fp = fopen("/dev/urandom", "rb");
++    unsigned char buf[16];
++    size_t got = 0;
++
++    if (fp) {
++        got = fread(buf, 1, sizeof(buf), fp);
++        fclose(fp);
++    }
++    if (got < sizeof(buf)) {
++        /*
++         * Fallback entropy: time + pid, folded into the bytes still
++         * missing from buf so that no write ever goes past the end of
++         * the buffer regardless of how many bytes fread() managed to
++         * produce.
++         */
++        struct timeval tv;
++        size_t need = sizeof(buf) - got;
++        unsigned char fill[16];
++        size_t f = 0;
++
++        gettimeofday(&tv, NULL);
++        memcpy(fill + f, &tv.tv_sec, sizeof(tv.tv_sec));
++        f += sizeof(tv.tv_sec);
++        memcpy(fill + f, &tv.tv_usec, sizeof(tv.tv_usec));
++        f += sizeof(tv.tv_usec);
++        if (f < sizeof(fill)) {
++            /* Repeated pid byte fills any remaining room. */
++            memset(fill + f, (unsigned char)(getpid() & 0xff),
++                   sizeof(fill) - f);
++        }
++        memcpy(buf + got, fill, need);
++    }
++    *randseed = smalloc(16);
++    memcpy(*randseed, buf, 16);
++    *randseedsize = 16;
++}
++
++static void list_presets_from_menu(struct preset_menu *menu)
++{
++    int i;
++
++    for (i = 0; i < menu->n_entries; i++) {
++        if (menu->entries[i].params) {
++            char *paramstr = thegame.encode_params(
++                menu->entries[i].params, true);
++            printf("%s %s\n", paramstr, menu->entries[i].title);
++            sfree(paramstr);
++        } else {
++            list_presets_from_menu(menu->entries[i].submenu);
++        }
++    }
++}
++
++static void usage(const char *pname)
++{
++    printf("Usage: %s [options]\n", pname);
++    printf("  --version               print the version and exit\n");
++    printf("  --list-presets          print this game's preset parameter "
++           "strings\n");
++    printf("  --generate [n [params]] generate n puzzle IDs (params may "
++           "be given)\n");
++    printf("  --test-solve            after generating, also solve the "
++           "game\n");
++    printf("  --time-generation       report generation time per game\n");
++    printf("  --save <prefix> [--save-suffix <suffix>] write games to "
++           "save files\n");
++}
++
++int main(int argc, char **argv)
++{
++    char *pname = argv[0];
++    int ngenerate = 0;
++    bool time_generation = false, test_solve = false, list_presets = false;
++    const char *savefile = NULL, *savesuffix = NULL;
++    char *arg = NULL;
++    bool doing_opts = true;
++    int ac = argc;
++    char **av = argv;
++
++    while (--ac > 0) {
++        char *p = *++av;
++        if (doing_opts && !strcmp(p, "--version")) {
++            printf("%s, from Simon Tatham's Portable Puzzle Collection\n%s\n",
++                   thegame.name, ver);
++            return 0;
++        } else if ((doing_opts && !strcmp(p, "--help")) ||
++                   (doing_opts && !strcmp(p, "-h"))) {
++            usage(pname);
++            return 0;
++        } else if (doing_opts && !strcmp(p, "--generate")) {
++            if (--ac > 0) {
++                ngenerate = atoi(*++av);
++                if (!ngenerate) {
++                    fprintf(stderr, "%s: '--generate' expected a number\n",
++                            pname);
++                    return 1;
++                }
++            } else {
++                ngenerate = 1;
++            }
++        } else if (doing_opts && !strcmp(p, "--time-generation")) {
++            time_generation = true;
++        } else if (doing_opts && !strcmp(p, "--test-solve")) {
++            test_solve = true;
++        } else if (doing_opts && !strcmp(p, "--list-presets")) {
++            list_presets = true;
++        } else if (doing_opts && !strcmp(p, "--save")) {
++            if (--ac > 0) {
++                savefile = *++av;
++            } else {
++                fprintf(stderr, "%s: '--save' expected a filename\n",
++                        pname);
++                return 1;
++            }
++        } else if (doing_opts && (!strcmp(p, "--save-suffix") ||
++                                  !strcmp(p, "--savesuffix"))) {
++            if (--ac > 0) {
++                savesuffix = *++av;
++            } else {
++                fprintf(stderr, "%s: '--save-suffix' expected a filename\n",
++                        pname);
++                return 1;
++            }
++        } else if (doing_opts && !strcmp(p, "--")) {
++            doing_opts = false;
++        } else if (doing_opts && *p == '-') {
++            fprintf(stderr, "%s: unrecognised option '%s'\n", pname, p);
++            return 1;
++        } else if (arg) {
++            fprintf(stderr, "%s: more than one argument supplied\n", pname);
++            return 1;
++        } else {
++            arg = p;
++        }
++    }
++
++    if (list_presets) {
++        midend *me = midend_new(NULL, &thegame, NULL, NULL);
++        int id_limit;
++        struct preset_menu *menu = midend_get_presets(me, &id_limit);
++        if (menu)
++            list_presets_from_menu(menu);
++        midend_free(me);
++        return 0;
++    }
++
++    if (ngenerate > 0 || savefile) {
++        int i, n = 1;
++        midend *me;
++        char *id;
++
++        if (savefile && !savesuffix)
++            savesuffix = "";
++        if (!savefile && savesuffix)
++            savefile = "";
++
++        n = ngenerate;
++        me = midend_new(NULL, &thegame, NULL, NULL);
++        i = 0;
++
++        /*
++         * In this loop we either generate a game ID, or read one
++         * from stdin (when ngenerate == 0, i.e. --test-solve driven
++         * by piped parameter strings).  We then print the fully
++         * generated descriptive game ID to stdout, optionally solve
++         * it (--test-solve) and/or serialise it (--save).
++         */
++        while (ngenerate == 0 || i < n) {
++            char *pstr, *seed;
++            const char *err;
++            struct rusage before, after;
++
++            if (ngenerate == 0) {
++                pstr = fgetline(stdin);
++                if (!pstr)
++                    break;
++                pstr[strcspn(pstr, "\r\n")] = '\0';
++            } else {
++                if (arg) {
++                    pstr = snewn(strlen(arg) + 40, char);
++                    strcpy(pstr, arg);
++                    if (i > 0 && strchr(arg, '#'))
++                        sprintf(pstr + strlen(pstr), "-%d", i);
++                } else
++                    pstr = NULL;
++            }
++
++            if (pstr) {
++                err = midend_game_id(me, pstr);
++                if (err) {
++                    fprintf(stderr, "%s: error parsing '%s': %s\n",
++                            pname, pstr, err);
++                    return 1;
++                }
++            }
++
++            if (time_generation)
++                getrusage(RUSAGE_SELF, &before);
++
++            midend_new_game(me);
++
++            seed = midend_get_random_seed(me);
++
++            if (time_generation) {
++                double elapsed;
++
++                getrusage(RUSAGE_SELF, &after);
++
++                elapsed = (after.ru_utime.tv_sec -
++                           before.ru_utime.tv_sec);
++                elapsed += (after.ru_utime.tv_usec -
++                            before.ru_utime.tv_usec) / 1000000.0;
++
++                printf("%s %s: %.6f\n", thegame.name, seed, elapsed);
++            }
++
++            if (test_solve && thegame.can_solve) {
++                /*
++                 * Destroy the aux_info in the midend by re-entering
++                 * the same game id, then try to solve it.  The error
++                 * "Solution not known for this puzzle" is OK (games
++                 * without an algorithmic solver); any other error is
++                 * a problem.
++                 */
++                char *game_id;
++
++                game_id = midend_get_game_id(me);
++                err = midend_game_id(me, game_id);
++                if (err) {
++                    fprintf(stderr, "%s %s: game id re-entry error: %s\n",
++                            thegame.name, seed, err);
++                    return 1;
++                }
++                midend_new_game(me);
++                sfree(game_id);
++
++                err = midend_solve(me);
++                if (err && strcmp(err, "Solution not known for this puzzle")) {
++                    fprintf(stderr, "%s %s: solve error: %s\n",
++                            thegame.name, seed, err);
++                    return 1;
++                }
++            }
++
++            sfree(pstr);
++            sfree(seed);
++
++            if (savefile) {
++                struct savefile_write_ctx ctx;
++                char *realname = snewn(40 + strlen(savefile) +
++                                       strlen(savesuffix), char);
++                sprintf(realname, "%s%d%s", savefile, i, savesuffix);
++
++                ctx.fp = fopen(realname, "w");
++                if (!ctx.fp) {
++                    fprintf(stderr, "%s: open: %s\n", realname,
++                            strerror(errno));
++                    return 1;
++                }
++                ctx.error = 0;
++                midend_serialise(me, savefile_write, &ctx);
++                if (ctx.error) {
++                    fprintf(stderr, "%s: write: %s\n", realname,
++                            strerror(ctx.error));
++                    return 1;
++                }
++                if (fclose(ctx.fp)) {
++                    fprintf(stderr, "%s: close: %s\n", realname,
++                            strerror(errno));
++                    return 1;
++                }
++                sfree(realname);
++            }
++            if (!savefile && !time_generation) {
++                id = midend_get_game_id(me);
++                puts(id);
++                sfree(id);
++            }
++
++            i++;
++        }
++
++        midend_free(me);
++    }
++
++    return 0;
++}
++
