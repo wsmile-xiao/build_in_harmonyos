@@ -1,0 +1,120 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E429.kv，填写各字段
+# 对应的人类文档: doc/E429.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E429
+trigger_tool: configure|make|cc|clang
+phase: configuration
+error_signature: Checking whether the C compiler works\.\.\. no|Checking whether the C\+\+ compiler works\.\.\. no|/system/bin/sh: .*: inaccessible or not found|sh: .*: inaccessible or not found|scons: .* not found
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: build-system, portability
+match_keywords: SCons, SConstruct, SConscript, construction variable, C compiler works, posix_spawn, SHELL, cross compile, compiler detection, RHVOICE_SCONS
+title: SCons 交叉编译：构造变量（CC/CXX/SHELL）未注入 → 编译器自检失败或子进程 sh 找不到
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: SCons 只从 construction variables 取编译器（默认 gcc/g++），不读环境变量 CC/CXX；且它用 SHELL 构造变量直接 posix_spawn 执行 sh（不搜索 PATH），沙箱与 CI 内默认 shell 不可用 → 编译器自检 no / 子进程 127
+affected_scope: 所有以 SCons（SConstruct/SConscript）为构建系统的三方库在 OHOS 交叉编译下的 configuration 阶段（rhvoice 1.14.0 实测；dxx-rebirth 0.6 同类）
+verification_cmd: grep -n "SHELL\|CC\|CXX" SConstruct | head; python3 -m SCons -n CC=<abs clang> CXX=<abs clang++> SHELL=<abs sh>
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: source-patch
+rec_description: 给 SConstruct 打补丁：让环境变量 RHVOICE_SCONS_<NAME> 覆盖任意 construction variable，再由配方从 Conan toolchain 注入 CC/CXX/AR/RANLIB/SHELL 的绝对路径（R33：不用裸 shell 环境变量）
+rec_command: patch: for k,v in os.environ.items(): if k.startswith("RHVOICE_SCONS_"): base_env[k[len("RHVOICE_SCONS_"):]] = v ; then python3 -m SCons -j<N> CC=${CC} CXX=${CXX} SHELL=${SHELL}
+rec_auto_fix: false
+rec_impl: patch
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: set-env-var
+fallback_description: 不改源码时可直接在 SCons 命令行用构造变量覆盖（CC=/CXX=/SHELL=）；但 SConstruct 若在 CheckCC 后重建 env，覆盖会失效
+fallback_command:
+fallback_auto_fix: false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern: env\["SHELL"\] *= *"sh"
+forbid_1_reason: 裸 "sh" 依赖 PATH 查找，而 SCons 走 posix_spawn 不搜 PATH；OHOS 沙箱内 /bin/sh 缺失、/system/bin/sh 受限
+forbid_1_consequence: 配置阶段之后的所有子进程（编译器探测、编译）以 127 失败，日志只显示 inaccessible or not found，极易误判为缺依赖
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+forbid_2_pattern: CC.*=.*gcc|CXX.*=.*g\+\+
+forbid_2_reason: SCons 默认构造变量指向 gcc/g++，OHOS 交叉编译环境没有这些宿主工具
+forbid_2_consequence: 首个编译器自检即失败（C compiler works... no），构建在 configure 阶段中止
+prescan_pattern: \bSConstruct\b|\bSConscript\b
+doc_file:               doc/E429.md
+last_updated: 2026-10-11
+source_event: rhvoice 1.14.0 适配（2026-10-10）：SCons 自检 no + /system/bin/sh: pkg-config inaccessible；补丁引入 RHVOICE_SCONS_* 覆盖 + Conan toolchain 注入后 conan create rc=0
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 30EB
