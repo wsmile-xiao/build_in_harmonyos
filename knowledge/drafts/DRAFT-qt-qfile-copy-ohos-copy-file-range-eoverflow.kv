@@ -1,0 +1,105 @@
+# ═══ Draft knowledge entry — Qt QFile::copy() 在 OHOS 上恒失败（errno 75 EOVERFLOW）═══
+# Timestamp: 2026-09-30
+# Software: kcoreaddons 6.26.0.1（autotests/plugin/kpluginmetadatatest.cpp），kio/6.26.0.1 闭包
+# Gate: kcoreaddons 适配（patches/0006-qfilecopy-harmonyos-plugin-test.patch）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-qt-qfile-copy-ohos-copy-file-range-eoverflow
+trigger_tool:           ctest|test
+phase:                  testing
+error_signature:        QVERIFY\(QFile::copy|QFile::copy\(\).*returned false|
+                         errno ?=? ?75|EOVERFLOW|copy_file_range.*(EOVERFLOW|not implemented)
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               ohos, platform, filesystem, qt, hmdfs
+match_keywords:         QFile::copy, errno 75, EOVERFLOW, copy_file_range, sendfile,
+                        HMDFS, QTemporaryDir, QVERIFY, autotest, plugin metadata,
+                        KPluginMetaData, fixture staging, kcoreaddons
+title:                  OHOS 未实现 copy_file_range：Qt QFile::copy() 对任意文件恒失败（errno 75 EOVERFLOW），须改 read/write 循环
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  Qt 6 的 QFile::copy() 在 Unix 上优先走 QFileSystemEngine::copyFile() 的
+  copy_file_range()/sendfile() 快路径，仅对 EXDEV/ENOSYS/EINVAL/EPERM 等少数
+  errno 回退到 read/write。OHOS 文件系统（HMDFS 挂载点，如 $HOME 下的构建/
+  临时目录）上的 copy_file_range() 未正确实现，对**任意**源/目标都返回 -1 且
+  errno=75 (EOVERFLOW)；Qt 未把 EOVERFLOW 纳入回退集合，于是"每一次"
+  QFile::copy() 都返回 false —— 而同一对文件用普通 read/write 循环复制正常。
+  实测点：kcoreaddons autotests/plugin/kpluginmetadatatest.cpp 的
+  testFindingPluginInAppDirFirst / testFindingPluginInPluginNamespace 中
+  `QVERIFY(QFile::copy(originalPluginPath, ...))` 直接断言失败。
+
+affected_scope: >
+  所有在 OHOS 上运行 Qt 代码且使用 QFile::copy() 的场景；上游 autotest 的
+  fixture staging 最典型（QTemporaryDir + QFile::copy 是 KDE 框架测试的常见
+  组合）。共用库/应用若用 QFile::copy() 做安装、缓存、配置拷贝，则会静默
+  失去复制能力（返回 false 而不抛异常），比测试失败更隐蔽。
+
+verification_cmd: >
+  printf '%s\n' '#include <QFile>' '#include <cstdio>' '#include <cerrno>'
+  '#include <cstring>' 'int main(int c,char**v){QFile s(v[1]),d(v[2]);'
+  'bool ok=s.copy(v[2]);printf("copy=%d errno=%d (%s) error=%d %s\n",ok,errno,'
+  'std::strerror(errno),(int)d.error(),qPrintable(d.errorString()));return ok?0:1;}'
+  > $TMPDIR/qcopy.cpp &&
+  clang++ $TMPDIR/qcopy.cpp $(pkg-config --cflags --libs Qt6Core) -o $TMPDIR/qcopy &&
+  echo hi > $TMPDIR/qsrc && $TMPDIR/qcopy $TMPDIR/qsrc $TMPDIR/qdst
+  # 预期（OHOS 上）：copy=0 errno=75 (Value too large for defined data type)
+  # 反证：dd/read-write 循环复制同一对文件成功
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           readwrite-loop-fallback
+rec_description: >
+  在调用点用 64 KiB 缓冲的 read/write 循环替代 QFile::copy()，并在配方侧以
+  patches/00NN-*.patch 承载（本仓先例：
+  archives/k/kcoreaddons/6.26.0.1/patches/0006-qfilecopy-harmonyos-plugin-test.patch
+  —— 新增 copyPluginFixture() 静态函数，两处 QVERIFY(QFile::copy(...)) 改为
+  调用它，配注释说明 errno 75 与回退理由）。
+rec_command:            patch -p1 < patches/0006-qfilecopy-harmonyos-plugin-test.patch
+rec_auto_fix:           false
+rec_impl:               manual
+
+# 回退方案
+fallback_priority:      2
+fallback_approach:      LD_PRELOAD-shim-copy_file_range
+fallback_description: >
+  LD_PRELOAD 一个把 copy_file_range() 直接返回 -1/ENOSYS 的 shim，逼 Qt 落到
+  read/write 回退分支（Qt 对 ENOSYS 有回退）。仅适用于测试进程与本地复现，
+  不可用于交付产物；shim 必须返回 ENOSYS 而非 EOVERFLOW，否则无效。
+fallback_command:       LD_PRELOAD=$HOME/libshim_no_copy_file_range.so ctest --output-on-failure
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       QVERIFY\(true\)|#define QFile_copy\(.*\) true
+forbid_1_reason:        把失败断言改成恒真/宏屏蔽等于删除测试，掩盖平台缺陷（R8 空壳 stub 同类）
+forbid_1_consequence:   测试变绿但 fixture 从未复制，插件查找逻辑不再被验证，CI 失去意义
+
+# ═══ Layer 4: 原则引用 ═══
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E331, E523]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/DRAFT-qt-qfile-copy-ohos-copy-file-range-eoverflow.md
+last_updated:           2026-09-30
+source_event:           kcoreaddons 6.26.0.1 适配（patch 0006；kio/6.26.0.1 依赖闭包）
+
+# ═══ 知识协作 ═══
+authors:                A7F3
+source_pr:
+source_commit:
+
+# ═══ 预扫描派生规则（可选）═══
+prescan_pattern:        QFile::copy
