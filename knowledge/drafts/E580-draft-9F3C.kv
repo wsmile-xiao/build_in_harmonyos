@@ -1,0 +1,63 @@
+#====================================================================
+# Draft: cross GCC on OHOS needs three mandatory workarounds
+#====================================================================
+
+id:                     E580
+trigger_tool:           conan|autotools|gcc|make|cross-build
+phase:                  build
+error_signature:        config.sub .*linux-ohos failed|stmp-fixinc.*Error 1|unknown architecture `armv4t'|unrecognized option `-march=armv4t'|getcwd: cannot access parent directories
+
+severity:               2
+category:               cross-build, toolchain, autotools, hmdfs, build-system
+match_keywords:         cross gcc, config.sub, bundled prerequisite, STMP_FIXINC, fixincludes, fixincl, collect-ld, as, ld, nm, exec prefix, COMPILER_PATH, arm-none-eabi, --without-headers, --with-newlib, HMDFS, getcwd
+title:                  Cross GCC on OHOS: sync bundled prereq config.sub, clear STMP_FIXINC, install unprefixed target as/ld/nm shims
+
+root_cause:             Three independent gaps appear when a GNU GCC cross compiler is built on HarmonyOS (host aarch64-linux-ohos) rather than natively. (1) GCC's top-level configure canonicalises the build triplet by executing EACH in-tree prerequisite's own config.sub, so patching only the top-level config.guess/config.sub is insufficient: the bundled releases predate OHOS by years (gmp 6.1.0 is from 2015) and reject aarch64-unknown-linux-ohos, aborting configure-gmp with "configure: error: .../gmp/config.sub aarch64-unknown-linux-ohos failed". (2) GCC's gcc/configure.ac records that for a cross build "we cannot run fixincludes", but STMP_FIXINC still defaults to stmp-fixinc; signing the freshly built host tools refreshes fixincl's timestamp, which invalidates gcc/stmp-fixinc and re-runs fixinc.sh, and that re-run is unreliable on HMDFS (getcwd: Not supported / Permission denied / Invalid argument, then "make: *** [Makefile:3246: stmp-fixinc] Error 1"). (3) GCC resolves its assembler/linker by searching its own exec prefixes for the UNPREFIXED program name (as, collect-ld, nm) before falling back to PATH; on OHOS the host PATH also contains the AArch64 host as, so a packaged cross driver silently picked the host assembler and every target compile died with "Error: unknown architecture `armv4t'" / "unrecognized option `-march=armv4t'".
+affected_scope:         Any GNU GCC (and GCC-family: avr/arm-none-eabi/riscv) cross compiler recipe built on HarmonyOS PC, especially bare-metal targets configured --with-newlib --without-headers, and any recipe that builds GCC with vendored in-tree prerequisites.
+verification_cmd:       grep -c 'file://' archives/g/gcc-11-cross/26/conandata.yml; /data/service/hnp/bash <patched-tree>/config.sub aarch64-unknown-linux-ohos; /data/service/hnp/bash <pristine-tree>/gmp/config.sub aarch64-unknown-linux-ohos; grep -n 'STMP_FIXINC=' archives/g/gcc-11-cross/26/conanfile.py; ls <package>/libexec/gcc/<target>/<version>/{as,ld,collect-ld,nm}
+
+rec_priority:           1
+rec_approach:           cross-gcc-ohos-three-point-fix
+rec_description:        Apply all three fixes together; any one alone leaves a deterministic build or test failure. (1) After applying the top-level config.guess/config.sub patches, COPY the patched pair into every vendored prerequisite tree (gmp/, mpfr/, mpc/) so their own config.sub recognises aarch64-unknown-linux-ohos. (2) Pass STMP_FIXINC= on the make command line (it propagates to sub-makes) so stmp-int-hdrs depends on nothing and fixincludes never runs for a header-less cross target. (3) Install unprefixed as / ld / collect-ld / nm sh shims into <package>/libexec/gcc/<target>/<version>/ that exec the target-prefixed programs supplied by the binutils tool_requires, at both build time (GCC searches its exec prefixes while building) and package time (the installed driver searches the same prefixes).
+rec_command:            make --jobserver-style=pipe -j1 STMP_FIXINC= all-gcc; printf '#!/bin/sh\nexec arm-none-eabi-as "$@"\n' > "$D/as" && chmod 755 "$D/as"  # D=<pkg>/libexec/gcc/<target>/<ver>; -j1 (not -j2): the recipe builds serially because the host is memory-oversubscribed and HMDFS cannot host GNU make's FIFO jobserver
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      disable-fixincludes-at-configure-time
+fallback_description:   If the make-line STMP_FIXINC= override is not possible (e.g. an upstream wrapper sets it after your command), pre-create the stamp file after the first make phase so the fixincludes rule stays up to date, or patch gcc/configure.ac STMP_FIXINC=stmp-fixinc to empty and regenerate. Prefer the make-line override: it needs no generated-file edit (repo rule R6) and is what GCC's own configure.ac comment prescribes for cross builds.
+fallback_command:       touch gcc/stmp-fixinc; touch gcc/stmp-int-hdrs
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       copy .*config\.sub.*/gmp.*top-level config\.sub only|patch .*gmp/config\.sub
+forbid_1_reason:        The prerequisites are downloaded tarballs, not source you own; patching or hand-editing them is not reproducible and diverges from GCC's pinned upstream versions. Injecting the already-patched top-level scripts keeps one source of truth.
+forbid_1_consequence:   The recipe stops being reproducible from official tarballs and the sha256-pinned prerequisites no longer describe what is built.
+
+forbid_2_pattern:       rm -rf .*fixincl|strip .*fixincludes|chmod .*fixincl|accept.*getcwd.*stderr
+forbid_2_reason:        Deleting or hiding the fixincludes artefacts suppresses the symptom while leaving the second and third failures in place, and can hide a genuine missing-header defect. Disabling the rule via STMP_FIXINC= states the cross-build intent explicitly.
+forbid_2_consequence:   A silently broken header-installation step, or a build that passes locally and fails on a clean CI worker.
+
+principles:             P005,P010,P013
+
+causes:                 []
+caused_by:              []
+similar_to:             [E007,E011,E386]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/E580-draft-9F3C.md
+last_updated:           2026-09-17
+source_event:           gcc-11-cross 26 (GNU GCC 11.5.0, host aarch64-linux-ohos, target arm-none-eabi) local conan create + ci/conan/build_and_test.sh rehearsal on OHOS PC
+
+authors:                openharmony-pc-adaptor <adaptor@openharmony.pc>
+source_pr:
+source_commit:          d658b8eb0
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 9F3C

@@ -1,0 +1,84 @@
+# test_package/MANIFEST.yml
+# 上游官方测试声明文件
+# CI 脚本 (build_and_test.sh L0e) 强制要求此文件存在
+
+package: gcc-11-cross/26
+homepage: "https://gcc.gnu.org/"
+
+# 上游测试命令（主口径）：GCC 官方 DejaGNU 套件，由 build() 内驱动
+upstream_check_command: "make check-gcc RUNTESTFLAGS=\"--target_board=arm-none-eabi-ohos dg.exp execute.exp compile.exp\""
+
+# conanfile.py build() 中集成了上游 DejaGNU 全套（主口径）
+# 另有两条非主口径路径：
+#   - `make -C gcc selftest`：仅留下可审计痕迹（release tarball 上 GCC 自报
+#     internal self-tests are not enabled，故无测试结论）
+#   - `_run_upstream_torture_subset()`：仅在 DejaGNU/Expect/Tcl 不可用时回退
+upstream_test_in_build: true
+upstream_test_command: "make check-gcc with RUNTESTFLAGS \"--target_board=arm-none-eabi-ohos dg.exp execute.exp compile.exp\" (gcc.dg + c-c++-common + gcc.c-torture/{execute,compile}); results read back from gcc/testsuite/gcc/gcc.sum"
+
+# 上游实际运行/驱动的测试程序
+upstream_tests:
+  - file: gcc/testsuite/gcc.dg/dg.exp
+    source: gcc-11.5.0/gcc/testsuite/gcc.dg/dg.exp
+    description: "DejaGNU driver for gcc.dg + c-c++-common (dg-options / dg-error / dg-warning / dg-final scan-assembler evaluated by DejaGNU itself)"
+    command: "make check-gcc RUNTESTFLAGS=\"--target_board=arm-none-eabi-ohos dg.exp\""
+  - file: gcc/testsuite/gcc.c-torture/execute/execute.exp
+    source: gcc-11.5.0/gcc/testsuite/gcc.c-torture/execute
+    description: "Upstream C torture execute driver; dg-do run cases report UNSUPPORTED because the target cannot execute on this host (no ARM emulator / no AArch32 layer)"
+    command: "make check-gcc RUNTESTFLAGS=\"--target_board=arm-none-eabi-ohos execute.exp\""
+  - file: gcc/testsuite/gcc.c-torture/compile/compile.exp
+    source: gcc-11.5.0/gcc/testsuite/gcc.c-torture/compile
+    description: "Upstream C torture compile driver"
+    command: "make check-gcc RUNTESTFLAGS=\"--target_board=arm-none-eabi-ohos compile.exp\""
+  - file: gcc/testsuite/gcc.c-torture/execute/20000113-1.c
+    source: gcc-11.5.0/gcc/testsuite/gcc.c-torture/execute
+    description: "Representative source of the compile-and-inspect torture subset (fallback path only; not used when DejaGNU is available)"
+    command: "fresh arm-none-eabi-gcc compile-only subset (-O0/-O2)"
+  - file: gcc/selftest-run-tests.cc
+    source: gcc-11.5.0/gcc/selftest-run-tests.cc
+    description: "GCC internal compiler selftests - invoked for an auditable trace only; on a release tarball the driver reports that internal self-tests are not enabled, so this yields no test result and is NOT the upstream test evidence"
+    command: "make -C gcc selftest"
+
+# test_package 中自带的测试 (消费者视角验证)
+test_package_tests:
+  - file: smoke.c
+    description: "Compile at -O0/-O2 and -mcpu=cortex-m3, link freestanding against the packaged libgcc, then inspect ELF machine/architecture/symbols/size"
+    command: "arm-none-eabi-gcc -std=c17 -O2 -nostdlib -nostartfiles -Wl,-e,_start smoke.c -lgcc && arm-none-eabi-objdump -f smoke.elf && arm-none-eabi-nm smoke.elf && arm-none-eabi-size smoke.elf"
+  - file: cpp_smoke.cpp
+    description: "C++17 compile and link with std::string/std::vector against the packaged libstdc++, then verify the ELF is elf32-littlearm and carries libstdc++ symbols (basic_string / vector / operator new)"
+    command: "arm-none-eabi-gcc -x c++ -std=c++17 -O2 cpp_smoke.cpp -o cpp_smoke.elf && arm-none-eabi-objdump -f cpp_smoke.elf && arm-none-eabi-nm cpp_smoke.elf | grep -E 'basic_string|St6vector|_Znwm'"
+  - file: broken.c
+    description: "Negative control: the compiler must reject deliberately invalid C with a non-zero exit status"
+    command: "arm-none-eabi-gcc -std=c17 -c broken.c"
+
+# test_package 中自带的鸿蒙特有测试 (OH-1..OH-7, 平台机制验证)
+# 与消费者测试互补: 不验证编译能力, 而是验证 OHOS 上交叉工具链赖以成立的三类平台机制
+# (宿主 ELF 签名 / 目标对象不签名 / 无前缀目标工具垫片)
+ohos_specific_tests:
+  - id: OH-1
+    description: "bin/arm-none-eabi-gcc.real 宿主驱动必须含 .codesign 段 (OHOS 拒绝执行未签名 ELF)"
+    command: "llvm-readelf -S <pkg>/bin/arm-none-eabi-gcc.real | grep codesign"
+  - id: OH-2
+    description: "libexec/gcc/arm-none-eabi/11.5.0/cc1 必须含 .codesign 段"
+    command: "llvm-readelf -S <pkg>/libexec/gcc/arm-none-eabi/11.5.0/cc1 | grep codesign"
+  - id: OH-3
+    description: "libexec/gcc/arm-none-eabi/11.5.0/collect2 必须含 .codesign 段"
+    command: "llvm-readelf -S <pkg>/libexec/gcc/arm-none-eabi/11.5.0/collect2 | grep codesign"
+  - id: OH-4
+    description: "目标对象 lib/gcc/arm-none-eabi/11.5.0/crtbegin.o 必须保持 REL 且不含 .codesign (只签宿主工具, 不签目标产物)"
+    command: "llvm-readelf -h <pkg>/lib/gcc/arm-none-eabi/11.5.0/crtbegin.o && llvm-readelf -S <pkg>/lib/gcc/arm-none-eabi/11.5.0/crtbegin.o | grep -c codesign"
+  - id: OH-5
+    description: "libexec/gcc/arm-none-eabi/11.5.0/ 下无前缀 as/ld/collect-ld/nm 垫片必须存在且可执行 (否则驱动回落宿主 AArch64 as)"
+    command: "test -x <pkg>/libexec/gcc/arm-none-eabi/11.5.0/{as,ld,collect-ld,nm}"
+  - id: OH-6
+    description: "-print-prog-name=as 必须解析到包内 exec-prefix 路径 (垫片生效, 非宿主 as)"
+    command: "arm-none-eabi-gcc -print-prog-name=as | grep <pkg>/libexec/gcc/arm-none-eabi/11.5.0"
+  - id: OH-7
+    description: "-print-prog-name=ld 必须解析到包内 exec-prefix 路径 (垫片生效, 非宿主 ld)"
+    command: "arm-none-eabi-gcc -print-prog-name=ld | grep <pkg>/libexec/gcc/arm-none-eabi/11.5.0"
+
+# 测试断言总数 (实计, 用于质量评估)
+# 消费者测试 11 条 (test() 内 (1)..(11), 含 C++17 链接与 libstdc++ 符号)
+#   + 鸿蒙特有测试 7 条 (OH-1..OH-7)
+#   + 目标 C 库测试 4 条 (TL-1..TL-4)
+assertion_count: 22
