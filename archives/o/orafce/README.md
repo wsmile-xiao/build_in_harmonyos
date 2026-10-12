@@ -1,4 +1,4 @@
-# postgresql-orafce
+# orafce
 ## 简介
 orafce 提供 Oracle 兼容函数，帮助从 Oracle 迁移到 PostgreSQL。
 ## OHOS 适配

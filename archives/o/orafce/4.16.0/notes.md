@@ -1,4 +1,4 @@
-# postgresql-orafce 4.16.0 适配笔记
+# orafce 4.16.0 适配笔记
 
 ## 编译环境
 - 构建系统: PostgreSQL Extension (PGXS)
@@ -8,9 +8,9 @@
 
 ## 编译步骤
 
-postgresql-orafce 是一个 PostgreSQL 扩展，使用 PGXS (PostgreSQL Extension Building Infrastructure) 构建：
+orafce 是一个 PostgreSQL 扩展，使用 PGXS (PostgreSQL Extension Building Infrastructure) 构建：
 
-1. 初始化编译环境：`python3 ohc-run.py init-build postgresql-orafce 4.16.0 --url=https://github.com/orafce/orafce/archive/refs/tags/VERSION_4_16_0.tar.gz`
+1. 初始化编译环境：`python3 ohc-run.py init-build orafce 4.16.0 --url=https://github.com/orafce/orafce/archive/refs/tags/VERSION_4_16_0.tar.gz`
 2. 手动编译（PGXS 不需要 configure）：`export CC=clang && make -j1`
 3. 安装到 staging 目录：`make install DESTDIR=$TEST_PREFIX`
 4. 安装到实际位置：`make install`
