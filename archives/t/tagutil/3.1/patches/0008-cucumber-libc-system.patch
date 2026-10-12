@@ -1,0 +1,99 @@
+--- a/test/features/support/env.rb
++++ b/test/features/support/env.rb
+@@ -1,8 +1,9 @@
+ #!/usr/bin/env ruby
+ # encoding: UTF-8
+ 
++require 'fiddle'
+ require 'fileutils'
+-require 'open3'
++require 'shellwords'
+ require 'tmpdir'
+ require 'yaml'
+ 
+@@ -13,6 +14,59 @@
+   @tmpdir     = nil # temporary test directory
+   @blankfiles = Dir[File.join(ProjectRoot, 'test', 'files', '*')]
+ 
++  class ShellStatus
++    def initialize(code)
++      @code = code
++    end
++
++    def exitstatus
++      @code
++    end
++
++    def success?
++      @code == 0
++    end
++  end
++
++  # Ruby 3.4.5 on the CI worker aborts inside Open3/Process.spawn
++  # (posix_spawn file actions) with "ILL received in SEGV handler".
++  # libc system() still runs the same shell command and returns its status.
++  def self.libc_system(command)
++    @libc_system ||= Fiddle::Function.new(
++      Fiddle.dlopen(nil)['system'],
++      [Fiddle::TYPE_VOIDP],
++      Fiddle::TYPE_INT)
++    @libc_system.call(command)
++  end
++
++  def self.shell_capture(env, cmd, stdin: nil)
++    stamp = "#{Process.pid}-#{rand(1 << 20)}"
++    base = @tmpdir || Dir.tmpdir
++    outfile = File.join(base, "tagutil-out-#{stamp}")
++    infile = nil
++    if stdin
++      infile = File.join(base, "tagutil-in-#{stamp}")
++      File.write(infile, stdin)
++    end
++    prefix = env.map { |key, value|
++      "#{key}=#{Shellwords.escape(value.to_s)} "
++    }.join
++    redirect_in = infile ? " <#{Shellwords.escape(infile)}" : ""
++    script = "#{prefix}#{cmd}#{redirect_in} >#{Shellwords.escape(outfile)} 2>&1"
++    raw = libc_system(script)
++    output = File.file?(outfile) ? File.read(outfile) : ""
++    FileUtils.rm_f(outfile)
++    FileUtils.rm_f(infile) if infile
++    if raw < 0
++      code = 127
++    elsif (raw & 0xff) != 0
++      code = 128 + (raw & 0x7f)
++    else
++      code = (raw >> 8) & 0xff
++    end
++    [output, ShellStatus.new(code)]
++  end
++
+   # build tagutil iff the executable does not exist
+   def self.build
+     self.build! unless File.exist?(Executable)
+@@ -22,7 +76,7 @@
+   def self.build!
+     STDOUT.print "===> running a debug build..."
+     STDOUT.flush
+-    output, status = Open3.capture2e("make -C #{ProjectRoot}")
++    output, status = shell_capture({}, "make -C #{ProjectRoot}")
+     raise RuntimeException.new('Could not build tagutil') unless status.success?
+     STDOUT.puts "done."
+     STDOUT.flush
+@@ -51,14 +105,14 @@
+     FileUtils.cp blank, path
+     if tags
+       data = "#{tags.to_yaml}\n"
+-      output, status = Open3.capture2e("#{Executable} load:- #{path}", stdin_data: data)
++      output, status = shell_capture({}, "#{Executable} load:- #{path}", stdin: data)
+       raise RuntimeError.new(output) unless status.success? and output.empty?
+     end
+   end
+ 
+   def self.run(env: {}, argv: "")
+     cmd = "#{Executable} #{argv}"
+-    Open3.capture2e(env, cmd)
++    shell_capture(env, cmd)
+   end
+ 
+   class World
