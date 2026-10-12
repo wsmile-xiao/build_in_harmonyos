@@ -1,0 +1,56 @@
+#====================================================================
+# Draft: Test frameworks whose official self-test contract is
+#        "exit code == expected failure count" (minunit 0.0-git20230524):
+#        wrapping the official suite in a zero-exit expectation misjudges
+#        a fully-correct run as FAILED. Read the upstream check script
+#        FIRST, then assert the exact contracted code + report output.
+#====================================================================
+
+id:                     DRAFT-MINUNIT-GIT20230524-NONZERO-EXIT-OFFICIAL-CONTRACT
+trigger_tool:           conan|ci
+phase:                  testing
+error_signature:        Error 6 while executing|[0-9]+ tests, [0-9]+ assertions, [0-9]+ failures|expected_exit_code|MU_EXIT_CODE|minunit_fail
+
+severity:               2
+category:               testing|conan|ci-gate
+match_keywords:         minunit, MU_EXIT_CODE, exit code 6, check_example.sh, expected_exit_code, ignore_errors, designed-to-fail, 测试框架, 断言捕获, self.run, retcode, test framework, self-test, demo failure cases, 非零退出码, 退出码契约
+
+title:                  测试框架自适配的退出码契约陷阱：minunit 的 MU_EXIT_CODE 是"失败计数"而非"成功布尔"（官方 ci/check_example.sh 断言 exit==6 才算 PASS），零退出码期望会把完全正确的运行误判为失败——先读上游 check 脚本，再按契约精确断言退出码+报告输出
+
+root_cause:             minunit 的退出码语义是"失败计数"：MU_EXIT_CODE 展开为 minunit_fail 计数器。官方自测套件 minunit_example.c 的 11 个 MU_TEST 中 6 个是框架故意演示失败的用例（*_fail 系列 + mu_fail，用途是验证断言捕获能力），因此一次完整正确的运行必然 exit 6——上游官方 CI 契约 ci/check_example.sh 明确写 expected_exit_code=6，非 6 反而判 FAIL。适配者若按"测试程序退出码非零=失败"的默认语义包裹该套件（conan build() 内 self.run 不带 ignore_errors 直接炸 "Error 6 while executing"，或门禁/统计把非零码当通过率损失），会把一次完全符合上游设计的运行误判为适配失败；反之若只 ignore_errors 而不校验具体码值，则丢失"6 个设计失败全部如期发生"的验证价值——码是 5 或 7 同样说明框架行为异常，精确断言才能同时防两类误判。
+affected_scope:         所有"被测对象是测试框架本身"或"官方套件内嵌 designed-to-fail 演示用例"的包（minunit 及同类极简断言/测试库的 self-test）；任何在 conanfile build()/test_package 里包裹此类套件的配方；把退出码当成功布尔的 CI 门禁与统计口径。
+verification_cmd:       cd <src> && clang -std=c99 -I. minunit_example.c -lm -o minunit_example && ./minunit_example; echo "exit=$?"   # 期望 "11 tests, 11 assertions, 6 failures" 且 exit=6（官方契约）
+
+rec_priority:           2
+rec_approach:           assert-official-exit-contract-exactly
+rec_description:        (1) 适配前先读上游官方 CI 入口脚本（.travis.yml/appveyor.yml 的 script 段 → ci/check_example.sh），提取官方对退出码的精确契约——本例 expected_exit_code=6，"非零退出码是 PASS 判据"；(2) build() 内用 self.run(cmd, ignore_errors=True) 取回 retcode（Conan 2.x run() 语义：ignore_errors=True 时返回退出码而不抛异常），按契约精确断言 retcode == 6，不符则 raise ConanException 带期望值与实际值；(3) 消费者侧 test_package 同法做契约断言：故意失败用例数 N → 断言 exit == N，并同时校验 MU_REPORT 输出行（"10 tests, 10 assertions, 5 failures"）与 setup/teardown 触发计数，把"退出码+报告行+钩子计数"三重证据做实，防止只对码漏对行为；(4) PR 统计表与 MANIFEST 如实写"官方契约口径：exit 6 == PASS（6 个 designed-to-fail 演示用例按设计失败）"，防止后续人工审查把非零退出码误读为通过率问题（rule4 高频打回点）。
+rec_command:            retcode = self.run("./minunit_example", cwd=self.build_folder, ignore_errors=True); if retcode != 6: raise ConanException("upstream official test FAILED: ci/check_example.sh contract expects exit code 6, got %d" % retcode)
+rec_auto_fix:           false
+
+# ═══ W 系社区字段（pathb-pathc-workflow 动作 1 规范）═══
+draft:                  DRAFT-MINUNIT-GIT20230524-NONZERO-EXIT-OFFICIAL-CONTRACT
+status:                 pending-editor-review
+solution: |
+  # conanfile.py build() 内（官方契约断言）：
+  retcode = self.run("./minunit_example", cwd=self.build_folder, ignore_errors=True)
+  if retcode != 6:
+      raise ConanException(
+          "minunit upstream official test FAILED: ci/check_example.sh "
+          "contract expects exit code 6, got %d" % retcode)
+
+  # test_package/conanfile.py test() 内（消费者契约断言，N=故意失败用例数）：
+  with open(out_file, "w") as f:
+      retcode = self.run('"%s"' % exe, stdout=f, env="conanrun", ignore_errors=True)
+  out = open(out_file).read()
+  if retcode != 5:
+      raise ConanException("minunit contract expects MU_EXIT_CODE==5, got %d" % retcode)
+  for expected in ("10 tests, 10 assertions, 5 failures", "setup_calls=10 teardown_calls=10"):
+      if expected not in out:
+          raise ConanException("expected %r in output" % expected)
+fallback:               若官方无显式契约脚本：先本地逐用例实测上游套件期望退出码（记录 N tests / M failures / exit M），按实测值断言；若实测不稳定（时序/环境相关的失败数），退化为只断言 MU_REPORT 报告行格式 + 用例数与断言数一致，并在 notes.md 记录放弃码值断言的具体原因。
+verify_builds:          "#68181（CI 绿）；本地 conan create exit 0（OHOS aarch64 clang15，build() 内官方契约真跑 exit 6 + test_package 契约断言 exit 5 双过）"
+reference_impl:         PR !14375：archives/m/minunit/0.0-git20230524/conanfile.py（build() 契约断言）+ test_package/conanfile.py + test_package/test_minunit.c（消费者契约断言）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              14375
+source_commit:          5fa54331a236
