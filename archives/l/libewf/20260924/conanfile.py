@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""Conan recipe for libewf 20260924 — libyal Expert Witness Compression Format (EWF) 取证格式库（纯 C，Autotools）。
+
+源码：上游 GitHub release 资产 libewf-experimental-20260924.tar.gz（channel=
+      experimental，HTTP 200 实测，sha256 e2da4fdb…905b5）。资产自包含：预生成
+      configure/Makefile.in/aclocal.m4/config.guess/config.sub + 22 个 libyal
+      支持组件内嵌，无 autoreconf 需求（CI worker PATH 没有 automake，这点关键）。
+      注：任务卡给定的 codeload git tarball（refs/tags/20260924）不含 configure
+      产物也不含 22 个子库（synclibs.sh 需构建期 git clone 拉取未注册依赖，
+      违反本仓规范），故不用；同族先例 libvmdk/20260714（PR #15170）、
+      libvmdk/20240510 同走 release 资产通道。
+
+平台适配全部内联在 build() 内（不改上游任何 C/H 源文件与测试脚本，无 patches/ 文件）：
+1. E011（HMDFS umask）：随包 configure 内 2 处 `umask 077` → `umask 022`，
+   并让整个构建过程保持 umask 022（同族 libvmdk/libsmraw 先例）。
+2. 三元组：随包 config.guess（2025-07-10 vintage）在设备上无法识别 HarmonyOS
+   （uname -s=HarmonyOS → "unable to guess system type"，实测）；config.sub 2025
+   虽已接受 linux-ohos，但 --build 仍需显式指定避免 guess 失败，OHOS 下用
+   --build/--host=aarch64-unknown-linux-gnu（同族先例口径）。
+3. HMDFS 上源码树脚本经 CONFIG_SHELL（profile [buildenv] 注入的
+   /data/service/hnp/bin/bash）显式启动 configure。
+4. 上游测试（make check）：本版测试框架为 autotest（tests/*.at → autom4te
+   生成 test_library/test_glob/test_manpages/test_tools 套件脚本 + zlib 就绪时
+   test_library_write/test_tools_write，check-local 驱动）。autom4te 由 OHOS
+   hnp 工具链提供（/data/service/hnp/bin/autom4te，autoconf 2.72），PATH 前置
+   hnp/bin 后 make check 可完整真跑；测试程序要读回构建树内的共享库，故把
+   libewf/.libs 追加进 LD_LIBRARY_PATH（只作用于本进程子树，退出时还原）。
+5. --disable-python：pyewf 绑定不入交付面（上游 --enable-python 默认即 no，
+   显式声明意图；HAVE_PYTHON_TESTS 条件不成立，test_python_module 不入注册面）。
+6. --with-libfuse=no：ewfmount 的 FUSE 挂载路径在无 libfuse 时编译期降级
+   （Homebrew 同口径；20140816 先例同参）。OHOS 无 libfuse。
+
+依赖：外部 Conan 依赖仅 zlib/1.3.2（制品仓已发布）——libewf 的 EWF 段压缩
+      （deflate）与写支持需要 zlib.h/uncompress/compress2。接线为
+      AutotoolsDeps 单通道（zlib 的 include/lib 经 conanbuild 注入
+      CPPFLAGS/LDFLAGS，configure 自动探测；zlib 就绪同时使
+      HAVE_WRITE_TESTS=1，写测试套件入注册面）。
+      **不要**加 `--with-zlib=<DIR>`：共享 m4（m4/zlib.m4 Version 20260622）
+      的 DIR 分支把成功态置 `zlib` 而终闸判 `!= zlib && ...`——显式 DIR 参数
+      在部分路径下仍会 configure 失败（同族 libvmdk/20240510 先例 DRAFT-E724
+      登记，round-1 G2 实测 "unable to find supported zlib in directory"）。
+      22 个 libyal 支持组件（libbfio libcaes libcdata libcdatetime libcerror
+      libcfile libclocale libcnotify libcpath libcsplit libcthreads libfcache
+      libfdata libfdatetime libfguid libfvalue libhmac libodraw libsmdev
+      libsmraw libuna，另加顶层 common/ 共享支撑代码）以 standalone 形式内嵌
+      在发布包内，非 Conan 依赖。
+
+交付物：libewf.so（默认 shared）+ include/libewf.h、include/libewf/*.h +
+        bin/ewfinfo、bin/ewfverify、bin/ewfexport、bin/ewfacquire、
+        bin/ewfacquirestream、bin/ewfrecover、bin/ewfdebug、bin/ewfmount +
+        lib/pkgconfig/libewf.pc；ewfmount 的 FUSE 挂载路径在无 libfuse 时
+        编译期降级（见 notes.md 已知限制）。
+"""
+import os
+
+from conan import ConanFile
+from conan.errors import ConanInvalidConfiguration
+from conan.tools.build import cmd_args_to_string
+from conan.tools.files import (
+    apply_conandata_patches,
+    copy,
+    export_conandata_patches,
+    get,
+    rm,
+)
+from conan.tools.gnu import Autotools, AutotoolsDeps, AutotoolsToolchain
+from conan.tools.layout import basic_layout
+
+
+class LibewfConan(ConanFile):
+    name = "libewf"
+    version = "20260924"
+    description = (
+        "Library to access the Expert Witness Compression Format (EWF) (libyal)"
+    )
+    license = "LGPL-3.0-or-later"
+    homepage = "https://github.com/libyal/libewf"
+    url = "https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos"
+    package_type = "library"
+
+    settings = "os", "compiler", "build_type", "arch"
+    options = {"shared": [True, False], "fPIC": [True, False]}
+    default_options = {"shared": True, "fPIC": True}
+
+    # zlib 的 include/lib 经 conanbuild 聚合环境注入 configure/make
+    # （AutotoolsDeps 先例：同族 libvmdk/20260714 等 500+ 主线配方）
+    generators = "AutotoolsDeps"
+
+    def config_options(self):
+        if self.settings.os == "Windows":
+            self.options.rm_safe("fPIC")
+
+    def configure(self):
+        if self.options.shared:
+            self.options.rm_safe("fPIC")
+
+    def validate(self):
+        if str(self.settings.os) not in ("Linux", "OHOS"):
+            raise ConanInvalidConfiguration(
+                "libewf adaptation supports Linux and OHOS"
+            )
+
+    def requirements(self):
+        # 唯一外部硬依赖；ohpcd 制品仓已发布（同族 libvmdk/20260714 同版本）
+        self.requires("zlib/1.3.2")
+
+    def export_sources(self):
+        # conandata.yml 当前无 patches 段（平台适配全部内联在 build()），
+        # 保留导出/应用调用使配方对后续补丁形态就绪；无 patches 时为 no-op。
+        export_conandata_patches(self)
+
+    def layout(self):
+        basic_layout(self)
+
+    def source(self):
+        # conandata.yml 的 sources 段自带 url/sha256/filename 三键，原样展开即可
+        # （filename 的单一事实来源在 conandata，调用点不得再显式传 filename=——
+        #  DRAFT-E597 libsmraw 先例）
+        get(self, **self.conan_data["sources"], strip_root=True)
+
+    def _configure_args(self):
+        """generate() 与 build() 必须用同一组参数（共享同一份构造逻辑）。"""
+        toolchain = AutotoolsToolchain(self)
+        toolchain.configure_args.extend(
+            [
+                # pyewf 绑定不入交付面（上游默认即 no，显式声明意图）
+                "--disable-python",
+                # 工具不静态链接（共享库模式下避免再链一份静态副本；同族口径）
+                "--enable-static-executables=no",
+                # ewfmount 的 FUSE 挂载路径在无 libfuse 时编译期降级
+                # （OHOS 无 libfuse；Homebrew/20140816 先例同参）
+                "--with-libfuse=no",
+                # 注意：**不加** --with-zlib=<DIR>——共享 m4/zlib.m4
+                # （Version 20260622）DIR 分支仍以 zlib 置成功态，显式 DIR 参数
+                # 走 DIR 分支探测（同族 libvmdk/20240510 先例 DRAFT-E724）。
+                # zlib 只走 AutotoolsDeps 注入的 CPPFLAGS/LDFLAGS 自动探测。
+            ]
+        )
+        if self.options.shared:
+            toolchain.configure_args.append("--enable-shared")
+            toolchain.configure_args.append("--disable-static")
+        else:
+            toolchain.configure_args.append("--disable-shared")
+            toolchain.configure_args.append("--enable-static")
+        if str(self.settings.os) == "OHOS":
+            # 本版 config.guess（2025-07-10 vintage）在设备上无法识别 HarmonyOS
+            # （uname -s=HarmonyOS → "unable to guess system type" 实测）；
+            # 沿用 GNU 三元组显式指定。update_configure_args 是替换语义，
+            # 避免重复 --build/--host。
+            toolchain.update_configure_args(
+                {
+                    "--build": "aarch64-unknown-linux-gnu",
+                    "--host": "aarch64-unknown-linux-gnu",
+                }
+            )
+        return toolchain
+
+    def generate(self):
+        self._configure_args().generate()
+
+    def _patch_hmdfs_umask(self):
+        """E011：configure 的 umask 077 在 HMDFS 上生成不可写临时目录。"""
+        configure_path = os.path.join(self.source_folder, "configure")
+        with open(configure_path, encoding="utf-8") as configure_file:
+            configure_text = configure_file.read()
+        if "umask 077" in configure_text:
+            with open(configure_path, "w", encoding="utf-8") as configure_file:
+                configure_file.write(
+                    configure_text.replace("umask 077", "umask 022")
+                )
+            self.output.info(
+                "configure: umask 077 -> 022 (HMDFS writable tempdir, E011)"
+            )
+        os.chmod(configure_path, 0o755)
+
+    def _jobs(self):
+        """显式限制 make 并发。
+
+        conan 的 tools.build:jobs 缺省取 os.cpu_count()（本机 20，而容器
+        affinity 只有 8），共享设备上会超订；本包统一按 2 并发构建，调用方可
+        用 `-c tools.build:jobs=N` 显式覆盖。
+        """
+        conf_jobs = self.conf.get("tools.build:jobs", default=None, check_type=int)
+        return conf_jobs if conf_jobs else 2
+
+    def build(self):
+        apply_conandata_patches(self)
+        jobs = self._jobs()
+        old_umask = os.umask(0o022)
+        old_tz = None
+        old_ld_library_path = os.environ.get("LD_LIBRARY_PATH")
+        old_path = os.environ.get("PATH")
+        try:
+            if str(self.settings.os) == "OHOS":
+                config_shell = os.environ.get(
+                    "CONFIG_SHELL", "/data/service/hnp/bin/bash"
+                )
+                self._patch_hmdfs_umask()
+                # 本版测试框架为 autotest（.at → autom4te 生成套件脚本）：
+                # hnp 工具链自带 autom4te（autoconf 2.72），前置其 bin 目录
+                # 使 make check 的 AUTOM4TE 调用可解析。
+                hnp_bin = "/data/service/hnp/bin"
+                if hnp_bin not in (old_path or "").split(os.pathsep):
+                    os.environ["PATH"] = hnp_bin + os.pathsep + (old_path or "")
+                configure_path = os.path.join(self.source_folder, "configure")
+                configure_args = cmd_args_to_string(
+                    self._configure_args().configure_args
+                )
+                self.run(
+                    f'"{config_shell}" "{configure_path}" {configure_args}',
+                    cwd=self.source_folder,
+                )
+            else:
+                Autotools(self).configure()
+            self.run(f"make -j{jobs}", cwd=self.source_folder)
+
+            # ── 上游官方测试（make check，autotest 结构）──
+            if str(self.settings.os) == "OHOS":
+                # 固定 CET：ewf_test_header_values 期望串要求 +01:00 (CET)
+                # （设备默认 CST 会漂移到 13:34:45 +08:00）。
+                # self.run 为子进程，启动时读取 TZ。
+                old_tz = os.environ.get("TZ")
+                os.environ["TZ"] = "CET-1CEST,M3.5.0,M10.5.0/3"
+                library_path = os.path.join(
+                    self.source_folder, "libewf", ".libs"
+                )
+                if old_ld_library_path:
+                    os.environ["LD_LIBRARY_PATH"] = (
+                        library_path + os.pathsep + old_ld_library_path
+                    )
+                else:
+                    os.environ["LD_LIBRARY_PATH"] = library_path
+                self.run(
+                    f'make -j{jobs} check LOG_COMPILER="{config_shell}"',
+                    cwd=self.source_folder,
+                )
+            else:
+                self.run(f"make -j{jobs} check", cwd=self.source_folder)
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            if old_ld_library_path is None:
+                os.environ.pop("LD_LIBRARY_PATH", None)
+            else:
+                os.environ["LD_LIBRARY_PATH"] = old_ld_library_path
+            if old_path is None:
+                os.environ.pop("PATH", None)
+            else:
+                os.environ["PATH"] = old_path
+            os.umask(old_umask)
+
+    def package(self):
+        # 树内构建：make install 必须在源码目录执行——conanfile.run() 的默认 cwd
+        # 是 build 文件夹（basic_layout 下与源码目录不同），那里没有顶层 Makefile。
+        # AutotoolsToolchain 的默认 prefix="/"，DESTDIR=package_folder 即落在
+        # package_folder/{include,lib,bin}。
+        self.run(
+            f'make install DESTDIR="{self.package_folder}"',
+            cwd=self.source_folder,
+        )
+        # libtool 的 .la 描述文件对消费者无用，且内嵌构建机绝对路径
+        rm(self, "*.la", os.path.join(self.package_folder, "lib"))
+        for license_file in ("COPYING", "COPYING.LESSER"):
+            copy(
+                self,
+                license_file,
+                src=self.source_folder,
+                dst=os.path.join(self.package_folder, "licenses"),
+            )
+
+    def package_info(self):
+        self.cpp_info.libs = ["ewf"]
+        # 交付面含 bin/ewfinfo、bin/ewfverify、bin/ewfexport、bin/ewfacquire、
+        # bin/ewfacquirestream、bin/ewfrecover、bin/ewfdebug、bin/ewfmount
+        # （commands.json 已声明）
+        self.cpp_info.bindirs = ["bin"]
+        self.cpp_info.set_property("cmake_file_name", "libewf")
+        self.cpp_info.set_property("cmake_target_name", "libewf::libewf")
+        self.cpp_info.set_property("pkg_config_name", "libewf")
