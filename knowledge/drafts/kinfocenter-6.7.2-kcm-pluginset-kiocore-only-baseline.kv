@@ -1,0 +1,92 @@
+draft: kinfocenter-6.7.2-kcm-pluginset-kiocore-only-baseline
+status: pending-editor-review
+title: "KDE KCM 插件集包在 KIOCORE_ONLY 基线上的适配模式：目标可用性矩阵裁剪 + KIOWidgets 消费者改接 Qt6::DBus/KIOCore + KPluginFactory 消费者测试补偿验证"
+category: ohos-platform, portability, packaging, kde, cmake, conan
+match_keywords: >
+  kinfocenter, KCM, kcm_, KIOCORE_ONLY, KIOGui, KIOWidgets, KCMUtilsQuick,
+  kcmutils_add_qml_kcm, KPluginFactory, plasma/kcms, systemsettings symlink,
+  KSambaShare, KPropertiesDialog, kauth-policy-gen, KAUTH_INSTALL_ACTIONS,
+  dmidecode-helper, FindUSB1, pkg-config host drift, SOVERSION,
+  build-tree DT_NEEDED, systemsettings
+error_signature: >
+  Target "KF6::KIOGui" does not exist|Target "KF6::KIOWidgets" does not exist|Could NOT find PkgConfig.*libdrm|pkg_check_modules\(libdrm REQUIRED|Cannot load library .*kcm_.*\.so.*Permission denied|kauth-policy-gen.*not found|file INSTALL.*cannot create.*link
+root_cause: >
+  ohpcd 的 kio/6.26.0 是 KIOCORE_ONLY 基线——只发布 libKF6KIOCore.so（KF6KIOConfig.cmake
+  的 KIOGui/KIOWidgets/KIOFileWidgets find_dependency 分支被构建期剪掉；反直觉点：KSambaShare/
+  KSambaShareData 符号实测在 KIOCore 内）。凡以 KCM 插件集为 payload 的 KDE GUI 应用
+  （kinfocenter 6.7.2 实证，后续 systemsettings、plasma 设置模块同型）在这条基线上撞四类连锁缺口：
+  (1) 链接 KF6::KIOGui/KIOWidgets 的 KCM configure 直接失败；(2) pkg_check_modules(libdrm)+
+  UDev+vulkan/opengl helper 工具链不在 conan 包布局（libdrm 制品 .pc 写死 prefix=/，pkg-config
+  跨 worker 解析漂移，FindUSB1 类 module 探测可能探到 host x86_64 同名 .pc 把异 ABI 库链进来）；
+  (3) kauth OHOS 包 FAKE 后端、不带 kauth-policy-gen host 工具，KAUTH_INSTALL_ACTIONS/
+  KAUTH_INSTALL_HELPER_FILES 安装宏在 install 阶段执行该工具失败；(4) 上游"可执行文件"是指向
+  systemsettings 的符号链接（ADD_CUSTOM_TARGET create_symlink+install FILES），OHOS 无
+  systemsettings 时 file(INSTALL) 对悬空链接报错。共性尾巴：私有 helper 库无 SONAME 时已装插件
+  记录 build-tree 相对 DT_NEEDED（E330/E537 同族）；新鲜链接的 OHOS ELF 带无效 .codesign stub
+  段，dlopen 报 EACCES Permission denied（E077 已收），消费者不重签就加载失败。
+solution: |
+  第一步"目标可用性矩阵"先画表再裁——逐 KCM 扫 target_link_libraries/find_package/
+  pkg_check_modules/kauth 宏四类声明，对照制品仓实际导出目标（grep "add_library(KF6::"
+  KF6KIOTargets.cmake 只有 KIOCore；kauth 无 policy-gen），分四档处置：
+  裁（about-distro：KIOGui+libdrm+UDev+vulkan helper 全缺；helpers：FAKE 后端无 policy-gen；
+  usbview：FindUSB1 走 pkg-config、host x86_64 .pc 会被探到、链进异 ABI 库，为确定性裁掉）、
+  留（CommandOutputContext 型 KCM 只链 KCMUtilsQuick/CoreAddons/I18n，全可用）、
+  改（samba：KIOWidgets→Qt6::DBus + KPropertiesDialog 集成删除三处联动——.h 的 Q_INVOKABLE、
+  .cpp 的对话框实现、ShareListItem.qml 的 ToolButton；KSambaShare 本就在 KIOCore，上游
+  autotests 因此保住真跑）、守卫（energy 留在上游 Linux 守卫后天然跳过）。
+
+  第二步共性收尾（CMake 补丁关键行）：
+  ```cmake
+  # 顶层显式补组件：samba 的 qt_add_dbus_interface 需要 DBus；
+  # KCMUtilsQuick 的 INTERFACE_LINK_LIBRARIES 引用 Qt6::Qml，只有显式 find_package 才建目标
+  find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED COMPONENTS Core Gui Widgets DBus Qml Quick)
+  # 私有库补 SOVERSION，防已装插件记录 build-tree DT_NEEDED
+  set_target_properties(KInfoCenterInternal PROPERTIES VISIBILITY_INLINES_HIDDEN OFF SOVERSION 1)
+  # 删除 ADD_CUSTOM_TARGET(kinfocenter_link ...) 与其 install(FILES ...) 行（systemsettings 悬空链接）
+  ```
+  第三步打包期统一重签（E077 手段前移，消费者环境零依赖）：
+  ```python
+  # conanfile.py package() 末尾
+  for so in walk_package_elves():  # lib/*.so* + lib/plugins/**/*.so
+      subprocess.run([objcopy, "--remove-section", ".codesign", so], check=False)
+      subprocess.run([signer, "sign", "-inFile", so, "-outFile", so, "-selfSign", "1"], check=True)
+  ```
+  第四步 test_package 三段式补偿验证（无可执行入口的插件集包）：
+  ```cpp
+  // ① systemsettings 同款加载机制  ② 私有库 dlopen+元对象符号（mangle 长度 _ZN20 不是 21）
+  const KPluginMetaData meta(pluginDir.filePath("kcm_cpu.so"));
+  auto result = KPluginFactory::loadFactory(meta);            // dlopen+factory 实例化
+  QLibrary internal(pkg + "/lib/libKInfoCenterInternal.so.1");
+  internal.resolve("_ZN20CommandOutputContext16staticMetaObjectE");
+  // ③ 逐项断言 18 个 KCM 模块安装集
+  ```
+fallback: >
+  若下游需要 about-distro/usbview 等被裁模块：裁剪点全部是 add_subdirectory 行删除/组件枚举
+  修改，git 粒度干净可整段恢复——about-distro 需等 kio 发布含 KIOGui 的完整基线；usbview 恢复时
+  应改用 conan libusb 依赖 + 显式 CMAKE_PREFIX_PATH，而非放回 pkg-config 探测（host 漂移根因
+  不除）。若 kauth 后续发布 policy-gen 工具，helpers 的 KAUTH_INSTALL_* 宏链可直接还原。
+  CI worker 若持续 SSH 桥断连（平台集群故障），本地 arm64 conan create（含 ctest+test_package
+  全链）可作为等效验证证据。
+reuse: >
+  适用于一切以 kcmutils_add_qml_kcm / kcoreaddons_add_plugin(INSTALL_NAMESPACE plasma/kcms/...)
+  产出 KCM 插件集、且依赖闭包落在 KIOCORE_ONLY kio 制品基线上的 KDE 应用（kinfocenter 6.7.2
+  实证；systemsettings、plasma 各设置模块、kde-plasma-addons 同型待验证）。"目标可用性矩阵"
+  方法本身可推广到任何"多插件 payload + 依赖基线缺目标"的裁剪决策场景。R8 合规（无 __OHOS__
+  平台宏，纯构建系统层适配）。
+note: >
+  "拟提升编号：由知识库主编确认" —— 本草稿为未提升草稿，尚未分配正式 E 编号，等主编评审后
+  rename 为 E###.kv 并移入 knowledge/graph/ 且追加 index.tsv 行。
+source: >
+  kinfocenter 6.7.2 OHOS PC 适配（build_in_harmonyos，archives/k/kinfocenter/6.7.2，任务
+  #12847）：patches/0001-ohos-trim-kcms.patch（7 文件）+ conanfile.py 打包期重签
+  （_sign_ohos_payload）+ test_package KPluginFactory 三段式消费者测试。
+verification: >
+  本地 arm64 OHOS conan create 全链绿（RC=0）：上游 samba autotests 2/2 Passed（ctest
+  100% tests passed, 0 tests failed out of 2）+ 消费者测试 PASSED (0 failures)（含
+  [PASS] full expected KCM set installed (18/18)）。CI 侧两轮构建（#69654/#69810）均因
+  worker SSH 桥断连 5 秒内失败（平台集群故障，非包问题——本地同源码同配方全绿为证）。
+related_to:
+  - E077: ELF .codesign 重签（本条把其手段前移到 package() 期，消费者零依赖）
+  - E330: CMake SONAME 保留（本条 KInfoCenterInternal SOVERSION 1 是同族应用）
+  - E537: DT_NEEDED 绝对路径 build-time 修复（本条 ctest 兼容链接沿用其相对路径版手段）
+  - E083: JDK 库签名（同属签名族，JVM 侧）
