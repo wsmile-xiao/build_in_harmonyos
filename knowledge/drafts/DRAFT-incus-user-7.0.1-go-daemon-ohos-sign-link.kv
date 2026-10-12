@@ -1,0 +1,121 @@
+#====================================================================
+# DRAFT: OHOS 适配 Go 守护进程/CLI 的“签名时机 + toolexec 路径”两个坑
+#   —— incus-user 7.0.1（github.com/lxc/incus cmd/incus-user，纯 Go 守护进程）
+# 状态: 草稿（未审核、未合入正式知识库）
+# 查重:
+#   - E523 覆盖“Go 链接器 fallocate()=EACCES → toolexec 重定向 /dev/shm”，
+#     本稿沿用其方案，但补充两个 E523 未涉及的**新坑**（签名时机 / 路径空格）；
+#   - E318 覆盖“go test 临时测试 ELF 未签名不可执行”，未说明“何时签才对”；
+#   - DRAFT-kubeadm-go-toolchain-sign 覆盖“工具链自身 ELF 需批量自签”；
+#   本稿填补“go 链接后会改写产物 → 签名必须在其最终拷贝之后”与
+#   “-toolexec 值不能含空格”两个真空档。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-incus-user-7.0.1-go-daemon-ohos-sign-link
+trigger_tool:           go
+phase:                  compilation
+error_signature:        fork/exec \S+\.test: (permission denied|operation not permitted)|fork/exec \S*/[A-Za-z ]+: no such file or directory|mapping output file failed: permission denied
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               toolchain, go, ohos, linking, security
+match_keywords:         go test, -toolexec, binary-sign-tool, .codesign, EPERM,
+                         permission denied, operation not permitted, mapping output file,
+                         /dev/shm, fallocate, GOTOOLCHAIN, GOPROXY, vendor
+title:                  OHOS 上 Go 产物（含 go test 测试二进制）签名必须在 go
+                         最终拷贝之后；且 -toolexec 值不能含空格
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             (1) 签名时机：OHOS 内核拒绝 execve 未签名 ELF，但 go 在
+                         链接完成后仍会改写/拷贝产物（buildid、$WORK→-o 落地）。若在
+                         -toolexec 包装器内“链接后立即签名”，go 随后修改文件使签名失效
+                         → execve 报 EPERM（operation not permitted，带 .codesign 但无效）。
+                         正确做法：先 `go test -c -o <tb>` 编译，再对 <tb> 签名，再直接
+                         执行 <tb>；主产物同理（build 结束后对最终 -o 签名）。
+                         (2) 路径空格：Go 把 `-toolexec` 的值按空格切分，工作目录/包装器
+                         路径含空格（如 “lan work”）时，go 去 fork/exec 路径的***首个
+                         空格前片段***，报 `fork/exec /…/lan: no such file or directory`。
+                         包装器必须落在无空格路径（/dev/shm 或 $HOME 等）。
+affected_scope:         所有在 OHOS 上用 Go 工具链构建的库/工具（尤其需要执行 go
+                         test 的包，与工作区路径含空格的开发机）。
+verification_cmd:       # 签名时机：包装器内即时签名 → execve EPERM
+                         ./pkg.test            # EPERM: operation not permitted
+                         # go test -c 后签名 → 正常
+                         go test -c -o tb ./pkg/ && binary-sign-tool sign -selfSign 1 \
+                           -inFile tb -outFile tb.s -signAlg SHA256withECDSA \
+                           && mv tb.s tb && ./tb -test.v
+                         # 路径空格：-toolexec 指向含空格路径即报 fork/exec 截断错误
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           sign-after-final-copy + space-free-toolexec
+rec_description: >
+  (a) 链接输出重定向：-toolexec 包装器把 link 的 -o 输出改写到 /dev/shm
+      （该 FS 支持 fallocate），链接完成后 cp 回原路径（E523 方案）。
+  (b) 签名时机：不要指望包装器里的即时签名；统一在 go 命令**结束后**对最终产物
+      逐个 binary-sign-tool 自签，再 chmod 755。
+  (c) 测试：先 `go test -c -o <tb> ./pkg/`，签名 <tb>，再 cd 到包目录执行
+      `./<tb> -test.v -test.timeout <N>s`（等价于 go test，且签名有效）。
+  (d) 包装器路径选择：优先 /dev/shm/<name>.sh，其次 $HOME/<name>.sh；严禁含空格。
+inc_command:            >
+  # conanfile.build() 要点（incus-user 7.0.1 实测）
+  wrapper = "/dev/shm/<pkg>-toolexec.sh"          # 无空格
+  self.run(f'"{go}" build -toolexec "{wrapper}" -o "{exe}" ./cmd/<pkg>')
+  self._sign_elf(exe)                              # 最终拷贝之后签名
+  self.run(f'"{go}" test -c -toolexec "{wrapper}" -o "{tb}" ./<pkg>/')
+  self._sign_elf(tb)                               # 测试二进制同理
+  subprocess.run([tb, "-test.v"], cwd=pkg_dir)
+rec_auto_fix:           false
+rec_impl:               conanfile-build-method
+
+fallback_priority:      2
+fallback_approach:      goproxy-mod-download
+fallback_description: >
+  源若为 GitHub 官方 git archive（`archive/refs/tags/vX.tar.gz`），其**不含 vendor/**
+  （上游 linuxcontainers.org 发布 tarball 才含）。此时 `-mod=vendor` 不可用，需
+  `go mod download` + `GOFLAGS=-mod=mod` + `GOPROXY=https://goproxy.cn,direct`
+  + `GOSUMDB=off`（go.sum 仍校验完整性）。
+  另注：纯净 Go 解析器在部分鸿蒙主机上无法解析域名（/etc/resolv.conf 里 UDP DNS
+  不可达），而 curl/python(libc) 可解析；此时可临时经本地 CONNECT 代理
+  （HTTPS_PROXY=http://127.0.0.1:<port>）让 go 走 libc 解析。
+fallback_command:       export GOFLAGS=-mod=mod GOPROXY=https://goproxy.cn,direct GOSUMDB=off && go mod download
+fallback_auto_fix:      false
+fallback_impl:          conanfile-generate-env
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       toolexec.*".* .*"|/data/service/.*/wrapper.sh（含空格路径）
+forbid_1_reason:        Go 按空格切分 -toolexec 值，含空格即 fork/exec 截断路径。
+forbid_1_consequence:   报 `fork/exec /…/lan: no such file or directory`，误判为工具链缺失。
+forbid_2_pattern:       # 在 -toolexec 包装器里对 link 输出即时 binary-sign-tool 签名
+forbid_2_reason:        go 在链接后仍改写/拷贝产物，签名即失效（.codesign 在但 execve EPERM）。
+forbid_2_consequence:   产物看似已签却无法执行，排查方向被误导到内核/SELinux。
+
+principles:             [P017]
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              [E523, E318]
+similar_to:             [E523, E318, E250, DRAFT-kubeadm-go-toolchain-sign]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-incus-user-7.0.1-go-daemon-ohos-sign-link.md
+last_updated:           2026-10-10
+source_event:           incus-user 7.0.1 适配（Alpine 源包 incus 7.0.1 的 user
+                         子包，Go 守护进程）：CGO_ENABLED=0 构建 + 上游测试
+                         151/151 通过；实测记录 EPERM（包装器内即时签名失效）
+                         与 `fork/exec /…/lan: no such file or directory`
+                         （-toolexec 路径含空格）。
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                ran060619 <ran060619@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-10-10
