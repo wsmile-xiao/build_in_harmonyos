@@ -1,0 +1,138 @@
+# DRAFT: OHOS 拒绝 AF_UNIX 路径名 bind()（hmdfs EPERM）时 gtest 套件的
+# 同型 bind 探针 + 粒度跳过（fixture SetUp / 逐用例 GTEST_SKIP，注册数不变）；
+# unix 控制通道属功能路径本身时如实申报平台不支持
+id: DRAFT-kea-dhcp6-3.0.3-hmdfs-af-unix-pathname-bind-probe-gtest-skip
+status: draft
+contributor: kea-dhcp6 3.0.3 适配任务（openharmony-compile-agent）
+created: 2026-10-04
+
+# Layer 0: 错误面
+trigger_tool:           kea|dhcp6|gtest|meson|conan|test
+phase:                  runtime, testing
+error_signature:        Operation not permitted|Failed to bind.*socket|Unable to bind.*unix|AF_UNIX.*(EPERM|denied)|CtrlChannelDhcpv6SrvTest.*(FAILED|Failure)
+
+# Layer 1: 识别层
+severity:               2
+category:               ohos, portability, network, sandbox, testing
+title:                  鸿蒙用户存储（hmdfs）拒绝 AF_UNIX 路径名套接字 bind()（EPERM）：
+                        gtest 单二进制套件无法用 exit 77 跳过，正确姿势是「与服务器同型的
+                        bind 探针 + GTEST_SKIP 粒度跳过」（fixture SetUp 组级 / 逐用例，
+                        用例注册数零改动）；unix 控制通道是功能路径本身的服务应如实申报
+                        平台不支持，而不是伪造等价通道
+match_keywords:         AF_UNIX, unix socket, bind, EPERM, hmdfs, GTEST_SKIP, gtest,
+  meson test skip, exit 77, control socket, control channel, CtrlChannelDhcpv6SrvTest,
+  kea, dhcp6, sandbox, ENAMETOOLONG, sockaddr_un
+
+# Layer 2: 诊断层
+root_cause:             鸿蒙用户存储 /storage/Users/currentUser 是 hmdfs 挂载：对 AF_UNIX
+  **路径名**套接字的 bind() 返回 EPERM（Operation not permitted）；/tmp 是只读挂载
+  （EROFS，普通文件也写不了）。即目录"可写"不等于"可 bind"，把 socket 目录改到
+  TMPDIR/cwd 同样 EPERM（raul 2.0.0 初版实测教训，[[raul-2.0.0-af-unix-bind-blocked-meson-skip]]）；
+  挂载点级白名单见 [[DRAFT-ohos-agent-socket-tmpdir-only-bindable-path]]（/dev/shm EACCES、
+  唯一例外 /data/storage/el1/base；抽象命名空间全通）。kea-dhcp6 的 unix 控制通道
+  （kea-ctrl-agent ↔ 服务器）建立在路径名套接字上：`CtrlChannelDhcpv6SrvTest` 的
+  直接 socket / 继承 socket 两组用例执行到真实 bind 时 45 例失败，另有 2 个
+  config-commit 用例因配置含 unix control socket 提交失败。TCP 回环 bind 正常——
+  与"路径"/"协议栈"都无关，是平台能力缺失。（同一包的 HTTP 控制通道测试全绿；
+  补丁 0010 只治 /tmp 只读的配置写路径，与本条无关。）
+
+affected_scope:         1) 所有以 gtest 单二进制注册批量用例、其中部分用例依赖 AF_UNIX
+  路径名 socket 的上游套件（服务类项目的控制通道/管理接口测试尤甚）——一个进程跑完
+  全部用例，meson 层 exit 77 不可用，需要套件内粒度跳过机制；
+  2) 把 unix 域套接字作为生产功能（本地控制/IPC 通道）的守护进程适配——功能侧按
+  平台如实申报不支持，不伪造等价物；存在替代通道时走既有等价面（TCP 回环，见 E024）。
+  不适用于抽象命名空间（\0 前缀）用法——抽象套接字不受此限
+  （[[DRAFT-libdsme-0.67.0-ohos-abstract-af-unix-socket]] 以 @ 前缀约定提供）。
+
+verification_cmd: |
+  # 探针：在"被测代码实际使用的目录"里做真实同型 bind（python 10 秒复核）
+  python3 - <<'PY'
+  import os, socket
+  d = os.environ.get('TMPDIR') or '/tmp'
+  p = os.path.join(d, 'kea-probe.sock')
+  s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+  try:
+      s.bind(p); print('AF_UNIX_OK')
+  except OSError as e:
+      print('AF_UNIX_FAIL', e)      # EPERM（hmdfs）或 EROFS（/tmp）
+  PY
+  # 套件改造实例：archives/k/kea-dhcp6/3.0.3/patches/0007-0009
+  # 期望：kea-dhcp6-tests 965 跑：918 PASS / 47 SKIP / 0 FAIL；dhcp6_process_tests.sh 14/14
+
+# Layer 3: 方案层
+rec_priority:           1
+rec_approach:           same-type-bind-probe-with-granular-gtest-skip
+rec_description:        测试侧（三件套）：
+  (1) 在共享测试工具里加探针助手，用**与服务器同型的** AF_UNIX bind 在**被测代码实际
+      使用的目录**（配置的 socket 目录）真实探测：unlink 探针路径 → socket() → bind()
+      → close → unlink，返回 bool；路径长度 ≥ sizeof(sun_path) 同样返回 false
+      （覆盖 ENAMETOOLONG 类宿主）；
+  (2) fixture 级用 SetUp() override 一次 GTEST_SKIP 覆盖整组用例（kea 的
+      CtrlChannelDhcpv6SrvTest 两组共 45 例）；跨 fixture 的零散用例逐测试 GTEST_SKIP，
+      并能按"配置内容实际含 control-sockets"进一步收窄（kea 的 get_config 用例）；
+  (3) 断言与用例注册数零改动；GTEST_SKIP 消息写明平台语义，保证 SKIP 可审计
+      （965 跑 = 918 PASS + 47 SKIP + 0 FAIL）。
+  功能侧（unix 通道是产品功能）：如实申报平台不支持（README/notes 写明 + 服务器其余
+  功能与 HTTP 控制通道正常），不为"功能齐全"伪造 unix 等价通道。
+rec_command: |
+  patch（实例见 archives/k/kea-dhcp6/3.0.3/patches/）：
+  0007：dhcp6_test_utils.{cc,h} 增 BaseServerTest::unixControlSocketsUsable()
+        —— probe_path = UnixCommandConfig::getSocketPath() + "/kea6-socket-probe"；
+        bind() == 0 即可用；size >= sizeof(addr.sun_path) 直接 false；
+  0008：SetUp() override { if (!unixControlSocketsUsable()) GTEST_SKIP() << "..."; }（45 例组级）
+  0009：逐测试 GTEST_SKIP（2 例 config-commit；get_config 侧再按
+        config.find("control-sockets") != npos 收窄）
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      alternates-when-available
+fallback_description:   若平台提供替代落点/命名空间：a) 抽象命名空间（\0 前缀）全通，
+  但需调用方配合且改变接口语义（[[DRAFT-libdsme-0.67.0-ohos-abstract-af-unix-socket]]
+  的 @ 前缀约定即此路线）；b) 挂载点级例外（/data/storage/el1/base 可用，见
+  [[DRAFT-ohos-agent-socket-tmpdir-only-bindable-path]]）——仅当被测代码允许自定义
+  socket 路径且沙箱可达时才成立，构建期测试通常不可达。两者都不能对"路径名语义"
+  做无声替换；都不可用时回到探针 + 跳过 + 功能侧申报。
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       bind.*(EPERM|Operation not permitted).*->\s*(结论|方案)[:：].*(改|换).*(TMPDIR|/tmp|临时目录|cwd|路径).*(即可|就能|解决)
+forbid_1_reason:        路径不解决问题：/tmp EROFS、hmdfs 全域 EPERM、/dev/shm EACCES
+                        ——"可写"不等于"可 bind"（raul 2.0.0 初版改 TMPDIR 后仍 EPERM 的
+                        实测教训；真机探针 10 秒可证伪）。
+forbid_1_consequence:   多轮换路径返工后仍全挂，最终仍需做能力探测——浪费轮次，且期间
+                        容易把平台性问题误读为库缺陷。
+forbid_2_pattern:       (unix|AF_UNIX).*(控制通道|控制套接字|channel).*->\s*(结论|方案)[:：].*(整体不可适配|释放任务|放弃|降级)
+forbid_2_reason:        kea-dhcp6 实测除 47 例平台性跳过外全部可用：965 例 918 过 +
+                        壳套件 14/14 + HTTP 控制通道全绿；未探针就断言"整包不可适配"
+                        会误杀可交付适配（反向错误同样致命）。
+forbid_2_consequence:   误报环境不支持，放弃可完成的任务或错误降级。
+
+# Layer 4: 原则引用
+principles:             平台能力缺失用真实操作探针取证（同型 bind、实际目录），不用路径
+                        猜测；测试跳过要粒度化、可审计（注册数不变、SKIP 有据、消息写明
+                        平台语义）；功能路径的平台缺失如实申报，不伪造等价物
+
+# 关系图
+causes:                 []
+caused_by:              []
+similar_to:             raul-2.0.0-af-unix-bind-blocked-meson-skip, DRAFT-ohos-agent-socket-tmpdir-only-bindable-path, DRAFT-libdsme-0.67.0-ohos-abstract-af-unix-socket, E024
+conflicts_with:         []
+prerequisite_of:        []
+
+# 元数据
+doc_file:               drafts/DRAFT-kea-dhcp6-3.0.3-hmdfs-af-unix-pathname-bind-probe-gtest-skip.md
+last_updated:           2026-10-04
+source_event:           kea-dhcp6 3.0.3 真机首验：CtrlChannelDhcpv6SrvTest 45 例 +
+                        2 例 config-commit FAIL（hmdfs AF_UNIX bind EPERM）；补丁
+                        0007-0009 后 kea-dhcp6-tests 965 例 = 918 PASS / 47 SKIP /
+                        0 FAIL，dhcp6_process_tests.sh 14/14
+authors:
+source_pr:
+source_commit:
+
+# 质量度量
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-10-04
