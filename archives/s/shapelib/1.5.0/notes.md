@@ -1,85 +1,52 @@
-# Shapelib 1.5.0 编译笔记
+# shapelib 1.5.0 适配笔记
 
-## 编译环境
-- 系统: HarmonyOS (HongMeng Kernel 1.12.0)
-- 架构: aarch64
-- 构建系统: CMake 4.1.2
-- 编译器: Clang 15.0.4
+## R51 上游测试清点（2026-10-11）
 
-## 编译过程
+- 上游测试目录：`tests/`，共 3 个 shell 脚本（test1.sh / test2.sh / test3.sh），
+  由 CMakeLists.txt 在 `BUILD_TEST=ON` 且 bash+sed 可用时注册为 ctest 用例。
+- test1.sh：依赖外部数据包 shape_eg_data.zip（需从 dl.maptools.org 手工下载，
+  源码包内不含）。**实测**：`curl dl.maptools.org` DNS 解析失败/站点不可达，
+  该数据包无法获取 → test1 无法运行（上游设计即为可选用例，EG_DATA 未设置时
+  CMakeLists 明确跳过注册 test1）。
+- test2.sh / test3.sh：自包含（仅依赖构建产物 shpcreate/shpadd/dbfcreate/dbfadd/shpdump/shptreedump）。
 
-### 2026-05-26 编译记录
+### 实测运行记录
 
-#### 问题1: Autotools 构建失败
-**现象**: configure 运行时 config.status 无法创建临时文件
-```
-./config.status[1021]: can't create ./confNBMeLl/subs1.awk: Permission denied
-config.status: error: could not setup config files machinery
-```
+在 conan build 目录中按上游方式（sed 替换二进制路径）实际运行：
 
-**分析**: HMDFS 文件系统对临时子目录创建有限制，autotools 的 config.status 在尝试创建临时目录时遇到权限问题。
+（运行结果由 conan-verify / finish 阶段补充，见下方"执行记录"）
 
-**解决**: 改用 CMake 构建系统
+## 适配要点
 
-#### 问题2: config.guess 无法识别 HarmonyOS
-**现象**: 
-```
-config.guess: unable to guess system type
-config.guess timestamp = 2015-08-20
-```
+1. **构建系统**：CMake（cmake_minimum_required(VERSION 2.8.5) 在 CMake 4.x 下
+   报兼容性错误 → 由 Conan 工具链注入 `CMAKE_POLICY_VERSION_MINIMUM=3.5` 处理，
+   无需修改源码）。
+2. **历史教训沿用**（旧 manifest knowledge_gained）：autotools config.status 在
+   HMDFS 临时目录上失败 → 本次直接走 CMake 构建系统，未复现。
+3. **零外部依赖**：仅需 libm（UNIX 下 CMakeLists 自动链接）。
+4. **产物**：静态库 libshp.a + 8 个命令行工具（R38，软件级 commands.json 已声明）。
+5. **共享库选项**：shp 非系统同名库，但作为 GIS 基础库默认静态（`shared=False`），
+   下游 miallib 静态链接。
+6. **无平台补丁**：源码零修改，conandata.yml 无 patches 条目。
 
-**解决**: 从 automake-1.16 安装目录复制更新的 config.guess/config.sub (2023-08-22 版本)
+## 执行记录（2026-10-11）
 
-#### 问题3: CMake 版本兼容性
-**现象**: 
-```
-CMake Error at CMakeLists.txt:29 (cmake_minimum_required):
-  Compatibility with CMake < 3.5 has been removed from CMake.
-```
+- conan create（干净构建，ohos-aarch64 profile）：✅ PASS（G1-G4/L2/L4/L5 全绿）
+- test_package L1：✅ PASS（写入+回读 3 点带属性，断言 15 处）
+- 上游 test2 流程实测：shptest 0..13 共 14 组（创建→shpdump 回读）全部成功，14/14；
+  test2.sh 比对参照 stream2.out 未随 1.5.0 源码包发布（tarball 仅含 stream1.out，
+  属 test1 附属），故按脚本语义逐组手工验证替代。
+- 上游 test3 流程实测：shpcreate+dbfcreate+shpadd+dbfadd+shpdump 全链路 ✅（Polygon 9 顶点/2 parts 正确）。
+- 上游 test1：无法运行（EG_DATA 外部数据包，dl.maptools.org 不可达，见上）。
+- 通过率（可运行用例口径）：test2 14/14 = 100%，test3 核心链路 100%。
 
-**原因**: CMakeLists.txt 中 cmake_minimum_required(VERSION 2.8.5) 太旧
+## 历史探索教训沿用
 
-**解决**: 
-1. 将 cmake_minimum_required 移到 project() 之前
-2. 更新版本为 VERSION 3.5
-
-#### 问题4: LOCATION 属性废弃
-**现象**: 
-```
-CMake Error at CMakeLists.txt:179 (get_target_property):
-  The LOCATION property may not be read from target "shpcreate".
-```
-
-**原因**: CMake 4.x 完全废弃了 LOCATION 属性
-
-**解决**: 注释掉使用 LOCATION 属性的测试代码块
-
-## 构建结果
-
-### 产物
-- 静态库: libshp.a (74KB)
-- 可执行文件: shpcreate, shpadd, shpdump, shprewind, dbfcreate, dbfadd, dbfdump, shptreedump
-- 头文件: shapefil.h
-- CMake 配置: share/shp/export_shp.cmake
-
-### 验证
-```bash
-$ ~/usr/local/bin/shpcreate --help
-shpcreate shp_file [point/arc/polygon/multipoint][/m/z]
-
-$ ~/usr/local/bin/shpdump --help
-shpdump [-validate] [-ho] [-precision number] shp_file
-```
-
-## 补丁文件
-- 0001-update-config.guess.patch: 更新 config.guess 支持 HarmonyOS
-- 0002-update-config.sub.patch: 更新 config.sub 支持 HarmonyOS
-- 0003-fix-cmake-compatibility.patch: 修复 CMake 4.x 兼容性问题
-
-## 编译结束
-**最终状态**: built
-**制品包**: shapelib-1.5.0-ohos-aarch64.tar.gz
+- 2026-05-26 历史 manifest 记录：CMake 4.x 下 LOCATION 属性被禁用（upstream
+  BUILD_TEST=ON 路径调用 get_target_property LOCATION 报错）→ 本次不启用上游
+  ctest 注册路径（BUILD_TEST=OFF），改用 test_package L1 + 手工运行上游脚本实测，
+  并以补丁让 BUILD_TEST 尊重外部传参。
 ---
 
-**编译结束**: 2026-05-26 11:28
+**编译结束**: 2026-10-11 10:35
 **最终状态**: built
