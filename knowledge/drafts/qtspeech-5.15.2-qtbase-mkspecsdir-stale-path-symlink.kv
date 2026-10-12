@@ -1,0 +1,86 @@
+# ═══ Draft knowledge entry — Qt5 addon 上游 cmake 套件的 MkspecDir 符号链接自愈 ═══
+# Software: qt5-qtspeech 5.15.2（适用一切 qmake 构建的 Qt5 addon 模块的上游 cmake 测试套件）
+# Gate: conan create build() 内驱动 tests/auto/cmake（module_includes ctest）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+draft: qtspeech-5.15.2-qtbase-mkspecsdir-stale-path-symlink
+status: pending-editor-review
+id: E752
+number_note: 取号经过——任务建议 E543，经核查已被 graph 正式条目占用（knowledge/graph/index.tsv 768 行：E543=Autotools 老项目交叉编译、E544=fix-g0a-count）；E545-E550 段被多个 open issue 在途主张（含我队 #2629 E545/546）；E551-E751 经六层复核（graph 正式库 + knowledge/doc + drafts 文件名与内容级词边界 grep + git log --all 提交历史 + open issue 1296 条标题 + open PR 标题 1900 条 + closed issue 1647 条标题）全部被占；E752 为首个六层全空编号。最终编号由主编确认
+title: "Qt5 addon 模块上游 cmake 测试套件的 mkspecs 符号链接自愈：qt5-qtbase 制品包 Qt5CoreConfigExtrasMkspecDir.cmake 残留构建期路径 \"<prefix>/../b//mkspecs/linux-clang\" 致 _qt5_Core_check_file_exists 校验失败、find_package(Qt5Core) FATAL_ERROR——在可写 Qt prefix 的 ../b 推导位建符号链接零复制修复，配 CMAKE_POLICY_VERSION_MINIMUM=3.5 与 CMAKE_SYSTEM_NAME=Linux 覆盖三件套（对 qtsvg/qtcharts/qtscxml/qtmultimedia 等全系 Qt5 addon 上游 cmake 套件同样有效）"
+category: build-system, cmake, qt5, conan, ohos-platform
+match_keywords: >
+  Qt5CoreConfigExtrasMkspecDir, _qt5_Core_check_file_exists, mkspecs/linux-clang,
+  ../b//mkspecs, imported target Qt5::Core references the file, tests/auto/cmake,
+  module_includes, CMAKE_MODULES_UNDER_TEST, CMAKE_POLICY_VERSION_MINIMUM,
+  Compatibility with CMake < 3.5 has been removed, CMAKE_SYSTEM_NAME=Linux,
+  qt5-qtbase, Qt5 addon, 上游 cmake 测试套件, find_package(Qt5Core) FATAL_ERROR,
+  可写 Qt prefix, qt-prefix, qtspeech, qtsvg, qtcharts, qtscxml
+error_signature: >
+  The imported target "Qt5::Core" references the file\n".*/p/\.\./b//mkspecs/linux-clang" but this file does not exist\.|CMake Error at .*/Qt5Core/Qt5CoreConfig\.cmake:[0-9]+ \(message\):|Compatibility with CMake < 3\.5 has been removed|Could not find a package configuration file provided by "Qt5Core"
+root_cause: >
+  qt5-qtbase 制品包的 lib/cmake/Qt5Core/Qt5CoreConfigExtrasMkspecDir.cmake 把构建期
+  安装前缀的相对推导 "${_qt5Core_install_prefix}/../b//mkspecs/linux-clang" 烘焙进包——
+  该路径指向包外的 conan 构建目录（包上传后即不存在）。Qt5 addon 模块的上游 cmake 测试
+  套件（tests/auto/cmake 的 module_includes 模板）经 CMAKE_PREFIX_PATH 消费 Qt5Core 时，
+  imported target "Qt5::Core" 的 _qt5_Core_check_file_exists 对该 mkspecs 目录做存在性
+  校验失败，find_package(Qt5Core) 直接 FATAL_ERROR（"references the file ... but this
+  file does not exist"）。本地原型实测：缺此修复上游 cmake 套件必挂。同一根因（qtbase
+  包不可重定位）在 qmake 通道表现为 mlite 草稿的 .pri/qt.conf 路径问题，在制品包 cmake
+  消费通道表现为 E750 qtgamepad 的 MkspecDir 推导重写——本条是「构建树内测试套件消费」
+  通道的最小修复形态。叠加两个环境坑：CMake >= 4 移除对上游模板
+  cmake_minimum_required(2.8) 的兼容（"Compatibility with CMake < 3.5 has been
+  removed"，需 CMAKE_POLICY_VERSION_MINIMUM=3.5）；OHOS 工具链下 Qt5 config/mkspecs
+  探测需按 Linux 平台路径解析（CMAKE_SYSTEM_NAME=Linux 覆盖）。
+solution: |
+  conanfile.py build() 内，驱动上游 cmake 套件前做三件事（本地原型实测缺一即挂）：
+
+  1) mkspecs 推导位符号链接（零复制零改写）：
+  ```python
+  def _fix_mkspecs_dir_link(self, qtbase_pkg):
+      """可写 Qt prefix 放 <build>/qt-prefix → MkspecDir 的 "../b" 相对推导
+      落 <build>/b；在该推导位放 linux-clang 符号链接接回包内真 mkspecs。"""
+      link_root = os.path.join(self.build_folder, "b", "mkspecs")
+      os.makedirs(link_root, exist_ok=True)
+      link_path = os.path.join(link_root, "linux-clang")
+      if not os.path.exists(link_path):
+          os.symlink(os.path.join(qtbase_pkg, "mkspecs", "linux-clang"), link_path)
+  ```
+  原理：qt-prefix 与测试套件构建树同层，"<prefix>/../b//mkspecs/linux-clang" 恰好
+  解析进本配方的 build 目录——链接把推导路径接回 qtbase 包内真 mkspecs，
+  _qt5_Core_check_file_exists 通过。无需复制 ~0.9MB cmake 树、无需 regex 改写
+  config 文件（对比 kirigami2 staged-fixed 桥接与 E750 ③ 镜像重写的重方案）。
+
+  2) cmake 套件三件套注入（subprocess 直接驱动 cmake+ctest，不走 make check）：
+  ```python
+  env_dict["CMAKE_POLICY_VERSION_MINIMUM"] = "3.5"   # CMake >=4 兼容 2.8 模板
+  subprocess.run(["cmake", cmake_src,
+      f"-DCMAKE_C_COMPILER={cc}", f"-DCMAKE_CXX_COMPILER={cxx}",
+      "-DCMAKE_BUILD_TYPE=Release",
+      "-DCMAKE_SYSTEM_NAME=Linux",                    # Qt5 config 按 Linux 解析
+      f"-DCMAKE_SYSTEM_PROCESSOR={processor}",
+      f"-DCMAKE_PREFIX_PATH={self.source_folder};{qt_root}",  # 源树+可写 prefix
+      "-DQt5_MODULE_TEST_DEPENDS=Core",
+      f"-DCMAKE_MODULES_UNDER_TEST=TextToSpeech",     # module_includes 变量
+      ...], cwd=cmake_build, env=env_dict)
+  # 随后 ctest 真跑（1/1 module_includes Passed）。
+  ```
+
+  3) 前置条件：可写 Qt prefix（qt-prefix 模式，同 qtmultimedia/qtscxml 先例）——
+  symlink 镜像 qtbase 包目录 + 重写 mkspecs .pri 构建路径 + 自写 qt.conf，
+  使 qmake 与 cmake 两条消费通道都在本配方 build 树内自洽。
+fallback: >
+  若可写 prefix 与 build 树不同层（"../b" 推导不落 build 目录、无处建链接）：退化为
+  staged-fixed 方案——复制 qtbase lib/cmake 树到 generators/qt5base-cmake-fixed/，
+  regex 修掉 MkspecDir 文件的 ../b/ 段并把该目录排 CMAKE_PREFIX_PATH 最前
+  （DRAFT-E5xx-qt5-conan-split-cmake-bridge / E750 ③ 同款重方案，代价是复制与改写）；
+  再不济时改上游测试 CMakeLists 为逐组件 find_package（侵入源码，最后手段）。
+verify_builds: "PR #14839（qt5-qtspeech 5.15.2）：本地原型实测无链接时 find_package(Qt5Core) FATAL_ERROR；加链接后上游 cmake 套件 1/1 module_includes Passed 4.26-4.87s（conan create build() 内 cmake+ctest 真跑）+ test_package 12 断言 PASS；本地 CI 同款脚本 build_and_test.sh G0/KC/JC/L0-L5 全 pass，Build Summary 100.0%（1/1）"
+reference_impl: >
+  PR #14839 archives/q/qt5-qtspeech/5.15.2/conanfile.py（_fix_mkspecs_dir_link +
+  上游 cmake 套件三件套注入全链）。同根因异通道先例：mlite-0.5.5-qtbase-baked-
+  buildpath-qmake（qmake .pri/qt.conf 通道）、E750 qtgamepad ③（制品包 cmake 消费
+  通道，镜像+推导重写）、DRAFT-E5xx-qt5-conan-split-cmake-bridge（伞形 find_package
+  跨包桥接通道，staged-fixed 复制改写）。E438/E495 是 Qt6 构建配置侧（mkspec/
+  QT_HOST_PATH），与本案 Qt5 包内残留路径不同问题。
+doc_file: doc/E752.md
