@@ -1,0 +1,202 @@
+--- a/src/isoquery.c
++++ b/src/isoquery.c
+@@ -8,10 +8,97 @@
+ #include <glib.h>
+ #include <glib/gi18n.h>
+ #include <locale.h>
++#include <dlfcn.h>
+ #include <json-glib/json-glib.h>
+ #include "options.h"
+ #include "isocodes.h"
+ 
++static void *isoquery_libintl_handle(void)
++{
++    static void *handle;
++    static int tried;
++
++    if (tried) {
++        return handle;
++    }
++    tried = 1;
++#ifdef ISOQUERY_LIBINTL
++    handle = dlopen(ISOQUERY_LIBINTL, RTLD_LAZY | RTLD_GLOBAL);
++#endif
++    if (handle == NULL) {
++        handle = dlopen("libintl.so.8", RTLD_LAZY | RTLD_GLOBAL);
++    }
++    if (handle == NULL) {
++        handle = dlopen("libintl.so", RTLD_LAZY | RTLD_GLOBAL);
++    }
++    return handle;
++}
++
++static void isoquery_bind_domain(const char *domain, const char *localedir)
++{
++    void *handle = isoquery_libintl_handle();
++    char *(*bindfn)(const char *, const char *);
++    char *(*codesetfn)(const char *, const char *);
++
++    if (handle == NULL) {
++        return;
++    }
++    bindfn = dlsym(handle, "bindtextdomain");
++    codesetfn = dlsym(handle, "bind_textdomain_codeset");
++    if (bindfn != NULL) {
++        bindfn(domain, localedir);
++    }
++    if (codesetfn != NULL) {
++        codesetfn(domain, "UTF-8");
++    }
++}
++
++/* GNU gettext ignores LANGUAGE while the locale stays C or POSIX.
++   setlocale(LC_ALL, "") fails when LC_ALL names a locale the C library
++   does not ship (the upstream harness asks for en_GB.UTF-8). A UTF-8
++   locale is enough for LANGUAGE to select the catalog. */
++static void isoquery_setlocale_utf8(void)
++{
++    if (setlocale(LC_ALL, "") != NULL) {
++        return;
++    }
++    if (setlocale(LC_ALL, "C.UTF-8") != NULL) {
++        return;
++    }
++    setlocale(LC_ALL, "en_US.UTF-8");
++}
++
++static void isoquery_setup_i18n(void)
++{
++    const char *localedir = getenv("ISOQUERY_LOCALEDIR");
++    const char *iso_localedir = getenv("ISO_CODES_LOCALEDIR");
++    static const char *iso_domains[] = {
++        "iso_639-2", "iso_639-3", "iso_639-5",
++        "iso_3166-1", "iso_3166-2", "iso_3166-3",
++        "iso_4217", "iso_15924",
++        NULL
++    };
++    int i;
++
++    if (localedir == NULL || localedir[0] == '\0') {
++        localedir = "/usr/share/locale";
++    }
++    isoquery_bind_domain(GETTEXT_PACKAGE, localedir);
++    textdomain(GETTEXT_PACKAGE);
++    isoquery_setlocale_utf8();
++
++    if (iso_localedir == NULL || iso_localedir[0] == '\0') {
++#ifdef ISOQUERY_ISO_CODES_LOCALEDIR
++        iso_localedir = ISOQUERY_ISO_CODES_LOCALEDIR;
++#endif
++    }
++    if (iso_localedir != NULL && iso_localedir[0] != '\0') {
++        for (i = 0; iso_domains[i] != NULL; i++) {
++            isoquery_bind_domain(iso_domains[i], iso_localedir);
++        }
++    }
++}
++
+ int main(int argument_count, gchar **arguments)
+ {
+     // The first parameter is not used, but cannot be omitted.
+@@ -24,12 +111,11 @@ int main(int argument_count, gchar **arguments)
+     gchar *filename;
+     gchar **codes;
+ 
+-    // Set up I18N infrastructure
+-    // @TODO: Use LOCALEDIR
+-    bindtextdomain(GETTEXT_PACKAGE, "/usr/share/locale");
+-    bind_textdomain_codeset(GETTEXT_PACKAGE, "UTF-8");
+-    textdomain(GETTEXT_PACKAGE);
+-    setlocale(LC_ALL, "");
++    // Catalogs default to /usr/share/locale. ISOQUERY_LOCALEDIR overrides
++    // that directory. ISO_CODES_LOCALEDIR, or the compile-time fallback
++    // ISOQUERY_ISO_CODES_LOCALEDIR, binds the separate iso-codes domains.
++    // With neither set, behavior matches the historical hardcoded path.
++    isoquery_setup_i18n();
+ 
+     // Parse command line and report possible errors
+     if (!options_parse_command_line(arguments, &error)) {
+--- a/src/isocodes.c
++++ b/src/isocodes.c
+@@ -9,6 +9,7 @@
+ #include <glib/gi18n.h>
+ #include <glib/gprintf.h>
+ #include <locale.h>
++#include <dlfcn.h>
+ #include "isocodes.h"
+ #include "options.h"
+ #include "search.h"
+@@ -219,6 +220,55 @@ const gchar *isocodes_get_string_member(JsonObject *entry, const gchar *member)
+     return value ? value : "";
+ }
+ 
++static void *isoquery_libintl_handle(void)
++{
++    static void *handle;
++    static int tried;
++
++    if (tried) {
++        return handle;
++    }
++    tried = 1;
++#ifdef ISOQUERY_LIBINTL
++    handle = dlopen(ISOQUERY_LIBINTL, RTLD_LAZY | RTLD_GLOBAL);
++#endif
++    if (handle == NULL) {
++        handle = dlopen("libintl.so.8", RTLD_LAZY | RTLD_GLOBAL);
++    }
++    if (handle == NULL) {
++        handle = dlopen("libintl.so", RTLD_LAZY | RTLD_GLOBAL);
++    }
++    return handle;
++}
++
++
++static char *isoquery_dgettext(const char *domain, const char *msgid)
++{
++    void *handle = isoquery_libintl_handle();
++    char *(*fn)(const char *, const char *);
++
++    if (handle == NULL || msgid == NULL) {
++        return (char *)msgid;
++    }
++    fn = dlsym(handle, "dgettext");
++    if (fn == NULL) {
++        return (char *)msgid;
++    }
++    return fn(domain, msgid);
++}
++
++static void isoquery_setlocale_utf8(void)
++{
++    if (setlocale(LC_ALL, "") != NULL) {
++        return;
++    }
++    /* GNU gettext ignores LANGUAGE while the locale stays C or POSIX. */
++    if (setlocale(LC_ALL, "C.UTF-8") != NULL) {
++        return;
++    }
++    setlocale(LC_ALL, "en_US.UTF-8");
++}
++
+ /**
+  * Special handling for the name fields
+  */
+@@ -240,13 +290,14 @@ void isocodes_show_name(JsonObject *entry)
+ 
+         // Use the wanted locale to look for a translation
+         setenv("LANGUAGE", option_locale, TRUE);
+-        // Use the default locale, based on the environment variable above
+-        setlocale(LC_ALL, "");
++        // Use the default locale, based on the environment variable above.
++        // Fall back when that locale is not installed so LANGUAGE is honored.
++        isoquery_setlocale_utf8();
+ 
+         // Determine the gettext domain from the standard
+         gchar *domain = g_strdup_printf("iso_%s", option_standard);
+         // Do the actual translation
+-        output = dgettext(domain, output);
++        output = isoquery_dgettext(domain, output);
+ 
+         // Restore the environment variable LANGUAGE, either
+         // to the previous value or unset the variable.
