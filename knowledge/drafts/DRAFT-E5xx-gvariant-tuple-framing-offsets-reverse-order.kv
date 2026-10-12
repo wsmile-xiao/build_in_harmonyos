@@ -1,0 +1,83 @@
+draft: DRAFT-E5xx-gvariant-tuple-framing-offsets-reverse-order
+status: pending-editor-review
+id: E5xx
+title: 纯软件复刻 GVariant 序列化：tuple framing offsets 逆序/数组正序、字宽由容器序列化总大小决定，正确性判据是与真 GLib 参照逐字节 diff
+category: build-system, glib, gvariant, serialization, gnome
+severity: 2
+last_updated: 2026-10-02
+software: gweather-locations-2026.2（Locations.bin 生成 shim）；任何自研 GVariant 生成器/反序列化器
+verify_builds: "权威 CI run1 EXITCODE=0（gwl-ci-run1.log）；修后 shim 产物与真 GLib twin 逐字节一致（112 字节模型）+ 全量 Locations.bin 反序列化器 17/17"
+
+match_keywords: >
+  GVariant, framing offsets, tuple, dict-entry, 逆序, reverse order, 字宽, offset width,
+  serialization, GLib, Locations.bin, magic 校验, start <= end, g_variant_get_data_as_bytes,
+  反序列化器, 参照实现, 逐字节 diff
+
+error_signature: >
+  assertion failed: \(start <= end\)|GVariant.*assertion failed|db_world_get_timezones.*assertion|not ok .*no-code-serialize
+
+root_cause: >
+  GVariant 序列化语义三条易错规则（GLib 生态跨库知识，非单库 quirk）：
+  (1) tuple/dict-entry 的 framing offsets：每个非末尾变长子元素存一个，
+  按子顺序【逆序】追加到容器尾——数组则是【正序】且每元素一个（含末元素）。
+  两类容器方向相反，复刻实现极易写反；(2) framing offset 字宽由容器序列化后
+  总大小决定（<=255:1B / <=65535:2B / <=2^32-1:4B / 其余 8B），序列化端与
+  反序列化端逻辑必须对称；(3) "magic + 总大小正确"不是正确性证据：framing
+  写反产出的二进制能过 magic/大小双校验，但消费端解析即崩（诊断盲区）。
+
+affected_scope: >
+  任何在无 GLib 运行时的构建主机上生成或校验 GVariant 制品的场景：Locations.bin
+  类数据库生成器、GNOME 系构建期代码生成、自研 GVariant 反序列化器/校验器；
+  复发面由 GNOME 生态保证，不限于单库。
+
+verification_cmd: >
+  分两层（python 必须用绝对路径 /storage/Users/currentUser/usr/local/bin/python3，
+  裸 shell 无 python3 会 127）：
+  第一层（判据=真 GLib 参照逐字节 diff，112 字节缩小模型）：按本条目 .md 附录 A/B
+  内嵌源码编译运行 gvariant-ref.c（真 GLib 侧）与 shim-twin.py（复刻侧），
+  各自 dump 后 sha256 对比——修复前发散（shim.bin=ad63e3cd… vs ref.bin=222f25d1…），
+  修复后一致（shim2.bin==ref2.bin=e93f7904…，size 均为 112）。
+  第二层（全量制品结构验证）：纯 python GVariant 反序列化器跑真实 Locations.bin
+  （642680 字节），17 项 magic/结构/索引界内校验（本 run test_locations.py，
+  test-locations-parse.log）。
+
+rec_priority: 1
+rec_approach: reference-diff-then-deserializer
+rec_description: >
+  修复：序列化端对 tuple/dict-entry 的 offsets 用 offsets[::-1] 追加（数组保持
+  正序）；_append_offsets 按 total = len(data) + offsize*len(ends) 迭代加倍定字宽。
+  推荐诊断次序：magic → 全量反序列化（索引界内/引用完整性校验最先暴露坏 framing）
+  → 真 GLib 参照逐字节 diff（缩小模型）。反例教训：只做消费端冒烟会漏掉仅在特定
+  规模/嵌套深度触发的 framing 错误；只有自研反序列化器而无敌参照实现会循环论证
+  （自证），必须补字节级参照或真实消费端测试。
+rec_command: >
+  附录 A/B 探针编译运行 + sha256 对比；第二层命令见本条目 .md 附录 C。
+rec_auto_fix: false
+rec_impl: gvariant-framing-reverse-order-ref-diff
+
+fallback_priority:      2
+fallback_approach:      deserializer-plus-consumer-as-second-oracle
+fallback_description: >
+  拿不到真 GLib 参照运行环境时，以全量反序列化器（含索引界内/引用完整性校验）
+  作为第二 oracle，并强制配一个真实消费端测试；两条腿缺一——单靠自研解析器
+  自证有循环论证风险，单靠消费端冒烟会漏低频 framing 错误。
+fallback_auto_fix:      false
+
+forbid_1_pattern:       magic.*==.*0x5747687442443130.*&&.*len|只做.*magic.*校验|magic.*size.*check.*only
+forbid_1_reason:        "magic + 总大小双校验通过"是坏 GVariant 的典型假象（本 run 实证：正序 framing 产物过双校验仍致消费端崩溃），不得作为生成正确性证据。
+forbid_1_consequence:   framing 错误静默发布，消费端运行期崩溃（gw4-create4.log:410 实证）。
+forbid_2_pattern:       _append_offsets\(data,\s*offsets\)\s*$|tuple.*framing.*forward|dict-entry.*offsets.*正序
+forbid_2_reason:        tuple/dict-entry offsets 正序追加是本条目的核心错误模式（GVariant 规范要求逆子顺序）；数组才是正序。正确实现含 offsets[::-1]。
+forbid_2_consequence:   产物与真 GLib 字节发散，magic/大小校验全过但消费端解析崩溃。
+
+similar_to:             E243, E281, E305
+doc_file:               knowledge/drafts/DRAFT-E5xx-gvariant-tuple-framing-offsets-reverse-order.md
+
+evidence:
+  - "真实失败（消费端运行崩溃）：gw4-create4.log:410 'GWeather:ERROR:../libgweather/gweather-db.h:2129:db_world_get_timezones: assertion failed: (start <= end)' + 'not ok /weather/no-code-serialize'（修复前 shim 产物致 libgweather TAP Bail out!，Signal 6）"
+  - "字节发散 artifact 对（设备 deps tmp）：shim.bin=ad63e3cd… vs 真 GLib ref.bin=222f25d1…（尾部 framing 字节 shim 正序 07 0a 0d 23 26 32 3c 10 18 2e vs ref 逆序 38 26 23 0d 0a 07 46 2e 18 10）；修复后 shim2.bin==ref2.bin=e93f7904…（112 字节 twin 模型，twin-print.txt/twin2.txt 均 size: 112）"
+  - "全量验证：test-locations-parse.log 17/17 PASS（642680 字节，locations=8862/timezones=332/countries=245/metar=4004，全部索引界内）"
+  - "修复实现：候选分支 archives/g/gweather-locations/2026.2/shim/gi/repository.py:252-255 offsets[::-1]（注释明写 REVERSE child order / array forward order）"
+
+source_event:           gweather-locations 2026.2 shim 早期正序 bug → libgweather TAP 运行崩溃；与设备真机 GLib twin 实验逐字节对比定位，逆序修复后字节一致。
+authors:                Builder (ZCode subagent), Coordinator
