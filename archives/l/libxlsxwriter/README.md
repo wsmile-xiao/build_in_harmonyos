@@ -17,15 +17,14 @@ libxlsxwriter 是一个 C 库，用于创建 Microsoft Excel 2007+ 的 XLSX 文�
 
 ## OHOS 适配
 
-### 适配要点
+### 适配要点（2026-09-22 conan 配方版）
 
-1. **构建系统**：使用 CMake 构建
-2. **依赖处理**：需要设置 `ZLIB_ROOT` 环境变量指向 zlib 安装路径
-3. **pkg-config**：需要设置 `PKG_CONFIG_PATH` 包含 zlib.pc 所在路径
-4. **纯静态库**：该软件编译为纯静态库（libxlsxwriter.a），无可执行二进制文件
-5. **构建选项**：
-   - `-DBUILD_TESTS=OFF` 关闭测试编译
-   - `-DBUILD_EXAMPLES=OFF` 关闭示例编译
+1. **构建系统**：CMake（≥3.16，配方加 CMAKE_POLICY_VERSION_MINIMUM=3.5）
+2. **依赖处理**：zlib 为唯一外部依赖（conan zlib/1.3.1.1）；minizip/tmpfileplus/md5 全部 vendored 静态编入库（上游默认）
+3. **ZLIB 发现**：上游用 MODULE 模式 find_package(ZLIB)，配方预置 ZLIB_INCLUDE_DIR/ZLIB_LIBRARY 缓存变量（conan zlib 真实路径）绕交叉链 FIND_ROOT_PATH=ONLY
+4. **纯静态库**：libxlsxwriter.a，无可执行产物
+5. **上游测试真跑**：unit 420/420（ctest.h 框架）+ functional 791 用例金标比对（793 exe，747 .xlsx golden）+ 消费者冒烟
+6. **关键坑**：OHOS toolchain 链接默认 -Wl,--gc-sections 会回收 .ctest 测试注册段（unit 显示 0 tests）——需 -DCMAKE_EXE_LINKER_FLAGS=-Wl,--no-gc-sections
 
 ### 已知问题
 
