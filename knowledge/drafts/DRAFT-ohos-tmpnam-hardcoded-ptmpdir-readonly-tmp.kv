@@ -1,0 +1,135 @@
+#====================================================================
+# DRAFT-ohos-tmpnam-hardcoded-ptmpdir-readonly-tmp.kv
+# C 库 tmpnam()/tmpfile() 落 P_tmpdir=/tmp：OHOS /tmp 只读且 tmpnam 无视
+# TMPDIR/TEMP —— 测试的临时文件必须显式走 TEMP/TMPDIR
+# （路径 B 知识库草稿，二/二之一）
+# 来源: RetroArch 1.22.2 OHOS aarch64 适配（contrib-10118，分支 feat/retroarch-1.22.2）
+# 边界: E215 是 Lua/LuaRocks os.tmpname+可重定位打包族；gtest-TMPDIR 草稿是
+#       gtest 捕获流族。本条是 C libc tmpnam/tmpfile 族（测试代码直接调 libc）。
+# 状态: 草稿（待主编审核 promote 为正式 E 条目）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-ohos-tmpnam-hardcoded-ptmpdir-readonly-tmp
+trigger_tool:           test|runtime
+phase:                  testing|runtime
+error_signature:        read-only file system: /tmp|
+                         fopen\(.*\/tmp.*\): (Permission denied|Read-only file system)|
+                         Unable to create temporary file|
+                         tmpfile\(\) returned NULL|
+                         Assertion .*fd != NULL.* failed.*tmpnam
+
+# ═══ Layer 1: 识别面 (Recognition) ═══
+severity:               2
+category:               libc, ohos, portability, testing, hmdfs, posix
+match_keywords:         tmpnam, tmpfile, P_tmpdir, L_tmpnam, /tmp, read-only,
+                         Read-only file system, TEMP, TMPDIR, mkstemp,
+                         临时文件, temp file, scratch file, check_msg.c,
+                         open_tmp_file, 只读, read-only file system
+title:                  OHOS 根文件系统的 /tmp 只读，而 libc tmpnam()/tmpfile() 落
+                        P_tmpdir=/tmp 且**无视 TMPDIR/TEMP**（实测 bionic/musl 均
+                        如此）→ 上游测试里一切 tmpnam/tmpfile 用法必失败；须改为显式
+                        getenv("TEMP"/"TMPDIR") 构造 scratch 路径或设 TEMP 给带
+                        mkstemp 探测链的框架（如 libcheck）
+prescan_pattern:        tmpnam\s*\(|tmpfile\s*\(
+prescan_globs:          *.c, *.cc, *.cpp, *.h
+
+# ═══ Layer 2: 诊断面 (Diagnosis) ═══
+root_cause:             两层叠加：① OHOS 根文件系统只读挂载，/tmp 不可写
+                        （`zsh: read-only file system: /tmp/x`）；② libc 的
+                        tmpnam() 按 POSIX 只保证返回「可用路径名」，实现上锚定
+                        编译期常量 P_tmpdir=/tmp，**不读 TMPDIR/TEMP** —— 与
+                        glibc 行为一致，但 glibc 环境 /tmp 可写所以从不暴露。
+                        真机实测（探针程序）：无论 TMPDIR/TEMP 指向哪里，
+                        tmpnam() 恒返回 /tmp/tmpnam_XXXX。于是上游测试里
+                        `tmpnam(buf); fopen(buf,"wb")` 的 fopen 必失败，且报错
+                        出现在断言（fd != NULL）而非根因处，极易误诊为「测试代码
+                        有 bug」。注意区分框架行为：libcheck 的 open_tmp_file()
+                        探测链是 TEMP → P_tmpdir → TMPDIR，**设置 TEMP 即可**；
+                        而测试代码直接调 libc tmpnam() 的必须改代码。
+affected_scope:         所有在 OHOS 上运行、用 tmpnam()/tmpfile()/固定 /tmp 路径
+                        的上游测试与工具；实证：RetroArch 1.22.2 libretro-common
+                        的 test_hash.c/test_utils.c（tmpnam）与 libcheck
+                        check_msg.c（mkstemp 链，设 TEMP 解决）。
+verification_cmd:       # A. /tmp 只读复现
+                        echo x > /tmp/probe        # -> read-only file system
+                        # B. tmpnam 无视环境变量（探针）
+                        cat > /tmp/probe.c <<'EOF'  # 放可写目录编译
+                        #include <stdio.h>
+                        #include <stdlib.h>
+                        int main(void){char b[512];tmpnam(b);
+                          printf("tmpnam=%s P_tmpdir=%s TMPDIR=%s\n",
+                          b,P_tmpdir,getenv("TMPDIR"));return 0;}
+                        EOF
+                        TMPDIR=$PWD/tmp TEMP=$PWD/tmp ./probe   # -> tmpnam=/tmp/... P_tmpdir=/tmp
+                        # C. 框架链区分（libcheck）
+                        TEMP=$PWD/tmp ./test_suite               # 设置 TEMP 即过
+
+# ═══ Layer 3: 方案空间 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           explicit-temp-tmpdir-scratch-path
+rec_description:        测试代码弃用 tmpnam()/tmpfile()，改为显式探测环境构造
+                        scratch 路径：tmpdir = getenv("TEMP") ?: getenv("TMPDIR")
+                        ?: "."，再 snprintf("%s/<前缀>_%d.tmp", tmpdir, getpid())
+                        或 snprintf 后 mkstemp。仅测试侧可移植性改动，不改变被测
+                        库行为。对**框架自身**的 mkstemp 探测链（libcheck
+                        open_tmp_file：TEMP→P_tmpdir→TMPDIR），在 test() 环境
+                        export TEMP=<可写目录> 即可，无需改框架。实证：RetroArch
+                        1.22.2 补丁 0005 + conanfile build() 内 export TEMP，
+                        5 套件 127/127。
+rec_command:            const char *tmpdir = getenv("TEMP");
+                        if (!tmpdir || !*tmpdir) tmpdir = getenv("TMPDIR");
+                        if (!tmpdir || !*tmpdir) tmpdir = ".";
+                        snprintf(tmpfile, sizeof(tmpfile), "%s/lrc_test_%d.tmp", tmpdir, (int)getpid());
+rec_auto_fix:           true
+rec_impl:               patch test sources: getenv TEMP/TMPDIR scratch path（补 <unistd.h> 供 getpid）
+fallback_priority:      2
+fallback_approach:      export-TEMP-for-framework-mkstemp-chain
+fallback_description:   不改测试源码、且失败点在框架的 mkstemp 探测链（如 libcheck）
+                        时，仅在运行环境 export TEMP=<可写目录>（P_tmpdir 只读时
+                        TEMP 优先级最高）。对直接调 libc tmpnam() 的代码无效。
+fallback_command:       TEMP="$BUILD_DIR/tmp" TMPDIR="$BUILD_DIR/tmp" ./test_suite
+fallback_auto_fix:      true
+fallback_impl:          env: TEMP + TMPDIR
+
+# ★ 禁止策略（均以实测为依据）★
+forbid_1_pattern:       只设 TMPDIR 修 tmpnam|TMPDIR=.*\n.*tmpnam
+forbid_1_reason:        实测 libc tmpnam() 不读 TMPDIR/TEMP（恒 P_tmpdir=/tmp）；
+                        只设 TMPDIR 对直接调 tmpnam() 的代码无效。
+forbid_1_consequence:   假修复：环境变量设了、fopen 仍失败，浪费排障轮次。
+forbid_2_pattern:       尝试 chmod/remount /tmp|向 /tmp 写任何文件
+forbid_2_reason:        /tmp 属 OHOS 只读根文件系统，不可写也不应绕。
+forbid_2_consequence:   必然失败；即使临时成功也破坏平台只读约束。
+forbid_3_pattern:       把 scratch 固定在源码目录|硬编码 \$HOME/...
+forbid_3_reason:        源码目录在 CI 上可能只读；HOME 也不保证可写（HMDFS 权限族）。
+                        TEMP/TMPDIR 探测 + "." 回退才是最小可移植写法。
+forbid_3_consequence:   换环境即挂，且常以「偶现」形态出现。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             R25, R34
+
+# ═══ 关系图 (Relations) ═══
+causes:                 用 tmpnam/tmpfile/固定 /tmp 路径的上游测试 fopen 失败、断言 fd!=NULL 挂
+caused_by:              OHOS 根文件系统只读 + libc tmpnam 锚定 P_tmpdir=/tmp 且无视 TMPDIR/TEMP
+similar_to:             E215, E011, DRAFT-sexpp-0.8.7-gtest-capture-stdout-tmpdir-only
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-ohos-tmpnam-hardcoded-ptmpdir-readonly-tmp.md
+last_updated:           2026-10-08
+source_event:           RetroArch 1.22.2 OHOS aarch64：test_hash/test_utils 首跑
+                        2/127 失败（fd==NULL）+ libcheck check_msg.c
+                        "Unable to create temporary file"；探针证实 tmpnam 恒
+                        /tmp；补丁 0005 + export TEMP 后 127/127
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                frj__
+source_pr:              (本分支 feat/retroarch-1.22.2，PR #14934，关联 B issue)
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-10-08
+draft:                  true
+contributor_id:         frj__
