@@ -9,7 +9,11 @@ GNOME 密钥管理库：[Secret Service API](https://www.freedesktop.org/wiki/Sp
 
 ## 已编译版本
 
+- 0.20.5.1 (2026-10-01) — glib/2.88 Qt6 链专用（glib/2.88.3 代际）；
+  修复已发布 0.20.5 的 `.codesign` 失效缺陷（E077），
+  `dlopen("libsecret-1.so.0", RTLD_NOW)` 实测可加载
 - 0.21.7 (2026-09-15)
+- 0.21.8 (2026-09-20)
 
 ## 依赖
 
