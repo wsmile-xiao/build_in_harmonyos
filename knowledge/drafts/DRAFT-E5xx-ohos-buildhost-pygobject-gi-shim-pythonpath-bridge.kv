@@ -1,0 +1,87 @@
+draft: DRAFT-E5xx-ohos-buildhost-pygobject-gi-shim-pythonpath-bridge
+status: pending-editor-review
+id: E5xx
+title: 构建主机无 PyGObject：meson find_installation(modules:['gi']) 探测与构建期生成器子进程由 recipe 自含纯 python gi shim 经 PYTHONPATH 一次双注入桥接
+category: build-system, meson, conan, python, gnome, glib
+severity: 2
+last_updated: 2026-10-02
+software: gweather-locations-2026.2, libgweather-4-4.6.0（同根因依赖闭包：libgweather 构建消费本包生成的 Locations.bin）
+verify_builds: "权威 CI run1 EXITCODE=0（gwl-ci-run1.log，1/1 包全绿）；conan create 全链通过：shim 供入后 'Program python3 (gi) found: YES'，meson test 1/1，test_package 17/17"
+
+match_keywords: >
+  PyGObject, gi, gi.repository, GLib.Variant, find_installation, python3 modules gi,
+  ModuleNotFoundError, meson, PYTHONPATH, shim, 构建期生成器, 代码生成, GNOME 数据包,
+  GVariant, Locations.bin, gen_locations_variant, 数据模块
+
+error_signature: >
+  ModuleNotFoundError: No module named 'gi'|Program python3 \(gi\) found: NO|python3 not found but python3 required.*gi
+
+root_cause: >
+  OHOS 构建主机 python3（3.12.9）无 gi 模块——PyGObject 是 C 扩展 + 完整 GLib
+  绑定栈，构建机上不可补装。两层缺口：(1) 上游 meson.build 用
+  import('python').find_installation('python3', modules: ['gi']) 在 configure
+  阶段硬探测，缺失即构建失败；(2) 探测通过后，构建期生成器
+  （gweather-locations 的 build-aux/gen_locations_variant.py）由 ninja 拉起、
+  运行时 import gi.repository.GLib，同样失败。关键机理：两类子进程（meson
+  探测、ninja 生成器）都直接继承父进程环境，因此 build() 里向 os.environ 注入
+  一次 PYTHONPATH 即同时覆盖。生成器对 gi 的真实用量只有 GLib.Variant 值构造 +
+  get_data_as_bytes（byteswap 分支在小端主机是死代码），一个实现该子集的纯
+  python shim 即语义等价。
+
+affected_scope: >
+  凡构建主机无 PyGObject 且上游构建期需要 import gi 的包均命中（GNOME/meson
+  数据模块与构建期代码生成器；复发面由 GNOME 生态保证）。shim 桥接方案的适用
+  条件必须逐库核验，不得默认推广：仅当生成器只使用 GVariant 构造 +
+  get_data_as_bytes（值构造/序列化子集）时可行；生成器一旦涉及主循环
+  （GLib.MainLoop/idle/超时）、类型仓库（GType 注册/信号）或其他 GLib 运行时
+  服务，本方案不可行，须走 fallback 路径。
+
+verification_cmd: >
+  /storage/Users/currentUser/usr/local/bin/python3 -c 'import gi'
+  （探针必须用绝对路径：裸 shell 无 python3，裸名会 exit 127；预期 EXIT=1 且
+  ModuleNotFoundError: No module named 'gi'。修复侧验证：conan create 日志出现
+  "Program python3 (gi) found: YES ... modules: gi" 且全链通过。）
+
+rec_priority: 1
+rec_approach: recipe-self-contained-gi-shim-pythonpath-inject
+rec_description: >
+  recipe 内 exports_sources 自含 shim/gi/ 纯 python 包（实现生成器用到的
+  GLib.Variant 序列化子集：基本类型/tuple/dict-entry/array/嵌套 Variant 嵌入 +
+  get_data_as_bytes），build() 在 meson.configure() 之前
+  env["PYTHONPATH"] = <source>/shim + os.pathsep + 既有值。注入用 os.environ 直改
+  而非 buildenv_info（后者只向直接消费者传一跳，且写入时机在 generate() 之后）。
+  shim 实现范围以生成器源码审读圈定的 API 面为准，不追求完整 PyGObject；
+  build() 前置 shim 存在性守卫（缺失即 ConanException）。
+rec_command: >
+  conan create archives/g/gweather-locations/2026.2 -pr:h=ci/conan/profiles/ohos-aarch64
+  -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+rec_auto_fix: false
+rec_impl: gi-shim-pythonpath-bridge
+
+fallback_priority:      2
+fallback_approach:      host-pygobject-or-pre-generate
+fallback_description: >
+  (1) 宿主侧预装 PyGObject：依赖交叉构建机环境，机器不可控、CI worker 不保证，
+  仅当构建集群完全受控时可作备选；(2) 把生成产物 pre-generate 后随源码/recipe
+  携带：违背"不污染上游源码"原则且制品与上游源码版本漂移风险高，仅作最后退路
+  （若用必须在 PR 正文如实申报产物生成方式）。
+fallback_auto_fix:      false
+
+forbid_1_pattern:       pip3?\s+install\s+.*pygobject|pip3?\s+install\s+PyGObject
+forbid_1_reason:        recipe 内 pip 安装 PyGObject 在目标机与构建机双不可达：需要编译 C 扩展并链接完整 GLib dev 栈，构建机无该工具链，目标机非构建环境。
+forbid_1_consequence:   recipe 在构建与消费两端必然失败，且真实缺口（探测失败）被转译成莫名的安装失败，掩盖根因。
+forbid_2_pattern:       modules:\s*\[\s*\]|patch.*meson\.build.*modules|skip.*gen_locations|skip.*generator
+forbid_2_reason:        不得为绕过探测改写上游 meson.build（去掉 modules:['gi']）或跳过构建期生成器——那是上游正确性 oracle，改写等于放弃验证。
+forbid_2_consequence:   制品正确性失去上游锚点，坏数据（如 GVariant framing 错误，见姊妹条目）静默发布。
+
+principles:             P014
+similar_to:             E243, E307, DRAFT-E5xx-ohos-meson-detect-ninja-env-pin
+doc_file:               knowledge/drafts/DRAFT-E5xx-ohos-buildhost-pygobject-gi-shim-pythonpath-bridge.md
+
+evidence:
+  - "真机探针：/storage/Users/currentUser/usr/local/bin/python3 -c 'import gi' → ModuleNotFoundError: No module named 'gi'（Python 3.12.9），Curator 现场实测 + Auditor 独立复现（audit-report.md §1）"
+  - "shim 供入后：gwl-create2.log:87 'Program python3 (gi) found: YES ... modules: gi'；权威 CI run1 全绿（gwl-ci-run1.log:341-348 meson test 1/1；test_package 17/17 ALL PASS）"
+  - "注入点：候选分支 archives/g/gweather-locations/2026.2/conanfile.py build() env['PYTHONPATH'] = shim + os.pathsep + ...，位于 meson.configure() 之前"
+
+source_event:           gweather-locations 2026.2 适配：上游 meson.build find_installation('python3', modules:['gi']) 在 OHOS 构建主机必失败；recipe 自含 shim + PYTHONPATH 双注入后权威 CI 一次全绿。
+authors:                Builder (ZCode subagent), Coordinator
