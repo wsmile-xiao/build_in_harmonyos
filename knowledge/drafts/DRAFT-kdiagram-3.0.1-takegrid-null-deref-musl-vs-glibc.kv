@@ -1,0 +1,78 @@
+#====================================================================
+# Draft: kdiagram 3.0.1 — KGantt GraphicsScene::takeGrid() 空指针成员访问
+#        glibc 工具链上良性 UB（上游 CI 绿）vs OHOS musl/clang 上 SIGSEGV；
+#        上游 v3.0.1 后官方修复 15a4437 的定位与回移植范式
+#====================================================================
+
+draft:                  DRAFT-kdiagram-3.0.1-takegrid-null-deref-musl-vs-glibc
+status:                 pending-editor-review
+trigger_tool:           conan|ctest|clang
+phase:                  runtime|testing
+severity:               2
+category:               platform|portability|musl-vs-glibc|null-deref|upstream-fix-backport
+
+title:                  KGantt::GraphicsScene::takeGrid() 无条件 grid->disconnect() 空指针成员访问：glibc 上良性 UB（上游 CI 全绿）、OHOS musl/clang 上 SIGSEGV@0x4；上游 v3.0.1 后 commit 15a4437 官方修复可整 hunk 回移植（kdiagram 3.0.1 测试 22/23 → 23/23）
+
+error_signature:       Received signal 11 \(SIGSEGV\), code SEGV_MAPERR.*accessing address 0x0000000000000004|
+                         TestKGanttView.*testSetGraphicsView.*SegFault|
+                         kganttgraphicsscene\.cpp.*member access into incomplete type|
+                         grid->disconnect
+
+match_keywords:         takeGrid, null pointer dereference, SIGSEGV, SEGV_MAPERR, glibc, musl,
+                         clang, benign UB, kdiagram, KGantt, testSetGraphicsView,
+                         upstream fix backport, cherry-pick, release tag, git log v..HEAD
+
+root_cause:             kdiagram ≤3.0.1 的 KGantt::GraphicsScene::takeGrid() 在函数入口无条件执行
+                         `grid->disconnect(this)`，而 `d->grid` 在 KGantt::View 构造后未 setGrid 时为
+                         nullptr。TestKGanttView::testSetGraphicsView 用全新 View（无 grid）调
+                         setGraphicsView → takeGrid() 即触发空指针成员访问
+                         （SIGSEGV @0x0000000000000004 = nullptr this + 成员偏移）。
+                         该 UB 在 glibc/GNU 工具链上表现为良性（上游 CI 全绿从未暴露），
+                         在 OHOS musl loader + clang 15 工具链下必崩——同一份测试代码在两个
+                         平台呈现相反的可见性，典型"上游绿 ≠ OHOS 绿"平台差异。
+                         上游在 v3.0.1 之后的 commit 15a4437（"Fix more leaks"，2026-09-02）
+                         已补 if (grid) 守卫——官方修复实锤其为真实 bug 而非 OHOS 独有。
+
+solution: |
+  ① 回移植上游守卫（PR #14653 patches/0001-ohos-drop-printsupport.patch 内）：
+
+  ```cpp
+  AbstractGrid *GraphicsScene::takeGrid()
+  {
+      AbstractGrid *grid = d->grid;
+      // null-deref guard (upstream 15a4437 backport)
+      if (grid) {
+          grid->disconnect( this );
+      }
+      d->grid = nullptr;
+      if (grid) {
+          // revert to the default_grid
+          connect( &d->default_grid, SIGNAL(gridChanged()), this, SLOT(slotGridChanged()) );
+      }
+      return grid;
+  }
+  ```
+
+  ② 通用定位范式（OHOS 独有崩溃、上游 CI 绿时优先走这条）：
+  克隆上游 git 后查 release tag 之后的修复提交——
+  `git log v<version>..HEAD --oneline -- <崩溃源文件>`
+  若存在 fix/crash/leak/asan 类 commit 即为官方修复，直接整 hunk 回移植
+  （patch 内注明上游 commit hash），不要自行发明修法。
+  验证：本地 conan create ctest 从 22/23（SIGSEGV）恢复 23/23 全绿。
+
+fallback: >
+  上游无对应修复（真·平台差异）时：对空指针成员访问逐点补守卫，
+  保持函数签名与返回值语义不变；测试侧不可用 QEXPECT_FAIL 掩盖段错误
+  （SIGSEGV 无法被 QVERIFY 捕获），必须在库代码层修复。
+
+verify_builds:          "#14653（本地 conan create 实证：22/23 SIGSEGV → 23/23 passed）"
+
+reference_impl: >
+  上游官方修复：https://invent.kde.org/graphics/kdiagram/-/commit/15a4437
+  回移植载体：PR #14653 archives/k/kdiagram/3.0.1/patches/0001-ohos-drop-printsupport.patch
+  （同 PR 另一场景：qtbase/6.11.1 线 PrintSupport=OFF 下 KDE 模块优先用上游原生
+  QT_NO_PRINTER/HAVE_PRINTER 宏守卫降级——kdiagram 模式零手写 no-op，
+  对照 kgraphviewer 26.04.0 手写 13 对 no-op 源文件的重路径）
+
+id:                     DRAFT-KDIAGRAM-301-TAKEGRID-NULL-DEREF-MUSL-VS-GLIBC
+doc_file:               DRAFT-kdiagram-3.0.1-takegrid-null-deref-musl-vs-glibc.md
