@@ -1,0 +1,343 @@
+diff -ruN a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt	2026-04-09 12:24:02.000000000 +0800
++++ b/CMakeLists.txt	2026-10-01 22:09:05.653988906 +0800
+@@ -42,28 +42,35 @@
+     find_package(KF6 ${KF_MIN_VERSION} REQUIRED Auth)
+ endif()
+ 
++# OHOS adaptation: KCMUtils and KIO are dropped from the required set and
++# StatusNotifierItem becomes optional. The ohpcd conan registry publishes
++# kio/kcmutils/kstatusnotifieritem binaries only on the 6.26 KF6 line while
++# the kwallet/6.18.0 binary closure anchors this build to the 6.18 line
++# (kgoldrunner 26.04.0 KIO-trim precedent). KIO call sites are replaced by
++# direct local-file I/O in src/; the KCM module and its KAuth helper are
++# disabled through ENABLE_KAUTH=OFF in the recipe.
+ find_package(KF6 ${KF_MIN_VERSION} REQUIRED
+     Archive
++    Codecs
+     Config
+     ConfigWidgets
+     CoreAddons
+     DBusAddons
+     I18n
+-    KCMUtils
+-    KIO
++    ItemViews
+     Wallet
+     WindowSystem
+     XmlGui
+     Crash
+-    StatusNotifierItem
+     Service
+ )
++find_package(KF6 ${KF_MIN_VERSION} OPTIONAL_COMPONENTS StatusNotifierItem)
+ 
+ if (BUILD_DOC)
+     find_package(KF6DocTools ${KF_MIN_VERSION})
+     set_package_properties(KF6DocTools PROPERTIES
+         DESCRIPTION "Tools to generate documentation"
+-        TYPE REQUIRED
++        TYPE OPTIONAL
+     )
+ endif()
+ 
+@@ -90,7 +97,7 @@
+         DESTINATION ${KDE_INSTALL_LOGGINGCATEGORIESDIR}
+         )
+ 
+-if (BUILD_DOC)
++if (BUILD_DOC AND KF6DocTools_FOUND)
+     add_subdirectory(doc)
+     kdoctools_install(po)
+ endif()
+diff -ruN a/src/manager/CMakeLists.txt b/src/manager/CMakeLists.txt
+--- a/src/manager/CMakeLists.txt	2026-04-09 12:24:02.000000000 +0800
++++ b/src/manager/CMakeLists.txt	2026-10-01 22:13:09.353985781 +0800
+@@ -79,15 +79,19 @@
+     KF6::Wallet
+     KF6::DBusAddons
+     KF6::ConfigCore
+-    KF6::KIOCore
+-    KF6::KIOGui
+     KF6::Archive
++    KF6::Service
+     KF6::WindowSystem
+     KF6::Crash
+     KF6::Codecs
+-    KF6::StatusNotifierItem
+ )
+ 
++if (TARGET KF6::StatusNotifierItem)
++    target_link_libraries(kwalletmanager5 PRIVATE KF6::StatusNotifierItem)
++else()
++    target_compile_definitions(kwalletmanager5 PRIVATE KWM_TRIM_SNI)
++endif()
++
+ install(TARGETS kwalletmanager5  ${KDE_INSTALL_TARGETS_DEFAULT_ARGS} )
+ 
+ add_subdirectory(icons)
+diff -ruN a/src/manager/allyourbase.cpp b/src/manager/allyourbase.cpp
+--- a/src/manager/allyourbase.cpp	2026-04-09 12:24:02.000000000 +0800
++++ b/src/manager/allyourbase.cpp	2026-10-01 21:19:22.757987344 +0800
+@@ -8,8 +8,7 @@
+ #include "allyourbase.h"
+ #include "kwalletmanager_debug.h"
+ 
+-#include <KIO/StoredTransferJob>
+-#include <KJobWidgets>
++#include <QFile>
+ #include <KLocalizedString>
+ #include <KMessageBox>
+ #include <QUrl>
+@@ -305,14 +304,14 @@
+                 e->ignore();
+                 return;
+             }
+-            KIO::StoredTransferJob *job = KIO::storedGet(u);
+-            KJobWidgets::setWindow(job, listWidget());
++            // OHOS adaptation: KIO trimmed; direct local-file read.
++            QFile dropFile(u.toLocalFile());
+ 
+             e->accept();
+-            if (job->exec()) {
+-                data = job->data();
++            if (dropFile.open(QIODevice::ReadOnly)) {
++                data = dropFile.readAll();
+             } else {
+-                KMessageBox::error(listWidget(), job->errorString());
++                KMessageBox::error(listWidget(), dropFile.errorString());
+             }
+         }
+ 
+@@ -425,13 +424,13 @@
+ 
+         e->accept();
+ 
+-        KIO::StoredTransferJob *job = KIO::storedGet(u);
+-        KJobWidgets::setWindow(job, this);
+-        if (!job->exec()) {
+-            KMessageBox::error(this, job->errorString());
++        // OHOS adaptation: KIO trimmed; direct local-file read.
++        QFile dropFile(u.toLocalFile());
++        if (!dropFile.open(QIODevice::ReadOnly)) {
++            KMessageBox::error(this, dropFile.errorString());
+             return;
+         }
+-        data = job->data();
++        data = dropFile.readAll();
+ 
+         QByteArray entryMagic(QByteArray::number(KWALLETENTRYMAGIC));
+         QByteArray folderMagic(QByteArray::number(KWALLETFOLDERMAGIC));
+diff -ruN a/src/manager/kwalleteditor.cpp b/src/manager/kwalleteditor.cpp
+--- a/src/manager/kwalleteditor.cpp	2026-04-09 12:24:02.000000000 +0800
++++ b/src/manager/kwalleteditor.cpp	2026-10-01 21:19:22.757987344 +0800
+@@ -14,8 +14,6 @@
+ #include <KActionCollection>
+ #include <KCodecs>
+ #include <KConfigGroup>
+-#include <KIO/StoredTransferJob>
+-#include <KJobWidgets>
+ #include <KMessageBox>
+ #include <KSqueezedTextLabel>
+ #include <KStandardAction>
+@@ -26,7 +24,9 @@
+ 
+ #include <KSharedConfig>
+ #include <KXMLGUIFactory>
++#include <QFile>
+ #include <QTemporaryFile>
++#include <QUrl>
+ 
+ #include <KLocalizedString>
+ #include <KToolBar>
+@@ -986,13 +986,14 @@
+         return;
+     }
+ 
+-    KIO::StoredTransferJob *job = KIO::storedGet(url);
+-    KJobWidgets::setWindow(job, this);
+-    if (!job->exec()) {
++    // OHOS adaptation: KIO trimmed; wallet files are local paths, read
++    // the source directly.
++    QFile srcFile(url.toLocalFile());
++    if (!srcFile.open(QIODevice::ReadOnly)) {
+         KMessageBox::error(this, i18n("Unable to access wallet '<b>%1</b>'.", url.toDisplayString()));
+         return;
+     }
+-    tmpFile.write(job->data());
++    tmpFile.write(srcFile.readAll());
+     tmpFile.flush();
+ 
+     KWallet::Wallet *w = KWallet::Wallet::openWallet(tmpFile.fileName(), effectiveWinId(), KWallet::Wallet::Path);
+@@ -1127,15 +1128,16 @@
+         return;
+     }
+ 
+-    KIO::StoredTransferJob *job = KIO::storedGet(url);
+-    KJobWidgets::setWindow(job, this);
+-    if (!job->exec()) {
++    // OHOS adaptation: KIO trimmed; direct local-file read.
++    QFile srcFile(url.toLocalFile());
++    if (!srcFile.open(QIODevice::ReadOnly)) {
+         KMessageBox::error(this, i18n("Unable to access XML file '<b>%1</b>'.", url.toDisplayString()));
+         return;
+     }
++    const QByteArray srcData = srcFile.readAll();
+ 
+     QDomDocument doc;
+-    if (!doc.setContent(job->data())) {
++    if (!doc.setContent(srcData)) {
+         KMessageBox::error(this, i18n("Error reading XML file '<b>%1</b>' for input.", url.toDisplayString()));
+         return;
+     }
+@@ -1292,9 +1294,11 @@
+     // #368314: QTemporaryFiles are open in ReadWrite mode, so the QIODevice's position needs to be rewind.
+     tf.seek(0);
+ 
+-    KIO::StoredTransferJob *putJob = KIO::storedPut(&tf, url, -1);
+-    KJobWidgets::setWindow(putJob, this);
+-    if (!putJob->exec()) {
++    // OHOS adaptation: KIO trimmed; store through a local file.
++    QFile dstFile(url.toLocalFile());
++    if (dstFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
++        dstFile.write(tf.readAll());
++    } else {
+         KMessageBox::error(this, i18n("Unable to store to '<b>%1</b>'.", url.toDisplayString()));
+     }
+ }
+diff -ruN a/src/manager/kwalletmanager.cpp b/src/manager/kwalletmanager.cpp
+--- a/src/manager/kwalletmanager.cpp	2026-04-09 12:24:02.000000000 +0800
++++ b/src/manager/kwalletmanager.cpp	2026-10-01 22:17:59.949988281 +0800
+@@ -16,11 +16,12 @@
+ #include <KActionCollection>
+ #include <KConfig>
+ #include <KConfigGroup>
+-#include <KIO/CommandLauncherJob>
+ #include <KLocalizedString>
+ #include <KMessageBox>
+ #include <KStandardAction>
++#ifndef KWM_TRIM_SNI
+ #include <KStatusNotifierItem>
++#endif
+ #include <KTar>
+ #include <KWallet>
+ #include <KWindowSystem>
+@@ -28,6 +29,7 @@
+ 
+ #include <QAction>
+ #include <QCommandLineParser>
++#include <QProcess>
+ #include <QDialog>
+ #include <QFile>
+ #include <QFileDialog>
+@@ -83,6 +85,7 @@
+     QDBusConnection::sessionBus().registerObject(QStringLiteral("/KWalletManager"), this, QDBusConnection::ExportScriptableSlots);
+     KConfig cfg(QStringLiteral("kwalletrc")); // not sure why this setting isn't in kwalletmanagerrc...
+     KConfigGroup walletConfigGroup(&cfg, QStringLiteral("Wallet"));
++#ifndef KWM_TRIM_SNI
+     if (walletConfigGroup.readEntry("Launch Manager", false)) {
+         _tray = new KStatusNotifierItem(this);
+         _tray->setObjectName(QStringLiteral("kwalletmanager tray"));
+@@ -110,6 +113,13 @@
+     } else {
+         _tray = nullptr;
+     }
++#else
++    // OHOS adaptation: the status-notifier tray is trimmed on this platform
++    // (kstatusnotifieritem binaries are published only on the 6.26 KF6
++    // line, incompatible with the kwallet 6.18 binary closure); always run
++    // windowed.
++    _tray = nullptr;
++#endif
+ 
+     _managerWidget = new KWalletManagerWidget(this);
+ 
+@@ -165,15 +175,19 @@
+     act->setIcon(QIcon::fromTheme(QStringLiteral("configure")));
+ 
+     connect(act, &QAction::triggered, this, &KWalletManager::setupWallet);
++#ifndef KWM_TRIM_SNI
+     if (_tray) {
+         _tray->contextMenu()->addAction(act);
+     }
++#endif
+     act = actionCollection()->addAction(QStringLiteral("close_all_wallets"));
+     act->setText(i18n("Close &All Wallets"));
+     connect(act, &QAction::triggered, this, &KWalletManager::closeAllWallets);
++#ifndef KWM_TRIM_SNI
+     if (_tray) {
+         _tray->contextMenu()->addAction(act);
+     }
++#endif
+     KStandardAction::quit(this, SLOT(shuttingDown()), actionCollection());
+ 
+     KStandardAction::keyBindings(guiFactory(), &KXMLGUIFactory::showConfigureShortcutsDialog, actionCollection());
+@@ -208,11 +222,16 @@
+     }
+ 
+     if (!_shuttingDown) {
++#ifndef KWM_TRIM_SNI
+         if (!_tray) {
+             qApp->quit();
+         } else {
+             _tray->hideAssociatedWindow();
+         }
++#else
++        // SNI trimmed: always windowed, so quit directly.
++        qApp->quit();
++#endif
+         return false;
+     }
+     return true;
+@@ -220,11 +239,13 @@
+ 
+ void KWalletManager::aWalletWasOpened()
+ {
++#ifndef KWM_TRIM_SNI
+     if (_tray) {
+         _tray->setIconByName(QStringLiteral("wallet-open"));
+         _tray->setToolTip(QStringLiteral("wallet-open"), i18n("Wallet"), i18n("A wallet is open."));
+         _tray->setStatus(KStatusNotifierItem::Active);
+     }
++#endif
+     updateWalletDisplay();
+     createGUI(QStringLiteral("kwalletmanager.rc"));
+ }
+@@ -285,11 +306,13 @@
+ 
+ void KWalletManager::allWalletsClosed()
+ {
++#ifndef KWM_TRIM_SNI
+     if (_tray) {
+         _tray->setIconByName(QStringLiteral("wallet-closed"));
+         _tray->setToolTip(QStringLiteral("wallet-closed"), i18n("Wallet"), i18n("No wallets open."));
+         _tray->setStatus(KStatusNotifierItem::Passive);
+     }
++#endif
+     possiblyQuit();
+ }
+ 
+@@ -407,8 +430,10 @@
+ 
+ void KWalletManager::setupWallet()
+ {
+-    auto job = new KIO::CommandLauncherJob(QStringLiteral("kcmshell6"), {QStringLiteral("kcm_kwallet5")});
+-    job->start();
++    // OHOS adaptation: KIO trimmed (registry line mismatch with the kwallet
++    // 6.18 binary closure); launch the configuration module through
++    // QProcess::startDetached, which is a no-op when kcmshell6 is absent.
++    QProcess::startDetached(QStringLiteral("kcmshell6"), {QStringLiteral("kcm_kwallet5")});
+ }
+ 
+ void KWalletManager::closeAllWallets()
+@@ -557,8 +582,10 @@
+ 
+     if (isMinimized())
+         setWindowState(windowState() & ~Qt::WindowMinimized);
++#ifndef KWM_TRIM_SNI
+     else if (_tray && !isVisible()) // TODO: how does this relate to show() above?
+         _tray->activate(QPoint());
++#endif
+ 
+     // if there is a window visible, now or before, always activate it
+     if (isVisible()) {
