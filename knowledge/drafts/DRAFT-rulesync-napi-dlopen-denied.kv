@@ -1,0 +1,81 @@
+id:                     DRAFT-rulesync-napi-dlopen-denied
+trigger_tool:           node|vitest|rolldown|conan
+phase:                  testing|runtime
+error_signature:        Error loading shared library.*\.(node|so).*Permission denied|ERR_DLOPEN_FAILED.*Permission denied|UVWASI_EBADF.*uvwasi_init
+
+severity:               2
+category:               ohos, dynamic-loading, node-runtime, verification
+match_keywords:         N-API, dlopen, ERR_DLOPEN_FAILED, Permission denied, HMDFS, rolldown, vitest, WASI, uvwasi_init, binary-sign-tool, execve, Node CLI, @rollup/wasm-node, vite 7, esbuild subprocess, tsx EPERM, IPC pipe
+title:                  HMDFS tenant workspace refuses dlopen of native N-API addons even after ELF self-signing (execve works, dlopen does not)
+
+root_cause:             On this HarmonyOS PC tenant workspace the root filesystem holding the
+                        checkout is HMDFS (`u:object_r:hmdfs:s0`). Signed native objects there are
+                        accepted by execve but rejected by dlopen/mmap(PROT_EXEC): a copied
+                        `/data/service/hnp/bin/bash`, once signed with
+                        `binary-sign-tool sign -inFile X -outFile X -selfSign 1`, executes
+                        (EXIT=0), while the identically signed
+                        `rolldown-binding.openharmony-arm64.node` (`.codesign` section present,
+                        mode 755) still fails with `ERR_DLOPEN_FAILED: Permission denied`.
+                        Consequences: any Node toolchain that loads a native addon
+                        (rolldown via vite 8 / vitest 4, native esbuild/binding loaders) cannot
+                        start in such a workspace, even though the same Node binary executes plain
+                        JavaScript normally. The napi-rs WASI fallback is not an escape hatch here:
+                        `NAPI_RS_FORCE_WASI=true` reaches `node:wasi` and aborts in
+                        `uvwasi_init` with `UVWASI_EBADF` (errno 8).
+
+affected_scope:         Node.js 22+ CLI/library packaging and upstream test execution (vitest/vite 8 +
+                        rolldown, napi-rs addons) performed inside an HMDFS-backed tenant workspace;
+                        also affects any recipe that must dlopen Build-tree shared objects from such
+                        a workspace.
+
+verification_cmd:       node -e "require('@rolldown/binding-openharmony-arm64')"          # expect ERR_DLOPEN_FAILED/Permission denied
+                        cp /data/service/hnp/bin/bash ./bash.bin && chmod 755 ./bash.bin
+                        binary-sign-tool sign -inFile ./bash.bin -outFile ./bash.signed -selfSign 1
+                        ./bash.signed -c 'echo EXEC_SIGNED_OK'                            # expect EXIT=0
+                        readelf -S ./*.node | grep codesign                               # section present
+                        NAPI_RS_FORCE_WASI=true node -e "import('rolldown')"              # expect UVWASI_EBADF
+
+rec_priority:           1
+rec_approach:           wasm-rollup-runner-substitution
+rec_description:        First treat a signature-verified+execve-verified native-extension load failure as
+                        an environment capability boundary (not a recipe defect) and keep packaging +
+                        pure-JS consumer tests validated locally. When upstream JS/TS suites MUST
+                        actually run in such a workspace, substitute the native binding with a WASM
+                        runner stack instead of changing test sources: vitest 3 + vite 7 (esbuild runs
+                        as a child-process binary and is therefore unaffected), and replace rollup with
+                        the official @rollup/wasm-node via pnpm overrides. Verified on rulesync 14.2.0:
+                        7456 unit + 720 E2E cases executed with zero test-source edits.
+rec_command:            pnpm add -D vitest@3 vite@7; # pnpm-workspace.yaml: overrides: rollup: npm:@rollup/wasm-node@4.59.0
+                        pnpm install --ignore-scripts --no-frozen-lockfile
+                        node node_modules/vitest/vitest.mjs run --silent=true
+                        RULESYNC_CMD=dist-bun/<tool>-<platform>-<arch> node node_modules/vitest/vitest.mjs run --config vitest.e2e.config.ts
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      pack-pure-js-consumer-evidence
+fallback_description:   When only the addon-dependent runner is blocked, still produce real evidence
+                        for the deliverable itself: build the package with `npm install --omit=dev`
+                        and execute the packaged launcher end to end (init/generate/--version) plus
+                        the recipe's test_package script; report the upstream suite as
+                        not executed with the exact blocker (never as passing).
+fallback_command:       npm install --ignore-scripts --omit=dev --registry=https://registry.npmjs.org/ && sh test_package/test.sh <pkg>/bin/<tool>
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       test.*skip.*dlopen|vitest.*\|\| *true|suite.*passing.*(0|未执行)
+forbid_1_reason:        An addon that cannot be loaded means the suite did not run; reporting it as
+                        passing or swallowing its exit code fabricates validation evidence.
+forbid_1_consequence:   Reviewers accept an unvalidated upstream test result (R51 violation).
+
+forbid_2_pattern:       chmod.*\+x.*\.node.*fix|unsign.*fallback
+forbid_2_reason:        The rejection is not a mode bit issue: the signed object keeps mode 755 and
+                        still fails, so permission-only workarounds hide the real boundary.
+forbid_2_consequence:   Wasted rounds and a false "fixed" claim.
+
+principles:             P005, P010
+doc_file:               knowledge/drafts/DRAFT-rulesync-napi-dlopen-denied.md
+last_updated:           2026-10-01
+source_event:           rulesync 14.2.0 (npm CLI) adaptation: vitest/vite 8 -> rolldown native binding dlopen denied in HMDFS tenant workspace
+source_pr:
+authors:                GPQ
