@@ -40,6 +40,20 @@ HMDFS 不支持 libtool 尝试创建的硬链接。libtool 会自动回退到复
 - 安装后的 `libgmp.a` 链接进 AArch64 共享对象探针: PASS
 - 制品: `lib/libgmp.a` 1,093,896 bytes、`include/gmp.h`、`lib/pkgconfig/gmp.pc`
 
+### OHOS 专项回归覆盖
+
+`test_package/ohos_test.c` 仅使用安装后的 `gmp.h` 和 `gmp::gmp`，实际运行 7 项公开 API 检查：
+
+1. `GMP_LIMB_BITS == 64` 且 `GMP_NAIL_BITS == 0` 的 aarch64 平台字宽前提。
+2. 两个 30 位十进制整数可解析。
+3. 预期 60 位乘积可解析。
+4. `mpz_mul` 得到精确的 60 位乘积。
+5. `mpz_get_str` 的十进制输出长度为 60。
+6. `mpz_get_str` 的十进制输出值精确相等。
+7. `mpz_powm` 在 RSA 风格参数下得到独立校验结果。
+
+该测试与上游 `make check`、原有消费者 `test.c` 分开计数；`ctest` 会在同一 `test_package` 中执行两个可执行文件。
+
 ## 状态说明
 
 GMP 配方和本地 OHOS arm64 包已完整验证，但尚未发布到远端 `ohpcd` 制品仓。GnuCOBOL 发布前必须先合并并发布 GMP，以满足 R36。
