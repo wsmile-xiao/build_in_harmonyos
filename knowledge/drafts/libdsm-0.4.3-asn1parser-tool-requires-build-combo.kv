@@ -1,0 +1,68 @@
+#====================================================================
+# Draft: tarball 不含预生成的 ASN.1 C 源（spnego_asn1.c），meson 构建时
+#        find_program('asn1Parser') 依赖构建机装有 libtasn1 工具——OHOS CI
+#        clean 环境无系统 asn1Parser 时如何用 conan tool_requires 补齐
+# 触发事件: libdsm 0.4.3（SMB 客户端库）HarmonyOS PC aarch64 适配
+# 日期: 2026-10-09
+#====================================================================
+
+id:                     libdsm-0.4.3-asn1parser-tool-requires-build-combo
+draft:                  libdsm-0.4.3-asn1parser-tool-requires-build-combo
+status:                 pending-editor-review
+trigger_tool:           meson|conan|autotools
+phase:                  build
+error_signature:         meson\.build.*find_program.*not found|Program or command 'asn1Parser' not found|asn1Parser.*not found.*meson\.build|ERROR: Program.*asn1Parser.*not found
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               build-system, conan, meson, code-generation, toolchain
+match_keywords:         asn1Parser, libtasn1, spnego_asn1.c, custom_target, find_program, tool_requires, build_requirements, 预生成, ASN.1, meson custom_target, dist_generated, tarball 不含生成文件, 代码生成器
+title:                  meson/autotools 包构建期需要 asn1Parser 等"既属依赖又属工具"的程序时，用 conan tool_requires 同包引用（libtasn1 制品仓包自带 bin/asn1Parser + lib/libtasn1.so）补齐构建机工具缺口，无需在 OHOS 上单独装工具
+root_cause:             上游 tarball 只发布源码不发布生成产物（GitHub codeload tag tarball 是纯 git archive 产物，不跑上游 dist_generated.py 这类 dist 脚本），meson.build 用 find_program('asn1Parser') 在构建期从 contrib/spnego/spnego.asn1 生成 spnego_asn1.c。asn1Parser 是"既属依赖又属构建工具"的双角色程序（运行期链接 libtasn1.so、构建期做 ASN.1→C 代码生成），conan 生态把它当依赖管理但工具二进制只在包的 bin/ 里，构建机没装系统 libtasn1 工具时 PATH 上找不到，meson find_program 不会去 conan cache 里找
+affected_scope:         所有构建期需要 asn1Parser/asn1Coding 等 ASN.1 代码生成器的 meson/autotools 包（SPNEGO/kerberos/PKI 类网络认证库常见）；典型场景：tarball 不含生成 C 源 + OHOS 本机/CI clean 环境无系统级 libtasn1 工具（which asn1Parser 为空）
+verification_cmd:       1) 现象：本机/CI which asn1Parser → not found；meson configure 阶段报 Program or command 'asn1Parser' not found；2) 探针：conan download libtasn1/4.21.0 -r=ohpcd 后查包内 bin/asn1Parser 存在且 export LD_LIBRARY_PATH=<pkg>/lib 后 --version 正常（4.21.0）；3) 生成实验：asn1Parser -o spnego_asn1.c -n spnego_asn1_conf contrib/spnego/spnego.asn1 → 产物 ~2.2KB；4) 修复后 conan create RC=0 且 test_package 断言全过
+rec_priority:           1
+rec_approach:            tool-requires-same-dep-package-for-generator
+rec_description:        conanfile.py 同时声明 requires（运行期链接）与 tool_requires（构建期工具）同一个包：libtasn1/4.21.0 制品仓包自带 bin/asn1Parser + lib/libtasn1.so.6，conan 的 tool_requires 会把工具包 bin/ 注入构建环境 PATH、lib/ 注入 LD_LIBRARY_PATH（buildenv），meson find_program 直接命中。注意 asn1Parser 动态链接 libtasn1.so.6，脱离包环境裸跑会 Error loading shared library（exit 127），必须在 conan buildenv 里跑。meson 的 dependency('libtasn1') 走 pkg-config 查找，CI clean 环境还需 tool_requires pkgconf/3.0.5 补齐（ayatana-indicator-keyboard/burp2/captagent 合入先例同款）
+rec_command:            def requirements(self): self.requires("libtasn1/4.21.0") ; def build_requirements(self): self.tool_requires("libtasn1/4.21.0"); self.tool_requires("pkgconf/3.0.5")（参考 archives/l/libdsm/0.4.3/conanfile.py）
+rec_auto_fix:           false
+rec_impl:               conan-recipe-helper (build_requirements)
+fallback_priority:      2
+fallback_approach:      pre-generated-source-in-patches
+fallback_description:   若工具包在制品仓不存在或其 bin 不含所需生成器，可用本机（或任何有 libtasn1 的机器）预生成 spnego_asn1.c 并放进 patches/ 随配方附带（上游 dist_generated.py 正是干这个的）。缺点：生成器版本与依赖库版本可能漂移，优先 tool_requires 在线生成
+fallback_command:       export LD_LIBRARY_PATH=~/.conan2/p/libtafabd0bb445031/p/lib && ~/.conan2/p/libtafabd0bb445031/p/bin/asn1Parser -o spnego_asn1.c -n spnego_asn1_conf contrib/spnego/spnego.asn1
+fallback_auto_fix:      false
+solution: |
+  conanfile.py 同时声明 requires（运行期链接）与 tool_requires（构建期工具）同一个包：
+  ```python
+  def requirements(self):
+      self.requires("libtasn1/4.21.0")
+
+  def build_requirements(self):
+      # spnego_asn1.c 未预生成：asn1Parser 从 contrib/spnego/spnego.asn1 生成
+      self.tool_requires("libtasn1/4.21.0")
+      # CI clean 环境无系统 pkg-config，meson dependency() 查找需要
+      self.tool_requires("pkgconf/3.0.5")
+  ```
+  conan 的 tool_requires 自动把工具包 bin/ 注入构建环境 PATH、lib/ 注入
+  LD_LIBRARY_PATH（buildenv），meson find_program 直接命中。
+  注意 asn1Parser 动态链接 libtasn1.so.6，脱离包环境裸跑报
+  Error loading shared library（exit 127）——必须在 conan buildenv 里跑。
+fallback: >
+  若工具包在制品仓不存在或其 bin 不含所需生成器：用本机（或任何有 libtasn1
+  的机器）预生成 spnego_asn1.c 放进 patches/ 随配方附带（上游 dist_generated.py
+  正是干这个的）。缺点：生成器版本与依赖库版本可能漂移，优先 tool_requires
+  在线生成。
+verify_builds:         libdsm/0.4.3 本机 conan create RC=0（test_package 8/8 断言通过，2026-10-09）
+reference_impl: >
+  archives/l/libdsm/0.4.3/conanfile.py requirements()/build_requirements()
+  （随 PR 提交；知识草稿 .kv/.md 成对见本目录；先例：ayatana-indicator-keyboard/
+  burp2/captagent 的 pkgconf tool_requires 合入包）
+principles:             P012
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+doc_file:               drafts/libdsm-0.4.3-asn1parser-tool-requires-build-combo.md
+last_updated:           2026-10-09
