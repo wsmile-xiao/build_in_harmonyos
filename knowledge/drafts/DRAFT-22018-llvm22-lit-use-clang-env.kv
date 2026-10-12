@@ -1,0 +1,41 @@
+#====================================================================
+# Draft: LLVM 22 lit no longer searches PATH for tools -> clang/test
+#        lit.cfg.py use_clang(required=True) fatals (0 tests pass)
+#====================================================================
+
+id:                     DRAFT-22018-LLVM22-LIT-USE-CLANG-ENV
+trigger_tool:           llvm-lit|lit|clang/tools/clang-format|lit.cfg.py|use_clang
+phase:                  test
+error_signature:        could not find clang program|couldn't find 'clang' program|fatal:*lit*|Did not find * in *bin
+
+severity:               2
+category:               test-harness-platform
+match_keywords:         llvm-lit, lit, use_clang, use_llvm_tool, use_installed, CLANG, clang/test/lit.cfg.py, LLVM 22, LLVM 11, zero tests, fatal, PATH, search_env, clang-format, googletest
+
+title:                  LLVM 22 llvm-lit stops falling back to PATH when resolving tools, so clang/test/lit.cfg.py use_clang(required=True) aborts the whole suite with a first-line fatal and 0 tests executed
+
+root_cause:             In LLVM 22 lit.llvm.config.LLVMConfig.use_llvm_tool(name, search_env, required, search_paths, use_installed) searches only search_paths (clang_tools_dir + llvm_tools_dir) and then, only when use_installed=True, the environment PATH. clang/test/lit.cfg.py calls llvm_config.use_clang() which uses the default required=True, so if no `clang` driver binary exists in the build tree the lit_config.fatal path fires while the suite configuration is loaded, before any test runs (the run reports 0 passed). LLVM 11's use_llvm_tool searched config.environment['PATH'] unconditionally, which is why the clang-format-11 11.1.0 recipe worked on the same device (the hnp clang on PATH was picked up by accident). A recipe that builds only clang-format (target `clang-format`, not the `clang` driver) therefore regresses from ~30 passed to 0 passed purely from the toolchain upgrade.
+
+affected_scope:         Any LLVM/Clang lit-based recipe that builds a subset of clang tools without the `clang` driver binary (clang-format, clang-tidy-only subsets, custom tool packages) and runs clang/test/* lit suites, on any platform - not just OHOS. Verified instance - clang-format 22.1.8.src on HarmonyOS PC aarch64.
+
+verification_cmd:       cmake --build build-ohos --target clang-format FileCheck FormatTests count not llvm-config && bin/llvm-lit -sv clang/test/Format   (without CLANG: fatal, 0 passed; with CLANG: 32/32)
+
+rec_priority:           1
+rec_approach:           export-clang-via-search-env-override
+rec_description:        Before invoking llvm-lit, set the environment variable CLANG to the toolchain clang driver (for OHOS take it from the conan profile conf tools.build:compiler_executables["c"], never a hardcoded shell variable - R33). use_llvm_tool reads search_env="CLANG" first and, per its own docstring, "If the override is specified in the environment, use it without validation", so the fatal is bypassed. This is correct for suites that exercise tools other than the driver: clang/test/Format only ever invokes clang-format, and FileCheck/count/not are separate required tools that are built explicitly.
+rec_command:            build(); before self.run("... bin/llvm-lit ...") do os.environ["CLANG"] = <conf tools.build:compiler_executables.c>
+rec_auto_fix:           false
+rec_impl:               archives/c/clang-format/22.1.8.src/conanfile.py (_run_upstream_tests)
+
+fallback_priority:      2
+fallback_approach:      also-build-the-clang-driver
+fallback_description:   Add the `clang` target to the build so a real driver exists in the tools dir. Correct but expensive: for clang-format 22.1.8 on AArch64 the clang target adds ~1398 ninja steps (3175 vs 1777 for clang-format alone), roughly doubling build time and memory. Prefer the CLANG override unless the suite really needs the freshly built driver.
+fallback_command:       cmake --build build-ohos --target clang clang-format FileCheck count not llvm-config
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       assert tests passed by weakening the suite|skip clang/test/Format|hardcode /data/service/hnp/bin/clang in the recipe|patch clang/test/lit.cfg.py to required=False
+forbid_1_reason:        Skipping the lit suite or editing upstream lit config to dodge the fatal hides a real harness requirement and weakens the upstream test evidence (R51 forbids silently dropping tests). Hardcoding a device path breaks CI portability and violates R33.
+forbid_1_consequence:   Red CI on machines with a different toolchain path, or a review rejection for weakening/omitting upstream tests.
+
+principles:             platform-agnostic-fix, real-evidence-over-assumption, toolchain-from-conf, upstream-tests-must-run

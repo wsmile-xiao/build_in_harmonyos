@@ -1,0 +1,41 @@
+#====================================================================
+# Draft: LLVM bundled googletest CapturedStream hardcodes /tmp ->
+#        read-only /tmp aborts the whole unit suite (0 results)
+#====================================================================
+
+id:                     DRAFT-22019-LLVM-GTEST-CAPTURED-STREAM-TMP-READONLY
+trigger_tool:           FormatTests|gtest-port.cc|googletest|third-party/unittest/googletest|CaptureStdout|CaptureStderr
+phase:                  test
+error_signature:        Failed to create tmp file /tmp/gtest_captured_stream|Failed to open tmp file /tmp/gtest_captured_stream|Signal 6 (core dumped)|FATAL.*gtest-port.cc
+
+severity:               2
+category:               test-harness-platform
+match_keywords:         googletest, gtest, CapturedStream, CaptureStdout, CaptureStderr, mkstemp, gtest_captured_stream, /tmp, read-only, TMPDIR, TEST_TMPDIR, LD_PRELOAD, LLVM, ConfigParseTest, GetStyleOutput, OHOS, E002, Signal 6
+
+title:                  The googletest bundled with LLVM hardcodes /tmp for CapturedStream temp files, so on a platform with a read-only /tmp (HarmonyOS E002) the FIRST test that captures stdout/stderr aborts the entire gtest binary and the suite reports zero results
+
+root_cause:             third-party/unittest/googletest/src/gtest-port.cc CapturedStream builds name_template = "/tmp/" (the non-Windows, non-Android, non-iOS #else branch) and calls ::mkstemp on it. The bundled copy exposes no GTEST_TMP_DIR / TEST_TMPDIR override for the POSIX path - the value is a compile-time literal. On HarmonyOS the root /tmp is read-only, mkstemp fails, gtest logs "[ FATAL ] Failed to open tmp file ... for capturing stream" and raises SIGABRT, killing the process mid-run. Because the abort happens before the summary is printed there is no "[  PASSED  ] N tests." line at all, so a naive parser reads 0 tests and can mistake the run for "nothing to do" instead of a hard failure.
+
+affected_scope:         Any recipe that runs a bundled googletest (LLVM/Clang unit tests, and other projects vendoring this gtest fork) with CaptureStdout/CaptureStderr usage on a read-only-/tmp platform. Verified instance - clang-format 22.1.8.src running FormatTests on HarmonyOS PC aarch64: ConfigParseTest.GetStyleOutput aborted the whole 1244-test binary at ~800 tests.
+
+verification_cmd:       build-ohos/tools/clang/unittests/Format/FormatTests --gtest_filter=ConfigParseTest.GetStyleOutput   (aborts without the shim; passes with it)
+
+rec_priority:           1
+rec_approach:           ld-preload-mkstemp-prefix-rewrite
+rec_description:        Build a tiny LD_PRELOAD shim (intercept ::mkstemp; when the template starts with "/tmp/", memmove the "/tmp/" prefix away so the file is created relative to the current working directory) and run the unit binary from a writable cwd with LD_PRELOAD set. The rewrite only shortens the string, so the in-place mutation stays inside the std::string buffer that gtest hands to mkstemp. Every upstream test then runs for real and none is skipped or weakened. Do NOT set TMPDIR/TEST_TMPDIR and expect it to work - this gtest copy ignores both for the POSIX path.
+rec_command:            cc -shared -fPIC -o shim.so shim.c && cd <writable-dir> && LD_PRELOAD=shim.so <unit-binary>
+rec_auto_fix:           false
+rec_impl:               archives/c/clang-format/22.1.8.src/conanfile.py (_GTEST_TMP_SHIM_C / _build_gtest_tmp_shim / _run_upstream_tests)
+
+fallback_priority:      2
+fallback_approach:      gtest-filter-out-capturing-tests
+fallback_description:   Exclude only the tests that use CaptureStdout/CaptureStderr via --gtest_filter=-ConfigParseTest.GetStyleOutput:... This keeps the rest genuine but drops real assertions, so it must be documented explicitly (R51 allows documented non-runs with a concrete technical reason, never silent skips). Prefer the shim, which runs everything.
+fallback_command:       FormatTests --gtest_filter=-ConfigParseTest.GetStyleOutput
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       chmod/unmount to make /tmp writable|remount root rw|patch gtest-port.cc to change the literal|treat "0 tests parsed" as success
+forbid_1_consequence:   Modifying platform mounts is out of scope and destabilises the device; patching vendored upstream test infra diverges from upstream; accepting an empty parse silently converts a hard abort into a false pass (R30/R51).
+forbid_1_reason:        The failure must be made to pass by letting the real tests run, not by editing upstream test code, changing system mounts, or mis-reading an empty result as green.
+
+principles:             platform-agnostic-fix, real-evidence-over-assumption, upstream-tests-must-run, no-silent-skip
