@@ -1,0 +1,93 @@
+#====================================================================
+# E553 — Qt5 模块私有 prefix 构建组合：private_tests 特性开启解锁
+# 上游私有测试 + reduce_exports 只挪不删 + 外来模块 pri 剪枝保封闭性
+# 来源：qt5-qtwebsockets 5.15.2（PR !14826，j669539，鸡屁股队）
+# Timestamp: 2026-10-06
+#====================================================================
+
+draft: E553-draft-j669539
+status: pending-editor-review
+id: E553
+
+title: Qt5 模块私有可写 prefix 构建组合：mkspecs 特性翻转解锁上游私有测试（private_tests 开启 + reduce_exports 挪 disabled，只挪不删）+ 外来模块 pri 剪枝保证构建封闭性
+
+category: qt-module, qmake, build-system, testing
+
+match_keywords: >
+  private_tests, reduce_exports, qmodule.pri, QT.global_private,
+  enabled_features, disabled_features, qtConfig, Could not find feature,
+  mkspecs, SUBDIRS, 私有测试, 私有类, 私有 prefix, developer-build,
+  开发者构建, qt_lib_qml, 外来 pri, 剪枝, conan 缓存污染, 构建封闭性,
+  qt5-qtwebsockets, QWebSocketFrame, websockets.pro, qt5-qtbase
+
+error_signature: >
+  undefined reference to .?QWebSocket(Frame|HandshakeRequest|HandshakeResponse|DataProcessor)|
+  Project ERROR: Could not find feature (private_tests|reduce_exports)|
+  Unknown module\(s\) in QT: (qml|quick|declarative)|
+  make\[.\]: \*\*\* (websocketprotocol|dataprocessor|websocketframe|handshakerequest|handshakeresponse|qdefaultmaskgenerator) .*No rule to make target
+
+root_cause: >
+  三层机制因果：
+  (1) qtbase 私有特性清单 mkspecs/qmodule.pri 的 QT.global_private.disabled_features
+  含 private_tests 时，模块级 .pro（如 websockets.pro）中 qtConfig(private_tests)
+  条件包裹的私有测试目录（websocketprotocol/dataprocessor/websocketframe/
+  handshakerequest/handshakeresponse/qdefaultmaskgenerator 共 6 个）不进
+  SUBDIRS——无报错、静默跳过，上游私有 API 测试面整体丢失；
+  (2) reduce_exports 特性开启时非公开类（QWebSocketFrame/QWebSocketHandshakeRequest/
+  QWebSocketHandshakeResponse 等）符号默认隐藏，私有测试二进制链接报
+  undefined reference；该特性只能从 enabled 列表挪到 disabled 列表（等效 Qt
+  developer-build），直接删除特性名会使 qtConfig() 报
+  "Project ERROR: Could not find feature reduce_exports" 中止 qmake；
+  (3) 本地 conan 缓存中的 qt5-qtbase 包 mkspecs/modules/*.pri 可能被同仓其他
+  Qt5 模块构建污染（qt_lib_qml*.pri 等外来 pri 指向其他 conan 缓存包，
+  实测 86 个 pri 中 34 个外来），qmake 解析时静默拉入未声明依赖
+  （qml/quick/declarative），破坏构建封闭性与可复现性；原始 CI 下载的
+  qtbase 包无此污染（剪枝为空操作）——本地缓存与 CI 纯净包的行为差异。
+
+solution: |
+  组合方案（qt5-qtwebsockets 5.15.2 实测，conanfile.py `_prepare_mkspecs()`）：
+  1) 私有可写 Qt prefix 镜像 qtbase：顶层目录 symlink、bin/ 复制（构建工具需可写），
+     并重写 mkspecs 中 .pri 残留的 build-dir 引用
+     （`.conan2/p/b/qt*/b` → qtbase 包真实路径）；
+  2) 特性翻转（只挪不删）——镜像的 mkspecs/qmodule.pri：
+     ```python
+     enabled  = re.search(r"QT\.global_private\.enabled_features = ([^\n]*)", content)
+     disabled = re.search(r"QT\.global_private\.disabled_features = ([^\n]*)", content)
+     en  = [w for w in enabled.group(1).split()  if w != "reduce_exports"]
+     dis = [w for w in disabled.group(1).split() if w != "private_tests"]
+     if "private_tests"  not in en:  en.insert(0, "private_tests")   # 解锁私有测试目录
+     if "reduce_exports" not in dis: dis.insert(0, "reduce_exports") # 等效 developer-build
+     ```
+     private_tests 开启后 websockets.pro 才把 6 个私有测试目录纳入 SUBDIRS；
+     reduce_exports 挪 disabled 后私有类符号导出、私有测试可链接。
+  3) 外来模块 pri 剪枝（保证构建封闭性）——扫描镜像 mkspecs/modules{,-inst}/：
+     ```python
+     foreign = any(not m.group(1).startswith(qtbase_pkg)
+                   for m in _CONAN_PATH_PATTERN.finditer(content))
+     if foreign:
+         os.remove(pri_path)   # 含非 qtbase 的 conan2 绝对路径即删除
+     ```
+     纯净 qtbase 包场景此步为空操作（本地缓存污染防御）。
+  配套防虚报：测试日志强制校验套件数=9 + 失败白名单（白名单外任何失败即构建失败）；
+  tst_* 可执行文件 binary-sign-tool 签名后回环执行；make install STRIP=true；
+  打包后重写 .prl/.la/.pc 残留 build-dir 路径。
+
+fallback: >
+  私有测试无法解锁（qmodule.pri 缺失或特性文件不可写）时降级：只执行公开套件并在
+  manifest/PR 文档化缩减的测试覆盖，严禁伪造私有测试结果；特性翻转受阻时勿删除
+  特性名（qtConfig() 会中止 qmake），改为整体跳过对应私有测试目录并在日志中显式
+  标注；外来 pri 剪枝不可行时，改用隔离的干净 conan 缓存（独立 CONAN_HOME）或
+  CI 纯净下载路径构建，保证构建封闭性与可复现性。
+
+verify_builds: >
+  本地 conan create G0-G4 门禁全绿（HarmonyOS PC arm64 / clang 15）：
+  9 套件 / 7322 数据用例 → 7321 通过 + 1 环境限制白名单
+  （tst_QWebSocket::tst_errorString，DNS fake-IP 劫持，非库缺陷，防虚报强制校验）；
+  test_package 1/1 PASS（127.0.0.1 回环 RFC 6455 echo 往返）；实证 PR !14826
+
+reference_impl: >
+  archives/q/qt5-qtwebsockets/5.15.2/conanfile.py `_prepare_mkspecs()`（PR !14826，
+  L102-L186：build-dir 重写 + 特性翻转 + 外来 pri 剪枝）；
+  私有 prefix 镜像模式先例：qt5-qtcharts、qtmultimedia
+
+doc_file: doc/E553.md
