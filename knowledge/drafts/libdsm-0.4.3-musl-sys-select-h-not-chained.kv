@@ -1,0 +1,64 @@
+#====================================================================
+# Draft: musl libc 的 sys/types.h 不像 glibc 那样间接暴露 sys/select.h——
+#        网络库源码用 fd_set/select/struct timeval 却未包含 <sys/select.h>
+#        时在 OHOS（musl）上编译失败，glibc/Linux 上正常
+# 触发事件: libdsm 0.4.3（SMB 客户端库，meson 构建）HarmonyOS PC aarch64 首次 conan create
+# 日期: 2026-10-09
+#====================================================================
+
+id:                     libdsm-0.4.3-musl-sys-select-h-not-chained
+draft:                  libdsm-0.4.3-musl-sys-select-h-not-chained
+status:                 pending-editor-review
+trigger_tool:           clang|meson
+phase:                  build
+error_signature:        use of undeclared identifier 'fd_set'|variable has incomplete type 'struct timeval'|call to undeclared function 'FD_ZERO'|call to undeclared function 'select'|too many errors emitted
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               ohos-platform, musl, portability, network, compile-error
+match_keywords:         fd_set, select, struct timeval, FD_ZERO, FD_SET, FD_ISSET, sys/select.h, musl, glibc, 头文件链, use of undeclared identifier, incomplete type, 网络库, socket, 非阻塞, abort pipe
+title:                  musl 下 fd_set/select/timeval 未声明（use of undeclared identifier 'fd_set'）——根因是 glibc 的 sys/types.h 间接链出 sys/select.h 而 musl 不链，补 #include <sys/select.h> 即修，对 glibc 无害
+root_cause:             glibc 的 sys/types.h 通过内部头文件链（bits/types.h 等）间接包含 sys/select.h，fd_set/struct timeval/FD_* 宏在 glibc 上"只 include sys/socket.h 也能用"；musl 严格按 POSIX 分层，sys/types.h 不链 sys/select.h，未显式包含即报 undeclared。与编译方言无关（gnu11+_GNU_SOURCE 与 gnu11+POSIX2008 两个组合实测均不可见），纯头文件链差异。注意并非所有文件都挂：包含 sys/time.h 的文件不挂（musl 的 sys/time.h 会带出 fd_set 定义），只挂"既无 sys/time.h 也无 sys/select.h"的文件
+affected_scope:         所有在 OHOS(musl) 上编译、源码使用 fd_set/select/struct timeval/FD_* 宏但未显式包含 sys/select.h 的网络/IO 多路复用代码；典型场景：上游作者在 glibc 环境开发从未需要显式包含（libdsm 0.4.3 netbios_session.c/netbios_utils.c 实测命中，netbios_ns.c 因含 sys/time.h 幸免）
+verification_cmd:       1) 复现：conan create 编译含 fd_set 的源文件，报 use of undeclared identifier 'fd_set' / variable has incomplete type 'struct timeval'；2) 判别链：grep -ln "fd_set\|select(\|struct timeval" src/*.c 找出全部使用文件，再查各文件 include 列表确认缺 sys/select.h 且无 sys/time.h；3) 微型探针：echo '#include <sys/socket.h>' + fd_set 用法，用 clang -std=gnu11 -D_GNU_SOURCE 编译——glibc 过、musl 挂即锁定根因；4) 修复后 conan create RC=0
+rec_priority:           1
+rec_approach:            add-sys-select-h-include-portability-patch
+rec_description:        为每个使用 fd_set/select/struct timeval/FD_* 宏但未包含该头的源文件补 #include <sys/select.h>（portability 补丁）。补丁对 glibc/Linux 无害（include guard 幂等），是纯增益修复。注意必须 grep 全部使用文件逐一补齐，不能只补报错的第一个（编译器 -ferror-limit 截断会掩盖后续文件）
+rec_command:            grep -ln "fd_set\|select(\|struct timeval" src/*.c 然后对每个缺 sys/select.h 的文件：补丁 +1 行 #include <sys/select.h>（参考 archives/l/libdsm/0.4.3/patches/0001-musl-include-sys-select-h-for-fd_set.patch：netbios_session.c 在 errno.h 后、netbios_utils.c 在 NS_ABORT_USE_PIPE include 块内）
+rec_auto_fix:           false
+rec_impl:               conan-recipe-helper (patches/)
+fallback_priority:      2
+fallback_approach:      gnu-dialect-with-GNU_SOURCE
+fallback_description:   若源文件恰好已包含 sys/time.h（musl 的 sys/time.h 会带出 fd_set 定义），则只调方言即可规避；但本例证明 _GNU_SOURCE 对 sys/select.h 链不出（fd_set 仍不可见），方言法只解决 strlcpy 类声明问题，不能替代 include 补丁——两者互补：本配方同时用 c_std=gnu11+c_args=['-D_GNU_SOURCE']（修 strlcpy 声明）+ include 补丁（修 fd_set）
+fallback_command:       tc.project_options["c_std"] = "gnu11"; tc.c_args.append("-D_GNU_SOURCE")
+fallback_auto_fix:      false
+solution: |
+  为每个使用 fd_set/select/struct timeval/FD_* 宏但未包含该头的源文件补
+  #include <sys/select.h>（portability 补丁，对 glibc/Linux 无害——include guard 幂等）：
+  ```diff
+  --- a/src/netbios_session.c
+  +++ b/src/netbios_session.c
+  @@ -47,6 +47,7 @@
+   #include <fcntl.h>
+   #include <errno.h>
+  +#include <sys/select.h>
+  ```
+  注意必须 grep 全部使用文件逐一补齐（grep -ln "fd_set\|select(\|struct timeval" src/*.c），
+  不能只补报错的第一个——编译器 -ferror-limit 截断会掩盖后续文件。
+fallback: >
+  若源文件恰好已包含 sys/time.h（musl 的 sys/time.h 会带出 fd_set 定义），
+  则该文件无需补丁。方言法（c_std=gnu11 + c_args=['-D_GNU_SOURCE']）只解决
+  strlcpy 类声明问题、不能替代 include 补丁（实测 _GNU_SOURCE 下 fd_set 仍不可见），
+  两者互补：libdsm 配方同时用两者。
+verify_builds:         libdsm/0.4.3 本机 conan create RC=0（test_package 8/8 断言通过，2026-10-09）
+reference_impl: >
+  archives/l/libdsm/0.4.3/patches/0001-musl-include-sys-select-h-for-fd_set.patch
+  （随 PR 提交；知识草稿 .kv/.md 成对见本目录）
+principles:             P012
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+doc_file:               drafts/libdsm-0.4.3-musl-sys-select-h-not-chained.md
+last_updated:           2026-10-09
