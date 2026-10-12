@@ -1,0 +1,140 @@
+#====================================================================
+# E998-draft-B183-pd-external-unresolved-symbol — 单产物插件库的
+#   「平台头探针假阳性 → x86 专属符号残留 → 整库 dlopen 失败」
+# 来源: pd-zexy/2.4.4 适配（OHOS aarch64 / 内置 clang 15.0.4 / 宿主 HarmonyOS）
+# 状态: 草稿，等待主编审核（未 promote；promote 为正式 E 条目后 engine/prescan 方才生效）
+# 配套: pd-zexy 适配（本条目样例库）+ skills/pd-externals-ohos/（同族 A 类 PD 拓展）
+# 与同族条目 E999-draft-B183-pd-externals-ohos（pd-vbap：无 cc/头集/符号作用域）互补：
+#   该条覆盖「构建不起来」，本条覆盖「构建成功但产物整体不可加载」，触发面不同。
+#====================================================================
+
+id:                     E998-draft-B183-pd-external-unresolved-symbol
+trigger_tool:           make|clang|ld|test|runtime
+phase:                  compilation|linking|testing|runtime
+
+error_signature:        Error relocating .*: (ioperm|iopl|inb|outb|inb_p|outb_p): symbol not found
+                        |symbol not found.*(ioperm|iopl|inb|outb)
+                        |can't load abstraction within itself
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               compat, detection, linking, libc, ohos
+prescan_pattern:        sys/io\.h|ioperm|iopl|\boutb\b|\binb\b|Z_WANT_LPT|with-lpt
+prescan_globs:          *.c, *.h, *.mk, Makefile*, conanfile.py
+match_keywords:         并口, ioperm, iopl, sys/io.h, x86 专属代码, 平台头探针, 头探针假阳性,
+                        header probe false positive, 未解析符号, symbol not found,
+                        Error relocating, 单产物库, 一坏全坏, 整体不可加载, dlopen 冒烟,
+                        pd_linux, Pd 外部库, pd-lib-builder, with-lpt, Z_WANT_LPT,
+                        上游回归套件, testrunner.sh, 相对路径, can't load abstraction within itself
+title:                  平台头探针假阳性让 x86 专属符号混入单产物插件库，导致整库 dlopen 失败
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             ① 探针层：构建系统用「头文件存在性」推断「接口可用性」
+                        （pd-lib-builder：`$(CPP) -E` 探 <sys/io.h> 成功即定义 HAVE_SYS_IO_H，
+                        进而编译 src/lpt.c 的并口代码）。OHOS sysroot 确实**装**了
+                        <sys/io.h>（内核 uapi 侧），但 musl **不提供** ioperm/inb/outb——
+                        头有了、函数没有，探针必然假阳性。这是「头存在 ≠ 接口存在」的
+                        跨 libc 通用陷阱，任何 `AC_CHECK_HEADERS`/`__has_include` 风格的
+                        能力探测在 musl 目标上都要复核符号层。
+                        ② 传播层：该对象被编进**同一个** .pd_linux（zexy 89 个 .c 链成单一
+                        shared object），未解析符号留在动态符号表里。构建期不报错
+                        （链接器对共享对象的未定义符号默认放行，留待运行时解析），
+                        故「构建成功」不等于「可用」。
+                        ③ 爆炸层：宿主 dlopen 该 .pd_linux 时按 RTLD 全量重定位，
+                        一个符号缺失即整库加载失败 → 库里**全部** 90 个类不可用。
+                        单产物插件库（Pd 外部、VST、内核模块风格）天然「一坏全坏」，
+                        失败面被放大到与库规模成正比：实测上游 36 项回归里 19 项挂掉。
+affected_scope:         pd-lib-builder 构建的 Pd 外部库中带平台专属子系统的（zexy 的
+                        并口/串口/GPIO 一类；iemlib/cyclone/iemnet/… 同样 vendor 该构建器，
+                        遇到同类子系统即复现）。推广到任何「头探针 + 单产物」组合：
+                        自研共享库把 x86/内核专属对象链进同一 .so、插件式架构整体加载。
+                        与架构无关（aarch64 上跑 x86 专属代码必缺符号），与 libc 相关
+                        （musl 缺 glibc 的 <sys/io.h> 符号是本次触发点）。
+verification_cmd:       nm -uD <pkg>/lib/pd-externals/*.pd_linux | grep -xE 'ioperm|iopl|inb|outb|inb_p|outb_p' | wc -l
+                        # 期望 0；非 0 即产物整体不可加载（本类命中）
+                        grep -nE 'sys/io\.h|HAVE_SYS_IO_H|Z_WANT_LPT|with-lpt' <src>/Makefile* <src>/src/*.c
+                        # 定位探针与开关（本样例：Makefile 150-182 区段 + src/lpt.c）
+                        conan create . -pr:h=<ohos-aarch64> -pr:b=<ohos-aarch64> --build=missing
+                        # test_package 内直接跑上游全套回归，看 Testsutie summary
+
+# ═══ Layer 3: 方案层 ★ ═══
+rec_priority:           1
+rec_approach:           disable-platform-object-via-upstream-switch
+rec_description:        优先用**上游自带开关**关掉平台专属对象，不打补丁、不改源码：
+                        zexy 提供 with-lpt=no（→ -DZ_WANT_LPT=0，Makefile 内对
+                        with-lpt 之外的路径统一注入），关闭后 x86 符号精确归零
+                        （nm -uD … | grep -xE 'ioperm|…' → 0 行），上游 36 项回归
+                        由 13 PASS/19 FAIL 变为 32 PASS / 0 FAIL / 4 XFAIL（预期失败）。
+                        开关常在 README/configure --help/Makefile 变量里，先找开关再谈补丁。
+rec_command:            生产样例: archives/p/pd-zexy/2.4.4/conanfile.py（本拓展样例库）
+                        self.run('make -j1 CC="{cc}" PDINCLUDEDIR="{inc}" with-lpt=no',
+                                 cwd=self.source_folder)
+                        # 且 test_package 必须把上游回归套件真跑起来（见 forbid_2/3）
+rec_auto_fix:           false
+rec_impl:
+
+fallback_priority:      2
+fallback_approach:      conditionally-compile-out-platform-object
+fallback_description:   上游没有开关时，才用补丁条件化该对象（源码级 #if 守卫或从
+                        class.sources 里摘除），补丁须在 PR 说明理由（R8 口径：默认
+                        禁止平台宏堆砌，须有实质逻辑且可解释）。无论哪种方式，
+                        验收都以「符号层归零 + 整库 dlopen 冒烟 + 上游全套回归」为准，
+                        不能以「编译通过」收尾。
+fallback_command:       patches/0001-disable-platform-only-object.patch（+ PR 正文说明）
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       nm -u\b(?!.*-D).*\|ldd -r.*(无输出即通过)|编译通过即视为适配完成
+forbid_1_reason:        共享对象的未定义符号在链接期默认放行，编译/链接成功完全不能证明
+                        产物可加载；必须做符号层检查（nm -uD/lld -r）或真实 dlopen 冒烟。
+forbid_1_consequence:   把「构建成功、运行全挂」的库提交进制品仓，下游消费者整库不可用，
+                        且排障会误判为消费者（宿主）问题。
+
+forbid_2_pattern:       testrunner\.sh .*\$\(find /|testrunner\.sh .*\$\(pwd\)/tests|bash\s+/.*/tests/testrunner\.sh\s+/(?!.*-path)
+forbid_2_reason:        上游回归补丁必须以**相对路径**喂给 testrunner.sh（等价上游
+                        `make check` 从源码根跑 `find tests/*/ -name '*.pd'`）。
+                        tests/absgn~/abs.pd 内的 `abs` 抽象在**绝对路径**下会被 pd 解析成
+                        该补丁自身，报 "can't load abstraction within itself" 而失败——
+                        纯路径形态造成的假失败（源树绝对路径实测 FAIL=1，相对路径 PASS）。
+forbid_2_consequence:   把适配成功误判为失败（或反之用错姿势掩盖真失败），
+                        并在 CI 里产生与被测库无关的噪声红。
+
+forbid_3_pattern:       只跑抽样/单类测试即认定回归通过|test_package.*print.*PASS
+forbid_3_reason:        单产物库「一坏全坏」，抽样无法覆盖整体加载面；且空壳测试
+                        （只打印断言）会让 L1e/R34 反向验证判负。test_package 必须
+                        真加载产物并跑上游全套（本样例 36 项，断言 FAIL==0 且 TOTAL>=36）。
+forbid_3_consequence:   产物整体不可加载却报绿，或反之因漏测放过回归退化。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P001, P012
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+# 说明：与 E999-draft-B183-pd-externals-ohos（pd-vbap，非本分支）同属 Pd 外部库
+#       OHOS 适配族，但该条目尚未落在 main 上，故此处置空以免引用失效；待两条目
+#       均 promote 后由主编互链（similar_to）。
+
+# ═══ 元数据 ═══
+doc_file:               drafts/E998-draft-B183-pd-external-unresolved-symbol.md
+last_updated:           2026-09-29
+source_event:           pd-zexy/2.4.4 适配：首跑上游回归 13 PASS/19 FAIL，宿主报
+                        Error relocating ./zexy.pd_linux: ioperm: symbol not found；
+                        加 with-lpt=no 后 32 PASS/0 FAIL/4 XFAIL，nm -uD 精确归零
+
+# ═══ 知识协作 ═══
+authors:                bbzl <bbzl@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: B183
