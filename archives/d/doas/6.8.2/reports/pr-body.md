@@ -1,0 +1,80 @@
+## PR 信息
+
+- 三方库名称：doas（Duncaen/OpenDoas）。
+- 上游版本：6.8.2；包版本6.8.2与官方源码一致，不再用旧任务标签6.9.3代替源码版本。
+- 上游仓库地址：https://github.com/Duncaen/opendoas
+- 适配路径：路径 A（基础适配）+ 路径 B（知识库扩展）。当前HD1–HD4均为false；设备能力受限不单独构成高难条件。
+- 使用知识库：E2026100903-draft-doas-native-auth-boundary.kv及同stem.md（补充至PR15075）；区分构建、语法解析、安全拒绝与真实认证/权限变化。
+
+官方归档32430字节，SHA-256 `6da058a0e70b7543bc60624389b0b00b686189ec933828c522bf8b2600495a67`。使用官方源码及五个由官方refresh工具生成的本地移植补丁；这些补丁不是上游已发布修改。
+
+## 测试用例对比
+
+### 上游库测试用例统计
+
+| 测试类型 | 上游用例数 | 说明 |
+|----------|-----------:|------|
+| 单元测试 | 0 | 官方6.8.2无注册自动套件 |
+| 集成测试 | 0 | 原GNUmakefile无check/test目标 |
+| 其他测试 | 0 | 构建不是测试；无其他原测试入口 |
+| **合计** | **0** | 无上游套件，不把0/0称为100% |
+
+### 适配后测试用例统计
+
+| 测试类型 | 适配后用例数 | 与上游对比 | 说明 |
+|----------|---------------:|------------|------|
+| 单元测试 | 0 | 不变 | 源码盘点不计执行用例 |
+| 集成测试 | 3 | +3 | 调用已安装ELF：合法纯-C、非法纯-C、usage；fresh正式官方r020实际3/3 |
+| 鸿蒙特有测试 | 1 | +1 | 实际HarmonyOS、非root UID/EUID和真实非SUID安全权限属性下普通执行精确拒绝；同r020实际1/1 |
+| **合计** | **4** | **新增4** | 产品验证4/4；不包含认证成功、SUID或权限跃迁 |
+
+## 上游测试用例修改说明
+
+### 是否存在对上游测试用例的修改？
+
+- [x] **否**，官方6.8.2没有自动测试套件。
+- [ ] **是**，存在对上游测试用例的修改。
+
+五项生产补丁由官方refresh工具生成的本地移植。纯`-C config`分支只延迟与语法检查无关的账户初始化，仍执行原真实UID降权、解析器与错误码。普通执行、带命令的配置检查以及原认证/SUID保护不绕过；不伪造passwd、shadow、权限或认证结果。
+
+## 补全测试用例说明
+
+### 上游是否存在无测试用例，适配后补全的情况？
+
+- [ ] **否**，上游已有覆盖。
+- [x] **是**，补三项真实CLI消费者及一项鸿蒙安全部署行为。
+
+合法配置要求实际RC0；非法配置同时要求原语法诊断和RC1，NSS失败、签名拒执、信号、RC126或任意非零退出均不能冒充负向通过。usage要求实际横幅。鸿蒙专项先核验运行平台、非root UID=EUID和已安装ELF的真实模式，要求普通文件、owner可执行、无SUID/SGID和group/world写位，再要求原普通执行精确RC1/`no passwd entry for self`或`not installed setuid`。模式在断言前记录；不以chmod成功代替回读，不把可选group/other读执行位等同安全条件。安全拒绝测试通过不等于认证成功或提权成功。
+
+## 验证结果
+
+- 编译状态：通过
+- 上游测试用例通过率：0/0（不适用）
+- 新增测试用例通过率：4/4（100%）
+
+以上新增4项只指已声明的3CLI+1鸿蒙安全拒绝，不是完整权限功能通过率。r010实际Conan create RC0；独立观察`doas-security-conan-observed-oct08-r010.json` SHA-256 `8bf71e0e983ba1f43b8fc95f9b7f512f884a3959cd149d89974764f9dea52673`核对唯一launch、原WAL/receipt链及release/postrelease、自有进程0。完整原日志`doas-security-conan-logs-oct08-r010/stderr`19021字节，SHA-256 `be32d27bf90451faaf7d97e9cb5a3308fecf05178dd9a231badbb35500082f1a`。
+
+历史r010整体结果保持`EVIDENCE_ACCOUNTING_PASS_TARGET_FUNCTIONAL_FAIL`，不改写为PASS。新的同一r017通过官方`FinishPipeline.step35_local_ci`真实执行setup与build_and_test，均RC0；已安装ELF消费者3/3及鸿蒙安全拒绝1/1。官方成功路径自动生成校验记录，355字节，SHA-256 `3744ee4ad8f9aaacff3240e2d046d9548d8c886a52974c72a21f4398e7aae13d`；完整原日志24829字节，SHA-256 `138e0b099b4e05ec48790646a378ae6740f544bf730a9ee96dcfddb75fb9787a`。独立`doas-official-local-ci-observed-oct08-r017.json` SHA-256 `9ffe8d34756be75a73f4fc1820a09bc672e0745a6aabd377a1565fdfb441ac92`验证唯一launch、12回执/24WAL及release/postrelease、自有SID进程0。认证成功、真实权限跃迁和完整认证W3仍未证实，正式收尾成功不代表这些能力PASS。
+
+## 补充说明
+
+当前评审修复F1/F2/F6已在fresh r018验证：仅Harmony/OHOS的shadow配置免`-lcrypt`，其他平台保留原链接；声明注释不再声称libc导出缺失符号；CLI断言数3与独立Harmony1分开。官方`FinishPipeline.step35_local_ci`的setup/build/create实际RC0，原成功路径自动marker SHA-256 `97a3f04b993155cada64e494a0731bdbd341aa76a0acdcd0701034514e5d875b`，完整日志24828字节 SHA-256 `c9de093ce5177656e1705a2f3600cfac6f715860fc5b617674319033f7d363df`。独立观察`doas-official-local-ci-observed-oct08-r018.json`（文件名保留旧日期前缀，内容run_id为20261009-r018）SHA-256 `29be94d4f5245c1cf0e4761dd8c9fd289b8c3e203f36b62466d4fe4e1439a981`，唯一launch1、12回执/24WAL，原release/postrelease、自有进程0。上述r017/r010仅历史；fresh r018仍不证明正向账户认证或权限转换。验证后只更新说明与元数据，不修改已验证产品字节。
+
+- 关联 Issue：#3656（https://atomgit.com/OpenHarmonyPCDeveloper/build_in_harmonyos/issues/3656），唯一OPEN，创建前关联PR集合为空。
+- 队伍名称：天天开心。
+- 申请人显示标识：2301_80739235。
+- 源分支：feat/doas-6.8.2
+- 目标分支：main
+- 任务：14982，开源鸿蒙PC专项积分赛-依赖，自有领取账号与分支已权威回读。
+
+真机能力限制：SSH实际UID/EUID20020084没有对应的真实passwd账户，普通执行与带命令配置检查仍按原保护拒绝。受控命名空间/chroot实际子进程各SIG31，没有建立命名多UID账户、真实shadow认证或权限变化的受控环境。当前0755安装不是SUID实现；不修改系统账户、权限、服务，不用nopass或模拟认证替代能力。该限制按用户要求公开保留，不将未执行功能算作PASS；也不推断其他执行域全无能力。
+
+人工意见的落实：六节、两张统计表、两个勾选区及三个固定验证字段均保留；消费者真实调用已安装二进制，原上游分母0来自官方源码。构建/解析/安全拒绝证据与未完成的认证能力分别陈述，不能仅点击resolve宣称整改完成。
+
+本次纠正真实6.8.2身份，不沿用错误旧版本分支。当前尚未提审；按最新用户目标，在当前完整HEAD的平台CI真实PASS、评审真实问题实际解决及身份门禁满足后提审，不执行合并。
+
+最新AI评论192795310的实际代码修复：0005纯语法路径已移除平台宏，以相同模式条件在各平台进入原checkconfig；保留真实UID降权、parser、参数校验与原失败保护。新补丁由官方refresh-patch生成并精确回放，SHA256 e77ff09882cf594f23454679e042cffc58a49cad8a4b9cfc25788540ffaef2cc。fresh官方r019真实create RC0、CLI3/3、鸿蒙安全拒绝1/1，无跳过；observer SHA256 999a0bd302154b579ef8b409b958496584b492a4382c280ee2d79315b71d7ffb，唯一launch1、12回执/24WAL、release/postrelease own0。当前能力限制仍如上公开保留，不把安全拒绝或官方构建成功当成认证/权限切换成功。
+
+当前真实CI请求104526/build91205在旧HEAD `2476a0b435e3f2274165d6afb2776ef58a29b1d8` 已进入产品测试，失败于安全测试的mode恰等0755断言；失败日志尚未打印actual mode，不能据此声称该CI实际读到0710或已证明文件系统根因。修复只改变测试的权限属性契约，原产品、认证和精确拒绝保护不变。实际10组正/负模式和非普通文件控制保留SUID/SGID、可写、不可执行拒绝。
+
+fresh原官方r020的setup/build/create均RC0，CLI3/3与鸿蒙负向安全1/1，无跳过。真实mode输出0755、UID/EUID20020084、原命令RC1/`no passwd entry for self`；不宣称模式变换或正向认证。独立observer SHA256 `f58bce885e1a08d22a548291bb76d2b21ce774f0ef0128bb21e623be4176c18e`；原完整日志SHA256 `9503561f80376766e8d75af75f32728c41b1d6e6f06939fcb93fe9521b76eb2f`，自动原marker SHA256 `4a899b4674633a6b1841a6235644c689e1c673986a7d9ed05f5aa14fa29a57e4`。唯一launch1、12回执/24WAL、release/postrelease own0。新提交仍须重新取得当前HEAD平台Review和CI；旧失败和历史记录不覆盖、不拼成当前CI PASS。
