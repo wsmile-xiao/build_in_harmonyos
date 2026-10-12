@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E429.kv，填写各字段
+# 对应的人类文档: doc/E429.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E429
+trigger_tool: java|javac|mvn|conan|create
+phase: compilation
+error_signature: Failed to mark memory page as executable - check if grsecurity/PaX is enabled
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 3
+category: java, environment, toolchain
+match_keywords: Error occurred during initialization of VM, Failed to mark memory page as executable, grsecurity, PaX, W^X, RWX, mmap, mprotect, PROT_EXEC, bishengjdk, HNP, /data/service/hnp/bin/java, JAVA_HOME, Maven BUILD FAILURE
+title: HNP 自带 JDK（/data/service/hnp/...）在某环境启动即报 “Failed to mark memory page as executable”，字面像平台 W^X 限制但实际是「该 JDK 构建在本机不可用」——须用 C 探针证伪（RWX mmap + mprotect(RX) 成功），改按 cmd-pkgs 自装 ~/bishengjdk17 解决
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: HNP 自带的 bishengjdk17（/data/service/hnp/bin/java 与其 bishengjdk17.0.13_06.org 目录）在本适配环境执行任何 JVM 入口（java -version / javac / maven 调用的 java）都在 VM 初始化阶段失败，报 “Failed to mark memory page as executable - check if grsecurity/PaX is enabled”。该文案字面指向 W^X/PaX 内核策略，极易被判定为平台限制（仓库既有知识 E045 对 mmap/RWX/JIT 类问题即给 no-fix-platform-limitation 结论）。但实测：同一台机器上编译运行一个 C 探针做 `mmap(PROT_READ|PROT_WRITE|PROT_EXEC)` 与 `mprotect(PROT_READ|PROT_EXEC)` **均成功**（home 与非 home 目录皆然）→ 平台并未禁止 RWX，真因是该 JDK 构建在此环境不可用。改用同一台机器上经 cmd-pkgs 自装的 ~/bishengjdk17（BiShengJDK 17.0.13）后，java/javac/Maven 全部正常。
+affected_scope: 所有需要在设备/沙箱内运行 JVM 的任务（Java 包的 conan create、test_package 的 javac/java、以 Maven/Gradle 为构建系统的库）；不影响纯 C/C++ 包
+verification_cmd: ① C 探针：clang -o rwx rwx.c && ./rwx（mmap RWX + mprotect RX 均打印 OK）② ~/bishengjdk17/bin/java -version（打印 openjdk version "17.0.13" ... BiSheng）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: probe-platform-then-switch-to-cmd-pkgs-jdk
+rec_description: ①先用 C 探针确认平台是否真禁 RWX（探针源码：mmap(0,4096,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) 与 mprotect(p,4096,PROT_READ|PROT_EXEC)）；探针成功即证明不是平台限制，不要据此把库判为 env_unsupported/no-fix。②换 JDK：curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install-jdk.sh -o ~/.install-jdk.sh && sh ~/.install-jdk.sh 17.0.13（装到 ~/bishengjdk17）。③配方侧把 _ensure_java() 的候选顺序固定为 JAVA_HOME → ~/bishengjdk17 → ~/usr/local/bishengjdk17 → PATH，确保不会回退到 PATH 中的坏 JDK（否则 mvn 内部仍会用到它并 BUILD FAILURE）。④test_package 的 test.sh / conanfile.py 解析 JAVA_HOME 时同样优先 ~/bishengjdk17。
+rec_command: sh ~/.install-jdk.sh 17.0.13 # 装到 ~/bishengjdk17；随后 export JAVA_HOME=~/bishengjdk17
+rec_auto_fix: false
+rec_impl: manual
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: try-jvm-flags-then-give-up-fast
+fallback_description: 若探针也失败（平台确实禁 RWX），再考虑 JVM 参数（实测本环境 -Xint、-XX:-UseCompiler、-Xshare:off、-XX:-UsePerfData、TMPDIR 指向可写目录、以及 LD_PRELOAD 拦截 mmap/mprotect 去掉 PROT_EXEC **全部无效**，勿重复尝试）；确认平台禁 RWX 后按平台限制上报，不要在单个库上无限调参
+fallback_command: java -Xint -version # 实测无效（失败发生在 VM 初始化更早阶段，与 JIT 无关）
+fallback_auto_fix: false
+fallback_impl: forbid_1_pattern:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:
+forbid_1_reason:
+forbid_1_consequence:
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E429.md
+last_updated: 2026-10-08
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: F199
