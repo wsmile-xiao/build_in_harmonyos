@@ -1,0 +1,30 @@
+id:                    DRAFT-zig-build-ohos-consumption
+trigger_tool:           conan|zig|test
+phase:                  compile|testing|package
+error_signature:        failed to spawn .*AccessDenied|minimum_build_zig_version|minimum_zig_version|@compileError|'bits/alltypes\.h' file not found|Downloaded 0 of .*bytes|unable to unpack tarball|error: the following build command failed with exit code
+severity:               2
+category:               zig, toolchain, conan, build-system, code-signing, vendoring, pattern, ohos
+match_keywords:         zig, tool_requires, zig/0.15.2, zig/0.16.0.1, build.zig.zon, minimum_build_zig_version, minimum_zig_version, AccessDenied, ZIG_OHOS_SIGN_ROOTS, ZIG_GLOBAL_CACHE_DIR, ZIG_LOCAL_CACHE_DIR, binary-sign-tool, _sign_elf, vendored, deps, .path, lazy, tracy
+title:                  conan 配方消费 zig/ 工具包的完整模式：tool_requires 按上游 minimum_zig_version 硬 pin + build() 清 CC/CXX 系规避 0.15.x sysroot 探测 + wrapper 自动签名/AccessDenied 重试 + package() _sign_elf + zon 依赖 vendored 本地 .path 零网络构建
+root_cause:             OHOS 上（1）每个被执行的 ELF 必须携带有效签名——zig 构建期反复生成/派生宿主可执行（build runner、gen exe、测试二进制），最终产物还需打包后签名；（2）zig 在 OHOS 的宿主 libc 探测会 consult 系统 OHOS SDK clang 并注入不完整 sysroot（其 stdint.h 依赖 musl bits/alltypes.h 而该 sysroot 不含此头）——zig/0.15.x 下清空 CC/CXX/CFLAGS/CPPFLAGS/LDFLAGS/CPATH/C_INCLUDE_PATH 即可让 zig 回落自带头，zig/0.16.x 探测通道与 env 无关须换 -Dtarget 或文件级 vendor（见 odiff 条）；（3）上游 build.zig.zon 的 url 依赖在 zig build 期网络抓取，runner/worker 网络（github 直连/代理）不可控；（4）上游以 minimum_build_zig_version/minimum_zig_version 硬 pin zig major.minor，跨 pin 版本直接 @compileError
+affected_scope:         所有以 Zig 为构建体系的 conan 配方（package_type=application 或含 zig 产物的库）在 OHOS runner 上的构建/测试/打包全链；适用 zig/0.15.2 与 zig/0.16.0.1 两代仓内工具包（行为差异处分别标注）
+verification_cmd:       conan create archives/<X>/<pkg>/<ver> -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=<pkg>/*；日志核验：zig version 行、Build Summary 全成功（AccessDenied 后 wrapper 自动重跑的两次 Build Summary 属预期）、上游测试计数、package() 内 "add codesign section success"
+rec_priority:           1
+rec_approach:           zig-toolchain-consumption-pattern
+rec_description:        五件套范式（全部经真机验证）：① tool_requires 严格按上游 minimum_zig_version 选包：0.15.x pin 用 zig/0.15.2，0.16.x pin 用 zig/0.16.0.1，禁止跨 pin（zls 0.15.1 在 0.16.x/0.14.x 直接 @compileError；minizign/odiff 为 0.16 专用）；② build() 先清 CC/CXX/CFLAGS/CPPFLAGS/LDFLAGS/CPATH/C_INCLUDE_PATH/CPLUS_INCLUDE_PATH（zig/0.15.x 有效路径，flow-control 21/21 步、zls 49/49 步实证），并把 ZIG_GLOBAL_CACHE_DIR/ZIG_LOCAL_CACHE_DIR 钉进 build_folder、ZIG_OHOS_SIGN_ROOTS 覆盖双缓存+zig-out（wrapper 据此自动签名构建期产物；每次 zig build 首轮对新建宿主可执行报 failed to spawn ... AccessDenied 属预期，wrapper 签名后自动重跑同一命令成功，勿当失败处理、勿重写重试）；③ build.zig.zon 非 lazy 依赖在 source() 以 pinned tarball（conandata 固定 URL+SHA256，附 gh-proxy 回退）vendored 到 deps/ 并 patch 成本地 .path 引用，实现零网络构建（minizign/zls 实证；lazy 依赖如 tracy 不启用即不抓取）；④ 产物在 package() 内 _sign_elf（llvm-objcopy --remove-section .codesign 后 binary-sign-tool sign -selfSign 1）；⑤ 上游测试 zig build test 直接内嵌 build() 真实执行，host 目标下 build-runner 类步骤照常运行（wrapper 路径作为 b.graph.zig_exe 传递，签名覆盖缓存根即可）
+rec_command:            conanfile.py: build_requirements(){ self.tool_requires("zig/<upstream-pin>") }; build(){ pop CC/CXX/CFLAGS/CPPFLAGS/LDFLAGS/CPATH/C_INCLUDE_PATH/CPLUS_INCLUDE_PATH; export ZIG_GLOBAL_CACHE_DIR/ZIG_LOCAL_CACHE_DIR=<build_folder>/…; export ZIG_OHOS_SIGN_ROOTS="<global> <local> <source>/zig-out"; self.run('zig build -Doptimize=ReleaseSafe --summary all', env="conanbuild"); self.run('zig build test …', env="conanbuild") }; source(){ get(主源码, filename=显式.tar.gz, strip_root=True); get(各依赖, sha256=…, destination=deps/<name>) }; package(){ copy zig-out/bin/<exe>; if OHOS: _sign_elf }
+rec_auto_fix:           true
+rec_impl:               conan-recipe-pattern
+fallback_priority:      2
+fallback_approach:      target-vendor-and-mirror
+fallback_description:   清 env 无效（zig/0.16.x 探测）或含 C 依赖编译不干净时：zig build 加 -Dtarget=aarch64-linux-musl 全局绕过 sysroot 探测，或 vendor 完整 musl 头文件级 -I 前置（须覆盖每个独立 C compile step）——细则与 access→statFile 见 DRAFT-odiff-4.5.0 条；网络抓取无法消除时按 flow-control 先例把 build.zig.zon URL 改写为 gh-proxy 镜像并配 zig fetch 预拉+瞬态网络重试（重试判定须基于捕获的 zig 输出而非 str(exc)）
+fallback_auto_fix:      false
+forbid_1_pattern:       tool_requires\("zig/(0\.14|0\.17)[^"]*"\)
+forbid_1_reason:        禁止使用 pin 区间外的 zig 工具包：上游 minimum_build_zig_version/minimum_zig_version 是硬 pin（major.minor 必须相等、patch 满足下限），0.15.x 与 0.16.x 构建系统与探测行为互不通用，跨 pin 直接 @compileError 或隐性语义漂移
+forbid_1_consequence:   编译期 @compileError 构建失败；或 0.15/0.16 探测行为错配导致 sysroot 注入差异、测试计数失真，CI L0/L1 失败或上游测试结果不可信
+similar_to:             [DRAFT-odiff-4.5.0-zig-ohos-libc-probe-incomplete-sysroot-global-bypass, DRAFT-flow-control-zig-env-clearing-ohos-sysroot]
+doc_file:               knowledge/drafts/DRAFT-zig-build-ohos-consumption.md
+last_updated:           2026-10-02
+source_event:           zls/0.15.1 真机适配全链验证 zig 工具链消费配方模式（仓内第 6 个 zig 工具包消费配方，0.15.2 线第 4 个）
+authors:                hmms-builder
+source_pr:              pending
