@@ -1,0 +1,156 @@
+#====================================================================
+# Draft knowledge entry - self-hosting language toolchain on OHOS:
+#   prebuilt bootstrap binary lacks .codesign (EACCES), monolithic
+#   libLLVM must override llvm-config component list, gnu-targeted
+#   bootstrap needs glibc-symbol shims
+# Source package: crystal/1.21.1
+#====================================================================
+
+id:                     DRAFT-ohos-crystal-1.21.1-prebuilt-bootstrap-sign-and-monolithic-llvm
+trigger_tool:           crystal|shards|make|clang|lld|binary-sign-tool|llvm-config
+phase:                  source|build|link|test
+
+error_signature:        sh: .*crystal: Permission denied|Permission denied.*crystal|unable to find library -lLLVM[A-Za-z]+|unable to find library -lLLVMRISCVDisassembler|undefined symbol: __xpg_strerror_r|undefined symbol: pthread_setcancelstate|can't find file 'c/fcntl'|can't find file 'markd'|error executing command: id -[ug]n, got exit status 1|libgc could not be found
+
+severity:               3
+category:               toolchain|self-hosting|elf-signing|llvm|compat-shim|environment
+match_keywords:         OHOS, crystal, crystal-lang, self-hosting, bootstrap, prebuilt binary, codesign, EACCES, Permission denied, monolithic libLLVM, LLVM_LDFLAGS, llvm-config, musl target, __xpg_strerror_r, pthread_setcancelstate, shards, CRYSTAL_PATH, lib_c, id -gn, id -un
+title:                  Self-hosting toolchains on OHOS: sign the prebuilt bootstrap, override the LLVM component list, and shim glibc-only symbols
+
+root_cause:             A self-hosting language ships a prebuilt bootstrap compiler that must
+                        RUN on OHOS before it can build the new compiler, and three
+                        independent obstacles stack up.  (1) The official release binary has
+                        no .codesign section, so execve returns EACCES even though mode bits,
+                        uid/gid, SELinux context and hmdfs permission attributes are identical
+                        to a locally built binary that runs fine.  (2) The build links LLVM via
+                        `llvm-config --libs`, which lists 110 component libraries
+                        (libLLVMX86CodeGen, libLLVMRISCVDisassembler, ...), while the OHOS SDK
+                        ships only three monolithic libLLVM files (libLLVM.so, libLLVM-15.so,
+                        libLLVM-15.0.4.so); --link-shared does not help because it looks for
+                        libLLVMSupport.so and friends, which are equally absent.  (3) The
+                        official bootstrap is built for the gnu target, and its stdlib picks
+                        lib_c bindings by the target it was BUILT for - not by the --target
+                        passed to new compilations - so generated code references glibc-only
+                        names (__xpg_strerror_r from lib_c/aarch64-linux-gnu/c/string.cr:8,
+                        pthread_setcancelstate from crystal/system/unix/process.cr:262,267)
+                        that musl does not provide.
+
+affected_scope:         Self-hosting language toolchains on OHOS that (a) ship a prebuilt
+                        bootstrap binary, (b) link LLVM through llvm-config, or (c) came from a
+                        gnu-targeted build.  Measured end to end on crystal 1.21.1: 1625 .cr
+                        files and 0 .c/.h files; the compiler builds to a 47 MB aarch64 binary
+                        and runs after signing (reports Crystal 1.21.1), and it compiles a
+                        runnable OHOS binary with --target aarch64-unknown-linux-musl.
+
+verification_cmd:       llvm-readelf -S ./bin/crystal | grep -c codesign ; ./bin/crystal --version
+
+rec_priority:           1
+rec_approach:           sign-bootstrap-then-override-llvm-then-shim
+rec_description:        Four ordered steps, each independently measured.
+                        (1) SIGN: binary-sign-tool sign -inFile <bootstrap>/bin/crystal
+                        -outFile <signed> -selfSign 1, chmod 755.  Sign bin/shards as well -
+                        it has the same missing section and fails the same way.
+                        (2) OVERRIDE LLVM: point LLVM_CONFIG at a wrapper script that is
+                        itself *named* llvm-config and placed first on PATH; the wrapper
+                        answers --libs / --ldflags / --system-libs with the monolithic
+                        library (-lLLVM-15.0.4) and forwards every other subcommand to the
+                        real llvm-config.  Measured: merely exporting LLVM_LDFLAGS does NOT
+                        work - crystal still runs `llvm-config --libs`, gets the 110
+                        component library names the SDK does not ship, and the link dies
+                        with "unable to find library -lLLVMX86CodeGen".  The wrapper name
+                        and its PATH position are what matter (crystal's
+                        find-llvm-config.sh resolves `llvm-config` through PATH).
+                        (3) SHIM glibc names: forward __xpg_strerror_r to musl's strerror_r (same
+                        XSI signature); return-0 stubs for pthread_setcancelstate /
+                        pthread_setcanceltype (justified: the runtime libc exports them as weak
+                        symbols, so "missing at link time" != "absent at run time").
+                        (4) POINT CRYSTAL_PATH correctly: it must include lib (for shards such
+                        as markd), src, and src/lib_c/<triple> (for `require "c/fcntl"`).
+rec_command:            PATH=<wrapper-dir>:$PATH LLVM_CONFIG=<wrapper-dir>/llvm-config make
+                        --jobserver-style=pipe -j4 crystal CRYSTAL=<signed>
+                        FLAGS="--target aarch64-unknown-linux-musl" LDFLAGS="-L<libgc>/lib <shim>.o"
+                        # <wrapper-dir>/llvm-config = compat/llvm-config-ohos, copied under
+                        # the name llvm-config so crystal's PATH lookup finds it.
+                        # Do NOT rely on LLVM_LDFLAGS alone: measured ineffective.
+rec_auto_fix:           false
+rec_impl:               recipe-source-layout
+
+fallback_priority:      2
+fallback_approach:      static-deps-to-avoid-abi-mixing
+fallback_description:   --target aarch64-unknown-linux-musl and OHOS-built shared objects pull
+                        in conflicting ABIs: linking an ohos .so reports "libxxx.so is
+                        incompatible with aarch64linux".  Prefer static dependencies where
+                        available (numactl/libgc/libpcre2 are static-only on ohpcd already) or
+                        keep every dependency on one ABI.
+fallback_command:       crystal build prog.cr --target aarch64-unknown-linux-musl --link-flags="-L<libgc>/lib"
+fallback_auto_fix:      false
+fallback_impl:          build-option
+
+forbid_1_pattern:       foreign aarch64 binary.*(incompatible|not supported).*(so|wontfix)|conclude glibc-vs-musl incompatibility from Permission denied
+forbid_1_reason:        Falsified by measurement: a locally built FULLY STATIC binary (e_type=EXEC,
+                        no INTERP, no NEEDED), padded to ~130 MB and placed in the same
+                        directory, runs fine.  The only decisive difference is that the local
+                        binary has a .codesign section and the released one has none.
+forbid_1_consequence:   Wrongly writing off an adaptable package as unsupported, while the
+                        actual remedy is one signing command.
+
+forbid_2_pattern:       link using plain llvm-config --libs output on OHOS|assume LLVM_LDFLAGS fixes the component-library list
+forbid_2_reason:        It names 110 component libraries that the OHOS SDK does not ship
+                        (only a monolithic libLLVM exists), and exporting LLVM_LDFLAGS does
+                        not change that list - measured: the build still links the 110 names.
+                        The working remedy is LLVM_CONFIG pointing at a wrapper that is named
+                        llvm-config and sits first on PATH.
+forbid_2_consequence:   Immediate link failure with dozens of "unable to find library -lLLVM..."
+                        lines; no amount of -L tweaking or LLVM_LDFLAGS helps.
+
+forbid_3_pattern:       delete the id -[ug]n spec|remove GROUP_NAME spec|patch group_spec to skip
+forbid_3_reason:        The failure is a host accounting quirk (uid/gid without a name mapping),
+                        not a defect in the test or the package.  A runner-level PATH shim that
+                        falls back to the numeric id preserves the assertion.
+forbid_3_consequence:   Silently losing user/group spec coverage.
+
+forbid_4_pattern:       sign only crystal but not shards|single sign step is enough
+forbid_4_reason:        Both binaries in the release archive lack .codesign and both are
+                        executed during the build.
+forbid_4_consequence:   The build gets past the compiler but dies when shards is invoked.
+
+similar_to:             [DRAFT-E077B-ohos-sdk-autocodesign-invalid, DRAFT-332-openrct2-0.5.3-libcpp15-cpp20-compat, DRAFT-eigen-3.4.1-make-jobserver-mkfifo-nonfatal, DRAFT-aml-1.0.0-ohos-pthread-setcancelstate-meson-feature-detect]
+conflicts_with:         []
+prerequisite_of:        []
+
+notes_codesign_signal:  Distinguishing this from E077B is the first diagnostic:
+                        `llvm-readelf -S <bin> | grep -c codesign` returns 0 here (no section at
+                        all) versus 1 for the SDK-autocodesign case.  E077B: fake signature
+                        present, remove then re-sign.  This entry: no signature, just sign.
+notes_shards_sign:      bin/shards in the release archive is unsigned too and fails identically;
+                        it must be signed before `shards install`.
+notes_crystal_path:     Omitting lib/ yields "can't find file 'markd'"; omitting
+                        src/lib_c/<triple> yields "can't find file 'c/fcntl'".  Both error
+                        messages misleadingly suggest running `shards install`, so the real
+                        cause (a missing CRYSTAL_PATH component) is easy to miss.
+notes_jobserver:        The make "jobserver mkfifo: Operation not permitted" warning appears
+                        here as well and is likewise NON-FATAL, matching
+                        DRAFT-eigen-3.4.1-make-jobserver-mkfifo-nonfatal.
+notes_openssl_version: A FIFTH gate, and the one that unblocks everything else: crystal
+                        binds OpenSSL 1.1 macro names (sk_value, sk_pop_free,
+                        EVP_CIPHER_flags) whenever it decides the OpenSSL version is
+                        unknown.  It decides that with a compile-time macro running
+                        `pkg-config --modversion libcrypto`, which silently yields
+                        "0.0.0" when PKG_CONFIG_PATH is unset, selecting the 1.1 bare-name
+                        branch in src/openssl/lib_crypto.cr.  Do NOT chase these symbols
+                        one by one - export PKG_CONFIG_PATH pointing at each dependency's
+                        lib/pkgconfig and the entire sk_*/EVP_* error chain disappears at
+                        once (verified: pkg-config then reports 3.5.8, and the spec suite
+                        compiles).
+notes_remaining:        Closed out.  The 67 failures / 38 errors are attributed by category
+                        (chmod and readlink under hmdfs which ignores chmod, user/group with
+                        no name mapping, tempfile, XML, exception-memory) in the recipe's
+                        notes.md and test_package/MANIFEST.yml; the conanfile recipe was
+                        produced and local conan create validation PASSED (CREATE_RC=0);
+                        the PR was opened.  Six gates are recorded above so the work need
+                        not be rediscovered.
+notes_status:           Measured: compiler MAKE_RC=0 (47 MB aarch64), runs as "Crystal 1.21.1
+                        (2026-09-26)", compiles a runnable hello-world for
+                        aarch64-unknown-linux-musl, and the upstream spec suite builds and
+                        runs: 18066 examples, 67 failures, 38 errors, 32 pending, i.e.
+                        17929 passing, in 4:29.

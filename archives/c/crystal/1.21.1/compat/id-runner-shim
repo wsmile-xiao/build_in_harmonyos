@@ -1,0 +1,89 @@
+#!/bin/sh
+# runner 级环境兼容 shim（不改上游测试与断言）：
+# 本机 uid/gid 无名称映射，`id -un` / `id -gn` 会向 stderr 打
+# "cannot find name for ..." 并以 1 退出；而 upstream crystal spec 在
+# **编译期宏**里取用（spec/std/system/{group,user}_spec.cr）并检查退出码，
+# 直接导致 spec 编译失败。POSIX 允许无名称时回退数字 id，故此处补齐：
+# 先试真实 id，失败则回退 `id -u`/`id -g` 的数字值，退出码恒 0；其余参数原样转交。
+#
+# 真实 id 的定位（**不写死路径**）：本 shim 被命名为 id 且置于 PATH 最前，
+# 故必须排除**自身**再取 PATH 上第一个 id——否则递归调用自己。
+# 硬编码 /storage/.../usr/local/bin/id 在其它 worker 上不存在，会静默退化。
+set -u
+
+self=$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")
+
+# 判定某个 id 是否真的可用：必须能取到数字 uid（设备上 /system/bin/id 存在，
+# 但连 `id -u` 都失败：rc=1、无输出）。只按"文件存在"选取会命中它，让整个
+# shim 崩掉——故一律实测，不行就试下一个。
+id_works() {
+  p=$1
+  [ -n "$p" ] || return 1
+  [ -x "$p" ] || return 1
+  rp=$(readlink -f "$p" 2>/dev/null) || rp="$p"
+  [ "$rp" != "$self" ] || return 1
+  v=$("$rp" -u 2>/dev/null) || v=""
+  case $v in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$rp"
+}
+
+find_real_id() {
+  # ① 首选：PATH 上第一个真正可用的 id（自然适配任意 worker 布局）
+  rest=${PATH:-}
+  while [ -n "$rest" ]; do
+    case $rest in
+      *:*) d=${rest%%:*}; rest=${rest#*:} ;;
+      *)   d=$rest; rest="" ;;
+    esac
+    [ -n "$d" ] || continue
+    if rp=$(id_works "$d/id"); then
+      printf '%s\n' "$rp"; return 0
+    fi
+  done
+  # ② 兜底：PATH 上没有可用 id 时，逐个试**已知安装位置**。这是本改动前的
+  # 原始形态（硬编码 /storage/.../usr/local/bin/id 曾实测可用）——保留它可
+  # 避免"改成 PATH 搜索后反而找不到"的回退。仍然逐个实测，不可用就继续。
+  for cand in \
+      /storage/Users/currentUser/usr/local/bin/id \
+      /data/service/hnp/bin/id \
+      /usr/local/bin/id \
+      /usr/bin/id \
+      /bin/id ; do
+    if rp=$(id_works "$cand"); then
+      printf '%s\n' "$rp"; return 0
+    fi
+  done
+  return 1
+}
+
+if ! REAL=$(find_real_id); then
+  echo "id-shim: no usable 'id' found (searched PATH and known locations)" >&2
+  exit 1
+fi
+
+# 回退：取数字 id。拿不到就**报错退出**，不静默吐空值（空值会让上游断言
+# 以看似无关的方式失败，掩盖真实原因）。
+num_fallback() {
+  v=$("$REAL" "$1" 2>/dev/null) || v=""
+  case $v in
+    ''|*[!0-9]*) echo "id-shim: '$REAL $1' produced no numeric id" >&2; exit 1 ;;
+    *) printf '%s\n' "$v"; exit 0 ;;
+  esac
+}
+
+arg=${1:-}
+case "$arg" in
+  -un|-u)
+    if out=$("$REAL" "$arg" 2>/dev/null) && [ -n "$out" ]; then
+      printf '%s\n' "$out"; exit 0
+    fi
+    num_fallback -u ;;
+  -gn|-g)
+    if out=$("$REAL" "$arg" 2>/dev/null) && [ -n "$out" ]; then
+      printf '%s\n' "$out"; exit 0
+    fi
+    num_fallback -g ;;
+  *) exec "$REAL" "$@" ;;
+esac
