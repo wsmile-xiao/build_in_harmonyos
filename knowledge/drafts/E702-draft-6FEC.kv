@@ -1,0 +1,143 @@
+#====================================================================
+# E702（草稿/预留编号）— OHOS 上 gl4es 缺失 GL 2.0+/3.0 原型声明：
+#   <GL/glew.h> 系工程编译报「未声明标识符」，且制品仓无 GLEW 可依赖
+# 触发事件: critter 2.0.4（mooflu/critter，SDL2 分支）HarmonyOS PC 适配
+# 日期: 2026-09-26
+# 与既有条目的关系（增量说明）:
+#   本条聚焦「**头文件原型面**」——即 GL 头随平台宏条件裁剪导致 prototype 缺失；
+#   E013/E019 覆盖的是 dlopen API 与 dlopen 硬编码绝对路径（运行期符号获取），
+#   与本条正交。本条同时覆盖 gl4es 在 Linux/OHOS 下**不定义**
+#   GL_GLEXT_PROTOTYPES 这一上游事实（只在 Emscripten/Apple 下定义）。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E702
+trigger_tool:           cmake|clang|cpp|conan
+phase:                  configuration|compilation
+error_signature:        use of undeclared identifier 'glGetUniformLocation'|use of undeclared identifier 'glUniform[1-4][a-z]*'|use of undeclared identifier 'glGetStringi'|use of undeclared identifier 'glBindVertexArray'|use of undeclared identifier 'glDebugMessageCallback'|GL_GLEXT_PROTOTYPES|undefined reference to `glewInit'|cannot find -lGLEW|Could NOT find GLEW
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               compat, headers, ohos, platform, portability
+match_keywords:         GL/glew.h, GLEW, glewInit, glewGetString, glewExperimental, gl4es, libGL, GL_GLEXT_PROTOTYPES, glext.h, glGetUniformLocation, glBindVertexArray, glGetStringi, FindGLEW, OPENGL_gl_LIBRARY, use of undeclared identifier
+title:                  OHOS/gl4es 下 `GL_GLEXT_PROTOTYPES` 未定义导致 GL 2.0+/3.0 原型缺失：`<GL/glew.h>` 工程批量报「未声明标识符」，须由下游 glew.h + 空实现 shim 补齐（制品仓无 GLEW 可依赖）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             两个互相独立但同源的问题叠加：①**原型缺失**——gl4es 提供的
+                        include/GL/gl.h 只在 `#if defined(__EMSCRIPTEN__) || defined
+                        (__APPLE__)` 分支里 `#define GL_GLEXT_PROTOTYPES 1`，而
+                        gl4es 的 glext.h 又把 GL_VERSION_2_0/2_1/3_0 的函数声明整段
+                        包在 `#ifdef GL_GLEXT_PROTOTYPES` 内。于是在 OHOS/Linux 上
+                        编译时，`<GL/glew.h>`/`<GL/gl.h>` 只给出 OpenGL 1.x 原型，
+                        凡使用 glGetUniformLocation / glUniform*/glBindVertexArray /
+                        glGetStringi / glGetUniformLocation 的 C++ 源码一律报
+                        「use of undeclared identifier」（C 源因隐式声明仅告警，
+                        **C++ 直接硬错**，所以同工程里 .c 能过、.cpp 全挂，容易被
+                        误判为「源码不兼容」）。②**GLEW 无处可依**——OHOS 制品仓没有
+                        glew 配方/二进制（`conan list glew/* -r=ohpcd` 无命中），
+                        而工程的 CMake 往往 `find_package(GLEW REQUIRED)`；
+                        实际需要的 GLEW 面很小（glewInit / glewGetString /
+                        glewExperimental 三个符号 + GLEW_VERSION / GLEW_ARB_* /
+                        GLEW_OK 等宏），绝大部分 GLEW 宏只是 feature flag。
+                        gl4es 自身**不导出** glDebugMessageCallback 等调试入口。
+affected_scope:         所有在 OHOS 上通过 gl4es（libGL.so）使用「直接 GL 调用 +
+                        <GL/glew.h>」的 C/C++ 图形工程：SDL2/GLFW 图形程序、游戏、
+                        用 OpenGL 2.0+ 着色器（VAO/VBO/uniform）的渲染器。典型信号是
+                        同一头文件在 Emscripten/Apple 构建能过、OHOS 构建报未声明标识符。
+verification_cmd: |
+  # 1) 确认 gl4es 头在 Linux/OHOS 下不定义 GL_GLEXT_PROTOTYPES（应在 Emscripten/Apple 分支内）
+  grep -n "GL_GLEXT_PROTOTYPES" $GL4ES_PREFIX/include/GL/gl.h
+  # 2) 确认 glext.h 的 2.0+ 声明被该宏门控
+  grep -n "GL_VERSION_2_0\|GL_VERSION_3_0" $GL4ES_PREFIX/include/GL/glext.h | head
+  # 3) 确认制品仓确实没有 glew（R35：用 download/install 而非 conan list 下结论）
+  conan download "glew/2.2.0" -r=ohpcd --only-recipe   # 期望 Recipe not found
+  # 4) 修复后：原型可见 + glew 符号可解析
+  printf '#include <GL/glew.h>\nint main(){glewInit();return 0;}\n' > t.c && clang t.c -lGL -o t && ./t
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           downstream-glew-header-shim-plus-empty-impl
+rec_description:        配方自带一份下游 compat 头（exports_sources 携带，落
+                        compat/GL/glew.h）：在 #include <GL/gl.h> **之前**定义
+                        GL_GLEXT_PROTOTYPES——gl4es 的 gl.h L2097 会无条件 include
+                        <GL/glext.h>，宏已就位即让 GL 2.0+/3.0 原型随 gl.h 一起可见。
+                        反之把宏放在 gl.h 之后、靠二次 include glext.h 补救无效：
+                        glext.h 的 __glext_h_ include guard 会让第二次 include
+                        整段跳过。随后提供 GLEW 的宏面
+                        （GLEW_VERSION、GLEW_VERSION_1_1..2_1、GLEW_OK、错误码）与
+                        函数面声明（glewInit/glewGetString、
+                        extern GLboolean glewExperimental）。同时用一份极小的
+                        glew-shim.c 提供这些函数的**空实现**（glewInit 返回
+                        GLEW_OK、glewGetString 返回 "1.13" 之类的版本串），以及
+                        gl4es 未导出的 GL3/调试入口的 no-op（glDebugMessageCallback/
+                        glDebugMessageControl、glBindBufferBase/glProgramParameteri/
+                        glBindFragDataLocation）——这些符号只被工程里**未被调用**的
+                        辅助代码引用，no-op 不改变行为。shim 编译进静态库或直接
+                        加入目标 link 列表；CMake 侧用 `-DOPENGL_gl_LIBRARY=<gl4es
+                        libGL.so>` + `-DOPENGL_INCLUDE_DIR=<gl4es include>` 把
+                        FindOpenGL 钉在 gl4es 上。参考先例：
+                        archives/l/logstalgia/1.1.4（同名 glew.h 头 shim +
+                        compat/lib 内静态 shim 库）、archives/b/ball（缺 GLU 时
+                        关闭 GUI 面）。
+rec_command:            conan create archives/c/critter/2.0.4 -pr:h=./ci/conan/profiles/ohos-aarch64 -pr:b=./ci/conan/profiles/ohos-aarch64
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      define-glext-prototypes-in-build-flags
+fallback_description:   若不便携带 compat 头，可在配方 build() 里给全部编译单元统一加
+                        `-DGL_GLEXT_PROTOTYPES=1`（并在 include 顺序上确保 gl4es 的
+                        include/GL 在系统 GL 头之前），可解决①原型缺失；但②GLEW
+                        符号仍缺，必须另配 tool_requires/桩库或改用上游自带的
+                        GLEW 加载替代路径，因此回退面比推荐方案窄。
+fallback_command:       cmake -DCMAKE_C_FLAGS="-DGL_GLEXT_PROTOTYPES=1" -DCMAKE_CXX_FLAGS="-DGL_GLEXT_PROTOTYPES=1 -I<gl4es>/include"
+fallback_auto_fix:      false
+
+forbid_1_pattern:       apt install libglew-dev|dnf install glew-devel|conan install glew/.*--build=missing|从系统 /usr/include/GL/glew.h 取头
+forbid_1_reason:        OHOS 构建机与目标机都没有系统 GLEW；把宿主系统头/库塞进交叉编译会混入
+                        非 OHOS 的 ABI 与 feature 宏（且宿主 glew.h 的 GLEW_VERSION
+                        与 gl4es 实际能力不符，会把运行期判成「支持 GL 4.x」而走到
+                        未实现路径）；制品仓也没有 glew 配方可解，--build=missing 会
+                        直接失败或拉入无关源码。
+forbid_1_consequence:   构建看似通过但产物链到宿主 libGLEW（非 aarch64-ohos），目标机
+                        loader 拒绝加载；或运行期按错误版本号启用 gl4es 未实现的
+                        路径而崩溃——比编译期报错更难定位。
+
+forbid_2_pattern:       放在 #include <GL/gl.h> 之后才 #define GL_GLEXT_PROTOTYPES 1.*并二次 include <GL/glext.h>|直接在源码里删 #include <GL/glew.h>
+forbid_2_reason:        宏必须在 gl4es 的 <GL/gl.h> 被**解析之前**就定义好：gl.h L2097
+                        无条件 include <GL/glext.h>，而 glext.h 的 2.0+/3.0 原型块由
+                        #ifdef GL_GLEXT_PROTOTYPES 门控；若反过来放在 gl.h 之后，
+                        二次 include glext.h 会被其 __glext_h_ include guard 直接跳过，
+                        宏永远没有机会生效（顺序写反等于没定义）。改上游源码更是越界：
+                        源码仓改动应由 patch 承载并说明，探索期禁止散改。
+forbid_2_consequence:   折腾多轮仍报同样的未声明标识符，误判为「gl4es 完全不支持 GL2」
+                        而放弃适配；或产生无法复现的本地源码改动。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P003, P006
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E013, E019
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               drafts/E702-draft-6FEC.md
+last_updated:           2026-09-26
+source_event:           critter 2.0.4（mooflu/critter，SDL2 分支）HarmonyOS PC 适配：game/Video.cpp 等 ~19 处 <GL/glew.h>，编译期批量「use of undeclared identifier」
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:              pending
+source_commit:          pending
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-26
+
+draft:                  true
+contributor_id:         6FEC
