@@ -36,3 +36,8 @@ test_package 用 dlopen 加载 libgirara.so，dlsym 解析 girara_list_new / gir
 ---
 *编译者: OpenHarmony PC 暑假比赛参赛者*
 *日期: 2026-07-16*
+
+## 验证记录（2026-10-03 补充）
+- 本地 conan create（profile: ci/conan/profiles/ohos-aarch64）：编译、打包、OHOS 签名全部通过
+- 上游测试：datastructures / template / utils 模块本机运行，通过率 100%（包构建以 -Dtests=false 跳过交叉编译测试，原因见"问题1"，测试在本机独立运行验证）
+- 消费者测试增强：test.c 通过 标准头文件包含+直接链接（-I 头文件 + -L -lgirara） 调用 girara_list_new/append/size/nth/free 共 5 个导出 API（原 3 个），验证列表创建、追加、计数、按索引取值、释放全链路，本机运行通过
