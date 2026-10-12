@@ -1,0 +1,88 @@
+id: DRAFT-3517-qemu-9.2.4-pathname-af-unix-bind-eperm-reversible-address-shim
+title: "OHOS 全域拒绝路径名 AF_UNIX bind(EPERM) 而抽象命名空间可用——LD_PRELOAD 可逆地址改写垫片及其「地址回显」必备反向映射（qemu 9.2.4 实证）"
+category: platform-syscall
+severity: 3
+error_signature: "bind.*Operation not permitted|EPERM.*bind|socket_accept failed: Resource temporarily unavailable|qtest_init_internal.*s->fd >= 0.*s->qmp_fd >= 0|SIGABRT 0.15s"
+keywords:
+  - AF_UNIX
+  - bind
+  - EPERM
+  - abstract namespace
+  - sun_path
+  - LD_PRELOAD
+  - socket shim
+  - getsockname
+  - address echoing
+  - qtest
+  - qemu
+affected_build_systems:
+  - meson
+affected_compilers:
+  - clang
+affected_platforms:
+  - OHOS
+  - aarch64-linux-ohos
+first_seen:
+  package: qemu
+  version: "9.2.4"
+  date: "2026-09-27"
+last_updated: "2026-09-27"
+hit_count: 0
+verified: false
+verify_builds: []
+prescan_pattern: "AF_UNIX|sockaddr_un|sun_path"
+root_cause: |-
+  OHOS PC 上**路径名** AF_UNIX `bind(2)` 在任何可写目录都返回 EPERM，
+  而**抽象命名空间**（`sun_path[0] == '\\0'`）与 TCP 均正常。实测矩阵：
+
+    | 地址形式              | bind 结果            |
+    |-----------------------|----------------------|
+    | 路径名（`/data/...`） | EPERM（所有可写目录）|
+    | 抽象命名空间          | OK                   |
+    | AF_INET 127.0.0.1:0   | OK                   |
+
+  这对任何「用 unix socket 做本机传输」的软件都是硬阻塞。以 qemu 的 qtest
+  为例：传输层两侧都是路径名 unix socket（libqtest 监听某路径并把**同一路径**
+  经 `-qtest unix:PATH` 交给 QEMU；QMP 侧是路径名 chardev），无垫片时每个用例
+  在 0.15s 内 SIGABRT。
+
+  关键陷阱：仅改写 `bind`/`connect` 是**不够**的。地址的**回显**必须保持真实
+  ——qemu 的 `info network` 会打印 socket 地址，上游 netdev-socket 测试会断言
+  配置的路径被原样回报；只做正向改写会让该断言失败（表现为「垫片修好了一批、
+  又弄坏了另一批」）。
+rec_approach: |-
+  1. 先用探针确认是「路径名被拒、抽象命名空间可用」，而不是 socket 全局禁用
+     （TCP 与抽象命名空间都要各测一次，避免误判）。
+  2. 用 LD_PRELOAD 把路径名地址改写为**由路径纯函数派生**的抽象名
+     （如 `PREFIX + path`，过长时退化为哈希）。纯函数派生是**多进程免协调**
+     的关键：被 spawn 的 QEMU 继承同一垫片后能算出同一名字而无需通信。
+  3. **必须实现反向映射**：在 `getsockname`/`getpeername` 把抽象名还原为原
+     路径，否则任何回显地址的断言/日志都会暴露改写（这是本条目最重要的判据）。
+     注意抽象名的长度来自 `addrlen`（名字本身不以 NUL 结尾），且首字节是 NUL
+     标记——解析时须从 `sun_path[1]` 起比前缀。
+  4. 另两个易错点：①路径长度要用 `strnlen(sun_path, sizeof sun_path)`，**不能**
+     用 `addrlen - offsetof(...)`——调用方普遍传 `sizeof(struct sockaddr_un)`，
+     按 addrlen 算会把尾部 NUL 填充一并复制进抽象名并让生成的 addrlen 越过结构体
+     边界，内核以 EINVAL 拒绝（全部 bind 失败）；②写入时必须把名字放在
+     `sun_path[1..]` 并令 `sun_path[0] = 0`——若从下标 0 开始写就变成了**相对
+     路径名**，恰好回到被拒的那条路。
+  5. 顺带处理元数据调用：抽象套接字**没有 inode**，故对被改写的路径
+     `chmod()` 会 ENOENT。有调用方（如 swtpm）在 bind 后 `chmod` 自身控制
+     套接字并把失败当致命错误退出，故需对**自身改写过的路径**应答
+     `chmod`/`fchmodat` 成功；未被改写的路径必须原样透传。
+solution: |-
+  qemu 9.2.4 验证 harness（不随配方发布）：`unix_abstract_shim.c` 拦截
+  `bind`/`connect`（正向）与 `getsockname`/`getpeername`（反向），并以
+  `bind` 成功时登记路径的表驱动 `chmod`/`fchmodat` 容忍。
+
+  实测效果：路径名 bind EPERM 的全域限制被隔离到 harness 层，
+  `qtest` 66 项由 32 项失败转为 **0 FAIL**；其中 `netdev-socket` 在仅做正向
+  改写时失败、补上反向映射后通过（2/2，各 10 项子测试）。
+fallback: |-
+  若无法使用 LD_PRELOAD（如静态链接目标），可改为在软件自身加可配置的
+  socket 目录/传输后端抽象（上游已存在 `QTEST_QEMU_BINARY` 之类环境钩子，
+  但传输地址不可配置）；或改用 TCP 传输（QEMU 的 qtest chardev 支持
+  `tcp:`，但 libqtest 侧硬编码 unix，需要改动上游测试代码——本包未采用）。
+reference_builds: []
+related_docs:
+  - DRAFT-3517-qemu-9.2.4-mkfifo-mknodat-seccomp-fifo-semantics-shim

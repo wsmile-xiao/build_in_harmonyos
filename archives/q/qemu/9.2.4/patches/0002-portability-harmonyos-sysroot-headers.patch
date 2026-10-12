@@ -1,0 +1,143 @@
+--- a/subprojects/libvhost-user/libvhost-user.h
++++ b/subprojects/libvhost-user/libvhost-user.h
+@@ -18,6 +18,14 @@
+ #include <stdbool.h>
+ #include <stddef.h>
+ #include <poll.h>
++/* OHOS's sysroot <linux/vhost.h> chains into the kernel's virtio UAPI headers.
++ * Those are the kernel-side copies: they use the upstream _UAPI_... guards
++ * (whereas the bundled headers below use the _LINUX_... form) and they omit
++ * vring_need_event(), a kernel-only helper this library calls.  Predefining
++ * their guards keeps the sysroot copies out of this translation unit so the
++ * bundled headers are the single source of these types. */
++#define _UAPI_LINUX_VIRTIO_TYPES_H
++#define _UAPI_LINUX_VIRTIO_RING_H
+ #include <linux/vhost.h>
+ #include <pthread.h>
+ #include "standard-headers/linux/virtio_ring.h"
+--- a/linux-user/syscall.c
++++ b/linux-user/syscall.c
+@@ -1277,7 +1277,17 @@
+ }
+ #endif
+ 
+-#if defined(TARGET_NR_mq_open) && defined(__NR_mq_open)
++/* The host libc may declare <mqueue.h> yet not export mq_open() from its
++ * shared library (OHOS's musl: only the static libc.a carries it), in which
++ * case the translation below cannot link:
++ *
++ *   ld.lld: error: undefined symbol: mq_open
++ *   >>> referenced by syscall.c:13051 (linux-user/syscall.c:13051)
++ *   >>>               libqemu-arm-linux-user.a.p/linux-user_syscall.c.o:(do_syscall1)
++ *
++ * meson probes for the symbol and sets HAVE_MQ_OPEN; without it these syscalls
++ * stay unimplemented instead of breaking the link. */
++#if defined(TARGET_NR_mq_open) && defined(__NR_mq_open) && defined(HAVE_MQ_OPEN)
+ #include <mqueue.h>
+ 
+ static inline abi_long copy_from_user_mq_attr(struct mq_attr *attr,
+@@ -7556,7 +7566,17 @@
+ #endif
+ 
+ #ifndef HAVE_SIGEV_NOTIFY_THREAD_ID
++/*
++ * glibc keeps the thread id inside its private _sigev_un union and the macro
++ * below reaches into it.  libcs without that union (musl, which OHOS uses)
++ * cannot compile the access -- nor deliver SIGEV_THREAD_ID -- so disable the
++ * conversion on those hosts instead of failing to build.
++ */
++#if defined(__GLIBC__)
+ #define sigev_notify_thread_id _sigev_un._tid
++#else
++#define QEMU_NO_SIGEV_NOTIFY_THREAD_ID 1
++#endif
+ #endif
+ 
+ static inline abi_long target_to_host_sigevent(struct sigevent *host_sevp,
+@@ -7579,7 +7599,9 @@
+     host_sevp->sigev_signo =
+         target_to_host_signal(tswap32(target_sevp->sigev_signo));
+     host_sevp->sigev_notify = tswap32(target_sevp->sigev_notify);
++#ifndef QEMU_NO_SIGEV_NOTIFY_THREAD_ID
+     host_sevp->sigev_notify_thread_id = tswap32(target_sevp->_sigev_un._tid);
++#endif
+ 
+     unlock_user_struct(target_sevp, target_addr, 1);
+     return 0;
+@@ -13017,7 +13039,7 @@
+ #endif
+ #endif
+ 
+-#if defined(TARGET_NR_mq_open) && defined(__NR_mq_open)
++#if defined(TARGET_NR_mq_open) && defined(__NR_mq_open) && defined(HAVE_MQ_OPEN)
+     case TARGET_NR_mq_open:
+         {
+             struct mq_attr posix_mq_attr;
+--- a/linux-user/strace.c
++++ b/linux-user/strace.c
+@@ -15,6 +15,13 @@
+ #include <linux/netlink.h>
+ #ifdef HAVE_OPENAT2_H
+ #include <linux/openat2.h>
++
++/* Older OHOS sysroots ship linux/openat2.h from before Linux 5.12 and so lack
++ * RESOLVE_CACHED, which openat2_resolve_flags[] below decodes.  Supply the
++ * kernel value when the header does not. */
++#ifndef RESOLVE_CACHED
++#define RESOLVE_CACHED 0x20
++#endif
+ #endif
+ #include <sched.h>
+ #include "qemu.h"
+--- a/linux-user/elfload.c
++++ b/linux-user/elfload.c
+@@ -2700,13 +2700,32 @@
+ static int pgb_try_mmap(uintptr_t addr, uintptr_t addr_last, bool keep)
+ {
+     size_t size = addr_last - addr + 1;
++    int flags = MAP_ANONYMOUS | MAP_PRIVATE | MAP_NORESERVE;
+     void *p = mmap((void *)addr, size, PROT_NONE,
+-                   MAP_ANONYMOUS | MAP_PRIVATE |
+-                   MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
++                   flags | MAP_FIXED_NOREPLACE, -1, 0);
+     int ret;
+ 
+     if (p == MAP_FAILED) {
+-        return errno == EEXIST ? 0 : -1;
++        if (errno == EEXIST) {
++            return 0;
++        }
++        /*
++         * The HarmonyOS kernel (1.12.0) does not implement
++         * MAP_FIXED_NOREPLACE and fails the guest-base probes with ENOSYS.
++         * Retry as a hint-only mmap, accepting the address only when the
++         * kernel placed the mapping exactly where we asked; otherwise the
++         * base is unavailable and another candidate is tried.
++         */
++        if (errno != ENOSYS) {
++            return -1;
++        }
++        p = mmap((void *)addr, size, PROT_NONE, flags, -1, 0);
++        if (p != (void *)addr) {
++            if (p != MAP_FAILED) {
++                munmap(p, size);
++            }
++            return 0;
++        }
+     }
+     ret = p == (void *)addr;
+     if (!keep || !ret) {
+--- a/meson.build
++++ b/meson.build
+@@ -2618,6 +2618,11 @@
+ config_host_data.set('CONFIG_TIMERFD', cc.has_function('timerfd_create'))
+ config_host_data.set('HAVE_COPY_FILE_RANGE', cc.has_function('copy_file_range'))
+ config_host_data.set('HAVE_GETIFADDRS', cc.has_function('getifaddrs'))
++# cc.has_function() only compiles a reference -- OHOS's musl declares mq_open()
++# in <mqueue.h> but does not export it from libc.so, so the probe must link.
++config_host_data.set('HAVE_MQ_OPEN',
++                     cc.links('#include <mqueue.h>\nint main(void) { return mq_open(0, 0); }',
++                              name: 'mq_open'))
+ config_host_data.set('HAVE_GLIB_WITH_SLICE_ALLOCATOR', glib_has_gslice)
+ config_host_data.set('HAVE_GLIB_WITH_ALIGNED_ALLOC', glib_has_aligned_alloc)
+ config_host_data.set('HAVE_OPENPTY', cc.has_function('openpty', dependencies: util))
