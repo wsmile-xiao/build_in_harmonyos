@@ -1,0 +1,31 @@
+#====================================================================
+# Draft: xcolmix 1.07 --
+#        手写 Makefile 在子 make 命令行上硬写 CFLAGS=/LFLAGS=，
+#        conan 的 CFLAGS/LDFLAGS/CPPFLAGS 到不了编译与链接行；
+#        依赖搜索路径必须走 Makefile 自己注释里写明的旋钮
+#====================================================================
+
+id:                     DRAFT-XCOLMIX-107-MAKEFILE-HARDCODED-CFLAGS
+trigger_tool:           conan|make|clang|ld
+phase:                  configuration|compiling|linking
+error_signature:        fatal error: (X11/)?forms\.h: No such file or directory|undefined reference to `fl_[a-z_]+'|cannot find -lforms|cannot find -lX11|make: \*\*\* No rule to make target
+
+severity:               1
+category:               conan|build-system|make|dependency|linking
+match_keywords:          hand-written Makefile, no configure, STDCFLAGS, STDLFLAGS, XFINCDIR, XFLIBDIR, sub-make command line, command-line variable override, make -e, CPPFLAGS implicit rule, GNU make, LFLAGS, -lforms, -lX11, XForms, AutotoolsDeps, VirtualBuildEnv, R33, R49
+
+title:                  手写 Makefile 把 CFLAGS/LFLAGS 硬写进子 make 的命令行：conan 注入的编译标志全部失效，依赖搜索路径只能从 Makefile 自己的旋钮进（症状是 -lforms 找不到 / forms.h 找不到，看起来像"依赖没发布"）
+
+root_cause:            GNU make 的变量优先级是「命令行赋值 > makefile 内的赋值 > 环境变量」。老式手写 Makefile 普遍把标志写死在「会再起一个子 make」的目标里，例如 xcolmix 1.07：final: make xcolmix CFLAGS="$(STDCFLAGS)" LFLAGS="$(STDLFLAGS)"。父 make 从 conan 拿到的 CFLAGS 是环境变量，子 make 命令行上的 CFLAGS= 直接把它盖掉，于是 AutotoolsToolchain / AutotoolsDeps 精心算出来的 -I/-L/-D 一条都进不了编译行，症状是 fatal error: forms.h: No such file or directory 或 ld.lld: error: undefined symbol: fl_initialize —— 看起来像依赖没进图（R36），实际依赖就在图里、路径也被算出来了，只是没送到编译器。判别要点：日志里 clang 的命令行若只剩 Makefile 自带的那几个标志（本例 -c -O2 -Wall），而 conan 缓存路径一个都没出现，就是这个坑。次级形态：链接行同理，本例 xcolmix: $(OBJ) $(XFLIBDIR) -lforms -lX11 -lm $(LFLAGS) 完全不吃 LDFLAGS，所以 -L 必须走 XFLIBDIR。唯一真正会自动生效的通道是 CPPFLAGS——make 内建 .c.o 规则是 $(CC) $(CFLAGS) $(CPPFLAGS) -c，AutotoolsDeps 写的 CPPFLAGS 会被带上（日志里可见），但这属于隐式行为、不可作为设计依据。
+affected_scope:         所有「无 configure / 无 autotools / 无 meson / 无 cmake、只有手写 Makefile」的包：1990-2000 年代的 X11 工具、编辑器、玩具项目、小工具。典型可搜索特征：tarball 里只有 src/Makefile；Makefile 目标名是 final/dist/install 而非 all；存在 STDCFLAGS/STDLFLAGS/XFINCDIR/XFLIBDIR 这类自造变量名。
+verification_cmd:       grep -nE '^[A-Za-z_]+:' <src>/Makefile | head -20 ; grep -nE '^\t(make|\$\(MAKE\))' -A2 <src>/Makefile ; grep -nE '\b(CFLAGS|LFLAGS|CPPFLAGS|LDFLAGS)\s*=\s*"' <src>/Makefile
+
+rec_priority:           1
+rec_approach:           read-makefile-comment-for-documented-knobs-then-assert-linkline
+rec_description:        (1) 先读 Makefile 头部注释：老 Makefile 通常自己写明了「否则请设置 XFLIBDIR=… 与 XFINCDIR=…」这类旋钮，直接用它们，不要绕开上游目标自己拼命令。xcolmix 的做法是 `make -j1 final XFINCDIR="…-I…" XFLIBDIR="-L…"`，让 final 原样执行。(2) 配方里显式从 self.dependencies.host 收集 include/lib 目录（注意 Conan 2 里 dependencies.host 给的是整个 host 闭包，不只是直接 requires），拼成 XFINCDIR/XFLIBDIR 传进去——显式优于依赖 CPPFLAGS 的隐式行为，便于评审逐字核对。(3) 仍然照常 generate() AutotoolsToolchain + AutotoolsDeps + VirtualBuildEnv，让 CC 来自 conf（R33），即使 CFLAGS 到不了编译行。(4) build() 之后必须断言产物：读 ELF 头确认 64 位 + 目标机器，并核对 DT_NEEDED 里确实出现了要链接的库；「make 退出码 0」不等于「链上了正确的库」。(5) 上游自造的变量名拼错（如 xcolmix 的 STDLFLAGS 被 final 当成 LFLAGS 传）不要顺手修：那个不存在的 -L 路径会被链接器忽略，改它属与任务无关的上游改动。(6) 若某条标志无论如何都送不进去，才考虑在 package() 侧或用 patch 改 Makefile，并把理由写进 notes。
+rec_command:           make -j1 final XFINCDIR="$(for d in $DEPS; do printf -- '-I%s ' "$d/include"; done)" XFLIBDIR="$(for d in $DEPS; do printf -- '-L%s ' "$d/lib"; done)"   # 再 readelf -d <pkg>/bin/<exe> | grep NEEDED 复核
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:
+source_commit:

@@ -1,0 +1,31 @@
+#====================================================================
+# Draft: xcolmix 1.07 / X11+XForms GUI --
+#        图形程序的「可断言面」只有窗口显示之前的分支；
+#        用 -display 指向关闭的回环端口可把 XOpenDisplay 失败变成
+#        与环境无关的确定性断言，从而证明工具包代码真的在进程内执行
+#====================================================================
+
+id:                     DRAFT-XCOLMIX-107-GUI-HEADLESS-ASSERTABLE-BRANCHES
+trigger_tool:           conan|make|clang|X11|XForms|qemu
+phase:                  testing
+error_signature:        Can't open display|In fl_initialize\(\)|Segmentation fault \(core dumped\)|qemu: uncaught target signal 11|Test time = [0-9.]+ sec.*<end of output>|rc=124|exit=139
+
+severity:               2
+category:               testing|qemu|X11|headless|environment
+match_keywords:          GUI app, headless CI, no X server, XOpenDisplay, fl_initialize, fl_do_forms, blocks forever, SIGSEGV, access(R_OK), argc validation, usage banner, version banner, -display 127.0.0.1:99, deterministic assertion, XForms, xev, --version absent, L2 skip
+
+title:                  无 X server 的 headless CI 上怎么测 X11 GUI 程序：只有窗口显示之前的分支可断言，把 display 强制指向关闭的回环端口即可把 XOpenDisplay 失败变成确定性证据（直接跑 GUI 路径只会阻塞或段错误）
+
+root_cause:            X11 GUI 程序进入 fl_do_forms()/XNextEvent 之后会**永远阻塞**（实测 timeout rc=124）；若显示打开失败后代码仍继续建表单，则会在解引用 NULL Display 时段错误（实测 SIGSEGV / exit=139）。两者都不能作为 CI 断言，因为结果与 worker 是否恰好有可用 $DISPLAY 有关。真正稳定的是 main() 里在显示窗口**之前**就 return/exit 的那几条拒绝分支：参数个数校验、access(2) 文件可读性校验、以及工具包初始化自身的失败分支。xcolmix 1.07 的实测结构是：argc>2 → usage() exit 1；argc==2 且 access(argv[1],R_OK) 失败 → usage() exit 1；无参数或合法 rgb 文件 → 进入 initforms()+fl_do_forms()（阻塞/崩，不可测）。关键技巧：usage() 之类的横幅常把版本号编进字符串（xcolmix 的 usage() 用 src/version.h 的 VER 拼出 "X Color Mixer  V1.07"），于是"横幅含版本号"同时是一条版本断言和一条"产物确由本包源码构建"的断言；而工具包初始化失败分支可以通过 -display host:N 指向一个**关闭的回环端口**来强制触发，这样即使 worker 上 $DISPLAY 指向一个可用的 X server，该分支仍然稳定复现，诊断串（如 "In fl_initialize() [flresource.c:995]: …: Can't open display 127.0.0.1:99"）就成了"XForms 代码确实在进程内执行过"的最强信号。顺带一条：上游 GUI 程序常常没有 --version/--help，此时 CI 的 L2 冒烟必然记 skip/warn（非阻塞），不要为了让它变绿而给上游加版本开关。
+affected_scope:         所有基于 X11/XForms/Qt-free 工具包的 headless 验证场景：xcolmix、xev 一类 X 应用，以及任何"CI 上没有 X server"的包。注意先例差异：xev 1.2.7 的 -version/--help 早于 XOpenDisplay 返回，所以它的 4 条断言全是干净退出 0；xcolmix 没有版本开关，只能走拒绝分支。
+verification_cmd:       timeout 20 ./app alpha beta gamma; echo "rc=$?" ; DISPLAY= timeout 20 ./app -display 127.0.0.1:99 a b c; echo "rc=$?" ; timeout 20 ./app </dev/null; echo "rc=$? (124=阻塞, 139=段错误, 两者都不可断言)"
+
+rec_priority:           2
+rec_approach:           assert-only-pre-display-branches-and-force-unreachable-display
+rec_description:        (1) 先读 main()，把所有"在显示窗口之前就退出"的分支列出来，那才是 headless 上可断言的全部面；本例三条：argc>2、argc==2 且 access 失败、工具包初始化失败。(2) 对工具包初始化失败分支，用 -display 127.0.0.1:99（关闭的回环端口，连接立即被拒）强制触发，并在断言里匹配诊断串里的端口号，从而与 worker 的 $DISPLAY 无关。若上游支持，也可反过来说：DISPLAY 未设时诊断串必然出现，设了则不出现——但把 display 显式写死更稳。(3) 断言打在**可观测契约**上：退出码 + usage/版本横幅，而不是"进程没崩"。横幅里若含版本号，优先断言它。(4) 不要断言会阻塞/崩的路径，也不要用 timeout 掩盖它们；把它们写进 notes.md 的"不能测"表并附实测 rc，评审就不会误读为漏测。(5) 无 --version/--help 的包，L2 记 skip/warn 属预期，如实记录即可。(6) 配套：X11 栈的运行期寻库要在配方里声明 run=True 依赖，并用 LD_PRELOAD 绝对路径兜底（loader 可能忽略 LD_LIBRARY_PATH）——同 xev 1.2.7 的做法。
+rec_command:           out=$("$BIN" -display 127.0.0.1:99 alpha beta gamma 2>&1); rc=$?; [ "$rc" -eq 1 ] && echo "$out" | grep -q "Can't open display 127.0.0.1:99" && echo "$out" | grep -q "V1.07"
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:
+source_commit:
