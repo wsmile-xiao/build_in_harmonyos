@@ -1,0 +1,93 @@
+#====================================================================
+# DRAFT-14559-simd-macro-activation-gap-readme-ahead-of-cmake-impl
+# 上游 README 宣称的 SIMD 开关选项在 CMake 实现中不存在 + 宏激活链在
+# 非 Apple aarch64 断链 —— 构建成功但静默退化为标量路径
+#====================================================================
+
+id:                     DRAFT-14559-simd-macro-activation-gap-readme-ahead-of-cmake-impl
+draft:                  DRAFT-14559
+status:                 pending-editor-review
+trigger_tool:           cmake|clang|conan
+phase:                  build|configure
+error_signature:        "building float with simd disabled !|float SCALAR1 macros are defined|simd_size=1|simd_arch=Scalar|pffft_simd_size\\(\\) == 1"
+severity:               2
+category:               cmake, simd-activation, arm-neon, silent-degradation, doc-impl-gap, ohos-platform
+match_keywords:         PFFFT_ENABLE_NEON, PFFFT_USE_SIMD_NEON, TARGET_C_ARCH, TARGET_C_EXTRA, GCC_EXTRA_VALUES, pf_neon_float.h, pf_scalar_float.h, target_optimizations.cmake, simd disabled, Scalar, pffft_simd_size, pffft_simd_arch, NEON macros are defined, aarch64, arm64, CMAKE_C_FLAGS, -DPFFFT_ENABLE_NEON=1
+title:                  上游 README 宣称的 SIMD 开关选项（PFFFT_USE_SIMD_NEON）在 CMake 实现中不存在，且 PFFFT_ENABLE_NEON 宏的唯一注入路径（TARGET_C_EXTRA=neon_*）仅在 armv7l 分支提供 —— 非 Apple aarch64 Linux/OHOS 构建成功但 SIMD 静默退化为标量路径；识别特征是编译日志 pragma "building float with simd disabled !"；修复用 CMAKE_C_FLAGS 注入 -DPFFFT_ENABLE_NEON=1 并以 pffft_simd_size()==4 断言收口
+
+root_cause:             >
+  1) 上游 README 列出选项 PFFFT_USE_SIMD_NEON（"force using NEON on ARM, default: OFF"），但 v1.1.0 的 CMakeLists.txt
+  与 cmake/ 目录中该选项不存在（grep 全源码零命中）——文档超前于实现。
+  2) SIMD 宏真实激活链：src/pffft.c → simd/pf_float.h → pf_neon_float.h 的 guard
+  `#if !defined(PFFFT_SIMD_DISABLE) && defined(PFFFT_ENABLE_NEON) && (defined(__arm__)||defined(__aarch64__)||...)`。
+  PFFFT_ENABLE_NEON 只在 cmake/target_optimizations.cmake 的 TARGET_C_EXTRA 非 none 分支注入（:143-144）；
+  而 GCC_EXTRA_OPT_neon_* extra 值仅在 CMAKE_SYSTEM_PROCESSOR=armv7l 分支提供，非 Apple aarch64 分支
+  GCC_EXTRA_VALUES="" → TARGET_C_EXTRA cache 变量根本不创建 → PFFFT_ENABLE_NEON 永不被定义。
+  3) 后果不是构建失败而是静默降级：pf_float.h 在 SIMD_SZ 未定义时 #define PFFFT_SIMD_DISABLE 兜底走标量路径，
+  编译全绿、数值测试全过，只有编译日志里的 pragma message 和 simd_size()==1 暴露真相——
+  无断言的适配会把"NEON 优化库"发布成"标量库"而不自知。
+
+affected_scope:         >
+  任何直接适配 marton78/pffft（或其 fork）的配方；以及大量音频/DSP 库（rnnoise 生态、convolution reverb、SDR、
+  语音增强类）内嵌 pffft.c 单源的二次适配——内嵌形态往往沿用上游默认编译参数，aarch64 上同样中招。
+  更广的通用模式：①README 文档选项超前于 CMake 实现（声称的开关不存在）；②SIMD 宏激活依赖
+  "extra 选项分支"而该分支仅覆盖部分架构；③SIMD 降级不失败只静默——三者组合在一切
+  "多 SIMD 后端竞争定义 + 宏守卫分发"的库（pffft/kissfft/celt 等）上复现。
+  不覆盖：PFFFT_SIMD_DISABLE=1 被显式设置的主动降级；SSE/AVX 路径问题（x86）。
+
+solution: |
+  # 配方 generate() 内按架构注入宏（aarch64 NEON 为基线指令集，无需 -march）：
+  ```python
+  def generate(self):
+      tc = CMakeToolchain(self)
+      arch = str(self.settings.arch)
+      if arch.startswith("armv8") or arch in ("arm64", "aarch64"):
+          tc.variables["CMAKE_C_FLAGS"] = "-DPFFFT_ENABLE_NEON=1"
+      tc.generate()
+  ```
+  # 识别证据链（判定三步）：
+  # ① grep -rn "PFFFT_USE_SIMD_NEON" CMakeLists.txt cmake/  → 零命中（README 选项不存在）
+  # ② 编译日志 pragma：默认构建出现 "building float with simd disabled !"（pf_float.h:68）；
+  #    注入后出现 "ARM NEON macros are defined"（pf_neon_float.h:40）
+  # ③ 消费者测试断言收口（把静默降级变成显式失败）：
+  #    CHECK(pffft_simd_size() == 4); CHECK(strcmp(pffft_simd_arch(), "NEON") == 0);
+  #    （double 路径同 guard：pffftd_simd_size()==4，pf_neon_double.h:42）
+
+fallback: >
+  若宏注入与上游其他逻辑冲突（罕见），可 patch cmake/target_optimizations.cmake 在 aarch64 分支也提供
+  GCC_EXTRA_VALUES（仿 apple_m1 定义 extra 值）再 -DTARGET_C_EXTRA=<val>；缺点是改上游构建脚本、
+  升级版本需重做。次级兜底：接受标量路径（PFFFT_SIMD_DISABLE=1 显式声明），但必须在 PR 正文
+  声明性能退化——不声明即静默降级属未完成适配。
+
+verify_builds:          本地 conan create 三轮全绿（commit b5e7cdb7c9，OHOS aarch64：ctest 9/9 + test_package 11/11 断言，simd_size=4/NEON）；CI 构建号见 issue 证据表（PR #14559 附带构建）
+reference_impl:         pffft 1.1.0 PR #14559（archives/p/pffft/1.1.0/conanfile.py generate() + test_package/test_pffft.c 断言 2/3）
+doc_file:               drafts/DRAFT-14559-simd-macro-activation-gap-readme-ahead-of-cmake-impl.md
+
+# ── 扩展字段（R 系，供引擎处方用）──
+rec_priority:           1
+rec_approach:           inject-enable-macro-via-cmake-c-flags
+rec_description:        配方 generate() 里按架构注入：tc.variables["CMAKE_C_FLAGS"] = "-DPFFFT_ENABLE_NEON=1"
+                        （armv8/arm64/aarch64 判定）。NEON 是 aarch64 基线指令集，无需 -march —— TARGET_C_ARCH
+                        保持上游默认 none，与交叉工具链零 -march 冲突；不碰 TARGET_C_EXTRA（它在 aarch64 上无可用值）。
+                        消费者测试必须断言 pffft_simd_size()==4 / pffft_simd_arch()=="NEON"，把"静默降级"变成"显式失败"。
+rec_command:            tc.variables["CMAKE_C_FLAGS"] = "-DPFFFT_ENABLE_NEON=1"  # aarch64 only, in generate()
+rec_auto_fix:           false
+rec_impl:               conan-recipe|knowledge-draft
+
+fallback_priority:      2
+fallback_approach:      patch-target-optimizations-or-force-extra
+fallback_description:   见上方 fallback 字段（同内容扩展）：patch target_optimizations.cmake 或显式声明标量降级并公告性能退化。
+fallback_command:       patch cmake/target_optimizations.cmake aarch64 branch; or -DPFFFT_SIMD_DISABLE=1 (declare perf loss)
+fallback_auto_fix:      false
+
+forbid_1_pattern:       "看到构建成功+数值测试全过就认为 SIMD 适配完成（不查 pragma/不断言 simd_size）"
+forbid_1_reason:        标量路径数值完全正确，唯一性能差异——无断言的适配会把 NEON 优化库发布成标量库，
+                        性能主张（README 的 pretty fast）名不副实且无人知晓。
+forbid_1_consequence:   制品仓发布标量版 pffft，下游按上游基准预期性能掉一个数量级；审计回溯才发现。
+forbid_2_pattern:       "把上游 --test-simd 自检入口（validate_pffft_simd_ex）纳入测试集成并据其失败判定库有缺陷"
+forbid_2_reason:        该入口上游既未注册 ctest 也从不在 CI 运行；其 VALIGNED 探针循环假设 16 字节
+                        （SSE）语义下存在 unaligned 指针，而 NEON float 的 VALIGNED 是 4 字节
+                        （pf_neon_float.h:80），float 数组内不存在 4 字节不对齐指针 → 在 NEON float 路径
+                        确定性报 "!VALIGNED() should have found at least 4 occurences"——工装的 SSE 视角
+                        假设缺陷，非库缺陷（库正确性由 9 项 ctest 含 FFTPACK 140dB 对照覆盖）。
+forbid_2_consequence:   把好库误判为坏库，或为"过"自检而强行 patch 库源码引入真回归。
