@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(mumps_consumers C)
+find_package(mumps CONFIG REQUIRED)
+add_executable(mumps_consumer test.c)
+target_link_libraries(mumps_consumer PRIVATE mumps::mumps)
+add_executable(mumps_harmony harmony_tests/test_ohos.c)
+target_link_libraries(mumps_harmony PRIVATE mumps::mumps)
