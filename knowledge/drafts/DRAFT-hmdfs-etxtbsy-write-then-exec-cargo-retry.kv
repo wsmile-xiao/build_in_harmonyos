@@ -1,0 +1,42 @@
+draft: DRAFT-hmdfs-etxtbsy-write-then-exec-cargo-retry
+status: pending-editor-review
+id: DRAFT-hmdfs-etxtbsy-write-then-exec-cargo-retry
+title: HMDFS 写回在 close() 后仍短暂持有写句柄，cargo"写完 build-script 即 exec"偶发 ETXTBSY(os error 26)，cargo 构建/测试命令须带锚定错误文本的一次重试
+trigger_tool: cargo|rustc|make
+phase: compilation|testing
+error_signature: Text file busy|os error 26|ETXTBSY|could not execute process.*never executed
+severity: 2
+category: build-system, hmdfs, cargo, toolchain
+match_keywords: Text file busy, os error 26, ETXTBSY, build-script-build, never executed, cargo, build script, HMDFS, FUSE, retry, 重试
+root_cause: HMDFS（FUSE 型文件系统）的写回在 userspace close() 之后仍短暂持有写句柄；cargo 并发构建对 build-script 可执行文件走"写完立即 exec"路径（libc 等带 build.rs 的 crate 必经），紧邻序列撞上尚未释放的写句柄，exec 返回 ETXTBSY(os error 26)，cargo 记 could not execute process ... (never executed)，make 以 Error 101 失败。竞态窗口导致偶发（同命令重跑即过）；真实编译错误的特征是错误文本含编译诊断而非 os error 26，可据此区分。
+affected_scope: 任何在 OHOS 设备 HMDFS 工作区上运行 cargo 构建/测试的项目（凡含 build.rs 的 crate 均走写后即 exec 路径）；同型"写后即 exec"模式（libtool、编译驱动 wrapper、代码生成器）同此暴露面。
+verification_cmd: 真机两段探针（探针 C 源码全文见 doc_file，clang 现场编译）
+ 语义段（确定性）：对 HMDFS 路径下刚写好的可执行脚本，持写 fd 直接 execv，期望 ETXTBSY(errno 26)；close 后 execv，期望执行成功——证明该文件系统对"写句柄未释放即 exec"返回 26
+ 竞态段（概率放大器）：close 后立刻紧循环 fork+exec 200 次（每轮重写制造"刚写完"窗口），统计 ETXTBSY 命中数；大于 0 即证实"close 后写句柄仍短暂存活"，等于 0 不构成反证（窗口依赖 cargo 实际并发形态），已发生的生产命中日志仍是主要证据
+rec_priority: 1
+rec_approach: retry-once-anchored-to-etxtbsy-text
+rec_description: 对构建/测试命令做一次失败重试，且重试条件锚定错误文本（Text file busy / os error 26）而非盲重：真实编译错误第二轮照样失败并抛出，不掩盖任何真问题；精确锚定避免把无关失败也重试。权衡如实声明：recipe 层若用 catch-all 的"失败即重试一次"（本 run conanfile build() 即此形态）收敛性相同，但会对非 ETXTBSY 失败多做一轮无害工作，且略升 flake 频率被掩盖的观察成本——更优形态是 test_package 中"仅当输出含 Text file busy 才重试"的定向版。
+rec_command: 见 doc_file 两处实现样例（conanfile.py _run_with_retry 与 test_package _run_upstream_tests 的 Text file busy 定向重试）
+rec_auto_fix: false
+rec_impl: single-retry-guard
+fallback_priority: 2
+fallback_approach: reduce-build-concurrency
+fallback_description: 收敛构建并发（cargo build -j1 或 conan build.jobs=1）从根上缩小竞态窗口：确定性更高，但显著拖慢构建时长，仅作重试方案失效时的退路，不建议默认开启。
+fallback_command:
+fallback_auto_fix: false
+fallback_impl:
+forbid_1_pattern: sleep *[0-9]+.*&&.*cargo|while *True.*retry
+forbid_1_reason: 固定 sleep 是时序膏药（竞态窗口仍在，只是换位置），无界重试循环会掩盖 flake 真实频率并可能吞掉真实错误。
+forbid_1_consequence: 失败形态不可观测，后续无法评估 HMDFS 写回问题的恶化或收敛。
+forbid_2_pattern: patches/.*sleep|patches/.*retry
+forbid_2_reason: ETXTBSY 是构建宿主文件系统语义问题，不是上游源码缺陷；向上游源码塞 sleep/retry 污染上游判定。
+forbid_2_consequence: 上游行为偏移、补丁维护负担、态度审计风险。
+principles: P-HMDFS-001, P-FS-001
+causes: []
+caused_by: []
+similar_to: DRAFT-libfreenect-0.5.3-hmdfs-shared-lib-versioned-symlink, DRAFT-coordgenlibs-3.0.2-hmdfs-inode-sparse-worktree, DRAFT-dmc_unrar-1.8.0-hmdfs-inode-enospc-sparse-checkout
+conflicts_with: []
+prerequisite_of: []
+doc_file: DRAFT-hmdfs-etxtbsy-write-then-exec-cargo-retry.md
+source_event: archives/z/zram/1.2.1 真机预检第一轮（zram-1.2.1 run）：cargo 执行 libc 的 build-script-build 报 Text file busy (os error 26)、make Error 101、PREFLIGHT_BUILD_FAIL（~/zram-work/logs/preflight.log:119-129）；重跑即过；权威 CI run1 带重试守卫 PASS
+authors: Curator (oh-device-porting-v3, zram-1.2.1 run)

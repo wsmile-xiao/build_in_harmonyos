@@ -1,0 +1,43 @@
+draft: DRAFT-rust-preohos-musl-cfg-gate-ohos-misfire
+status: pending-editor-review
+id: DRAFT-rust-preohos-musl-cfg-gate-ohos-misfire
+title: Rust 生态 pre-ohos 依赖的 not(target_env="musl") cfg 门在 target_env="ohos" 上误启用 glibc-only 符号，上游版本范围无兼容版本时应按 cfg(not(target_env = "ohos")) 门控该依赖（dev-dependencies 亦必要：cargo 为 --bins 测试目标同样构建 dev-deps 图）
+trigger_tool: cargo|rustc
+phase: compilation
+error_signature: cannot find value.*in crate .libc.|could not compile.*nix|unresolved import.*nix|mismatched types.*nix|error\[E0425\]
+severity: 3
+category: rust, cargo, platform-cfg, compile-error
+match_keywords: nix, libc, O_FSYNC, mq_open, aio, target_env, musl, ohos, aarch64-unknown-linux-ohos, dev-dependencies, cfg, E0425
+root_cause: nix 0.23.2（0.26.4 仍同）的 pre-ohos 平台门 all(target_os = "linux", not(target_env = "musl"))（src/fcntl.rs:88-93；lib.rs 的 mqueue/aio 模块同门）在 aarch64-unknown-linux-ohos 上把 target_env="ohos" 误判为"非 musl"，启用 glibc-only 符号段（fcntl.rs:102 O_FSYNC、mqueue mq_*、aio_*）；而 libc 对 ohos 目标路由到 musl 模块，该模块没有这些符号（libc 0.2.139…0.2.189 逐版本源码核实，任何 libc 版本固定无效）；上游声明范围 nix >=0.22,<0.24 内无 ohos 感知版本，ohos 修复出现在 nix >=0.27 但其移除了集成测试辅助代码依赖的 mount API——版本方案双重不可行；cargo 对 --bins 测试目标同样构建 dev-deps 图，故即使不跑集成测试也绕不开这层编译。
+affected_scope: 任何以 aarch64-unknown-linux-ohos（或其他 target_env="ohos" 目标）构建、且依赖带 pre-ohos target_env cfg 门的 crate（nix 0.22 至 0.26 已知）的 Rust 项目；主依赖与 dev-dependencies 皆可触发。
+verification_cmd: 在设备（harmonybrew cargo 存在）上建最小探针仓复现，完整序列与期望输出见 doc_file
+ 核心步骤：Cargo.toml 写 dev-dependencies nix = "=0.23.2"，src/lib.rs 写一个调用 nix::unistd::getpid() 的 #[cfg(test)] 用例；.cargo/config.toml 配 [target.aarch64-unknown-linux-ohos] linker=/data/service/hnp/bin/clang 与 rsproxy sparse 镜像
+ 执行 cargo test --target aarch64-unknown-linux-ohos --lib，期望命中 error[E0425]: cannot find value `O_FSYNC` in crate `libc`（指向 nix-0.23.2/src/fcntl.rs:102）
+ 静态佐证：grep -n 'not(target_env = "musl")' /storage/Users/currentUser/.cargo/registry/src/*/nix-0.23.2/src/fcntl.rs
+rec_priority: 1
+rec_approach: cfg-gate-dep-to-not-ohos
+rec_description: 当该依赖仅被非 ohos 平台需要时（最常见形态：集成测试的 dev-dependency），在 Cargo.toml 把它移入 [target.'cfg(not(target_env = "ohos"))'.dev-dependencies]（主依赖对应 [target.'cfg(not(target_env = "ohos"))'.dependencies]）。这是对依赖解析目标适用范围的收窄，不改动上游测试用例与断言，非 ohos 平台行为与上游完全一致；Cargo.toml 的最小 diff 以 patch 形式进 recipe patches/ 可审计。产物侧不换版本、不改依赖源码、不污染全局缓存。
+rec_command: 参考 doc_file 内补丁样例（与 archives/z/zram/1.2.1/patches/0001-gate-nix-devdep-for-ohos.patch 同构）
+rec_auto_fix: false
+rec_impl: cargo-toml-target-cfg-gate-patch
+fallback_priority: 2
+fallback_approach: ohos-aware-version-or-dep-source-patch
+fallback_description: 若该依赖在 ohos 运行期确属必需：尝试上游声明范围之外的 ohos 感知版本（nix >=0.27，其 mount API 已移除，与本库用例的 API 兼容性未核实，仅作候选），或对依赖 crate 自身的 cfg 门打补丁，把 not(target_env = "musl") 收窄为 not(any(target_env = "musl", target_env = "ohos"))。诚实权衡：越出上游声明范围或修改依赖源码都偏离上游语义，仅作退路，须逐项说明并留证据。
+fallback_command:
+fallback_auto_fix: false
+fallback_impl:
+forbid_1_pattern: cargo update -p libc|libc *= *"0\.2\.1[3-8][0-9]"
+forbid_1_reason: 任何 libc 版本固定都无法满足：ohos 目标路由到 libc musl 模块，0.2.139…0.2.189 均无 O_FSYNC/mq_*/aio_*（逐版本源码核实）。
+forbid_1_consequence: 无效循环调试并引入锁图漂移，错过真正的 cfg 门修复（同 E358 的可复现性红线）。
+forbid_2_pattern: \.cargo/registry/src
+forbid_2_reason: 禁止直接修改设备全局 Cargo registry cache 内的 nix/libc 源码。
+forbid_2_consequence: 污染共享真机缓存，其他任务结果不可复现。
+principles: P-PATCH-002
+causes: []
+caused_by: []
+similar_to: E358, DRAFT-wagyu-0.6.1-rust-legacy-lockfile-ohos-port, DRAFT-ohos-musl-glibc-specific-symbols, E086, E102, E051
+conflicts_with: []
+prerequisite_of: []
+doc_file: DRAFT-rust-preohos-musl-cfg-gate-ohos-misfire.md
+source_event: archives/z/zram/1.2.1 真机预检（zram-1.2.1 run）：tests/test_cases.rs 的 dev-dependency nix 0.23.2 在 aarch64-unknown-linux-ohos 编译失败，保留日志 preflight2.log 含 29 行 error[E]，Builder 计全量 51 个错误；施用 patches/0001-gate-nix-devdep-for-ohos.patch 后权威 CI run1 PASS
+authors: Curator (oh-device-porting-v3, zram-1.2.1 run)
