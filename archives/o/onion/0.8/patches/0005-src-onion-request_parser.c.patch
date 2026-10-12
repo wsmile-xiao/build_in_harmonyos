@@ -1,0 +1,110 @@
+--- a/src/onion/request_parser.c
++++ b/src/onion/request_parser.c
+@@ -20,29 +20,45 @@
+ 	<http://www.gnu.org/licenses/> and
+ 	<http://www.apache.org/licenses/LICENSE-2.0>.
+ 	*/
+ 
+ #include <string.h>
+ #include <stdlib.h>
+ #include <libgen.h>
+ #include <fcntl.h>
+ #include <unistd.h>
+ #include <assert.h>
++#include <errno.h>
++#include <limits.h>
++#include <stdio.h>
+ 
+ #include "dict.h"
+ #include "request.h"
+ #include "types_internal.h"
+ #include "codecs.h"
+ #include "log.h"
+ #include "block.h"
+ #include "low.h"
+ #include "ptr_list.h"
++
++/* Honor the caller's private temporary directory for both upload methods. */
++static int onion_upload_tempfile(char *filename, size_t size){
++	const char *directory=getenv("TMPDIR");
++	if (!directory || !*directory)
++		directory="/tmp";
++	int length=snprintf(filename,size,"%s/onion-XXXXXX",directory);
++	if (length<0 || (size_t)length>=size){
++		errno=ENAMETOOLONG;
++		return -1;
++	}
++	return mkstemp(filename);
++}
+ 
+ /**
+  * @short Known token types. This is merged with onion_connection_status as return value at token readers.
+  * @private
+  */
+ typedef enum{
+ 	STRING=1001, // I start on 1000, to prevent collission with error codes
+ 	KEY=1002,
+ 	LINE=1003,
+ 	NEW_LINE=1004,
+@@ -614,24 +630,26 @@
+ 		return res;
+ 
+ 	if (res==NEW_LINE){
+ 		if (!req->POST)
+ 			req->POST=onion_dict_new();
+ 		ONION_DEBUG("New line");
+ 		onion_multipart_buffer *multipart=(onion_multipart_buffer*)token->extra;
+ 		multipart->pos=0;
+ 
+ 		if (multipart->filename){
+-			char filename[]="/tmp/onion-XXXXXX";
+-			multipart->fd=mkstemp(filename);
+-			if (multipart->fd<0)
+-				ONION_ERROR("Could not create temporal file at %s.", filename);
++			char filename[PATH_MAX];
++			multipart->fd=onion_upload_tempfile(filename,sizeof(filename));
++			if (multipart->fd<0){
++				ONION_ERROR("Could not create temporal file: %s.", strerror(errno));
++				return OCS_INTERNAL_ERROR;
++			}
+ 			if (!req->FILES)
+ 				req->FILES=onion_dict_new();
+ 			onion_dict_add(req->POST,multipart->name,multipart->filename, 0);
+ 			onion_dict_add(req->FILES,multipart->name, filename, OD_DUP_VALUE);
+ 			ONION_DEBUG0("Created temporal file %s",filename);
+ 
+ 			req->parser=parse_POST_multipart_file;
+ 			return parse_POST_multipart_file(req, data);
+ 		}
+ 		else{
+@@ -1093,24 +1111,26 @@
+ 	}
+ 	size_t cl=atol(content_size);
+ 
+ 	if (cl>req->connection.listen_point->server->max_file_size){
+ 		ONION_ERROR("Trying to PUT a file bigger than allowed size");
+ 		return OCS_INTERNAL_ERROR;
+ 	}
+ 
+ 	req->data=onion_block_new();
+ 
+-	char filename[]="/tmp/onion-XXXXXX";
+-	int fd=mkstemp(filename);
+-	if (fd<0)
+-		ONION_ERROR("Could not create temporary file at %s.", filename);
++	char filename[PATH_MAX];
++	int fd=onion_upload_tempfile(filename,sizeof(filename));
++	if (fd<0){
++		ONION_ERROR("Could not create temporary file: %s.", strerror(errno));
++		return OCS_INTERNAL_ERROR;
++	}
+ 
+ 	onion_block_add_str(req->data, filename);
+ 	ONION_DEBUG0("Creating PUT file %s (%d bytes long)", filename, token->extra_size);
+ 
+ 	if (!req->FILES){
+ 		req->FILES=onion_dict_new();
+ 	}
+ 	{
+ 	const char *filename=onion_block_data(req->data);
+ 	onion_dict_add(req->FILES,"filename", filename, 0);
