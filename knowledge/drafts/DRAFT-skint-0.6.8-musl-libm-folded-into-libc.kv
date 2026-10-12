@@ -1,0 +1,81 @@
+#====================================================================
+# DRAFT: OHOS musl 把 libm 折叠进 libc.so —— 链接 -lm 的产物 DT_NEEDED
+#        只有 libc.so；按 glibc 判据找 libm.so(.6) 会误判
+#====================================================================
+
+id:                     DRAFT-skint-0.6.8-musl-libm-folded-into-libc
+status:                 pending-editor-review
+title:                  OHOS musl sysroot 没有 libm.so（只有 88 字节空壳 libm.a），libm 符号由 libc.so 提供：链接 -lm 的产物 DT_NEEDED 恰为 [libc.so]；按 glibc 习惯断言 libm.so/libm.so.6 存在会误判，而该结果反过来可作为“确实用 OHOS musl sysroot 构建”的可执行判据
+trigger_tool:           clang|ld|llvm-readelf|conan
+phase:                  linking|testing
+error_signature:        |
+  libm\.so(\.6)?.*not found|
+  DT_NEEDED.*libm|
+  expected libm in NEEDED|
+  -lm.*no such file
+severity:               2
+category:               libc, musl, linking, testing, relocatable
+match_keywords:         libm, libm.so, libm.so.6, -lm, musl, libc.so, DT_NEEDED, NEEDED, readelf, llvm-readelf, 静态库空壳, libm.a, sysroot, glibc 判据, 交叉编译校验, ABI 断言, 折叠进 libc
+
+root_cause: >
+  musl 把数学库实现（以及 C99/XSI 数学函数入口）放在 libc 实现内部，OHOS SDK 的
+  aarch64-linux-ohos sysroot 里 usr/lib/aarch64-linux-ohos/ 下既没有 libm.so，也没有
+  libm.so.6，只有一个 88 字节的 libm.a（ar 归档里仅 __.SYMDEF，等于空壳）。因此
+  “链接 -lm 的产物必须在 DT_NEEDED 里出现 libm”这一 glibc 习惯不成立：-lm 由空壳静态归档
+  满足，数学符号在运行时从 libc.so 解析，产物 DT_NEEDED 只剩 libc.so。
+affected_scope: >
+  在 OHOS 上构建、且链接了 -lm（或声明了 system_libs=["m"]）的库/可执行文件；以及
+  按 glibc 习惯写 ABI 断言（检查 libm.so/libm.so.6）的 test_package / 打包校验脚本。
+verification_cmd: >
+  ls -l "$OHOS_SYSROOT/usr/lib/aarch64-linux-ohos/"libm.* || true;
+  printf 'int main(void){return 0;}\n' > /tmp/lmprobe.c;
+  <ohos-clang> -o /tmp/lmprobe /tmp/lmprobe.c -lm;
+  llvm-readelf -d /tmp/lmprobe | grep -E 'NEEDED'
+  # 期望：目录里只有 libm.a（88B，仅 __.SYMDEF），无 libm.so；探测二进制 DT_NEEDED 仅 libc.so
+
+rec_priority:           1
+rec_approach:           assert-libc-only-needed
+rec_description:        >
+  把 OHOS 侧的期望改成“只依赖 libc.so”：ABI/打包断言检查 DT_NEEDED 集合恰为
+  {libc.so}（或至少“不含 libm.so/libm.so.6 等 glibc 专属 SONAME”），不要去找 libm.so；
+  同时把这一点当作正向判据——一个链接了 -lm 的程序若在 aarch64 上 DT_NEEDED 只有 libc.so，
+  就说明它确实是用 OHOS musl sysroot 构建的（glibc aarch64 产物会多出 libm.so.6）。
+rec_command:            llvm-readelf -d <artifact> | grep -E 'NEEDED'   # 期望仅 Shared library: [libc.so]
+rec_auto_fix:           false
+rec_impl:               manual
+fallback_priority:      2
+fallback_approach:      also-check-interp-marker
+fallback_description:   >
+  若不便断言 DT_NEEDED 全集，至少同时断言 .interp == /lib/ld-musl-aarch64.so.1，两条合起来
+  仍能把“OHOS musl 构建”与“其他 aarch64 Linux（glibc）构建”区分开。
+fallback_command:       llvm-readelf -l <artifact> | grep -A1 INTERP
+fallback_auto_fix:      false
+fallback_impl:          manual
+forbid_1_pattern:       (cp|ln).*libm\.so.*(/lib|sysroot)
+forbid_1_reason:        sysroot 里的 libm.a 是空壳，系统也没有 libm.so；自造一个投放到 /lib 属于
+                        R26 系统同名库污染
+forbid_1_consequence:   把伪造的同名 .so 放进系统路径，可能影响其他应用/系统组件加载
+forbid_2_pattern:       --no-as-needed|-Wl,--whole-archive.*libm
+forbid_2_reason:        只为让 DT_NEEDED 里“出现 libm.so”而强行拉入不存在的库
+forbid_2_consequence:   链接行为被扭曲，暴露的是假依赖，掩盖真实的 libc-only 事实
+forbid_3_pattern:       断言.*libm\.so(?!.*(不含|不要|禁止))
+forbid_3_reason:        glibc 判据在 OHOS 上不成立
+forbid_3_consequence:   测试在真机上假失败，误导向“缺库”的错误结论
+principles:             P012, P013
+similar_to:             E401
+conflicts_with:         []
+causes:                 []
+caused_by:              []
+prerequisite_of:        []
+doc_file:               DRAFT-skint-0.6.8-musl-libm-folded-into-libc.md
+last_updated:           2026-10-02
+source_event:           skint 0.6.8 适配（makefile 链接 -lm；test_package 的 A3 断言固化为 DT_NEEDED==[libc.so]）
+authors:                5DBC
+source_pr:
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-10-02
+draft:                  true
+contributor_id:         5DBC
