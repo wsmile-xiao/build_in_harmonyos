@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E429.kv，填写各字段
+# 对应的人类文档: doc/E429.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E429
+trigger_tool: node|wasm|conan|create|WebAssembly
+phase: testing
+error_signature: Check failed: 12 == \(\*__errno_location\(\)\)|Signal 5 \(core dumped\)|WebAssembly is not defined|sm-function\[\d+\]:0x|ReferenceError
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 3
+category: wasm, nodejs, testing, environment
+match_keywords: --jitless, WebAssembly is not defined, wasm-bindgen, 手动实例化, __wbg_set_wasm, Node ESM 导入 wasm, 合成输入 trap, 双证据, 具名阻塞, start()
+title: 在本环境对 **wasm 模块**做 Node 端到端，要先解决两条互斥的路径问题——①**裸 `node` 会因 JIT 崩溃**（`Check failed: 12 == (*__errno_location())` + `Signal 5 (core dumped)`，与 E29001 同签名）；②但 **`node --jitless` 下 V8 不支持 WebAssembly**（`ReferenceError: WebAssembly is not defined`）→ 校验脚本应"**先试默认、再试 `--jitless`，谁真把 wasm 跑起来用谁**"，并在**两条证据同时出现**时才把该子项记作具名阻塞。另：wasm-bindgen 模块在 Node 里应走**手动实例化**（`WebAssembly.instantiate(..., {"./x_bg.js": bg})` + `bg.__wbg_set_wasm(instance.exports)`），因为上游 ESM 入口会 `import ... from "./x_bg.wasm"`（Node 直接导入 `.wasm` 受限）；用**合成输入**调用业务函数可能触发 wasm trap（上游用 `syn` 解析源码，非法输入即 panic）→ 该子项按具名证据 SKIP，**其余真跑通过项保留**
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: ①本环境的 node 存在 JIT 崩溃问题（缺 `--jitless` 必崩），而 V8 的 jitless 模式**主动禁用 WebAssembly**（两者不可兼得）；②wasm-bindgen 的 ESM 入口面向打包器（browser/webpack），在 Node 里 直接 import `.wasm` 需要实验性标志；③wasm 内的 Rust panic 会表现为 V8 的 wasm stack（`sm-function[N]:0x…`）， 与"环境不可用"外形相似，必须用**证据组合**区分，不能一把梭 SKIP。
+affected_scope: 所有需要在本环境用 Node 校验 wasm/emscripten/wasm-bindgen 产物的适配；以及任何"宿主能力被两条互斥开关各自堵住"的校验设计
+verification_cmd: ①`node script.mjs`（默认；看是否出现 `Check failed: … __errno_location` / `Signal 5`）②`node --jitless script.mjs`（看是否 `WebAssembly is not defined`）③Node 内手动实例化：`WebAssembly.instantiate(bytes, {"./x_bg.js": bg})` + `bg.__wbg_set_wasm(instance.exports)` ④跑业务函数看是否 `sm-function[…]` trap
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: two-path-node-wasm-check-with-manual-instantiation-and-dual-evidence-blocking
+rec_description: ①Node 校验脚本先按**默认**方式跑；②再按 `--jitless`（并 `NODE_OPTIONS=--jitless`）跑；③**择优**：哪次输出里真的出现 wasm 导出/业务结果就用哪次；④wasm 加载走**手动实例化**（`WebAssembly.instantiate` + 胶水的 `__wbg_set_wasm`），绕开"Node 不能直接 ESM 导入 .wasm"；⑤断言分层：**wasm 可实例化 + API 面可调用 + 关键类型可构造**＝真跑通过项；业务函数若因**合成输入**trap（`sm-function[…]`/`panicked`），按具名证据记 SKIP 并**明确写上"未以真实输入执行"**（不冒充通过）；⑥**双证据**才允许把"无法执行 wasm"整项记为阻塞：须同时看到 `Check failed … __errno_location`/`Signal 5` **与** `WebAssembly is not defined`；⑦其余失败一律判真实缺陷。
+rec_command: node check.mjs ; node --jitless check.mjs ; node -e "const b=require('fs').readFileSync('x_bg.wasm');WebAssembly.instantiate(b,{...}).then(r=>console.log(Object.keys(r.instance.exports).length))"
+rec_auto_fix: false
+rec_impl: manual
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: use-a-browser-or-deno-to-run-the-wasm
+fallback_description: 若 Node 两条路径都不可用，可改用带 WebAssembly 的其它运行时（deno/bun/浏览器 headless）执行端到端；需评估其在本平台是否可用，并在 notes/PR 说明。
+fallback_command:
+fallback_auto_fix: false
+fallback_impl: manual forbid_1_pattern:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:
+forbid_1_reason:
+forbid_1_consequence:
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E429.md
+last_updated: 2026-10-08
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 0AED
