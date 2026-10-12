@@ -1,0 +1,85 @@
+#====================================================================
+# DRAFT-kcalcore-5.116.0-qt5-qtimezone-zoneinfo-ldpreload-shim —
+# Qt 5.15 QTimeZone tz 后端硬编码 /usr/share/zoneinfo（无 QT_ZONEINFO），
+# OHOS 无 zoneinfo 数据库 → 命名时区全失效 → 日历类库测试大面积失败/死循环；
+# LD_PRELOAD 路径重定向 shim 注入 tzdata 包 zoneinfo 树
+# 触发事件: kcalcore 5.116.0 适配（#7770，修复前 191/497 失败 + testrecurson 死循环）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+draft: DRAFT-kcalcore-5.116.0-qt5-qtimezone-zoneinfo-ldpreload-shim
+status: pending-editor-review
+title: Qt 5.15 QTimeZone tz 后端硬编码 zoneinfo 路径且无 QT_ZONEINFO 覆盖（Qt 6.5+ 才有）——OHOS 无 /usr/share/zoneinfo 时命名时区全失效，日历/时间类库上游测试大面积失败甚至死循环；LD_PRELOAD libc 路径重定向 shim 指向 conan tzdata 包的修复模式
+category: platform, qt5, timezone, ld-preload, testing, conan
+severity: 3
+
+error_signature: "QTimeZone\\(\"[A-Za-z_]+/[A-Za-z_+-]+\"\\) invalid|GMT$|timezone.*GMT|relocation R_AARCH64.*z_errmsg|tests? (failed|hang)|testrecurson|runsingletestcase"
+
+match_keywords: >
+  Qt 5.15, QTimeZone, qtimezoneprivate_tz, zoneinfo, /usr/share/zoneinfo,
+  zone.tab, TZif, QT_ZONEINFO, TZDIR, tzdata, 命名时区, GMT 回退,
+  PDT, PST, 缩写缺失, 时区失效, LD_PRELOAD, dlsym RTLD_NEXT,
+  路径重定向, libc 拦截, open, fopen, stat, opendir, KCALCORE_ZONEINFO_DIR,
+  日历库, kcalcore, kcalendarcore, iCalendar, TZID, 递归死循环,
+  ctest 挂死, --timeout, 数据驱动测试, .ref 快照, tzdata 快照差异
+
+trigger_tool: cmake|ctest|conan create|Qt5 QTimeZone
+phase: testing|runtime
+
+root_cause: >
+  Qt 5.15 的 QTimeZone tz 后端（src/corelib/time/qtimezoneprivate_tz.cpp）对
+  命名时区全部走硬编码路径：loadTzTimeZones() 读 /usr/share/zoneinfo/zone.tab
+  （失败回退 /usr/lib/zoneinfo/zone.tab）建可用性哈希；findEntry() 对每个
+  ianaId 打开 /usr/share/zoneinfo/<id>（回退 /usr/lib/zoneinfo/<id>）；系统
+  时区读 /etc/localtime。QT_ZONEINFO 环境变量覆盖是 Qt 6.5+ 特性，5.15 线
+  源码中不存在（grep 实证）——Qt6 线配方（如 kcalendarcore 6.26.0）设
+  QT_ZONEINFO 即可，Qt5 线没有这个通道。OHOS 不带 zoneinfo 数据库且 /usr
+  只读（mkdir 报 Read-only file system），QTimeZone("America/Los_Angeles")
+  构造出无效时区。对日历类库（kcalcore/KCalendarCore）的连锁破坏：
+  readICalDateTime 里 QTimeZone(tzid) 无效 → QDateTime 回退 LocalTime →
+  递归展开跨时区边界不收敛：实测 191/497 注册测试失败，且 testrecurson
+  在 TZID=America/Denver 的月度递归上无限循环（100% CPU 9+ 分钟，正常
+  0.16s），输出侧特征是本应 "PDT America/Los_Angeles" 的行全变 "GMT"。
+
+solution: |
+  配方内嵌 ~180 行 zoneinfo_redirect.c，构建期用 profile 的 OHOS clang
+  （tools.build:compiler_executables 的 c + --target=aarch64-linux-ohos）
+  编译为 zoneinfo_redirect.so，ctest 环境注入 LD_PRELOAD=<shim> 与
+  KCALCORE_ZONEINFO_DIR=<tzdata conan 包 zoneinfo 树>：
+
+  - shim 拦截九个路径类 libc 调用（libQt5Core 实际导入面）：
+    open/openat/fopen/stat/lstat/fstatat/access/faccessat/opendir，
+    dlsym(RTLD_NEXT) 转发模式（authbind 先例）
+  - 仅命中 /usr/share/zoneinfo 与 /usr/lib/zoneinfo 两个前缀的路径被
+    重写为 $KCALCORE_ZONEINFO_DIR + 后缀，其余路径原样放行（对宿主
+    工具链/测试执行零污染）
+  - tzdata/2026.3 包的 zoneinfo 树自带 zone.tab（可用性哈希源）与全部
+    IANA TZif 文件（slim 格式含 POSIX footer）
+  - ctest 加 --timeout 120 兜底（修复前死循环类风险的第二道防线）
+  - TZ=UTC 固定本地时区；TZDIR 仍设（musl localtime_r 通道）
+
+  验证链（单点对照 → 全量）：无 shim 单测输出 "1997-09-02T09:00:00 GMT"
+  （期望 8 行 PDT）→ 带 shim 输出与 .ref 逐行一致；死循环测试秒级完成；
+  全量 ctest 191 失败 → 492/492 全过（497 注册，5 项 tzdata 快照差异另行
+  排除定性）。
+
+fallback: >
+  若目标场景不能注入 LD_PRELOAD（如被测二进制走硬编码 exec 链且无法控制
+  环境），备选通道：(1) 构建期 patch qtbase 的 qtimezoneprivate_tz.cpp
+  加环境变量覆盖（重造 QT_ZONEINFO，代价是 qtbase 包不可用 registry 二进制
+  必须自建）；(2) 只测 UTC 用例、命名时区用例全部按"环境限制"排除申报
+  （会损失大块真实测试覆盖，仅作最后手段）。禁止尝试写 /usr/share/zoneinfo
+  （OHOS 只读）与依赖 TZDIR 影响 Qt5 命名时区查找（Qt5 直接读文件不走
+  TZDIR——实测无效）。
+
+verify_builds: "kcalcore/5.116.0 本地 conan create（qt5-qtbase/5.15.2.2 + libical3/3.0.20 + tzdata/2026.3 图）：round6 100% tests passed, 0 tests failed out of 492；round8 RC=0 test_package 15/15"
+reference_impl: >
+  archives/k/kcalcore/5.116.0/conanfile.py（ZONEINFO_SHIM_SOURCE 模块级
+  内嵌源码 + _build_zoneinfo_shim() + _run_upstream_tests() 的 LD_PRELOAD
+  注入与 5 项 tzdata 快照排除）。拦截先例：archives/a/authbind/2.2.0
+  （dlsym RTLD_NEXT）；构建期 LD_PRELOAD 先例：archives/b/baloo/26.04.3
+  （passwd_shim.so）。Qt6 线对照（设 env 即可、无需 shim）：
+  archives/k/kcalendarcore/6.26.0。
+
+id: DRAFT-kcalcore-5.116.0-qt5-qtimezone-zoneinfo-ldpreload-shim
+doc_file: drafts/DRAFT-kcalcore-5.116.0-qt5-qtimezone-zoneinfo-ldpreload-shim.md
