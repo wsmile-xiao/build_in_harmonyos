@@ -1,62 +1,40 @@
-# libnice 0.1.21 适配笔记
+# libnice 0.1.21 HarmonyOS PC 适配记录
 
-## 编译环境
-- 构建系统: meson
-- 编译日期: 2026-05-26
-- 编译器: clang 15.0.4
-- 状态: built（第二次编译，依赖问题已解决）
+## 构建目标
 
-## 编译步骤
+- 目标平台：HarmonyOS PC 6.0，aarch64（Conan `OHOS/armv8`）
+- 构建系统：Meson；HarmonyOS SDK Clang 15
+- 默认产物：静态 libnice；运行依赖 GLib（shared）和 OpenSSL
+- 构建保留核心 ICE/STUN 与 `stund`、`stunbdc`，关闭 GStreamer、GUPnP、introspection、GTK 文档和示例；启用上游测试
+- 源码来自官方 `https://nice.freedesktop.org/releases/libnice-0.1.21.tar.gz`，SHA256：`72e73a2acf20f59093e21d5601606e405873503eb35f346fa621de23e99b3b39`
 
-1. **依赖解决**：安装 glib 2.84.0 动态链接版本（从 ~/tmp/test-install-glib-2.84.0）
-2. **配置**：`meson setup builddir --prefix=$HOME/usr/local`
-3. **编译**：`ninja -j2`
-4. **安装**：`meson install --destdir=$TEST_PREFIX`
+## 适配内容
 
-## 遇到的问题与解决方案
+- Conan 配方通过 MesonToolchain 配置 aarch64 本机构建，并从 Conan 依赖注入 Meson 所需工具路径和 GLib `glib-mkenums` 元数据。
+- `test_package` 使用 `nice.pc` 编译真实 C consumer；程序创建 `NiceAgent` 并添加 ICE stream。
+- `test_ohos_stun_loopback.sh` 在 HarmonyOS 上实际启动 `stund`，再用 `stunbdc` 发送本机 IPv4 UDP Binding Request 并检查 `Mapped address` 响应。
+- 上游测试清点见 `test_package/MANIFEST.yml`：69 个上游测试项分布于 41 个 Meson 测试目标（33 个 GLib 注册用例，加 36 个独立测试目标）；设备缺少 coturn，因此其中 6 个 TURN 注册用例未执行。最终设备 W3 结果写入 `reports/w3-local-ci.log`。
 
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-| 1 | glib 链接错误 | glib 预编译包使用静态链接 libintl（G_INTL_STATIC_COMPILATION） | 安装 glib 2.84.0 动态链接版本（不定义 G_INTL_STATIC_COMPILATION） |
-| 2 | meson 找不到编译器 | 未设置 CC/CXX 环境变量 | 设置 `CC=/data/service/hnp/bin/clang` 和 `CXX=/data/service/hnp/bin/clang++` |
-| 3 | meson 找不到 ar | 未设置 AR 环境变量 | 设置 `AR=/data/service/hnp/bin/llvm-ar` |
+### 对话 #1
 
-## 依赖版本
+- 2026-10-11：按需求选择核心库、`stund` 和 `stunbdc`；关闭 GStreamer、GUPnP 与 introspection，并为两个命令行工具登记软件级 `commands.json`。
+- 2026-10-11：在 `MALLOC_PERTURB_=84` 下复现上游随机传输测试的多一字节问题，定位到 EWOULDBLOCK 返回值 `-1` 被误当作已接受字节数；归一为零后，设备上的 1 MiB 文件逐字节比较通过。
 
-- glib 2.84.0（动态链接版本）
-- openssl 1.1.1w
-- pcre2 10.40
-- libffi 3.4.6
-- gettext 0.22.5
+## 发现与知识
 
-## 验证结果
+- ✅ HarmonyOS 队列满时 `pseudo_tcp_socket_send()` 可返回 `-1`（EWOULDBLOCK，接受 0 字节）。上游随机文件测试原样把 `-1` 纳入计数，并用 `wlen - len` 回退，实际会多回退一字节并重复上一字节；补丁先将负值归一为 0，再更新计数和文件位置。知识草稿：E545。
+- ✅ 静态 GLib 的 libintl 链接问题与知识条目 E123 相符，因此此配方依赖 shared GLib。
+- ✅ consumer 运行验证显式包含 Conan 依赖库目录，确认完整运行时链接闭包；相关背景见 E499。
 
-```bash
-readelf -d ~/test-install-libnice-0.1.21/storage/Users/currentUser/usr/local/lib/libnice.so.10.13.1 | grep NEEDED
-# 输出：
-# NEEDED: libgio-2.0.so.0
-# NEEDED: libgobject-2.0.so.0
-# NEEDED: libglib-2.0.so.0
-# NEEDED: libcrypto.so.1.1
-# NEEDED: libc.so
-```
+## 验证记录
 
-**确认**：libnice 正确链接了 glib 动态库版本（libglib-2.0.so.0），不是静态库。
+- 2026-10-11，HarmonyOS PC 6.0 aarch64（HarmonyOS SDK Clang 15）：官方 W3 本地 CI 使用 Conan 创建并运行 `libnice/0.1.21`，结果通过；41/41 Meson 测试目标返回通过。按测试项统计为 63 PASS、6 SKIP、0 FAIL（共 69 项）；6 个 TURN 用例因设备未安装 coturn 而由上游测试程序提前跳过。清点口径为 5 个 GLib 测试文件的 33 个注册用例，加 36 个独立目标各自的 1 个测试项；独立目标中包含此前漏列的 `random/test.c`。原始日志：`reports/w3-local-ci.log`。全局 `finish` 未完成：W5 因仓库既有知识图谱校验问题及发布就绪材料缺失返回 partial；这不改变该包 W3 的结果。
+- Conan consumer 编译并运行成功，实际创建 `NiceAgent` 和 ICE stream 1；验证报告：`reports/conan-verify-report.md`，创建日志：`reports/conan-create.log`。
+- HarmonyOS 专项 IPv4 UDP STUN loopback 通过：最近一次设备 W3 中启动 `stund`，`stunbdc` 向 `127.0.0.1:58690` 发送 Binding Request，收到映射地址 `127.0.0.1:35727`。这是设备上的真实 UDP 请求/响应测试，不是纯断言。
+- 最终补丁还在 `MALLOC_PERTURB_=84` 下复跑 1 MiB PseudoTCP 随机传输：退出码 0，发送和接收文件均为 1,048,576 字节且逐字节相同。
+- 官方 `.ci-result.json` 的日志 SHA256 与 `reports/w3-local-ci.log` 相符。W3 收尾中的 `stund`/`stunbdc` `--version`/`--help` 冒烟项给出非阻塞警告；二者的真实运行由上述 loopback 行为测试覆盖。完整 `finish` 的 W5 仓库级检查和发布就绪检查仍未通过，不能据此声称整体 finish 成功。
 
-## 交付物
-
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| libnice.so.10.13.1 | 3.3M | 动态库（链接 glib 2.84.0 动态版本） |
-| stund | - | STUN 服务器工具 |
-| stunbdc | - | STUN 客户端工具 |
-
-## 注意事项
-
-1. **必须使用 glib 2.84.0 动态链接版本**：预编译的 glib 2.88.0 使用静态链接 libintl，会导致链接失败
-2. **必须设置编译器环境变量**：meson 无法自动找到鸿蒙 SDK 的编译器
-3. **必须设置 AR 环境变量**：meson 无法自动找到 llvm-ar
 ---
 
-**编译结束**: 2026-05-26 11:58
+**编译结束**: 2026-10-11
 **最终状态**: built
