@@ -1,0 +1,77 @@
+#====================================================================
+# DRAFT-14985 — OHOS PC 文件系统无 FIFO 支持：GNU make jobserver 并行退化串行
+# Software: popt 1.19（所有使用 GNU make 并行构建的 autotools/CMake 包）
+# Gate: conan create build()/test_package（make -jN 或 cmake --build -- -jN）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#====================================================================
+
+draft: DRAFT-14985-popt-hmdfs-mkfifo-make-jobserver-serial-degrade
+status: pending-editor-review
+id: draft-popt-1.19-hmdfs-mkfifo-jobserver-serial-degrade
+title: OHOS PC 用户可写路径（HMDFS EPERM + /tmp EROFS）均不支持 FIFO 创建，GNU make 4.4 jobserver 无法建 GMfifo* 令牌管道，并行构建自动降级串行（告警非致命），适配配方应显式 -j1 消除告警并保证构建确定性
+
+trigger_tool:           make|cmake|conan
+phase:                  compilation
+error_signature:        make: jobserver mkfifo: .*(Operation not permitted|Read-only file system)|
+                         mkfifo.*(Operation not permitted|Read-only file system)
+
+severity:               1
+category:               platform|build-system|make
+match_keywords:         jobserver, mkfifo, GMfifo, Operation not permitted,
+                         Read-only file system, make -j1, 串行, HMDFS, FIFO,
+                         EPERM, EROFS, 并行退化, cmake --build
+
+root_cause:             GNU make 4.x 的 jobserver 机制在并行构建时通过 mkfifo 创建
+                         命名管道 GMfifo<pid> 传递令牌，实现父/子 make 间负载均衡。
+                         OHOS PC 的用户可写路径全部无法创建 FIFO：HMDFS 挂载
+                         （$HOME/tmp 等）mkfifo 返回 EPERM（errno=1 Operation not
+                         permitted，内核/FUSE 层不支持命名管道），/tmp 挂载只读返回
+                         EROFS（errno=30）。make 检测到 FIFO 创建失败后自动降级为
+                         串行执行并打印告警，构建仍能完成——但每个子 make 都会
+                         重复告警刷屏，且并行收益归零、jobserver 探测开销残留。
+affected_scope:         所有在 OHOS PC 上用 GNU make 并行构建的包：autotools 包
+                         的 make -jN、CMake 包 cmake --build -- -jN（内部同样调
+                         make）。popt 1.16（PR #3275 已合入）与 1.19（PR #14985）
+                         的 conanfile make(args=["-j1"]) 即为此对策。
+verification_cmd:       python3 -c "import os
+os.mkfifo('/storage/Users/currentUser/tmp/fifo_probe')"  # EPERM errno=1 (HMDFS)
+                         python3 -c "import os
+os.mkfifo('/tmp/fifo_probe')"  # EROFS errno=30 (/tmp 只读)
+                         make --version | head -1  # GNU Make 4.4.1
+
+rec_priority:           1
+rec_approach:           pin-j1-in-recipe
+rec_description:        配方层显式串行：Autotools 包 autotools.make(args=["-j1"])；
+                         CMake 包 cmake.build() 不传 -j 或 conan conf
+                         tools.build:jobs=1。告警本身非致命（make 自动降级），
+                         但显式 -j1 消除每子 make 重复告警、避免 jobserver 探测
+                         开销，并保证 CI 日志干净与构建时序确定性。
+rec_command:            conan create archives/p/popt/1.19 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing
+rec_auto_fix:           false
+rec_impl:               manual
+
+solution: |
+  # conanfile.py（autotools 例，popt 1.19 实证）
+  def build(self):
+      apply_conandata_patches(self)
+      autotools = Autotools(self)
+      autotools.configure()
+      autotools.make(args=["-j1"])   # HMDFS 无 FIFO，jobserver 必退化，显式串行
+
+  # 平台事实探测（OHOS PC 真机 2026-10-08 实测）：
+  #   HMDFS 挂载 ($HOME/tmp):  mkfifo -> EPERM  (errno 1,  Operation not permitted)
+  #   /tmp (EROFS):            mkfifo -> EROFS  (errno 30, Read-only file system)
+fallback: >
+  不改配方也可行：make 检测 FIFO 创建失败后自动降级串行，构建仍成功，
+  仅告警刷屏；若告警被 CI 日志门禁（如 grep -i error 误伤）拦截，再显式
+  -j1。禁止用 MAKEFLAGS=--jobserver-auth=semaphore 之类绕行（GNU make 4.4
+  semaphore auth 语义在 OHOS 环境未验证，属于发明未实证方案）。
+verify_builds: "#3275 (popt 1.16, 已合入), #14985 (popt 1.19)"
+reference_impl: >
+  archives/p/popt/1.19/conanfile.py build() autotools.make(args=["-j1"])；
+  archives/p/popt/1.16/conanfile.py 同款先例（2026-07-26 迁移记录）
+
+principles:
+
+causes:                 E129（近亲：HMDFS setgid/umask 文件系统语义差异）,
+                         E248（相邻：Make 依赖规则触发 automake 重生成）
