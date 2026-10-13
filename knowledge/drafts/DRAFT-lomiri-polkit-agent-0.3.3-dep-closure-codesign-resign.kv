@@ -1,0 +1,134 @@
+# ====================================================================
+# DRAFT-lomiri-polkit-agent-0.3.3-dep-closure-codesign-resign
+# 制品仓依赖共享库的 .codesign 段「存在但失效」→ 消费者侧运行期 dlopen 被静默拒载
+# （表象：编译全绿、运行期 symbol not found + Error 127），修法在消费者侧对依赖图闭包统一重签
+# ====================================================================
+
+id:                     DRAFT-lomiri-polkit-agent-0.3.3-dep-closure-codesign-resign
+trigger_tool:           conan|cmake|test|runtime|dlopen|ctest
+phase:                  runtime|testing
+title:                  已发布依赖制品的共享库 .codesign 段存在但无效 → 消费者运行期 dlopen 被拒载（symbol not found + Error 127），需在消费者侧对依赖图闭包统一重签
+error_signature:        Error relocating .*: .*symbol not found|
+                        Error loading shared library .*: (Permission denied|Operation not permitted)|
+                        ConanException: Error 127 while executing|
+                        dlopen.*(Permission denied|Operation not permitted)|Signal 5 \(core dumped\)
+severity:               3
+category:               ohos, security, dynamic-loading, conan, runtime
+keywords:               签名失效, .codesign, 依赖闭包重签, dlopen EACCES, symbol not found,
+                        Error 127, binary-sign-tool, selfSign, 制品仓依赖, 消费者侧修复,
+                        test_package, 三态对照
+match_keywords:         codesign, .codesign, symbol not found, Error 127, dlopen,
+                        Permission denied, Operation not permitted, binary-sign-tool,
+                        llvm-objcopy, selfSign, dependency closure, conan, test_package, OHOS
+prescan_pattern:        binary-sign-tool|--remove-section \.codesign
+
+root_cause: 缺陷不在本包，而在**已发布到制品仓的第三方依赖包**：其共享库带了
+  `.codesign` 段但签名对 OHOS 加载器无效（段存在 ≠ 有效）。链接期一切正常
+  （clang/lld 只看符号表），运行期进程首次 dlopen 该库时加载器以 EACCES 拒载，
+  于是报错**不是**签名/权限字样，而是下游符号解析失败的表象：
+  `Error relocating .*: <sym>: symbol not found` + `ConanException: Error 127`，
+  极易被误判为「漏依赖 / 搜索路径 / 符号版本」问题。本包自己编译的 ELF 是好的，
+  所以「本地跑得通、test_package/消费者一跑就挂」。
+  ⚠️ 现有条目的判据对「段在但失效」是**假阴性**：E489 用
+  `llvm-readelf -S <elf> | grep codesign` 只证明段存在，本次实测段存在却仍被拒载；
+  只有实际 dlopen/exec 或做「去段↔重签」三态对照才能定性。
+  载体差异（本条与既有条目的界线）：
+  ① E489＝本包**构建树**的 ctest 闭包未签名（修法在 build() 期签构建树）；
+  ② DRAFT-E077B＝本包**产物**的 SDK 自动签名段无效（修法在 package() 期四步重签）；
+  ③ DRAFT-E5xx＝本包 **install 产物**未签名导致 dlopen Permission denied（修法在 package() 内签产物）；
+  ④ 本条＝**已发布依赖制品**签名失效 → 依赖包不可改（改了也要等它重新发布），
+     修法只能在**消费者侧**按 conan 依赖图枚举闭包统一重签（本包 test_package 内实施）。
+
+affected_scope: 任何运行时经 dlopen 加载 conan 依赖共享库的 OHOS 消费者包，
+  尤其 GUI/服务类多库闭包（本样例 38 个库 / 19.8MB）。编译期完全无法发现：
+  conan install/profile 全绿、链接全绿、`conan create` 的 build 段全绿，
+  失败只出现在 test_package 或下游消费者的运行期。
+
+verification_cmd: |
+  # 随包提供的检测/复现脚本（可直接跑，POSIX sh，工具经 PATH 探测不硬编码本机路径）：
+  #   sh archives/l/lomiri-polkit-agent/0.3.3/test_package/repro-code-sign-closure.sh scan <lib_dir> [...]
+  #       → 逐库 dlopen 探针，输出 OK / UNSIGNED(签名失效) 清单
+  #   sh archives/l/lomiri-polkit-agent/0.3.3/test_package/repro-code-sign-closure.sh demo <lib_dir> <soname>
+  #       → 三态对照：a) 原件(期望 OK) b) 仅去段(期望 UNSIGNED) c) 去段+selfSign(期望 OK)
+  # 手工等价命令：
+  # ① 判定（段存在 ≠ 有效；grep -c 只能作存在性参考，不能作有效性判据）
+  llvm-readelf -SW <dep_pkg>/lib/<lib>.so.<ver> | grep -c codesign      # 1 → 段存在
+  # ② 三态对照（唯一变量=签名；三步结论必须一致才可定因）
+  #    a) 原件：正常
+  #    b) 仅去段：llvm-objcopy --remove-section .codesign $f  → dlopen EACCES / symbol not found / rc=127
+  #    c) 去段+重签：binary-sign-tool sign -inFile $f -outFile $f -selfSign 1  → 恢复
+  # ③ 闭包整体重签（软链先 rm -f；日志一律重定向文件，勿管道 head，规避 SIGPIPE）
+  find <closure_lib_dirs> -name '*.so*' -type f -print0 \
+    | xargs -0 -n1 sh -c 'llvm-objcopy --remove-section .codesign "$0" \
+        && binary-sign-tool sign -inFile "$0" -outFile "$0" -selfSign 1' > resign.log 2>&1
+  # ④ 以私有可写 TMPDIR 跑消费者测试
+  TMPDIR=<writable-dir> ctest --output-on-failure -j1 > ctest.log 2>&1
+
+rec_priority:           1
+rec_approach:           consumer-side-closure-resign
+rec_description: 在**消费者侧**（本包 test_package/下游配方）修，不写进依赖包：
+  ① test_package 的 generate()/build() 遍历依赖图（每个 requires 的
+     cpp_info.libdirs / bindirs，含传递依赖）收集所有 `*.so*`；
+  ② 过滤：只取 ELF（前 4 字节 \x7fELF）、跳过符号链接（HMDFS 上不可原地改链目标，
+     软链用 rm -f && ln -s 重建）；
+  ③ 对每个 ELF：`llvm-objcopy --remove-section .codesign` 去旧段 →
+     `binary-sign-tool sign -inFile <f> -outFile <f> -selfSign 1` 统一重签；
+  ④ 任一步失败（含签名工具缺失）**立即终止**，不允许降级为「跳过」——
+     否则运行期错误会在下游才爆；工具不存在时按 env_unsupported 上报；
+  ⑤ 重签后以私有可写 TMPDIR 执行消费者测试（ctest/test.sh），验证真实 dlopen 路径。
+  正解的另一半：把「依赖制品签名失效」作为依赖包缺陷单独报修
+  （让依赖包在 package() 内自签，见 E077B/E5xx 路线），消费者侧重签只是本包内的
+  必要兜底，不替代上游修复。
+rec_command: |
+  llvm-objcopy --remove-section .codesign <elf> \
+    && binary-sign-tool sign -inFile <elf> -outFile <elf> -selfSign 1 \
+    && TMPDIR=<writable-dir> ctest --output-on-failure -j1
+rec_auto_fix:           false
+
+fallback_priority:      2
+fallback_approach:      ld-preload-probe-then-resign
+fallback_description: 无法整体重签全部闭包时（磁盘/权限受限），先用最小 dlopen 探针
+  （python3 -c "import ctypes; ctypes.CDLL('<lib>')"，未签→OSError EACCES，已签→正常）
+  逐个定位真正被拒载的库，只对命中者重签；但必须在证据里写清「未覆盖其余闭包」，
+  不得据此宣称适配完成。
+fallback_command: 'LD_LIBRARY_PATH=<pkg>/lib python3 -c "import ctypes; ctypes.CDLL(\"libnotify.so.4\")"'
+
+safety_boundary: 1) 只在包内/私有可写目录操作，禁止重签共享前缀（/usr/local、/lib、/lib64）——
+   会与 CI worker 共用文件系统互相污染（E524/R49 教训）；
+  2) 软链一律 `rm -f && ln -s` 重建，不用 `ln -sf` 覆盖（HMDFS 不支持）；
+  3) 签名工具缺失或任一文件签名失败即终止，不得静默跳过或伪造通过；
+  4) 不写进依赖包配方（越界改动他人包），只修消费者侧；上游修复另行报修；
+  5) 判定不得只看 `grep -c codesign`（段存在性），必须实跑 dlopen/exec。
+
+evidence: lomiri-polkit-agent 0.3.3（2026-09-29/30，本机 aarch64 OHOS 6.0 + clang 15，
+  conan 2.29.1 / profile ci/conan/profiles/ohos-aarch64，分支 feat/lomiri-polkit-agent-0.3.3）：
+  · 表象：编译与 `conan create` build 段全绿、G2 干净构建通过；
+    test_package 运行期 rc=127，报 `Error loading shared library libnotify.so.4.0.0`
+    与 `notify_notification_show/close: symbol not found`（加载器拒载 → 符号解析失败）。
+  · 三态对照定因（唯一变量=签名）：libnotify/0.8.3 制品 `libnotify.so.4.0.0` 段存在；
+    仅去 `.codesign` 段即复现 EACCES；去段 + selfSign 恢复 → 确认为签名失效，
+    并**排除** E540（runner PATH）等误命中方向。
+  · 修法落地：test_package 收依赖图 libdirs，闭包 **38 个库 / 19.8MB** 全量去段+重签
+    （含 libnotify/libglib-2.0/libpolkit-agent-1/policykit-agent 等）。
+  · 验证：W3 `conan create` exit 0（`archives/l/lomiri-polkit-agent/0.3.3/.ci-result.json`
+    含日志 SHA256）、conan-verify G1/G0/G2/G3/G4 全 PASS
+    （`reports/conan-verify-report.md`）、test_package 6/6 通过。
+  · 引擎侧证据（知识缺口）：检索命中 E489，但其场景为「构建树 ctest 闭包未签名」，
+    与「已发布依赖制品失效」不同、且其判据（grep codesign）本次实测假阴性；
+    对症的 DRAFT-E077B（SDK 自动签名无效）与 DRAFT-E5xx（未签名共享库 dlopen 拒绝）
+    均为**草稿未提升**（不在 index.tsv）→ 引擎不可见；实际误命中 E540（runner PATH）。
+
+  · 脚本实证（2026-09-30 本机，同机同远端制品）：
+    `repro-code-sign-closure.sh demo <cache>/libnotify/lib libnotify.so.4.0.0`
+    → a) 原件 OK / b) 仅去段 UNSIGNED / c) 去段+selfSign OK，`RESULT: 三态符合预期`，exit 0；
+    `... scan` 对已重签后的 cache 目录输出 `OK`（未发现失效库），证明修复后状态可持续。
+
+similar_to:             [E489]
+caused_by:              []
+conflicts_with:         []
+prerequisite_of:        []
+authors:                [weijiapan]
+source_pr:              13994
+source_commit:          cce27580e2526c3736dc0c2feabd9146c015ed19
+draft_date:             2026-09-30
+last_updated:           2026-09-30
