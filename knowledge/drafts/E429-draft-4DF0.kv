@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E429.kv，填写各字段
+# 对应的人类文档: doc/E429.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E429
+trigger_tool: conan|create|dh_install|manifest.json|web-extension
+phase: packaging
+error_signature: manifest_version 不符|manifest.json 不存在|两棵树内容不一致|空目录|gecko id 与目录名不一致
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: packaging, web-extension, data-package
+match_keywords: 浏览器扩展, web extension, manifest.json, manifest_version, chromium, firefox, gecko id, 两棵树, 模板生成, 零依赖三处, 资源口径, 配置语义断言
+title: 浏览器扩展类包（纯静态 web-extension）的适配范式——①**同一内容要按浏览器装多棵树**（chromium + firefox，firefox 树用 Mozilla 扩展 ID 目录）；②**`manifest.json` 是生成物而非源码文件**：必须按浏览器挑选模板生成（chromium ← `manifest-chromium.json`（`manifest_version=3`）、firefox ← `manifest-firefox.json`（`manifest_version=2`、带 `browser_specific_settings.gecko.id`）），漏生成会缺文件、两棵树用同一份会让 chromium 侧的 `manifest_version` 出错；③**"零依赖"要三处都空**（Build-Depends / Depends / 发布物内有无 `package.json`、`Makefile` 等构建声明）；④消费者校验做**三层**——结构（两棵树与必需文件）、**配置语义**（version / manifest_version / gecko id 与目录名一致）、**资源口径**（各内容目录文件数下限），只数文件个数会被"空目录装过去"骗过
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: 上游把扩展内容与**按浏览器差异化的 manifest**分开存放（两份模板），由打包脚本挑选生成——Debian 的 `override_dh_auto_install` 正是 `cp manifest-<browser>.json debian/tmp/<browser>/manifest.json`。 不跑 dh 的适配若直接复制目录树，就会漏掉 `manifest.json`（源码里没有这个名字）或两棵树共用一份 （chromium 需要 `manifest_version=3`，firefox 需要 2）——两种错误都不会让"安装"失败，只在运行时/校验时才暴露。
+affected_scope: 所有浏览器扩展/WebExtension 类包（尤其 Debian 的 firefox/chromium 双打包）；以及任何"同一内容按目标形态生成不同配置"的数据包
+verification_cmd: ①`ls <src>/manifest*.json`（有几份模板？）②`grep -n manifest <debian>/rules`（官方挑选/生成规则）③装完后：`python3 -c "import json;print(json.load(open(p))['manifest_version'])"` 对两棵树分别核对 ④`find <树>/<dir> -type f | wc -l` 对照下限
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: per-browser-trees-with-generated-manifest-and-three-layer-consumer-checks
+rec_description: ①读 `debian/*.install` 得到每棵树的落点（firefox 树常带 Mozilla 扩展 ID 目录），读 `debian/rules` 得到 manifest 的生成规则；②在 `package()` 里对每个浏览器：复制内容目录 + 生成 `manifest.json`（从对应模板）；③`build()` 里加自检（模板存在、模板里的 `version` 与包版本一致、内容目录齐备）；④消费者校验三层——结构/配置语义/资源口径；语义断言至少要覆盖 `version`、`manifest_version`（按浏览器不同）与 gecko id（并与包内目录名**双向核对**）；⑤把"三处都空"作为零依赖的判定口径写进 manifest 的 knowledge_gained。
+rec_command: ls src/manifest*.json ; grep -A3 override_dh_auto_install debian/rules ; python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(d['version'],d['manifest_version'])" <树>/manifest.json
+rec_auto_fix: false
+rec_impl: manual
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: single-tree-with-both-manifests-archived
+fallback_description: 若评审不要求两棵树，可只装一棵树并把两份模板都保留在包内（命名为 manifest-chromium.json / manifest-firefox.json 原样保留），但必须在 notes/PR 说明该取舍，且消费者校验仍需断言保留模板的 `version` 与包版本一致。
+fallback_command:
+fallback_auto_fix: false
+fallback_impl: manual
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:
+forbid_1_reason:
+forbid_1_consequence:
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E429.md
+last_updated: 2026-10-08
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 4DF0
