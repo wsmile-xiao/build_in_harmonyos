@@ -1,0 +1,58 @@
+#====================================================================
+# Draft: OHOS 空壳 libintl.h × SDK 链接桩不导出 gettext ——
+#        私有声明头 + 系统 musl loader 取真符号（零 conan 依赖）
+#        cpufrequtils 008（任务 14913）
+# 说明：全字段单行，同时满足 draft-review 的 _parse_simple_fields、
+#       models.parse_kv_file 与真实 YAML 解析器三者。
+#====================================================================
+
+id:                     DRAFT-cpufrequtils-008-OHOS-LIBINTL-STUB-MUSL-SYMBOL-LINK
+trigger_tool:           clang|ld.lld|make|libintl.h|gettext|textdomain|libc.so|ld-musl-aarch64.so.1
+phase:                  compile|link
+error_signature:        "call to undeclared function 'gettext'|incompatible integer to pointer conversion passing 'int' to parameter of type 'const char *'|undefined symbol: gettext|undefined reference to `gettext`"
+severity:               2
+category:               portability|ohos|gettext|linking|header-stub
+match_keywords:         gettext, textdomain, bindtextdomain, libintl.h, 353 bytes, empty stub header, implicit function declaration, Wint-conversion, undefined symbol, ld-musl-aarch64.so.1, -L/lib, link stub, SDK libc, musl loader, raw Makefile, no autoconf
+
+title:                  "OHOS sysroot 的 libintl.h 是 353 字节空壳（零函数声明）且 SDK 链接桩 libc.so 只有 1592 符号、不含 gettext；系统 musl loader /lib/ld-musl-aarch64.so.1（SONAME libc.so）却导出 gettext 与 textdomain —— 私有声明头前置于 sysroot，再加 LDFLAGS=-L/lib -l:ld-musl-aarch64.so.1 即取到真符号，零 conan 依赖、零补丁、非恒等宏"
+
+root_cause:             "两层根因，2026-10-06 在 HarmonyOS PC aarch64（ohos-sdk_26.0.0.18）逐条实测。①头文件层：sysroot 的 usr/include/libintl.h 只有 353 字节，仅定义 __USE_GNU_GETTEXT、__GNU_GETTEXT_SUPPORTED_REVISION 与 __fa（且随后 __fa 被 undef），不声明任何函数，于是源码里对 libintl.h 的包含之后 gettext 与 textdomain 落成隐式 int，clang 15 把 Wint-conversion 判为 error（不是 warning），make 在 utils/info.c 中断。②链接层：SDK 的链接桩 sysroot/usr/lib/aarch64-linux-ohos/libc.so 大小 79424 字节、只导出 1592 个动态符号，llvm-nm -D 对 gettext、dgettext、textdomain、bindtextdomain、ngettext 全部 0 命中，所以只补声明会立刻换成 ld.lld 的 undefined symbol gettext。③反转证据（本条与既有条目的分水岭）：设备运行时的系统 musl loader /lib/ld-musl-aarch64.so.1 大小 2185824 字节、SONAME 就是 libc.so，实测导出 gettext 0x180a1c、dgettext、ngettext、textdomain 0x180974、bindtextdomain，即链接桩没有不等于运行时没有；把 -L/lib 加上 -l:ld-musl-aarch64.so.1 放进链接行，ld 把它解析成普通 libc.so，readelf -d 的 NEEDED 不新增任何条目。"
+
+affected_scope:         "在 OHOS 上没有 autoconf 探测层、没有 glib 代理层而直接调用 gettext 与 textdomain 的 C 包（裸 Makefile、自研 configure、单文件构建）。已验证实例 cpufrequtils 008（utils/info.c 与 utils/set.c 无条件包含 libintl.h 并大量 printf(gettext(...))）。反例：有 ENABLE_NLS 宏可挂的包走恒等回退（见 archives/l/linuxinfo/4.2.3 的 0003 补丁）；经 glib gi18n.h 走 g_dgettext 的包走 proxy-libintl（见 appstream 草稿）。"
+
+verification_cmd:       "conan create archives/c/cpufrequtils/008 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing"
+
+rec_priority:           1
+rec_approach:           "private-libintl-header-plus-system-musl-link"
+rec_description:        "两步，均落在 conanfile 的 build() 内，不产生任何补丁文件。(1) 声明层：save() 一份按 musl 公开 libintl.h 逐字补齐 9 个函数声明的私有头到 build_folder 下的 ohos-compat-include 目录，并把该目录的 -I 放进 CPPFLAGS，使源码对 libintl.h 的包含命中私有头而先于 sysroot 空壳头。(2) 符号层：仅当 settings.os 为 OHOS 时把 LDFLAGS 置为 -L/lib 加 -l:ld-musl-aarch64.so.1，从系统 musl loader 取真实 gettext 符号。两者通过 make 的环境变量注入（上游 Makefile 对 CPPFLAGS 用 +=、对 LDFLAGS 不做赋值，环境变量形态会与上游旗标叠加而不整体覆盖）。修后 DT_NEEDED 不新增依赖，消费者的 21 条断言全过。"
+
+rec_command:            "conan create archives/c/cpufrequtils/008 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing"
+rec_auto_fix:           false
+rec_impl:               "build() 内 save() 私有 libintl.h 加 CPPFLAGS 前置 -I 加 LDFLAGS=-L/lib -l:ld-musl-aarch64.so.1（archives/c/cpufrequtils/008/conanfile.py）"
+
+fallback_priority:      2
+fallback_approach:      "enable-nls-identity-fallback"
+fallback_description:   "若源码把 gettext 调用挂在可关的宏内（例如 ENABLE_NLS），可按 linuxinfo 的 0003 号补丁走恒等翻译回退；代价是关掉真符号。本包源码无条件调用、没有宏可挂，故仅作备选。"
+fallback_command:       "grep -n gettext <src>/*.c"
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       "add -Wno-implicit-function-declaration -Wno-int-conversion to pass the build"
+forbid_1_reason:        "隐式 int 返回值在 aarch64 上会把 64 位指针截成低 32 位，printf(gettext(...)) 运行期必崩。"
+forbid_1_consequence:   "假绿构建加运行期随机 SIGSEGV，审查按欺骗性行为判 P0 或 P1。"
+
+forbid_2_pattern:       "requires the conan libintl package to satisfy gettext"
+forbid_2_reason:        "制品仓 libintl/0.26.1 导出的是 libintl_gettext 与 g_libintl_gettext 改名符号，与源码直调的 gettext 对不上，还要多背一个运行期依赖与签名环节。"
+forbid_2_consequence:   "链接仍失败或引入无谓的传递依赖，方案失去零依赖这一核心价值。"
+
+forbid_3_pattern:       "patch the upstream sources or add __OHOS__ guards"
+forbid_3_reason:        "改 sysroot 或改上游源码都不必要，且 PF5 明令补丁内禁止 __OHOS__ 平台宏。"
+forbid_3_consequence:   "补丁面扩大、被 PF5 拦截，把一个纯配方层问题变成上游 diff。"
+
+similar_to:             "DRAFT-13410-trueprint-libintl-stub-header（同一空壳头根因，但结论写作 OHOS libc has no gettext at all，修法为 autoconf 双宏守卫加链入 replace 归档，依赖 autoconf 与包内自带实现）；DRAFT-appstream-1.2.0-ohos-gettext-proxy-libintl-header（同一根因，修法为复制 glib 包内 proxy libintl.h 并把符号改名成 g_libintl_ 前缀，依赖 glib）；archives/l/linuxinfo/4.2.3 的 0003 号补丁（同一根因，修法为 ENABLE_NLS 分支加恒等翻译回退，关掉真符号）；E015 与 E027 与 E107 与 E123 与 E142 与 E508（讲链接真实 libintl 时的符号缺失与 NLS 关闭，不是空壳头）"
+conflicts_with:
+caused_by:
+principles:             "minimal-recipe-layer-change, real-symbol-over-stub, zero-extra-dependency, no-platform-macro, evidence-over-assumption"
+authors:                "链主-cpufrequtils (主理-2)"
+source_event:           "cpufrequtils 008 任务 14913，2026-10-06 B 机 conan create 首轮实撞"
+source_pr:              "待建（本轮终点在 W4 审计前）"
