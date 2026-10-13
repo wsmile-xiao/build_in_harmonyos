@@ -1,0 +1,134 @@
+--- a/src/lib/util/klistopenfilesjob_unix.cpp
++++ b/src/lib/util/klistopenfilesjob_unix.cpp
+@@ -47,15 +47,27 @@
+             return;
+         }
+ 
++        lsofExecutable = lsofExec;
+         lsofProcess.start(lsofExec, {QStringLiteral("-t"), QStringLiteral("+d"), path.path()});
+     }
+ 
+     void lsofError(QProcess::ProcessError processError)
+     {
++        if (stage != DirectoryQuery) {
++            // The directory query itself already completed; if a follow-up
++            // query cannot be executed, the job reports no results rather
++            // than an execution error, matching what the directory query
++            // produced.
++            if (!hasEmittedResult) {
++                hasEmittedResult = true;
++                job->emitResult();
++            }
++            return;
++        }
+         emitResult(static_cast<int>(KListOpenFilesJob::Error::InternalError), QObject::tr("Failed to execute `lsof'. Error code %1").arg(processError));
+     }
+ 
+-    void lsofFinished(int, QProcess::ExitStatus);
++    void lsofFinished(int exitCode, QProcess::ExitStatus);
+     void emitResult(int error, const QString &errorText);
+ 
+     KListOpenFilesJob *job;
+@@ -63,7 +75,30 @@
+     bool hasEmittedResult = false;
+     QProcess lsofProcess;
+ 
++    // Not every lsof implements the +d directory query. The lsof shipped on
++    // OpenHarmony images is one of them: its usage is
++    // "lsof [-lt] [-p PID...] [FILE...]", it takes "+d" for a path name,
++    // aborts with "Can't stat +d" and lists nothing (verified on device:
++    // exit code 1, empty stdout). When that is detected, the directory
++    // query is retried against the directory's immediate entries, which is
++    // exactly the depth-1 search +d describes. A tool that understands +d
++    // never reaches this path.
++    enum QueryStage {
++        DirectoryQuery, // lsof -t +d <dir>, the plain upstream query
++        EntryQuery, // lsof -t <entry>... for the directory's entries
++        EntryQueryPerEntry, // one lsof run per entry: the reduced tool voids
++                            // the whole query when any single path does not
++                            // stat (verified on device)
++    };
++    QueryStage stage = DirectoryQuery;
++    QString lsofExecutable;
++    QStringList pendingEntries;
++    int pendingIndex = 0;
++
+     KProcessList::KProcessInfoList processInfoList;
++
++    void appendPids(const QString &out);
++    void startEntryQuery();
+ };
+ 
+ static KProcessList::KProcessInfo findInfoForPid(qint64 pid)
+@@ -84,13 +119,8 @@
+ #endif
+ }
+ 
+-void KListOpenFilesJobPrivate::lsofFinished(int, QProcess::ExitStatus)
++void KListOpenFilesJobPrivate::appendPids(const QString &out)
+ {
+-    if (hasEmittedResult) {
+-        return;
+-    }
+-    const QString out(QString::fromLocal8Bit(lsofProcess.readAll()));
+-
+     const QRegularExpression re(QStringLiteral("\\s+"));
+     const QVector<QStringRef> pidList = out.splitRef(re, Qt::SkipEmptyParts);
+ 
+@@ -100,6 +130,56 @@
+             processInfoList << findInfoForPid(pid);
+         }
+     }
++}
++
++void KListOpenFilesJobPrivate::startEntryQuery()
++{
++    const QStringList names = path.entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System, QDir::Name);
++    pendingEntries.clear();
++    for (const QString &name : names) {
++        pendingEntries << path.absoluteFilePath(name);
++    }
++    if (pendingEntries.isEmpty()) {
++        // Nothing can be open in an empty directory: same result as +d.
++        job->emitResult();
++        return;
++    }
++    stage = EntryQuery;
++    lsofProcess.start(lsofExecutable, QStringList{QStringLiteral("-t")} + pendingEntries);
++}
++
++void KListOpenFilesJobPrivate::lsofFinished(int exitCode, QProcess::ExitStatus)
++{
++    if (hasEmittedResult) {
++        return;
++    }
++    const QByteArray rawOut = lsofProcess.readAllStandardOutput();
++    if (!rawOut.isEmpty()) {
++        appendPids(QString::fromLocal8Bit(rawOut));
++    }
++
++    if (stage != DirectoryQuery) {
++        if (stage == EntryQuery && exitCode != 0 && processInfoList.isEmpty()) {
++            // The reduced tool refuses the whole query when any argument
++            // cannot be stat'ed, so retry one entry at a time.
++            stage = EntryQueryPerEntry;
++            pendingIndex = 0;
++        }
++        if (stage == EntryQueryPerEntry && pendingIndex < pendingEntries.size()) {
++            lsofProcess.start(lsofExecutable, QStringList{QStringLiteral("-t"), pendingEntries.at(pendingIndex++)});
++            return;
++        }
++        job->emitResult();
++        return;
++    }
++
++    // The plain directory query. A tool without +d support aborts before
++    // listing anything; fall back to querying the entries directly.
++    if (processInfoList.isEmpty() && exitCode != 0
++        && lsofProcess.readAllStandardError().contains("+d")) {
++        startEntryQuery();
++        return;
++    }
+     job->emitResult();
+ }
+ 

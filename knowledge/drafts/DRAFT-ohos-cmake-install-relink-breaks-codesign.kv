@@ -1,0 +1,64 @@
+# ═══ OHOS: CMake 安装期重写 rpath 使 .codesign 失效，制品在运行时无法 dlopen ═══
+# Timestamp: 2026-09-29
+# Software: kcoreaddons5/5.116.0, kpty5/5.116.0 (KDE Frameworks 5)
+# Gate: G2/conan create（制品打包 + 运行时加载）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-ohos-cmake-install-relink-breaks-codesign
+severity: 3
+category: packaging|loader|cmake
+trigger_tool: cmake|conan|ld
+phase: package|runtime
+approach: 在 generate() 里设 tc.variables["CMAKE_SKIP_RPATH"]="ON"。构建树与安装树的 rpath 因此一致（都为空），CMake 安装期无事可改，不再 relink，制品的 .codesign 保持有效。依赖库改由 LD_LIBRARY_PATH 定位——OHOS 加载器是认这个变量的。
+
+keywords: CMAKE_SKIP_RPATH, install rpath, RPATH_CHANGE, relink, codesign, Permission denied, Error loading shared library, dlopen, CMAKE_SYSTEM_NAME=Linux, HarmonyOS
+
+error_signature: Error loading shared library .*: Permission denied|Error relocating .*: symbol not found|Error loading shared library libKF5CoreAddons.so.5
+match_keywords: permission denied,error loading shared library,codesign,skip_rpath,relink,rpath
+
+root_cause: |
+  CMake 默认给构建树目标写入一条 rpath（由所链接库的目录推导），并在 install 时把这条
+  rpath **重写**为安装树的值——这是一次真正的重新链接。OHOS 的二进制带 .codesign 段，
+  重链发生在签名之后，签名便不再匹配，加载器随即拒绝该文件：
+      Error loading shared library .../p/lib/libKF5CoreAddons.so.5.116.0: Permission denied
+  同一份库的构建树副本加载正常，两者仅差 100 字节 .dynstr（两条 rpath 字符串），
+  这个不对称是定位该问题的关键。
+  kcoreaddons5 尤其容易命中：其配方为保住 KDE 的 `if(UNIX)` 源文件选择而显式设置
+  CMAKE_SYSTEM_NAME=Linux，从而加载了完整的 Linux ELF 链接规则，rpath 才会被写入并重写。
+  实测：构建树副本 ctypes.CDLL 成功，安装副本失败；把构建树副本复制到任意目录仍成功，
+  说明损坏在文件内容（签名不匹配），与路径、xattr 无关。
+
+error_hint: |
+  "Error loading shared library X: (needed by Y)" 有两种含义，必须区分：
+    1) 找不到 X    2) 找到了 X 但拒绝加载 X（签名无效即此类的 Permission denied）
+  只看第一句会误判为搜索路径问题。判据：同一文件在构建树能加载、在安装树不能，
+  即内容层差异；把该文件复制到中性目录后仍失败，即与位置无关。
+
+wrong_turns: |
+  - 误判为"搜索路径不对"，于是加 CMAKE_BUILD_RPATH / 定义
+    CMAKE_SHARED_LIBRARY_RUNTIME_<lang>_FLAG。这会**加重**问题：一旦 rpath 被写入，
+    安装期重写必然发生，签名必被破坏。
+  - 误判为"沙箱拒绝执行用户态二进制"。用 patchelf 改 rpath 做验证也是错的：
+    改写 ELF 本身就会让 .codesign 失效，二进制当场被拒，实验证明不了任何事。
+  - 误判为 LD_LIBRARY_PATH 不被加载器接受。实测（给一个无 rpath 的旧构建配上
+    完整闭包的 LD_LIBRARY_PATH）它是被接受的，唯一报错来自确实缺失的 libintl。
+
+affected_scope: |
+  所有在 OHOS 上以 CMake 构建、且构建期 CMAKE_SYSTEM_NAME 被识别为已知平台
+  （Linux/Android 等，或配方显式设成 Linux）的 Conan 制品；凡消费方在运行时从
+  package_folder 加载该库者均受影响——包括 test_package 消费者与下游库的上游测试。
+
+detection: |
+  # 1) 构建树副本与安装副本的 rpath 是否不同
+  readelf -d <pkg>/b/build/Release/bin/libX.so | grep -Ei 'rpath|runpath'
+  readelf -d <pkg>/p/lib/libX.so            | grep -Ei 'rpath|runpath'
+  # 2) 两份是否逐字节相同
+  cmp -l <build-tree-lib> <installed-lib> | wc -l
+  # 3) 直接判可加载性（设备上有 python3）
+  python3 -c 'import ctypes;ctypes.CDLL("<pkg>/p/lib/libX.so.5")'
+
+verification: |
+  设 CMAKE_SKIP_RPATH=ON 重建后，安装副本应与构建树副本逐字节一致（cmp 无差异），
+  且 ctypes.CDLL 安装副本成功；随后依赖它的上游测试才能进入 main() 并产出 QTest 结果。
+
+rec_priority: 1
