@@ -1,0 +1,52 @@
+# ═══ Draft knowledge entry — 图形库（skia）在 OHOS 的 CPU 光栅化适配模式：sysroot ICU 头是裁剪版 / GL 原生接口只有 EGL / 系统字体在 /system/fonts / musl 无 __WORDSIZE ═══
+# Timestamp: 2026-10-04
+# Software: skia 2.88.9（mono/skia@4bed689c…）
+# Gate: build + 上游测试实测（dm）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: draft-skia-cpu-raster-ohos-adaptation
+title: 图形/文本栈在 OHOS 的适配模式：ICU 头被裁到公共 C API（UText 内部结构体缺失）、无 X11 故 GL 只能走 EGL、系统字体在 /system/fonts、musl 无 __WORDSIZE
+trigger_tool: clang|gn|ninja
+phase: build
+error_signature: incomplete type.*UText|use of undeclared identifier.*UTEXT_INITIALIZER|fatal error: 'unicode/unistr\.h' file not found|fatal error: 'X11/Xlib\.h' file not found|cannot initialize a parameter of type 'long long \*' with an rvalue of type 'std::int64_t \*'|undefined symbol: hb_icu_script_to_script
+severity: 1
+category: graphics|freetype|harfbuzz|icu|egl|fontconfig|musl|ohos
+match_keywords: UText, UTEXT_INITIALIZER, unicode/unistr.h, ICU headers stripped,
+  U_HIDE_INTERNAL_API, U_DISABLE_RENAMING, libicu.so, X11/Xlib.h, skia_use_egl,
+  GrGLMakeNativeInterface, glx, EGL/GLES sysroot, /system/fonts, SK_FONT_FILE_PREFIX,
+  fontconfig, __WORDSIZE, musl, hb_icu_script_to_script, HAVE_ICU, harfbuzz,
+  freetype, skia, CPU rasterization
+approach: 四条独立事实，各自对应一类修法（互不依赖，按命中项取用）。
+  【A. ICU 头是裁剪版】OHOS sysroot 的 unicode/*.h 只有**公共 C API**：UText 只有
+  `struct UText;` 前向声明（内部结构体与 UTEXT_INITIALIZER 被裁），也没有任何 C++
+  头（unistr.h / normalizer2.h）。=> 凡是需要 UText 内部结构（如 harfbuzz 的
+  hb-unicode/hb-icu、SkShaper）或 ICU C++ API（如 sfntly）的代码都编不过。
+  修法：把**与 sysroot libicu.so 同版本**的完整 ICU 头（unicode-org/icu 的
+  release-<major>-<minor> tag，取 icu4c/source/{common,i18n}/unicode）随配方附带，
+  在构建文件里加 include 路径，并定义 `U_DISABLE_RENAMING=1`（sysroot 的
+  uconfig.h 就是 renaming=off → 系统 libicu.so 导出的是**无后缀**的 u_* 符号；
+  不关重命名则头会把 u_strlen 映射到 u_strlen_72，链接期全找不到）。
+  另：系统库名是 libicu.so（不是 libicuuc.so）→ `-licuuc` 要改成 `-licu`。
+  【B. 无 X11 → GL 只有 EGL】图形库在 Linux 上默认的 GL 原生接口是 **glx**
+  （`#include <X11/Xlib.h>`），OHOS 无 X11 头 → 必须切到 EGL：`skia_use_egl=true`
+  （sysroot 提供 EGL/GLES 头 + libEGL.so，且其 eglplatform.h 用 `USE_X11` 守卫而非
+  `__unix__`，不会拉 X11）。注意 skia 的 GPU 测试上下文
+  `tools/gpu/gl/{glx,egl}/CreatePlatformGLTestContext_*.cpp` 是否被编由 **is_linux
+  + skia_use_egl** 决定 —— 只关 `skia_use_x11` 不够，glx 分支仍会被选中而编不过。
+  【C. 字体目录】上游默认字体目录 `/usr/share/fonts/`（OHOS 不存在）；OHOS 系统字体在
+  **`/system/fonts`**。`SkFontMgr_custom_directory_factory.cpp` 有
+  `#ifndef SK_FONT_FILE_PREFIX` 守卫 → 加 `#elif defined(__OHOS__)` 分支
+  （或 `-DSK_FONT_FILE_PREFIX`）。实测效果：skia 的 dm 单元测试失败断言数 **105 → 24**
+  （字体相关用例大面积恢复），是本适配收益最大的单点修复之一。
+  【D. musl 无 __WORDSIZE】glibc 的 `<bits/wordsize.h>` 定义 `__WORDSIZE`，musl 没有。
+  第三方代码常写 `#if __WORDSIZE == 64`（如 dng_sdk 的 dng_safe_arithmetic.h、
+  libjpeg-turbo 的 jconfigint.h）→ 取值为 0 → 走 32 位分支 → 类型/尺寸判定错误
+  （典型报错 `cannot initialize a parameter of type 'long long *' with ... 'std::int64_t *'`）。
+  修法：`extra_cflags=["-D__WORDSIZE=64"]`（musl 自身不使用该宏，全局定义安全；sysroot
+  仅 bits/{reg,user}.h 引用且不参与此类构建）。
+  补充：fork 版本可能调用需 `HAVE_ICU` 才编译的 HB 函数（`hb_icu_script_to_script`
+  在 hb-icu.cc）→ 链接期 undefined symbol；把 hb-icu.cc 加进 harfbuzz 目标并定义
+  HAVE_ICU（其只用 ICU C API，本方案 A 的头即可满足）。
+  另：新版 harfbuzz（≥8）删除了 `hb_subset_input_set_retain_gids/_set_drop_hints/
+  hb_subset()`，旧图形库代码需改 flag API（`HB_SUBSET_FLAGS_RETAIN_GIDS` +
+  `hb_subset_or_fail`）。
