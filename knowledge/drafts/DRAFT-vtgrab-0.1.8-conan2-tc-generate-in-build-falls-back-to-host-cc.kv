@@ -1,0 +1,109 @@
+#====================================================================
+# DRAFT-vtgrab-0.1.8-conan2-tc-generate-in-build-falls-back-to-host-cc.kv
+# 配对文档: knowledge/drafts/DRAFT-vtgrab-0.1.8-conan2-tc-generate-in-build-falls-back-to-host-cc.md
+# 来源: archives/v/vtgrab/0.1.8 (vtgrab 0.1.8 适配)
+#====================================================================
+
+# ══ Layer 0: 错误面 (Error Surface) ══
+id:                     DRAFT-vtgrab-0.1.8-conan2-tc-generate-in-build-falls-back-to-host-cc
+trigger_tool:           conan|AutotoolsToolchain|configure|make
+phase:                  configuration|compilation
+error_signature:        AttributeError: 'AutotoolsToolchain' object has no attribute
+                         'configure'|AssertionError: env argument to ConanFile.run()
+                         should be a list|AttributeError: 'str' object has no attribute
+                         '_values'|/bin/sh: 1: ./configure: not found|CC = gcc|Makefile:
+                         CPPFLAGS = (空)|Makefile: LIBS = (空)
+
+# ══ Layer 1: 识别 ══
+severity:               3
+category:               conan-toolchain, cross-compile, silent-misbuild
+match_keywords:         AutotoolsToolchain, tc.generate, generate(), build(),
+                         conanbuild, conanautotoolstoolchain, Environment.vars,
+                         save_script, env="conanbuild", CC = gcc, host compiler
+                         fallback, basic_layout, src_folder, build_folder
+title:                  Conan 2.29 里 tc.generate() 放在 build() 会让工具链环境静默失效，
+                         configure 回落到宿主 gcc
+
+# ══ Layer 2: 诊断 ══
+root_cause:             Conan 2.29 的 Environment 只有 vars()（返回 EnvVars），没有
+                         save_script()/define()；AutotoolsToolchain 也没有 configure()
+                         方法，configure_args 是普通属性。在 build() 里调用
+                         tc.generate(env=...) 会把 conanautotoolstoolstoolchain.sh 写进
+                         generators 目录，但不会把它接进聚合后的 conanbuild.sh，于是
+                         self.run(..., env="conanbuild") 拿不到 CC/CFLAGS/LDFLAGS/LIBS。
+                         autoconf 的 configure 对此没有戒心：CC 缺失时它直接采用宿主默认
+                         编译器，于是配方"成功"编出 x86 产物并打上 OHOS 的 package_id。
+                         同源的第二个坑是 basic_layout()：默认 build=build/<type> 而
+                         source=.，Conan 会把源码复制进 build 目录，在 build() 里看到的
+                         cwd 里没有 ./configure。
+affected_scope:         所有用 AutotoolsToolchain / 环境变量型工具链的 Conan 2.x 配方，
+                         尤其是只调用一次 ./configure 的小型 C 项目；宿主装有 gcc 与
+                         ncurses-dev 时错误不会在编译期暴露，最危险
+verification_cmd:       conan create <recipe> -pr:h=<profile> -pr:b=<profile>
+                         --build=missing 2>&1 | grep -nE 'CC = |^CPPFLAGS = |^LIBS = '
+                         # 出现在 build_folder/Makefile 里；CC = gcc 即已中招
+
+# ══ Layer 3: 方案 ══
+rec_priority:           1
+rec_approach:           toolchain-in-generate-method
+rec_description:        把工具链生成放进配方的 generate() 方法（此时 EnvVars 有完整的
+                         generators 目录与 conf 文件，脚本会被接进 conanbuild.sh），
+                         build() 里统一用 env="conanbuild"；layout 用
+                         basic_layout(self, src_folder=".", build_folder=".") 做 in-tree
+                         构建以避开源码复制；make 仍需 env="conanbuild"
+rec_command:            def generate(self):
+                           tc = AutotoolsToolchain(self)
+                           tc.extra_ldflags = [...]
+                           env = tc.environment()
+                           env.append("CPPFLAGS", [...])
+                           env.append("LIBS", [...])
+                           tc.generate(env=env)
+
+                         def build(self):
+                           self.run("./configure --prefix=/usr", env="conanbuild")
+                           self.run("make -j1", env="conanbuild")
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      assert-compiler-in-recipe
+fallback_description:   若仍需把生成放在 build()，则生成后回读 generators 目录里的
+                         conanautotoolstoolchain.sh 并在同一次 self.run 里显式列出
+                         env=["conanbuild", "conanautotoolstoolchain"]；无论如何都要在
+                         打包前断言产物架构（见 DRAFT 同族 ELF 指纹自检）
+
+# ══ Layer 4: 关联 ══
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ══ 元数据 ══
+doc_file:               drafts/DRAFT-vtgrab-0.1.8-conan2-tc-generate-in-build-falls-back-to-host-cc.md
+last_updated:           2026-10-03
+source_event:           archives/v/vtgrab/0.1.8/manifest.yaml
+
+# ══ 知识协作 ══
+authors:                wzp780028 <wang780028@qq.com>
+source_pr:
+source_commit:
+
+# ══ 质量度量 ══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-10-03
+
+#====================================================================
+# 附加陷阱（同源误判高发，单列备查）
+#====================================================================
+# 1) 改了 conanfile.py 后 package_id 不变，conan create 会复用缓存二进制，
+#    "验证"跑的是旧产物。--build=vtgrab 不生效，必须
+#    conan remove "vtgrab/0.1.8:*" -c 后再 create。
+# 2) 上游 autotools 老 Makefile 常把 CFLAGS 写死（Makefile.in: CFLAGS = -D_GNU_SOURCE
+#    -Wall -W -O2），会覆盖工具链注入的 CFLAGS：依赖头文件路径要改走 CPPFLAGS，
+#    build_type 的 -O 标志要用 make 命令行变量覆盖（命令行赋值优先于 Makefile 赋值）。
+# 3) 宿主 musl loader 缺 OHOS 的 fortify 符号 __fd_chk（sys/select.h 的 FD_SET 引用它），
+#    本地 qemu 跑 OHOS 动态产物会报 "Error relocating ...: __fd_chk: symbol not found"；
+#    这是本地 loader 差异而非配方缺陷，用 QEMU_SET_ENV=LD_PRELOAD= 注入 stub 反证。
+#====================================================================
