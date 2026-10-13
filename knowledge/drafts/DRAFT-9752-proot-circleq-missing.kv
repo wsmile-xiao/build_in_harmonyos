@@ -1,0 +1,85 @@
+#====================================================================
+# DRAFT-9752-proot-circleq-missing — OHOS/musl 系 <sys/queue.h> 缺少
+#   CIRCLEQ 家族（FreeBSD 2018 移除）：依赖环形队列宏的软件需在特性
+#   守卫下自带标准实现（proot 5.4.0 OHOS arm64 实测；任务 #9752）
+#====================================================================
+
+id:                     DRAFT-9752-proot-circleq-missing
+trigger_tool:           cc|clang|make|cmake|configure
+phase:                  compilation
+error_signature:        CIRCLEQ_ENTRY\(|CIRCLEQ_HEAD\(|CIRCLEQ_REMOVE\(|CIRCLEQ_FIRST\(|CIRCLEQ_NEXT\(|CIRCLEQ_INIT\(
+
+severity:               2
+category:               libc, headers, compat, musl, porting
+match_keywords:         CIRCLEQ, CIRCLEQ_ENTRY, CIRCLEQ_HEAD, CIRCLEQ_REMOVE, sys/queue.h, BSD queue, circular queue, 环形队列, FreeBSD removed CIRCLEQ, musl queue.h, bsd-compat-headers, 容器宏缺失, queue macro family
+title:                  OHOS/musl 系 <sys/queue.h> 缺少 CIRCLEQ 家族（FreeBSD 2018 已删除）：使用环形队列宏的软件需在特性守卫下自带标准实现
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             OHOS 的 <sys/queue.h> 是 FreeBSD 衍生快照，与 FreeBSD >= 13 / musl 系一致地**移除了 CIRCLEQ 家族**（circular queue；FreeBSD 2018 年以极少使用为由删除，OpenBSD/musl 亦不提供），而同文件的 LIST/TAILQ/SLIST/STAILQ 仍在；glibc 至今仍提供 CIRCLEQ。后果：按 glibc/旧 BSD 编写的代码（使用 CIRCLEQ_ENTRY/CIRCLEQ_HEAD/…）在 OHOS 上宏未展开，编译期出现链式错误——结构体成员位置残留 `CIRCLEQ_ENTRY(binding) x;` 触发 "type name requires a specifier or qualifier"、"duplicate member"、"expected function body after function declarator"（proot 实测 12 处同族错误）。与 E091 的 struct 重定义、E194 的 bits/alltypes.h 缺失均不同轴：本条是**纯容器宏家族缺失**，非 libc ABI/类型缺口。
+affected_scope:         任何使用 CIRCLEQ_* 宏（含库内绑定/链表）的 C/C++ 软件在 OHOS/musl 系构建；与构建系统无关（手写 Makefile/CMake/autotools 均可复现）。glibc 构建不受影响。Alpine Linux 对同类问题的既有做法是引入 bsd-compat-headers 提供完整 BSD 头（含 CIRCLEQ）。
+verification_cmd:       grep -rn 'CIRCLEQ_' <src>/ | head; printf '#include <sys/queue.h>\nstruct s { int x; CIRCLEQ_ENTRY(s) link; };\nint main(void){return 0;}\n' > q.c && clang -c q.c -o /dev/null
+                        # OHOS 期望：q.c 报 "type name requires a specifier or qualifier"；glibc 上同一程序编译通过
+
+# ═══ Layer 3: 方案层 ★ ═══
+rec_priority:           1
+rec_approach:           feature-guarded-standard-macro-fallback
+rec_description:        在以 CIRCLEQ 类型定义处（首个使用该宏的头/源文件）包含 <sys/queue.h> 后，用 `#ifndef CIRCLEQ_HEAD` 特性守卫补齐标准 CIRCLEQ 宏族（HEAD/HEAD_INITIALIZER/ENTRY/FIRST/LAST/NEXT/PREV/EMPTY/INIT/INSERT_AFTER/INSERT_BEFORE/INSERT_HEAD/INSERT_TAIL/REMOVE/FOREACH/FOREACH_REVERSE；语义与 glibc/旧 FreeBSD 一致：以自指针为哨兵，`(void *)(head)`）。**纯特性检测，不含平台条件宏（R8/PF5 干净）**；glibc/Linux 构建走原头文件、零影响，同一补丁可在任意 C 库上安全生效。若使用点位于多个 TU，守卫应落在被共同包含的头文件（proot 为 src/path/binding.h；binding.c 中 sys/queue.h 先于该头包含亦被覆盖）。
+rec_command:            |
+                        #include <sys/queue.h> /* CIRCLEQ_*, */
+                        #ifndef CIRCLEQ_HEAD
+                        #define CIRCLEQ_HEAD(name, type)  struct name { struct type *cqh_first; struct type *cqh_last; }
+                        #define CIRCLEQ_ENTRY(type)       struct { struct type *cqe_next; struct type *cqe_prev; }
+                        #define CIRCLEQ_FIRST(head)       ((head)->cqh_first)
+                        #define CIRCLEQ_LAST(head)        ((head)->cqh_last)
+                        #define CIRCLEQ_NEXT(elm, field)  ((elm)->field.cqe_next)
+                        #define CIRCLEQ_PREV(elm, field)  ((elm)->field.cqe_prev)
+                        #define CIRCLEQ_EMPTY(head)       ((head)->cqh_first == (void *)(head))
+                        #define CIRCLEQ_INIT(head) do { (head)->cqh_first = (void *)(head); (head)->cqh_last = (void *)(head); } while (0)
+                        /* INSERT_AFTER/BEFORE/HEAD/TAIL、REMOVE、FOREACH 同标准实现（完整版见触发实例归档补丁 0002） */
+                        #endif
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      bsd-compat-headers-directory
+fallback_description:   引入 bsd-compat-headers 风格的独立头目录（把完整 BSD <sys/queue.h> 快照放到工程内并以 -I 优先级覆盖系统头；Alpine 的 libbsd/bsd-compat 思路）。诚实权衡：覆盖面最全，但遮蔽整个系统 sys/queue.h，存在与 sysroot 版本漂移/其它 family 不一致风险，仅当项目本身已依赖完整 BSD 头集合时采用。
+fallback_command:       # 将完整 BSD sys/queue.h 放入工程 include/ 并令工具链优先搜索该目录
+fallback_auto_fix:      false
+fallback_impl:          manual-header-vendor
+
+forbid_1_pattern:       复制 glibc 的 sys/queue.h.*(覆盖|替换).*(系统|sysroot)头|cp.*queue\.h.*sysroot
+forbid_1_reason:        整体覆盖平台系统头会遮蔽 sysroot 的 LIST/TAILQ 等 family 的本地版本与后续修正，跨任务不可复现，且违背"不写共享系统目录"的协作规范（E194 同类禁区：禁复制/手写系统头）。
+forbid_1_consequence:   污染平台 sysroot 或引入版本漂移；后续构建在他机上行为分叉。
+
+forbid_2_pattern:       defined\(__OHOS__\).*CIRCLEQ|#ifdef __OHOS__.*queue
+forbid_2_reason:        R8/PF5 红线：补丁不得注入平台条件宏；应使用 `#ifndef CIRCLEQ_HEAD` 特性检测（同样的缺失在 musl/Alpine/FreeBSD>=13 上都会出现，平台宏反而漏判）。
+forbid_2_consequence:   审计/评审判定欺骗或违规，PR 拒绝；且无法覆盖非 OHOS 的 musl 平台。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             upstream-compat-evidence, platform-truth-over-silent-fix
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              [系统头快照移除宏家族 + 上游代码按 glibc/旧 BSD 编写]
+similar_to:             [E091, E194, E007]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-9752-proot-circleq-missing.md
+last_updated:           2026-10-12
+source_event:           proot 5.4.0 OHOS arm64 适配（任务 #9752）：src/path/binding.h 使用 CIRCLEQ_*，OHOS <sys/queue.h> 无该家族，链式编译错误 12 处；补丁 0002 以 #ifndef CIRCLEQ_HEAD 守卫补标准宏，conan create/CI/test_package 全绿
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                kasumizawa-miyuu <241250031@smail.nju.edu.cn>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft:                  true
+contributor_id:         9C4A
