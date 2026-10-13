@@ -11,13 +11,13 @@ M4RI（Method of Four Russians Inversion）是 GF(2)（二元域）上的稠密�
 - 构建系统: autotools
 
 ## 已编译版本
-- 20260122 (2026-08-12)
+- 20260122.1 (2026-09-29，R37 修订；上游源码 20260122)
 
 ## 依赖
 - libpng —— `m4ri/io.c` 无条件 `#include <png.h>`，上游未做成可选项
 
 ## 使用方式
 ```bash
-conan install --requires=m4ri/20260122 -pr ohos-native
+conan install --requires=m4ri/20260122.1 -pr ohos-native
 clang your_program.c -lm4ri
 ```

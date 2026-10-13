@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe — m4ri 20260122 (autotools)"""
+"""Conan recipe — m4ri 20260122.1 (upstream 20260122, autotools)"""
 from conan import ConanFile
 from conan.tools.files import get
 from conan.tools.gnu import Autotools, AutotoolsToolchain
@@ -12,12 +12,12 @@ from conan.tools.env import VirtualRunEnv
 
 class M4riConan(ConanFile):
     name = "m4ri"
-    version = "20260122"
+    version = "20260122.1"
     package_type = "library"
     settings = "os", "arch", "compiler", "build_type"
     options = {"shared": [True, False], "fPIC": [True, False]}
     default_options = {"shared": True, "fPIC": True}
-    exports_sources = "patches/*"
+    exports_sources = "patches/*", "tmpfile-shim.c"
 
     def config_options(self):
         if self.settings.os == "Windows":
@@ -81,6 +81,50 @@ class M4riConan(ConanFile):
                     f.write(text.replace("umask 077", "umask 022"))
         autotools.configure()
         autotools.make(args=["-j1"])
+        # 上游回归套件是构建契约的一部分：tests/Makefile.am 的 TESTS 共 15 个
+        # 可执行测试（elimination/multiplication/pluq/ple/trsm/invert/kernel/…），
+        # 经 -Wl,-rpath,.libs 直链**刚构建的** libm4ri.so，在设备上真实运行；
+        # 任何一项失败 make 即非零退出，不允许静默跳过。
+        self._run_make_check()
+
+    def _run_make_check(self):
+        """跑上游 `make check`（15 项 TESTS 真实执行并统计）。
+
+        OHOS 差异：musl 的 tmpfile() 硬编码只读 /tmp（恒 EACCES、无视 TMPDIR），
+        tests/test_misc.c:60 拿到 NULL FILE* 直接喂给 libpng 的 png_init_io，
+        libpng 默认错误处理器 abort → SIGABRT(134)——15 项里唯一失败项。
+        修复沿用 E272 / DRAFT-8959 先例：编译 POSIX 语义 tmpfile() shim
+        （mkstemp 到 $TMPDIR + unlink + fdopen，见 tmpfile-shim.c 头注释），
+        仅在 make check 期 LD_PRELOAD 注入——不改上游源码、不改测试期望、
+        不进生产 package（m4ri 库本体不调用 tmpfile，仅此一处测试使用）。
+        """
+        import os, shlex, shutil
+        if str(self.settings.os) != "OHOS":
+            Autotools(self).make(target="check", args=["-j1"])
+            return
+        shim_src = os.path.join(self.source_folder, "tmpfile-shim.c")
+        if not os.path.isfile(shim_src):
+            raise RuntimeError("tmpfile-shim.c 不在 source_folder（exports_sources 未导出？）")
+        shim_so = os.path.join(self.build_folder, "tmpfile-shim.so")
+        # 编译器优先级：profile conf > $CC > PATH（binutils 先例）。
+        conf_ccs = self.conf_info.get("tools.build:compiler_executables", check_type=dict)
+        cc = (conf_ccs or {}).get("c") or os.environ.get("CC") \
+            or shutil.which("clang") or shutil.which("cc")
+        if not cc:
+            raise RuntimeError("tmpfile-shim: conf/CC/PATH 均找不到 C 编译器")
+        self.run("%s -shared -fPIC %s -o %s" % (
+            shlex.quote(cc), shlex.quote(shim_src), shlex.quote(shim_so)),
+            env="conanbuild")
+        self.output.info("tmpfile-shim: built %s" % shim_so)
+        # TMPDIR 指到构建目录内的可写子目录：shim 的 mkstemp 落点，
+        # 临时文件随检查产物留在 build 文件夹，不污染源码树。
+        tmpdir = os.path.join(self.build_folder, "check-tmp")
+        os.makedirs(tmpdir, exist_ok=True)
+        # self.run(env=[...]) 的列表项会被当成 env 文件名而非 VAR=value（binutils
+        # 实撞注释），故用 shell 前缀注入 LD_PRELOAD/TMPDIR，对全部子进程生效。
+        self.run("LD_PRELOAD=%s TMPDIR=%s make check -j1" % (
+            shlex.quote(shim_so), shlex.quote(tmpdir)),
+            cwd=self.build_folder, env="conanbuild")
 
     def package(self):
         autotools = Autotools(self)

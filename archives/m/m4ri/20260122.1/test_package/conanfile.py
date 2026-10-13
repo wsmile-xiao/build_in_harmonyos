@@ -12,6 +12,7 @@ _STD_HEADER_NAMES = {
 import shutil
 import subprocess
 from conan import ConanFile
+from conan.errors import ConanException
 from conan.tools.build import cross_building
 
 class TestPkg(ConanFile):
@@ -172,6 +173,10 @@ class TestPkg(ConanFile):
         link = " ".join(["-L" + p for p in libdirs] + _libs
                         + ["-Wl,-rpath," + p for p in libdirs] + ["-ldl"])
         self.run(f"{cc} {std_flag} test.c -o test_probe {inc} -DTARGET_SO='\"{so}\"' {link}")
+        # HarmonyOS PC 专项测试：OHOS AArch64 目标属性宏 + m4ri 核心 API
+        # （mul/rank/transpose/add、跨 64 位字边界、PNG 文件往返）真实运行，
+        # 与通用 test.c 互补；编译开关与 link 完全同一路径（真实消费方式）。
+        self.run(f"{cc} {std_flag} test_ohos.c -o test_ohos {inc} {link}")
 
     def test(self):
         if cross_building(self):
@@ -180,7 +185,6 @@ class TestPkg(ConanFile):
         if False:
             self.output.info("skip_test_run：GUI/app 库只验编译+链接")
             return
-        bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
         # **显式拼 LD_LIBRARY_PATH**，不能只依赖 conanrun：
         # VirtualRunEnv 生成的 conanrunenv 里 libdirs 可能是空的（本仓已记录：
         # shared=False 发布的包 conan 视为静态、不写 libdirs，但包里确实装了 .so），
@@ -190,5 +194,74 @@ class TestPkg(ConanFile):
         for _ref, _d in self.dependencies.items():
             libdirs += _d.cpp_info.libdirs
         ldpath = os.pathsep.join(dict.fromkeys(libdirs))
-        self.run(f"{bash} -c 'export LD_LIBRARY_PATH=\"{ldpath}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}\"; ./test_probe'",
+        # 不再额外包一层 bash：self.run 本就经 /bin/sh 执行（本机实撞证据：
+        # /data/service/hnp/bin/bash 不存在时，报错方正是 /bin/sh —— Error 127）。
+        # 以前取 CONFIG_SHELL 绝对路径是为了转义环境变量，POSIX sh 原生就支持
+        # ${VAR:+:$VAR} 展开，无需 bash。
+        self.run(f'export LD_LIBRARY_PATH="{ldpath}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"; ./test_probe',
                  env="conanrun")
+        # musl 运行时真实验证（CI #65698 教训）：OHOS Clang + musl 目标不保证
+        # 预定义 __MUSL__，宏断言不可靠；改对**最终链接产物**做 ELF 级检查。
+        self._verify_musl_elf(os.path.join(self.build_folder, "test_ohos"))
+        # HarmonyOS PC 专项测试与通用探针同一环境运行（显式 LD_LIBRARY_PATH）。
+        self.run(f'export LD_LIBRARY_PATH="{ldpath}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"; ./test_ohos',
+                 env="conanrun")
+
+    def _verify_musl_elf(self, exe):
+        """对最终链接出的测试可执行文件做 musl/AArch64 ELF 真实检查。
+
+        用 readelf -l（binutils）读 Program Header 拿 PT_INTERP——不依赖裸
+        `file` 命令（其输出格式随版本/locale 漂移），不写死 CI 本机路径
+        （readelf 经 shutil.which 从 PATH 找，找不到则 FAIL 而非静默跳过）。
+        musl 的判据是 PT_INTERP 指向 musl 动态加载器；GLIBC_* 版本符号依赖
+        一旦出现即说明链错到了 glibc。
+        """
+        import re as _re
+        if not os.path.isfile(exe):
+            self.output.error("musl ELF 检查：找不到 %s" % exe)
+            raise ConanException("musl ELF 检查失败：二进制不存在")
+
+        readelf = shutil.which("readelf")
+        if readelf is None:
+            self.output.error("musl ELF 检查：PATH 中找不到 readelf")
+            raise ConanException("musl ELF 检查失败：无 readelf")
+
+        def _readelf(args):
+            return subprocess.run([readelf] + args + [exe],
+                                  capture_output=True, text=True, timeout=120)
+
+        checks = []  # (名称, 通过与否)——聚齐后统一报告
+
+        # ---- 1) ELF64 + EM_AARCH64：readelf -h 的 Class/Machine 行 ----
+        # readelf 的字段值按列对齐，Class/Machine 前有大量空格，不能锚定行首。
+        out_h = _readelf(["-h"])
+        if out_h.returncode != 0:
+            self.output.error("readelf -h 失败：%s" % out_h.stderr.strip())
+            raise ConanException("musl ELF 检查失败：readelf -h 不可用")
+        hdr = out_h.stdout
+        checks.append(("ELF64", _re.search(r"Class:\s+ELF64\b", hdr) is not None))
+        checks.append(("EM_AARCH64", _re.search(r"Machine:\s+AArch64\b", hdr) is not None))
+
+        # ---- 2) PT_INTERP == /lib/ld-musl-aarch64.so.1（musl 判据） ----
+        # INTERP 段本身那行只给 offset，动态加载器路径在
+        # 「[Requesting program interpreter: ...]」注释行里。
+        out_l = _readelf(["-l"])
+        if out_l.returncode != 0:
+            self.output.error("readelf -l 失败：%s" % out_l.stderr.strip())
+            raise ConanException("musl ELF 检查失败：readelf -l 不可用")
+        m = _re.search(r"\[Requesting program interpreter:\s*(\S+?)\]", out_l.stdout)
+        interp = m.group(1) if m else ""
+        checks.append(("PT_INTERP == /lib/ld-musl-aarch64.so.1",
+                       interp == "/lib/ld-musl-aarch64.so.1"))
+
+        # ---- 3) 无 GLIBC_* 版本符号依赖（链到 glibc 即败） ----
+        out_v = _readelf(["--version-info"])
+        checks.append(("无 GLIBC_* 版本依赖", "GLIBC_" not in out_v.stdout))
+
+        failed = [name for name, ok in checks if not ok]
+        for name, ok in checks:
+            (self.output.info if ok else self.output.error)(
+                ("PASS" if ok else "FAIL") + ": musl ELF " + name)
+        if failed:
+            raise ConanException("musl ELF 检查失败：%s（PT_INTERP 实测 %r）"
+                                 % (", ".join(failed), interp))
