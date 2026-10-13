@@ -1,0 +1,110 @@
+#====================================================================
+# Draft: Qt 模块宿主侧 code generator 工具（qscxmlc）在 OHOS 构建宿主机上
+#        运行前必须 binary-sign-tool 自签；兄弟模块 mkspecs .pri 合并进
+#        可写 Qt prefix 使 qtHaveModule(qml) 成立；纯逻辑 QTest offscreen 运行
+#====================================================================
+
+draft: E550-draft-j669539
+status: pending-editor-review
+id: E550
+doc_file: E550-draft-j669539.md
+title: qmake addon 模块三类平台差异组合：host 代码生成工具（qscxmlc）未签名被 OHOS 加载器拒绝（Operation not permitted）、兄弟模块 .pri 未合并进可写 prefix 导致 qtHaveModule 静默跳过、纯逻辑 QTest 套件须 QT_QPA_PLATFORM=offscreen 运行
+category: qmake, ohos, signing, qt-module, testing
+match_keywords: >
+  qscxmlc, host tool, host_build, STATECHARTS, QMAKE_EXTRA_COMPILERS,
+  binary-sign-tool, selfSign, Operation not permitted, ELF 签名, 宿主工具,
+  qt-prefix, mkspecs, .pri, qtHaveModule, qtdeclarative, 可写 prefix,
+  静默跳过, src/imports, QT_QPA_PLATFORM, offscreen, tst_compiled,
+  code generator, moc 类工具, qmake addon
+error_signature: >
+  Operation not permitted.*qscxmlc|qscxmlc.*Operation not permitted|cannot execute.*qscxmlc|tst_compiled.*qscxmlc|qtHaveModule\(qml\).*false|src/imports.*skipped
+root_cause: >
+  OHOS 构建宿主机（hongmeng 内核宿主环境）对一切本机 ELF 可执行文件强制
+  签名校验，不仅目标架构产物。Qt addon 模块（qtscxml）在构建期要用宿主侧
+  code generator 工具（tools/qscxmlc，host_build）把 STATECHARTS 编译成
+  C++（tst_compiled 经 QMAKE_EXTRA_COMPILERS 调用），该工具刚被 make 产出
+  时未签名，OHOS 加载器直接拒绝执行（Operation not permitted），构建/测试
+  链断裂。区别于已知模式：E077/E083/E538 均是"包内目标产物安装前/后补签"，
+  本条是"构建流水线内部中间工具必须在使用前预签"，时间点在 build() 而非
+  package()。moc/rcc 已随 qtbase 处理，一切"Qt 模块自带 host code generator"
+  的 addon（qscxmlc/qlalr/qdoc 类）都会踩同一坑。
+solution: |
+  # conanfile.py 内、首次调用 qscxmlc 之前（build() 中 make 完成后立即）：
+  # 1) 定位签名器（环境变量 > PATH > OHOS hnp 默认路径）
+  signer = (os.environ.get("OHOS_SIGN_TOOL", "")
+            or shutil.which("binary-sign-tool")
+            or "/data/service/hnp/bin/binary-sign-tool")
+  # 2) 对宿主工具签名（-selfSign 1 原位替换）
+  def _sign_binary(self, path):
+      if self.settings.os != "OHOS" or not os.path.isfile(path):
+          return False
+      signed = f"{path}.signed"
+      self.run(f'"{signer}" sign -inFile "{path}" '
+               f'-outFile "{signed}" -selfSign 1', quiet=True)
+      os.replace(signed, path)
+      os.chmod(path, 0o755)
+      return True
+  # 3) make 结束后、跑 tst_compiled 等 STATECHARTS 测试前：
+  #    _sign_binary(<builddir>/tools/qscxmlc/qscxmlc)
+  # 4) package() 阶段对包内 bin/ 全部 ELF 再统一自签（常规产物签名单列）
+  #
+  # 配套（.pri 合并）：qtdeclarative 的 mkspecs/modules/*.pri 必须合并进
+  # 可写 Qt prefix，否则 qmake 的 qtHaveModule(qml) 为假，src/imports 与
+  # 相关测试被静默跳过（无报错、产物缺失）：
+  #   qt_root = <writable prefix>（symlink qtbase mkspecs 后）
+  #   for pri in (qtdecl_pkg/mkspecs/modules/*.pri):
+  #       合并写入 qt_root/mkspecs/modules/，并把 .pri 内 prefix 路径改写
+  #       到可写 prefix（_rewrite_module_files）
+  #
+  # 配套（测试运行）：纯逻辑 QTest 套件无 GUI，运行时设
+  #   QT_QPA_PLATFORM=offscreen
+  #   并确定性构造 LD_LIBRARY_PATH（源树 lib + 依赖包 lib + toolchain lib，
+  #   不继承父级——宿主注入的不兼容 libc++_shared.so 会遮蔽系统版本导致
+  #   "Error relocating ... symbol not found"）
+fallback: >
+  签名器不可得时（非 OHOS 宿主）：_sign_binary 按非 OHOS 跳过（返回 False）
+  并 warning 提示；STATECHARTS 类测试若因签名缺失无法编译，则仅跑解析/驱动
+  类纯逻辑套件（parser/statemachine/statemachineinfo/dynamicmetaobject），
+  tst_compiled 内联豁免并注明"宿主工具签名不可用"。.pri 合并无降级路径
+  （缺它 qml 相关子树整体静默消失，必须合并）。
+verify_builds: PR #14820（qt5-qtscxml 5.15.2，j669539，本地 conan create 全绿）
+reference_impl: >
+  PR !14820 archives/q/qt5-qtscxml/5.15.2/conanfile.py（_sign_binary/
+  _build_qt_tree/_rewrite_module_files）；qt-prefix 可写树模式先例：
+  qt5-qtmultimedia；JIT 沙箱限制先例：qt5-qtdeclarative/5.15.2
+affected_scope: >
+  一切"qmake addon 模块自带 host_build 代码生成工具"的 Qt 模块适配
+  （qscxmlc/qlalr/qdoc/uic 类，moc/rcc 之外的 addon 工具）；一切依赖兄弟
+  Qt 模块 .pri 才能启用子树（src/imports、qml 插件、测试）的 qmake 工程；
+  纯逻辑 QTest 套件在无显示环境下的运行
+verification_cmd: >
+  cd archives/q/qt5-qtscxml/5.15.2 && conan create . --profile:build=default
+  --profile:host=ohos-arm64（build() 内五套件 qmake+make+run，
+  QT_QPA_PLATFORM=offscreen；compiled 套件 11/11 依赖已签名 qscxmlc 真实
+  编译 STATECHARTS 通过）
+rec_priority:           1
+rec_approach:           sign-host-tool-before-first-run
+rec_description: >
+  宿主侧 code generator 工具在构建期首次被调用前用 binary-sign-tool
+  -selfSign 1 原位签名；兄弟模块 mkspecs/modules/*.pri 合并进可写 Qt
+  prefix 并改写 prefix 路径；QTest 套件 offscreen 运行 + 确定性
+  LD_LIBRARY_PATH。
+rec_command: >
+  _sign_binary(tools/qscxmlc/qscxmlc)（make 后、STATECHARTS 测试前）
+rec_auto_fix:           true
+rec_impl:               conanfile.py build()/package() + _build_qt_tree
+forbid_1_pattern:       把 host 工具签名推迟到 package() 之后
+forbid_1_reason:        qscxmlc 在 build() 阶段就要运行（编译 STATECHARTS），
+                        推迟签名会让 tst_compiled 直接无法构建
+forbid_1_consequence:   compiled 套件假失败（被误判库缺陷，实为宿主签名缺失）
+forbid_2_pattern:       测试子进程继承宿主注入的 LD_LIBRARY_PATH
+forbid_2_reason:        不兼容 libc++_shared.so 副本会遮蔽系统版本
+forbid_2_consequence:   qmake/cmake "Error relocating ... symbol not found"
+similar_to:             [E077, E083, E538, E189]
+source_event:           qt5-qtscxml 5.15.2 适配（任务卡 #14908，PR #14820）
+source_pr: 14820
+source_commit: 161dcea071360a53b2aecdab7e552766b4516e25
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.8
+last_updated:           2026-10-06
