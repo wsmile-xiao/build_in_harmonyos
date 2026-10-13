@@ -1,0 +1,61 @@
+# ═══ Draft knowledge entry — test_package 静态 DT_NEEDED 检查把系统 libz.so 误判为未解析（本地过、CI 挂的 sysroot 布局差异）═══
+# Timestamp: 2026-10-11
+# Software: vigor 0.016（所有链接 tcl/tk 9 且 test_package 做静态 DT_NEEDED 解析断言的 Conan 配方都可能遇到；PR #15200 / CI #80207 实测）
+# Gate: conan create test_package — test() 断言失败
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: draft-vigor-0.016-libz-system-resolved-dt-needed
+title: vigor 二进制 DT_NEEDED 含系统 libz.so（tcl/tk 9 的 cpp_info.system_libs 注入 -lz），test_package 静态解析断言在 CI worker 上 unresolved=['libz.so'] → "all DT_NEEDED libraries resolve" 失败；本机因 sysroot 路径存在而通过，CI worker 无该路径 → 本地过、CI 挂
+trigger_tool: conan|conan create|test_package|tcl|tk|zlib
+phase: testing
+error_signature: VIGOR TEST SUMMARY: \d+ passed, 1 failed|all DT_NEEDED libraries resolve.*unresolved=\['libz\.so'\]|conan create failed
+severity: 2
+category: ohos|conan|testing|system-library|dt-needed|tcl
+match_keywords: libz.so, DT_NEEDED, system_libs, tcl 9, tk 9, test_package,
+  sysroot, unresolved, LD_LIBRARY_PATH, aarch64-linux-ohos, conan create failed,
+  E541, local-passes-ci-fails
+keywords: libz.so, DT_NEEDED, system_libs, tcl 9, tk 9, test_package, sysroot,
+  unresolved, LD_LIBRARY_PATH, aarch64-linux-ohos, E541, zlib, system library,
+  loader-provided, static resolution check
+approach: treat-system-libz-as-loader-resolved
+root_cause: >
+  tcl/tk 9.0.3.2 配方把 'z' 放进 cpp_info.system_libs（['dl','m','pthread','z']），
+  AutotoolsDeps 因此给下游（vigor）链接注入 -lz；链接器解析到系统/工具链的
+  libz.so 并写进产物 DT_NEEDED。HarmonyOS 本身提供系统 libz.so（E541：Conan
+  不得再发布共享 libz.so），运行时加载器在 worker/设备上按系统默认路径即可
+  解析（vigor -e -r 实测 rc=0）。但 test_package 的 vigor_test.py 用静态
+  os.path.isfile 遍历 LD_LIBRARY_PATH + 硬编码 sys_paths 来断言每个 DT_NEEDED
+  可解析：硬编码的 /storage/Users/currentUser/usr/local/sysroot/... 与
+  /storage/Users/currentUser/ohos-sdk/sysroot/... 是本机 dev 布局，CI worker
+  （/data/service/hnp/ohos-sdk.org/... 布局）没有这些路径 → libz.so 被误判
+  unresolved → 断言失败 → conan create 失败。本机 sysroot 存在该路径所以
+  本地 9/9 通过——典型"本地过、CI 挂"的环境布局差异（同 polkit-qt-1
+  DRAFT-polkit-qt-1-0.201.1-ohos-sdk-layout-probe 一类）。
+affected_scope: >
+  所有依赖 tcl/tk 9（system_libs 含 z）且 test_package 自己实现静态
+  DT_NEEDED 解析断言的 Conan 配方；只要断言硬编码了某一种 dev 机 sysroot
+  布局，就会在 CI worker 上误报系统库未解析。
+verification_cmd: >
+  cd archives/v/vigor/0.016 && conan create . -pr:h=ohos-aarch64 -pr:b=ohos-aarch64
+  --build=missing 2>&1 | tail -3   # 期望 VIGOR TEST SUMMARY: 9 passed, 0 failed
+rec_priority: 1
+rec_approach: treat-system-libz-as-loader-resolved
+rec_description: >
+  在 test_package 的 DT_NEEDED 静态解析循环里，把 libz.so 与 libc.so/libc.so.6
+  一样视为 loader/system-resolved（E541 依据：HarmonyOS 提供系统 libz.so，
+  Conan 不应发布共享 libz.so），直接 continue，不要求它在 LD_LIBRARY_PATH 或
+  sys_paths 中可 isfile。因为运行时已由真实执行（vigor -e -r rc=0）验证可
+  加载；静态路径列表无法穷举每个 worker 的 SDK 布局。其余 DT_NEEDED（X11/
+  tcl/tk 链）仍按静态路径严格校验，不放松。
+rec_command: 见 verification_cmd
+rec_auto_fix: false
+rec_impl: test_package/vigor_test.py — 在 ("libc.so","libc.so.6") 分支后追加
+  `if lib == "libz.so": continue`（带 E541 注释）
+
+forbid_1_pattern:       把整个 "all DT_NEEDED libraries resolve" 断言删掉/注释掉|无条件 return 0|test() 里 pass
+forbid_1_reason:        掩盖其他真实未解析依赖（如 X11 链缺库），属 R9 伪造通过
+forbid_1_consequence:   CI 门禁 L1 无法再拦截真实运行时缺库问题
+
+causes:                 []
+caused_by:              []
+similar_to:             [E541, E186]
