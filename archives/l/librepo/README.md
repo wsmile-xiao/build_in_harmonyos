@@ -30,10 +30,32 @@ librepo 是 RPM 软件栈（dnf/libdnf 体系）的仓库下载库：基于 libc
 ```bash
 ctest                                  # 上游 check 套件（test_main）
 ./test_librepo                         # 消费者测试，期望输出 LIBREPO_CONSUMER_OK
-pkg-config --modversion librepo        # 期望输出: 1.20.0
+pkg-config --modversion librepo        # 期望输出对应版本号（1.20.0 / 1.18.0）
 ```
+
+## 版本
+
+| 版本 | 状态 | 归档 |
+|------|------|------|
+| 1.20.0 | published (2026-09-29) | `archives/l/librepo/1.20.0/` |
+| 1.18.0 | building (2026-10-08) | `archives/l/librepo/1.18.0/` |
+
+### 1.18.0 适配要点
+
+- cmake 4 构建上游 `cmake_minimum_required(2.8.5...3.26)` 需
+  `CMAKE_POLICY_VERSION_MINIMUM=3.5`
+- glib/libxml2/zchunk/openssl/check 走 `PkgConfigDeps`；`zck` 与 `libxml-2.0`
+  的 pkg-config 名与制品包名不一致，配方补转发 `.pc`
+- 自带 KDE 版 `FindGpgme` 依赖 gpgme-config：预置 `GPGME_INCLUDES` /
+  `GPGME_VANILLA_LIBRARIES` 缓存变量绕过；`FindCURL` 用 `CURL_LIBRARY` /
+  `CURL_INCLUDE_DIR` 指向 conan 的 curl 包
+- 测试 scratch 目录 `/tmp/librepoXXXXXX` 在 OHOS 只读，补丁改用 `g_get_tmp_dir()`
+- `ENABLE_SELINUX=OFF`（OHOS 无 libselinux）、`ENABLE_PYTHON=OFF`
+- 共享库 `cmake --install` 会改写 DT_RUNPATH 使 lld 写入的 `.codesign` 失效：
+  安装后按 E077 四步重签
+- 逐项证据与上游测试口径见 `archives/l/librepo/1.18.0/notes.md`
 
 ## 参考
 
 - 上游仓库: https://github.com/rpm-software-management/librepo
-- 归档: archives/l/librepo/1.20.0/
+- 归档: archives/l/librepo/
