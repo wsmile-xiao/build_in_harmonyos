@@ -1,0 +1,116 @@
+#====================================================================
+# DRAFT: pkg-config「发现 ≠ 消费」——上游 CMake 只用 PKG_CHECK_MODULES 的
+#        *_LIBRARIES 变量、从不接线 *_INCLUDE_DIRS/*_LIBRARY_DIRS；
+#        Linux /usr 单前缀世界无感，conan 非系统前缀下编译/链接双炸
+#====================================================================
+# Timestamp: 2026-10-08
+# Software: librepo 1.18.0（同库 4 处实例：zck.h / check.h 编译 + -l* 链接 + gpgme.h include）
+# 跨库实证: main 已合入 ≥8 配方各自手搓同一补丁（见 affected_scope）
+# 查重（2026-10-08 index + drafts）: LIBRARY_DIRS 0 / zck.h 0 / "unable to find" 0
+# Status: UNMATCHED — needs review to promote
+
+id:                     DRAFT-ohos-pkgconfig-consumption-gap-include-library-dirs
+draft:                  true
+contributor_id:         frj__
+trigger_tool:           cmake|cc|ld
+phase:                  configuration|compilation|linking
+error_signature:        fatal error: ['<].*[.]h['>] file not found$|
+                        ld\.lld: error: unable to find library -l[a-zA-Z0-9_-]+$|
+                        .*\bPC_[A-Z0-9_]+\b.*FOUND.*but.*header not found
+severity:               2
+category:               build-system, cmake, conan, linking, portability
+match_keywords:         PKG_CHECK_MODULES, _INCLUDE_DIRS, _LIBRARY_DIRS,
+                         INCLUDE_DIRECTORIES, LINK_DIRECTORIES, PkgConfigDeps,
+                         非系统前缀, conan prefix, zck.h, check.h, gpgme.h,
+                         unable to find library, 发现不等于消费
+title:                  PKG_CHECK_MODULES 的「发现」与「消费」是两层：模块找到只产生
+                         *_INCLUDE_DIRS/*_LIBRARY_DIRS/*_LIBRARIES 三组变量；上游 CMake
+                         在 Linux（一切都在 /usr）养成的习惯是只拿 *_LIBRARIES 去
+                         TARGET_LINK_LIBRARIES、从不 INCLUDE_DIRECTORIES/LINK_DIRECTORIES
+                         接线另外两组——换到 conan 非系统前缀后头文件与 -l 同时找不到
+
+root_cause: >
+  CMake 的 PKG_CHECK_MODULES(<前缀> <模块>) 成功后提供三组变量：<前缀>_INCLUDE_DIRS、
+  <前缀>_LIBRARY_DIRS、<前缀>_LIBRARIES（名字形如 -lfoo）。在发行版单前缀世界
+  （头在 /usr/include、库在 /usr/lib，皆在默认搜索路径），只消费 _LIBRARIES 也能
+  编译链接，于是大量上游 CMakeLists 从不写 INCLUDE_DIRECTORIES(${前缀}_INCLUDE_DIRS)、
+  更不写 LINK_DIRECTORIES(${前缀}_LIBRARY_DIRS)（librepo 1.18.0 顶层只接线了
+  GLIB2/LIBXML2 的 include，GPGME/ZCHUNKLIB/CHECK 的 include 与全部 link dirs 均未接）。
+  Conan 把每个依赖装进各自 package_folder 后，这三组变量指向互不相同的前缀，
+  头文件与 -l 名都脱离默认搜索路径 → 编译期 fatal error: 'zck.h'/'check.h' file not
+  found、链接期 ld.lld: unable to find library -lxml2/-lgio-2.0/-lzck/...。
+  注意这是**消费层**缺口：pkg-config 本身一切正常（--cflags/--libs 输出完整、
+  configure 检查全部通过），坏在上游拿了变量没接线。
+  与 pangomm gap-trio（DRAFT-13572）的分界：那三缺口是 **meson 侧 + conan
+  PkgConfigDeps 生成物不足**（自定义 pc 变量/别名 pc/find_library 搜索路径），
+  修法在**配方 generate()**（其 forbid_1 明确「不改上游」）；本条是 **CMake 侧 +
+  生成物完整而上游源从不消费**，修法必须落在**上游 CMakeLists 补丁**——
+  构建系统与修复层位都不同，互补而非重复。
+affected_scope: >
+  一切「上游 CMake + PKG_CHECK_MODULES + conan PkgConfigDeps」的适配。跨库实证
+  （main 已合入、各自手搓同一补丁而图谱无条目）：ciftilib 1.6.0
+  （0003 同时补 INCLUDE+LIBRARY_DIRS）、avro-c 1.12.0、ayatana-common 0.9.11
+  （0003-link-glib-libdirs）、ayatana-indicator-display 26.6.0 / -keyboard 26.6.2 /
+  -messages 24.5.2（link-deps-library-dirs）、blur 1.1.3、cassiopee 1.0.9、
+  jshn 2025.11.14（TARGET_LINK_DIRECTORIES ${JSONC_LIBRARY_DIRS}）、rcon 0.6、
+  ustream-ssl；本次 librepo 1.18.0 同库 4 处（GPGME include、ZCHUNKLIB include、
+  4 组 pkg-config 的 LINK_DIRECTORIES、tests 的 LIBCHECK include）。
+verification_cmd: >
+  # 判别树（与四个邻居子族的分流探针）：
+  pkg-config --cflags zck            # 非空 → 不是 E075（那是被 C_INCLUDE_PATH 抹空）
+  pkg-config --exists zck && echo ok  # ok → 不是 E468/E348（那是发现层/命名层失败）
+  grep -n '_LIBRARIES' CMakeLists.txt | head    # 上游拿了 _LIBRARIES
+  grep -cn '_INCLUDE_DIRS\|_LIBRARY_DIRS' CMakeLists.txt   # 0/远少于上面 → 命中本族
+  # 复现（conan 前缀下）：编译 fatal error: 'zck.h' file not found；
+  # 链接 ld.lld: error: unable to find library -lxml2（及 -lgio-2.0/-lzck/... 全列表）
+rec_priority:           1
+rec_approach:           wire-include-and-library-dirs
+rec_description: >
+  在上游 CMakeLists（或 patch）把缺失的两组变量接线：
+  INCLUDE_DIRECTORIES(${<前缀>_INCLUDE_DIRS}) 与
+  LINK_DIRECTORIES(${<前缀>_LIBRARY_DIRS})；tests/ 子目录同理（上游常把测试框架的
+  include 注释掉）。链接层替代写法：TARGET_LINK_DIRECTORIES(<tgt> PRIVATE ${...})
+  或直接用 pkg-config --libs 的全路径形态（LDFLAGS）。
+rec_command:            INCLUDE_DIRECTORIES(${PC_FOO_INCLUDE_DIRS}) + LINK_DIRECTORIES(${PC_FOO_LIBRARY_DIRS})
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      full-path-libs-from-pc
+fallback_description:   >
+  不改上游：在配方 generate() 里读 pkg-config --variable=libdir（或 PkgConfigDeps
+  生成物），把 -lfoo 换成全路径 .so 传给 CMAKE_EXE/SHARED_LINKER_FLAGS。缺点：
+  侵入配方逻辑、对 SHARED 库的 SONAME 记录有副作用（见 E537），仅当上游源不可补时用。
+fallback_command:       LDFLAGS="$LDFLAGS $(pkg-config --libs-only-L <mod>)"
+fallback_auto_fix:      false
+fallback_impl:          env-override
+
+forbid_1_pattern:       ^\s*export\s+C_INCLUDE_PATH=
+forbid_1_reason:        用 C_INCLUDE_PATH「修」头文件找不到会落入 E075 陷阱
+                        （pkg-config 把它当系统路径过滤 -I，cflags 变空，更难查）。
+forbid_1_consequence:   假修复：configure 仍过、编译仍挂，且现象与 E075 混淆。
+forbid_2_pattern:       patchelf.*DT_NEEDED
+forbid_2_reason:        链接失败不是 E537 的「绝对路径已记录」问题——这里链接根本
+                        没成功，事后改 ELF 无从谈起；先分清层次再动手。
+forbid_2_consequence:   在错误的层修（打包后重写 ELF），构建依旧红。
+
+principles:
+causes:                 []
+caused_by:              []
+similar_to:             [E075, E468, E348, E537, E480, E384,
+                         DRAFT-13572-pangomm-2.46-meson-pkgconfigdeps-gap-trio]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-pkgconfig-consumption-gap-include-library-dirs.md
+last_updated:           2026-10-08
+source_event:           archives/l/librepo/1.18.0
+
+authors:                frj__ <241250055@smail.nju.edu.cn>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-10-08
