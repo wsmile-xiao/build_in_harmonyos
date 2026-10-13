@@ -1,0 +1,72 @@
+#====================================================================
+# DRAFT-pd-creb-conan2-compiler-executables
+# Conan 2 does not turn tools.build:compiler_executables into CC/CXX, and
+# pd-lib-builder hardcodes -lstdc++ for the Linux branch -> silent host build
+#====================================================================
+
+id:                     DRAFT-pd-creb-conan2-compiler-executables
+trigger_tool:           make|pd-lib-builder|conan
+phase:                  build|link
+error_signature:        unable to find library -lstdc\+\+|ld\.lld.*unable to find library|make: \*\*\* \[pd-lib-builder//Makefile\.pdlibbuilder.*\] Error 1
+severity:               1
+category:               conan|make|cross-compilation|harmonyos|pd
+match_keywords:         pd-lib-builder, Makefile.pdlibbuilder, cxx.ldlibs, -lstdc++, PDINCLUDEDIR, PDDIR, PLATFORM, compiler_executables, VirtualBuildEnv, conanbuild, Pure Data, creb
+title:                  Conan 2 never exports tools.build:compiler_executables as CC/CXX, so a bare `make` silently cross-builds for the host; pd-lib-builder additionally hardcodes -lstdc++
+
+root_cause:             Two independent defects stack up.
+                        (1) VirtualBuildEnv does not map tools.build:compiler_executables to CC/CXX (verified: VBE: CC=[] CXX=[] AR=[] STRIP=[] RANLIB=[]),
+                        and self.run(env="conanbuild") during `conan create` loads conanbuild.sh, which is only materialised by `conan install`.
+                        A recipe that runs a bare `make` therefore sees an empty CC and make falls back to /usr/bin/cc. Because `uname` still
+                        reports Linux, pd-lib-builder still picks extension=pd_linux and pkglibdir=/usr/lib/pd-externals, so the build looks
+                        completely normal while emitting x86-64 objects.
+                        (2) pd-lib-builder hardcodes `cxx.ldlibs := -lc -lm -lstdc++` inside its `ifeq ($(system), Linux)` branch. OHOS ships
+                        libc++ only, so every C++ external fails to link until that variable is overridden.
+
+affected_scope:         Recipes that shell out to make without a Conan toolchain generator, and any project vendoring pd-lib-builder
+                        (Pure Data externals). Also every OHOS project whose build system hardcodes a GNU C++ runtime name.
+
+verification_cmd:       conan create . --name=pd-creb --version=0.10.0 -pr:h=ohos-aarch64-wsl -pr:b=ohos-aarch64-wsl --build=missing && \
+                        CI_PACKAGES="archives/p/pd-creb/0.10.0" zsh ci/conan/build_and_test.sh
+
+rec_priority:           1
+rec_approach:           pass-toolchain-on-the-make-command-line
+rec_description:        Read tools.build:compiler_executables from self.conf and pass CC/CXX as *make command line variables* (command line beats
+                        any makefile assignment, including pd-lib-builder's unconditional ones). Raise ConanException when the conf is absent so a
+                        host fallback can never happen silently. Additionally override cxx.ldlibs="-lc -lm" to drop -lstdc++, and do NOT set
+                        PLATFORM (it rewrites CC to $(PLATFORM)-gcc) and do NOT set PDDIR (it re-derives PDINCLUDEDIR as $(PDDIR)/src).
+rec_command:            make -j1 CC="$cc" CXX="$cxx" PDINCLUDEDIR="$pd_inc" 'cxx.ldlibs=-lc -lm'
+rec_auto_fix:           false
+rec_impl:               recipe-make-variables
+
+fallback_priority:      2
+fallback_approach:      export-cc-cxx-through-generators
+fallback_description:   Adding VirtualBuildEnv(self).generate() or a [buildenv] section to the profile is NOT sufficient on its own — both were
+                        measured to leave CC empty. Only useful as a supplement for tool_requires-provided env, never as the compiler source.
+fallback_command:       conan profile show ohos-aarch64-wsl
+fallback_auto_fix:      false
+
+forbid_1_pattern:       self\.run\(.*make.*env=[\"']conanbuild[\"'].*\)|make.*\$\{?CC\}?
+forbid_1_reason:        Neither VirtualBuildEnv nor conancreate's conanbuild.sh carries compiler_executables; a bare make builds for the host.
+forbid_1_consequence:   conan create returns 0 and the tests can even pass, while the packaged objects are x86-64 instead of aarch64.
+
+forbid_2_pattern:       PLATFORM=aarch64-linux-ohos|PLATFORM=.*ohos
+forbid_2_reason:        pd-lib-builder does `export CC = $(PLATFORM)-gcc` for non-darwin platforms; no such binary exists for the OHOS triplet.
+forbid_2_consequence:   "make: aarch64-linux-ohos-gcc: No such file or directory" (Error 127) at the first compile.
+
+forbid_3_pattern:       replace.*-lstdc\+\+.*with.*-lc\+\+
+forbid_3_reason:        A bare -lc++ resolves to libc++.so in the OHOS SDK lib dir, whose libc++_shared.so is absent at run time.
+forbid_3_consequence:   The binary links but fails to start; static attachment belongs to the toolchain driver, not the recipe.
+
+forbid_4_pattern:       cpp_info\.libs\s*=\s*\[["'][a-z]+["']\].*pd-external|pd_lib.*cpp_info\.libs
+forbid_4_reason:        A Pd external is a dlopen-able object, not a linkable library; there is no libcreb.so to link against.
+forbid_4_consequence:   Downstream consumers receive a -lcreb that can never resolve.
+
+doc_file:               archives/p/pd-creb/0.10.0/knowledge/drafts/DRAFT-pd-creb-conan2-compiler-executables.md
+last_updated:           2026-10-04
+source_event:           pd-creb/0.10.0 HarmonyOS PC adaptation
+source_package:         archives/p/pd-creb/0.10.0
+evidence:               patches/ (none — no platform macro added), notes.md, test-report.md, W3 log "RUN: make -j1 CC=/opt/lpk-fixed/clang CXX=/opt/lpk-fixed/clang++ PDINCLUDEDIR=... cxx.ldlibs=-lc -lm", test_package/test_pdcreb.py (784 assertions, EM_AARCH64 + DT_NEEDED=[libc.so])
+metrics_success_count:  1
+metrics_fail_count:     1
+metrics_confidence:     0.90
+draft:                  true
