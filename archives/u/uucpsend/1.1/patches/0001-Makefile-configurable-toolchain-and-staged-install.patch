@@ -1,0 +1,117 @@
+From: HarmonyOS PC adaptation <adapt@example.invalid>
+Subject: [PATCH 1/3] Makefile: configurable toolchain, portable staged install
+
+The upstream Makefile hard-codes both the toolchain and the installation
+mechanics:
+
+    CC = gcc
+    CFLAGS = -O3 -Wall
+    STRIP = -s
+    DEST=
+
+and its install rule runs
+
+    install -m 755 -o root -g root $(STRIP) uucpsend $(DEST)/usr/lib/news/bin
+
+so
+
+  * the compiler and its options can only be steered by a bare command-line
+    override, and the unconditional `-s` cannot be turned off for a debug
+    build;
+  * there is no staging prefix -- `$(DEST)` is only ever a *prefix*, and the
+    rule writes straight to it;
+  * a non-root builder cannot install at all, because `-o root -g root` is
+    passed unconditionally (the obvious workaround, `OWNER=` on the command
+    line, yields `install -o -g ...`, which consumes the next argument);
+  * `make` with no argument is a hard error: the only rule defined is
+    `uucpsend:`, there is no `all:` target.
+
+Changes:
+
+  * Add an `all:` target (`all: uucpsend`) so the conventional default goal
+    works, and make `install` depend on the program.  The existing
+    `uucpsend: $(OBJS)` rule is kept verbatim: it carries no recipe, so GNU
+    make's built-in `%: %.o` rule performs the link, and the `$(OBJS)`
+    prerequisite list is what puts both `uucpsend.o` AND `log.o` on the link
+    line.  (Replacing that rule instead of adding to it silently links only
+    `uucpsend.o`, which fails with undefined references to `openlogfile`,
+    `closelogfile` and `filelog` -- observed on device.)
+  * CC/CFLAGS/CPPFLAGS/LDFLAGS and the new BINDIR/CONFDIR/MANDIR/DESTDIR use
+    the conventional `?=` form, so the environment supplied by a build
+    system (a Conan buildenv script, Debian's dpkg build helpers, ...) takes
+    effect while the historical values stay as defaults.  A variable passed
+    on the make command line still wins over both the environment and `?=`.
+  * STRIP defaults to `-s` only when DEBUG is unset, so debug and
+    relwithdebinfo builds keep their symbols.
+  * The install rule is rewritten to be POSIX-portable and staging-friendly:
+    directories are created with `mkdir -p` instead of `install -d`, file
+    modes are set with `-m` only, and no implicit ownership change is
+    attempted.  Ownership is a packaging concern and belongs to whoever
+    stages the tree, not to `make install`; this is also what makes the rule
+    usable by an unprivileged builder.  BINDIR/CONFDIR/MANDIR keep their
+    upstream default locations, so a bare `make DESTDIR=/stage install`
+    reproduces the historical layout (`/usr/lib/news/bin`, `/etc/news`,
+    `/usr/man/man8|man5`) exactly, while still allowing a recipe to redirect
+    the configuration file away from /etc.
+  * SHELL is pinned to /bin/sh rather than /bin/bash: the only shell code is
+    the POSIX for/if loop in the install rule, and /bin/bash is not present
+    on every POSIX target (OpenHarmony/HarmonyOS ships /bin/sh only).
+
+The vestigial `DEST=` variable is dropped: it was a non-standard spelling of
+a staging prefix that DESTDIR now covers, and nothing outside these install
+rules referenced it.
+
+Upstream-Status: Inappropriate [configuration]
+Signed-off-by: HarmonyOS PC adaptation <adapt@example.invalid>
+---
+--- a/Makefile
++++ b/Makefile
+@@ -16,28 +16,37 @@
+ 
+ #  Makefile for uucpsend
+ 
+-CC = gcc
+-CFLAGS = -O3 -Wall
+-DEST=
++SHELL = /bin/sh
++CC ?= gcc
++CFLAGS ?= -O3 -Wall
++CPPFLAGS ?=
++LDFLAGS ?=
++DESTDIR ?=
++BINDIR ?= /usr/lib/news/bin
++CONFDIR ?= /etc/news
++MANDIR ?= /usr/man
+ MAN=man
+ NEWS=news
+ OBJS=uucpsend.o log.o
+-STRIP=-s
++STRIP=$(if $(DEBUG),,-s)
++
++all: uucpsend
+ 
+ uucpsend: $(OBJS)
+ 
+ clean:
+ 	rm -f $(OBJS) uucpsend
+ 
+-install:
+-	for d in $(DEST)/usr/lib/news/bin $(DEST)/etc/news $(DEST)/usr/man/man{5,8}; \
++install: uucpsend
++	for d in $(DESTDIR)$(BINDIR) $(DESTDIR)$(CONFDIR) $(DESTDIR)$(MANDIR)/man5 \
++	         $(DESTDIR)$(MANDIR)/man8; \
+ 	do \
+-	  if [ ! -d $$d ]; then install -m 755 -o root -g root -d $$d ; fi; \
++	  if [ ! -d $$d ]; then mkdir -p $$d ; fi; \
+ 	done
+-	install -m 755 -o root -g root $(STRIP) uucpsend $(DEST)/usr/lib/news/bin
+-	install -m 644 -o $(NEWS) -g $(NEWS) uucpsend.ctl $(DEST)/etc/news
+-	install -m 644 -o $(MAN) -g $(MAN) uucpsend.8 $(DEST)/usr/man/man8
+-	install -m 644 -o $(MAN) -g $(MAN) uucpsend.ctl.5 $(DEST)/usr/man/man5
++	install -m 755 $(STRIP) uucpsend $(DESTDIR)$(BINDIR)/uucpsend
++	install -m 644 uucpsend.ctl $(DESTDIR)$(CONFDIR)/uucpsend.ctl
++	install -m 644 uucpsend.8 $(DESTDIR)$(MANDIR)/man8/uucpsend.8
++	install -m 644 uucpsend.ctl.5 $(DESTDIR)$(MANDIR)/man5/uucpsend.ctl.5
+ 
+ 
+ log.o: log.c log.h
