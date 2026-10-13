@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.15)
+project(subunit_smoke C)
+
+find_package(subunit REQUIRED CONFIG)
+
+add_executable(subunit_smoke main.c)
+target_link_libraries(subunit_smoke PRIVATE subunit::subunit)
+if(CMAKE_SYSTEM_NAME STREQUAL "OHOS" OR CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS")
+    add_executable(subunit_harmony harmony_tests/hmdfs_loader.c)
+    target_link_libraries(subunit_harmony PRIVATE dl)
+    if(NOT SUBUNIT_SHARED)
+        target_compile_definitions(subunit_harmony PRIVATE SUBUNIT_DIRECT=1)
+        target_link_libraries(subunit_harmony PRIVATE subunit::subunit)
+    endif()
+endif()
