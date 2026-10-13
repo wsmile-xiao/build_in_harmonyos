@@ -6,7 +6,8 @@
 int main(void) {
     const utf8proc_uint8_t input[] = "A\xC3\xA9";
     utf8proc_uint8_t *normalized = 0;
-    const utf8proc_option_t options = UTF8PROC_STABLE | UTF8PROC_COMPOSE;
+    const utf8proc_option_t options =
+        UTF8PROC_STABLE | UTF8PROC_COMPOSE | UTF8PROC_NULLTERM;
     int length = utf8proc_map(input, 0, &normalized, options);
     if (length < 0 || normalized == 0) return 1;
     if (strcmp((const char *)normalized, "A\xC3\xA9") != 0) return 2;

@@ -13,7 +13,6 @@ class Utf8procTestConan(ConanFile):
         cmake_layout(self)
 
     def generate(self):
-        CMakeDeps(self).generate()
         tc = CMakeToolchain(self)
         if str(self.settings.os) == "OHOS":
             tc.cache_variables["CMAKE_SYSTEM_NAME"] = "Linux"
