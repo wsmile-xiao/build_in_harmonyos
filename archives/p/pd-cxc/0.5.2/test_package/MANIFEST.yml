@@ -1,0 +1,159 @@
+# test_package/MANIFEST.yml
+# pd-cxc 0.5.2 — upstream test declaration.
+package: pd-cxc/0.5.2
+homepage: "https://puredata.info/downloads/cxc"
+upstream_tarball: "https://deb.debian.org/debian/pool/main/p/pd-cxc/pd-cxc_0.5.2.orig.tar.gz"
+upstream_repo: "https://puredata.info/downloads/cxc （上游无 VCS；Debian 打包仓库 salsa.debian.org/multimedia-team/pd/pd-cxc）"
+
+# ── Upstream test inventory ────────────────────────────────────────────────
+# Counting unit: test CASES.  Upstream ships no automated test at all.
+# Evidence: the orig tarball has 65 entries — the only build inputs are
+# `Makefile` ("Pd library template version 1.0.11"), 27 *.c, one header
+# (cxc.h), one unreferenced extra source (cxc.c), 27 Pd help patches,
+# fader.pd, cxc-meta.pd, README.txt, REFERENCES, TODO and LICENSE.txt.
+# That Makefile's targets are all, libdir_install, install, single_install,
+# install-doc, install-examples, install-manual, clean, distclean, libdir,
+# dist, dpkg-source, etags, showsetup — there is no check/test/verify target
+# (`grep -nE '^[a-z-]+:' Makefile` shows no test target), and the repository
+# has no CI workflow running one.
+#
+# What does ship are 27 Pd help patches plus one fader.pd abstraction: patches
+# a human opens in Pd, with no reference output, so they cannot be ported to
+# an automated gate.  They are listed below as evidence of what upstream ships.
+upstream_tests_exist: false
+upstream_check_command: ""
+upstream_test_in_build: false
+upstream_test_command: ""
+upstream_test_cases: 0
+upstream_demo_patches:
+  - file: "fader.pd"
+    description: "interactive Pd abstraction (a fader GUI object); opens in Pd, no assertions"
+  - file: "cxc-meta.pd"
+    description: "Pd library meta patch (NAME/AUTHOR/DESCRIPTION/LICENSE/VERSION); declares the library, no assertions"
+  - file: "mean~-help.pd"
+    description: "help patch for [mean~] (also installed as cxmean-help.pd, cxstddev-help.pd, cxavgdev-help.pd); opens in Pd, no assertions"
+  - file: "dist_normal-help.pd"
+    description: "help patch for [dist_normal]; opens in Pd, no assertions"
+upstream_test_audit: >-
+  No automated upstream suite exists: the Makefile has no check/test/verify
+  target and the repository runs no CI.  The only upstream test-like artefacts
+  are 27 Pd help patches and fader.pd, which are patches a human opens in Pd
+  with no reference output, so nothing can be ported to a gate; the behaviour
+  is pinned by the consumer test below instead.
+
+# ── HarmonyOS-specific tests added by this adaptation ──────────────────────
+# Exercising a Pd external requires a Pure Data runtime, and there are two
+# complementary ways to get one, both used here:
+#
+# Layer 1 (pd_cxc_test.c) embeds a minimal Pure Data runtime shim that provides
+# exactly the Pd symbols the 26 externals import (measured with `nm -u` over the
+# built objects, union = 73 symbols of which 45 are Pd), and drives the packaged
+# externals through the same entry points Pd uses:
+# dlopen(RTLD_NOW|RTLD_LOCAL) -> dlsym(<mangled>_setup) -> setup() ->
+# class_new/class_add* -> creation function -> methods.
+#
+# Layer 2 (run_pd_cxc_e2e.py) runs the very same objects inside the real `pd`
+# binary from puredata/0.54.1 and compares what they compute with an independent
+# Python implementation of the upstream algorithms.  A shim is not Pd: while
+# writing layer 2 the shim's arrays turned out to be 4 bytes per sample while
+# Pd's arrays are `t_word` (8 bytes on LP64), which is exactly the bug fixed by
+# patches/0001-array-access-64bit-safe.patch -- measured on the unpatched
+# package, [cxmean buf] reported 1.25 for a buffer holding 1..8, and a typo'd
+# table name segfaulted pd (rc=139).  Layer 2 is what caught both.
+#
+# Three Pd calling conventions the shim has to get right, each of which was
+# wrong in the first version of this test and is now pinned by a comment where
+# it is used:
+#   * outlet_new() (m_obj.c) makes an object's first outlet reachable as
+#     owner->ob_outlet, which is how externals that discard its return value
+#     (hex2dec, cxc_split, ENV) still reach the outlet later;
+#   * the well-known selector symbols s_float/s_bang/s_list/s_symbol/s_signal
+#     really carry those names, and upstream forwards &s_list straight to
+#     outlet_list(), so a shim that leaves s_name NULL records an empty
+#     selector;
+#   * t_newmethod is called as (*newf)(symbol) for an A_DEFSYM class and
+#     (*newf)(f1, f2, ...) for A_DEFFLOAT ones -- the argument goes in the
+#     FIRST slot, so calling a one-argument A_DEFSYM constructor as
+#     (*newf)(NULL, sym) segfaults in hex2dec_new's `if (!s->s_name)`.
+test_package_tests:
+  - file: test_package/pd_cxc_test.c
+    description: >-
+      Consumer program that, for all 26 packaged externals, verifies the file
+      is a 64-bit little-endian aarch64 ELF shared object, dlopen()s it with
+      RTLD_NOW|RTLD_LOCAL (so every imported Pd symbol must be resolvable from
+      the loading image alone), calls setup() through Pd's own name-mangling
+      rule and asserts a Pd class named after the object got registered with a
+      non-zero instance size and at least one method.  It then instantiates
+      five externals through the creation function Pd would call and asserts
+      the exact messages their real methods emit on their outlets:
+      [hex2dec] no creation argument: the shim passes a NULL symbol, so this
+      asserts upstream's documented "file.%d" fallback, i.e. float 3 ->
+      symbol file.3 and float 42.9 -> symbol file.42 (the method formats an int);
+      creation argument "hex:%x" -> float 255 -> symbol hex:ff; creation
+      argument "tag-%s" -> symbol z -> symbol tag-z.  (Real Pd passes the empty
+      symbol rather than NULL for a missing creation argument, so there the same
+      object formats with "" -- the end-to-end case pins that difference.)
+      [cxc_prepend] anything "foo 1 2" -> anything "cxc_prepend foo 1 2"
+      (incoming selector prepended to the atoms), list "1 2" -> the same
+      without the leading selector, and `set bar` makes both carry "bar".
+      [cxc_split] with the default splitter ("cxc_split", so only its first
+      character splits) "abc" -> list [symbol ab, float 0] (the empty tail is
+      numeric and atof("") is 0); after `set /`, "12./3.4" -> list [12 3.4],
+      "ab/cd" -> list [symbol ab symbol cd], the symbol method "1/2/3" ->
+      list [1 2 3], and a creation argument of "," splits "7,8" -> [7 8].
+      [cxc_counter] instantiated with no arguments (low 1, high 10, dir up)
+      nine bangs emit 1..9 one float each on outlet 0, the tenth emits 10 plus
+      a bang on outlet 1, the next wraps silently to 1; `reset` restarts at 1
+      and reports it, `reset 7` sets and reports 7, `clear` is silent and
+      primes the next bang, and after `fl1 2` the count runs down from 10 to 2
+      one float per bang, arriving exactly on the low bound 1 emits 1 plus the
+      bang, and one bang further wraps silently back to 10.
+      [ENV] RAND_MAX emits the C library's own RAND_MAX as a one-atom list,
+      `setenv CXC_TEST_VAR cxc-value` followed by `getenv CXC_TEST_VAR` emits
+      [symbol cxc-value] (a real getenv/setenv round trip), `getenv` of an
+      unset variable emits [-1], and a float only posts.  It finally checks
+      that all 26 help patches, fader.pd, cxc-meta.pd (with VERSION 0.5.2),
+      README.txt and the GPL v2 text are installed beside the externals.
+    command: "./pd_cxc_test <package>/lib/pd-externals/cxc"
+
+  - file: test_package/run_pd_cxc_e2e.py
+    description: >-
+      End-to-end consumer run inside the real `pd` binary.  Case `load`: a patch
+      instantiating all 26 delivered classes must produce no "couldn't create"
+      (and the same patch with an empty search path must fail for all 26, so the
+      check cannot be vacuous).  Case `stats`: a [table buf 8] is filled with
+      1..8 through the array's own `list` message and measured with [cxmean],
+      [cxavgdev] and [cxstddev]; the three numbers are compared with an
+      independent Python implementation of the upstream formulas
+      (mean = sum/n, avgdev = sum|x-mean|/n, stddev = sqrt(sum((x-mean)^2)/(n-1)))
+      -- 4.5 / 2.0 / 2.44949.  Case `hex2dec`: [hex2dec hex:%x] over 0/255/4096
+      -> hex:0 / hex:ff / hex:1000 and [hex2dec tag-%s] with a symbol z -> tag-z,
+      compared with Python's own % formatting.  Case `counter`: twelve bangs
+      emitted into [cxc_counter] (via a counted [until], not a bang-into-until
+      which loops) must produce exactly 1..10 plus the wrap bang on outlet 1 and
+      a silent wrap to 1 -- compared with a Python re-implementation of
+      upstream's state machine.  Case `prepend`: [cxc_prepend pre] with
+      [list foo 1 2] -> "pre foo 1 2"; [cxc_split /] with symbol ab/cd ->
+      list ab cd.  Case `badtable`: [cxmean typo] must print a Pd error and
+      leave pd alive (the unpatched package segfaults: rc=139).  A builtins-only
+      probe runs first; if the host cannot execute the OHOS pd binary at all,
+      the whole case set is reported as SKIP and counted as 0 executed, never as
+      passes.
+    command: >-
+      python3 run_pd_cxc_e2e.py <pd-cxc package folder> <puredata package>/bin/pd
+      [summary file]
+
+test_files:
+  - path: "test_package/pd_cxc_test.c"
+    test_type: "R34"
+    harmonyos_specific: true
+    assertion_count: 254
+  - path: "test_package/run_pd_cxc_e2e.py"
+    test_type: "R34"
+    harmonyos_specific: true
+    assertion_count: 17
+
+test_package_test_count: 2
+consumer_assertion_count: 254
+end_to_end_check_count: 17
+assertion_count: 271
