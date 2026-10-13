@@ -1,0 +1,105 @@
+id:                     DRAFT-rocminfo-6.4.3-kernel-device-node-gated-userspace-runtime
+trigger_tool:           cmake|conan|clang
+phase:                  preflight|configure
+
+error_signature:        Could not find a package configuration file provided by "hsa-runtime64"|
+                         hsa-runtime64Config.cmake|
+                         HSA_STATUS_ERROR_OUT_OF_RESOURCES|
+                         /dev/kfd
+
+severity:               2
+category:               platform|portability|kernel|device-node|hardware|limitation|detection
+match_keywords:         HSA, hsa-runtime64, ROCm, ROCR, libhsakmt, ROCt thunk, /dev/kfd,
+                         amdkfd, KFD topology, /sys/class/kfd/kfd/topology/nodes,
+                         HSA_STATUS_ERROR_OUT_OF_RESOURCES, hsa_init, GPU agent enumeration,
+                         AMDGPU driver set, device node, kernel-provided interface,
+                         find_package REQUIRED missing, conan registry zero-hit,
+                         bare-metal hardware absence, env_unsupported
+title:                  内核设备节点门控的用户态运行时库不可适配判定：构建期 REQUIRED 依赖在制品仓零命中 且 运行期硬编码 open("/dev/kfd") 而平台无该内核驱动与硬件时，应直接判 env_unsupported（rocminfo 原型案例）
+
+root_cause:             一类库的**全部功能**是"通过某个内核驱动暴露的设备节点，枚举/操作平台硬件"。 它同时具备两个**互相独立**的致命阻塞，任一单独就足以否决适配： 1) **构建期依赖链断裂**：其 CMakeLists 用 `find_package(<runtime> REQUIRED)` 硬性引入 一个"用户态运行时库"（本案例 `hsa-runtime64`），而该运行时既不在 OHOS SDK sysroot 中， 也不在制品仓（本案例 7340 条配方检索 `hsa*`/`hsakmt*`/`rocr*`/`kfd*` 全部 0 命中）， 连配置阶段都过不去； 2) **运行期内核+硬件门控**：即便自行补齐该运行时（可自行写配方编出 libhsa-runtime64）， 其下层 thunk（本案例 libhsakmt/ROCt）**硬编码 `open("/dev/kfd", O_RDWR|O_CLOEXEC)`** （`libhsakmt/src/openclose.c:47` + `runtime/hsa-runtime/core/driver/kfd/amd_kfd_driver.cpp:131`）， 而 `/dev/kfd` 由**内核态驱动** `amdkfd`（AMDGPU 驱动集的一部分）创建，且必须绑定了 **AMD GPU 硬件**才有意义。OHOS PC（麒麟 SoC + 自研 GPU）既无该内核驱动、也无该硬件。 **关键判据（区别于"依赖未适配"）**：阻塞不在"某个库还没人适配"，而在 "该库的语义对象（KFD 驱动 + AMD GPU）在本平台上**不存在**"。因此不是"暂时搁置"， 而是**技术不可行 / env_unsupported**。 **必须做的排除项（防误报平台缺陷）**：OHOS SDK sysroot **已带** AMD 相关 **Linux UAPI 头** （`usr/include/linux/kfd_ioctl.h`、`usr/include/drm/amdgpu_drm.h`），所以 "鸿蒙缺 KFD 头文件"这条论据**不成立**，不得据此申报；真正的缺口是 **内核侧驱动 + 设备节点 + 硬件**三处。同理，制品仓里存在 `libomptarget-rtl-amdgpu` 这类"能编过但注册 0 设备"的 GPU 插件，**不能**反推平台支持 AMD GPU。 另需注意：本类库通常**无降级可用子集**——移除设备枚举后功能不成立，桩化 `hsa_init()` 只会得到一个恒失败的空壳（违反"不得裁剪软件"与空壳红线）。
+
+affected_scope:         全部功能承载于"内核设备节点 + 专属硬件"的用户态库在目标平台上的适配任务： GPU 运行时/枚举（rocminfo、ROCm 家族、HIP 运行时）、 其它需要 /dev/* 节点且节点由不存在的内核驱动提供的运行时。 **判别提问**：「把设备节点与硬件去掉后，本库是否还有可交付语义？」 答**否** ⇒ 命中本条（本案例 rocminfo 移除 KFD 后无任何剩余语义）； 答**是** ⇒ **不**适用，应正常适配（如仅把头文件/构建宏打包、 或另有纯软件回退路径的库）。 与"内核模块库"（jool/zfs/lenovolegionlinux，交付物本身即 .ko， 见 DRAFT-jool-modules-lts-6.18.39-kernel-module-not-deliverable） 的边界：**本条库自身是用户态二进制**，只是被内核驱动门控。
+
+verification_cmd:       # ① 构建期第一道门：是否 find_package(... REQUIRED) 强依赖某运行时
+                        grep -n 'find_package(.*REQUIRED' CMakeLists.txt
+                        # ② 制品仓是否存在可提供该运行时的配方（应 0 命中）
+                        conan search -r ohpcd 'hsa*'
+                        conan search -r ohpcd 'hsakmt*'
+                        conan search -r ohpcd 'rocm*'
+                        # ③ OHOS sysroot 是否已有该运行时的头/库（应 0）
+                        find $SYSROOT -iname '*hsa*' | wc -l
+                        find $SYSROOT \( -name 'libhsa*' -o -name 'libhsakmt*' \) | wc -l
+                        # ④ 反例核对：UAPI 头其实存在，不得当作阻塞理由
+                        find $SYSROOT -iname '*kfd*' -o -iname '*amdgpu*'
+                        # ⑤ 目标工具链实测配置应失败
+                        cmake -DCMAKE_SYSTEM_NAME=OHOS -DCMAKE_SYSROOT=$SYSROOT \
+                              -DCMAKE_CXX_COMPILER=$OHOS_CXX .    # 期望 CMAKE_EXIT=1
+                        # ⑥ 运行期硬编码证据：上游源码是否写死设备节点
+                        grep -rn '"/dev/kfd"' <runtime-src>/
+                        # ⑦ 平台无该设备节点/内核类
+                        ls -l /dev/kfd; ls /sys/class/kfd
+
+rec_priority:           1
+rec_approach:           detect-kernel-device-node-gated-runtime-then-escalate
+rec_description:        判定顺序（全部为可复现命令，见 verification_cmd）： 1) **先看构建期硬依赖**：`find_package(<runtime> REQUIRED)` 出现即记下该运行时名； 2) **查制品仓**：`conan search -r ohpcd` 检索该运行时及其下层 thunk，0 命中 ⇒ 依赖链整条断裂； 若有命中，须**下来看包内容**确认它真能提供所需 .so/头（本案例 `rocm-hipamd/5.7.1` 名为"rocm"实则 `header-library`，只有 `include/` 与 cmake 宏，**无任何 .so、无 hsa.h**， 不能解决 `find_package`）； 3) **查平台是否已有该能力**：`find $SYSROOT`；**同时必须查反例**——把"看似缺失但实际存在" 的东西（本案例 KFD/AMDGPU UAPI 头）明确写进报告，避免被评审以"论据不成立"驳回； 4) **追运行期硬编码**：下载其下层运行时的**对应版本源码**，grep 设备节点字面量 （`/dev/kfd`）与 topology sysfs 路径，确认阻塞在**内核态**而非用户态可绕； 5) **实测配置失败**并把原始报错贴进报告（证据链要求"真实做过的尝试与报错"）； 6) **最有力的补充证据（推荐做）**：在**无该硬件**的宿主上，用**真实**的上游运行时把该工具 **真正编出来并运行**，用 `strace` 抓出那一次失败的系统调用 （本案例实测：`openat("/dev/kfd", O_RDWR|O_CLOEXEC) = -1 ENOENT` → `hsa_init()` 失败 → `HSA_STATUS_ERROR_OUT_OF_RESOURCES` → exit 8）。 这把结论从"构建不过"升级为"**即使构建过了，运行期也确定不可用**"，堵死 "你只是没配好依赖"的质疑； 7) 结论落 `env_unsupported`，按仓库手册【无法适配】issue 通道申报（**不建配方包目录**， 否则 CI 报 `No packages to build` + exit 1 被误判 rule4 编译失败）； 可另开【知识库扩展】草稿 PR 沉淀本条通用判据（先例：mexce 1.0.1）。 禁止项：不得把 `find_package` 的 REQUIRED 去掉/改成非必需来"编过"、不得桩化 `hsa_init()` 等设备入口伪造可用、不得交付预编译二进制、不得把"自己写一个软件 GPU 模拟器" 当作适配交付。
+
+rec_command:            grep -n 'find_package(.*REQUIRED' CMakeLists.txt; \
+                         conan search -r ohpcd 'hsa*'; \
+                         find $SYSROOT -iname '*hsa*' | wc -l; \
+                         find $SYSROOT -iname '*kfd*'; \
+                         grep -rn '"/dev/kfd"' <runtime-src>/
+rec_auto_fix:           false
+rec_impl:               unadaptable-escalate-issue-channel
+
+fallback_priority:      3
+fallback_approach:      platform-level-device-info-interface (仅当平台单独立项，非本任务范畴)
+fallback_description:   若产品确需在 OHOS PC 上提供 GPU/设备信息工具，应由**平台侧**立项提供 等价的设备信息接口（系统 API），而不是以三方库适配形式提交； 或以"内核驱动 + 硬件支持"为前提单独立项。
+fallback_command:       （无 —— 见上游 README/Documentation 的 target platform requirements）
+fallback_auto_fix:      false
+fallback_impl:          platform-project-not-library-adaptation
+
+forbid_1_pattern:       (sed|patch|perl).*find_package\(hsa-runtime64.*(REQUIRED)?.*(remove|delete|#)
+forbid_1_reason:        删掉/降级 REQUIRED 只能骗过配置阶段；源码 41 处 hsa_agent_get_info、
+                        12 处 hsa_system_get_info 等调用仍需真实运行时符号，
+                        且运行期必然因无 /dev/kfd 而失败。
+forbid_1_consequence:   伪适配，产物在目标机零功能且立即报错退出，违反平台红线，判任务失败。
+
+forbid_2_pattern:       (touch|echo|cat >).*(hsa\.h|hsa-runtime64).*\.(h|cpp|cmake)
+forbid_2_reason:        伪造 HSA 头/桩化 hsa_init() 无法补齐内核驱动与硬件这一真实缺口，
+                        得到的是恒返回失败的空壳。
+forbid_2_consequence:   违反"软件要求绝对不能裁剪"与空壳红线，评审判伪适配。
+
+principles:
+similar_to:             DRAFT-jool-modules-lts-6.18.39-kernel-module-not-deliverable（同涉内核态交付面；
+                        但该条交付物本身是 .ko，本条是**用户态二进制被内核驱动门控**，互为边界）
+similar_to:             DRAFT-lenovolegionlinux-0.0.20-kernel-module-not-deliverable（同上，内核模块类）
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-rocminfo-6.4.3-kernel-device-node-gated-userspace-runtime.md
+last_updated:           2026-10-04
+source_event:           rocminfo 6.4.3 适配任务（平台任务 10212，taskBranch feat/rocminfo-6.4.3）：
+                        ① 上游 GitHub tag 归档可下载（sha256 0aa040963daaa2b5ebbec818a2d53c83612912686336160c223fb664dc0ca92b，27,947 bytes，全树 27 文件）；
+                        ② OHOS 6.0 aarch64 clang 配置实测失败于 CMakeLists.txt:63
+                           `find_package(hsa-runtime64 1.0 REQUIRED)`（CMAKE_EXIT=1）；
+                        ③ 制品仓检索：hsa*/hsakmt*/rocr*/kfd* 全 0 命中；rocm* 仅 2 条辅助包，
+                           其中 rocm-hipamd/5.7.1 实为 header-library（无 .so、无 hsa.h）；
+                        ④ OHOS sysroot：hsa 相关 0 命中；反例核对 KFD/AMDGPU UAPI 头**存在**；
+                        ⑤ ROCR-Runtime rocm-6.4.3 源码
+                           （sha256 3b23bed04cbed72304d31d69901eb76afa2099c7ac37f055348dfcda2d25e41a，2,292,387 bytes）
+                           中 libhsakmt/src/openclose.c:47 硬编码 "/dev/kfd"；
+                        ⑥ **决定性运行期实测**：在无 AMD GPU 宿主用真实 libhsa-runtime64 + libhsakmt
+                           把 rocminfo 真正编出（220,640 bytes，ldd 链接 hsa+hsakmt 成功）并运行，
+                           strace 抓到 `openat("/dev/kfd", O_RDWR|O_CLOEXEC) = -1 ENOENT` →
+                           `HSA_STATUS_ERROR_OUT_OF_RESOURCES`，EXITCODE=8；
+                           自带 rocm_agent_enumerator 回退路径 stdout 0 字节；
+                        ⑦ 终态 env_unsupported，按【无法适配】issue 通道申报（issue #3625）。
+authors:                Quas
+source_pr:              （无 —— 无法适配走 issue 通道，不建配方 PR；本条由【知识库扩展】草稿 PR 沉淀）
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.6
+metrics_last_used:      2026-10-04
