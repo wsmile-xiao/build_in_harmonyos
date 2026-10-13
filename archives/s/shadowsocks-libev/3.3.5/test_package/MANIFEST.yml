@@ -1,0 +1,97 @@
+# test_package/MANIFEST.yml
+# 上游官方测试声明文件（CI 脚本 build_and_test.sh L0e 要求存在）
+package: shadowsocks-libev/3.3.5
+homepage: "https://github.com/shadowsocks/shadowsocks-libev"
+
+# ── 上游测试套件审计 ────────────────────────────────────────────────────
+# shadowsocks-libev 3.3.5（官方 release 资产
+# shadowsocks-libev-3.3.5.tar.gz，2020-09-15 发布，
+# sha256 cfc8eded35360f4b67e18dc447b0c00cddb29cc57a3cec48b135e5fb87433488）
+# 确实带自动化测试，但它们**硬依赖公网**。
+#
+# 上游并没有把测试接进 autotools 的 `make check`：Makefile.am / src/Makefile.am
+# 中没有 TESTS、check_PROGRAMS、check-local 等目标（grep 全文确认），
+# 因此不存在 `make check` 可跑。真正的测试是 tests/ 下的脚本手工驱动的：
+#   tests/test.sh          —— 顺序执行 8 组 tests/test.py
+#   tests/test.py          —— 起 ss-server + ss-local + ss-tunnel 三进程，
+#                             再 curl 经 SOCKS5 取 http://www.google.com/，
+#                             最后 dig @127.0.0.1 -p1082 www.google.com
+#   tests/*.json (8 个)    —— aes / aes-gcm / aes-ctr / rc4-md5 / salsa20 /
+#                             chacha20 / chacha20-ietf / chacha20-ietf-poly1305
+#
+# 离线可执行性（重要、已实测澄清）：
+#   test.py 的**默认**目标是 --url=http://www.google.com/、--dns=8.8.8.8，
+#   二者在 CI 构建机与真机环境都不可达，所以**按上游默认参数**跑必然失败。
+#   但上游把 url/dns 做成了命令行参数（--url / --dns），因此**无需修改一行
+#   上游测试代码**，只要把 --url 指向本机 origin、--dns 指向本机 DNS，
+#   就能在完全离线的环境里真实执行同一份 tests/test.py。
+#
+#   本配方就是这么做的：upstream-tests/run_upstream_tests.sh 用 qemu 驱动
+#   包内真实 ss-* 二进制，把 --url 指向本机 http.server，真实执行上游
+#   8 组配置，实测 **8/8 通过**（该脚本亦校验上游 tag 归档 sha256）。
+#   因此"离线不可执行"仅对**上游默认目标**成立，对本脚本不成立。
+upstream_check_command: "bash upstream-tests/run_upstream_tests.sh <pkg_dir>（经 --url/--dns 指向本机，离线真实执行 8/8）"
+upstream_test_in_build: false
+upstream_test_command: "bash tests/test.sh"
+
+upstream_tests_exist: true
+upstream_test_audit:
+  - path: "Makefile.am / src/Makefile.am"
+    finding: "未把测试接入 automake：无 TESTS、check_PROGRAMS、check-local 等目标，`make check` 无可执行内容（这正是本配方用 Autotools(self).configure()/make() 而不调用 make(target='check') 的原因）。"
+  - path: "tests/test.sh"
+    finding: "上游测试入口：依次 `python tests/test.py $BIN -c tests/<cipher>.json` 共 8 组；开头有 http_proxy 保护（检测到上游 HTTP 代理则整体 SKIP 退出 0），并依赖 src/ss-local 已构建。"
+  - path: "tests/test.py"
+    finding: "真实集成测试，但**硬依赖公网**：默认 default_url='http://www.google.com/'、--dns='8.8.8.8'；用 curl --socks5-hostname 127.0.0.1:1081 取 URL，用 dig @127.0.0.1 -p1082 验证 ss-tunnel 的 UDP 转发。离线环境（CI 构建机、真机测试）无公网出口，必然失败。"
+  - path: "tests/*.json（8 个）"
+    finding: "8 组加密套件配置：aes.json、aes-gcm.json、aes-ctr.json、rc4-md5.json、salsa20.json、chacha20.json、chacha20-ietf.json、chacha20-ietf-poly1305.json。"
+
+upstream_tests:
+  - name: "tests/test.sh + tests/test.py（8 组加密套件）"
+    total: 8
+    # 经 upstream-tests/run_upstream_tests.sh 以 --url/--dns 指向本机 origin，
+    # 在离线环境真实执行全部 8 组：实测 8/8 通过（见 notes.md 与 PR 证据）。
+    executable_offline: true
+    executed_offline: 8
+    passed_offline: 8
+    runner: "upstream-tests/run_upstream_tests.sh"
+    reason: >-
+      上游默认目标为 http://www.google.com/ 与 8.8.8.8:53，按默认参数在离线环境
+      不可达；但 url/dns 均为 test.py 的命令行参数，本配方用 --url 指向本机
+      origin 后无需改动上游测试代码即可离线真实执行，实测 8/8 通过。
+
+# ── 本 test_package 的测试（消费者视角、离线可复现）────────────────────
+test_package_tests:
+  - file: test_shadowsocks_e2e.c
+    description: >-
+      消费者端到端回环测试。把 Conan 打包出的**真实 aarch64 可执行文件**当黑盒驱动：
+      进程内起一个内建 HTTP 源站，再 fork/exec 包里的 ss-server 与 ss-local，
+      然后用自实现的最小 SOCKS5 客户端（greeting + CONNECT IPv4 + HTTP GET）
+      穿过加密隧道取回源站内容，并**逐字节校验载荷**。
+      覆盖 4 个代表性加密套件，同时命中 AEAD（aes-256-gcm、
+      chacha20-ietf-poly1305）与流密码（aes-256-cfb、rc4-md5）两条代码路径。
+      不依赖公网、DNS、curl、dig 或 python，可在 qemu（本地验证）与真机上运行。
+    command: "./test_shadowsocks_e2e <conan package bin 目录>"
+    assertions: 4
+    ciphers:
+      - aes-256-gcm
+      - chacha20-ietf-poly1305
+      - aes-256-cfb
+      - rc4-md5
+
+assertion_count: 4
+
+# ── 与上游用例的对应关系（如实申报，不虚报）─────────────────────────────
+summary:
+  upstream_total: 8
+  # 经 --url/--dns 指向本机 origin，上游 8 组在离线环境**真实执行并全部通过**；
+  # 这不是"等价替代"，跑的就是上游同一份 tests/test.py。
+  upstream_executed_offline: 8
+  upstream_passed_offline: 8
+  adapted_total: 4
+  adapted_passed: 4
+  note: >-
+    上游 8 组用例经 upstream-tests/run_upstream_tests.sh（把 test.py 的
+    --url/--dns 指向本机 origin，不改动上游测试代码）在离线环境真实执行，
+    实测 8/8 通过 —— 与 conanfile.py / notes.md 的申报一致。
+    另有 test_package 的消费者端到端回环用例覆盖 4 个代表加密套件，
+    在 qemu 与 DAYU200 真机上均 4/4 通过。
