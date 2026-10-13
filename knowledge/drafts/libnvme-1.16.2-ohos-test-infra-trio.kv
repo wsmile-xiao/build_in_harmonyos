@@ -1,0 +1,33 @@
+#====================================================================
+# Draft: libnvme 1.16.2 - 上游 meson test 套件在 OHOS 真机上的三个
+#        测试基建级障碍：musl tmpfile() 不遵循 TMPDIR（只读 /tmp 下
+#        EACCES）、toybox env 不支持带参 shebang（#!/bin/bash -e 变
+#        ENOENT）、toybox tar 无法复现自引用硬链接（X link to X）。
+#        三者同为"上游测试逻辑正确、OHOS 运行环境语义差异"，修法
+#        全部是测试辅助文件的最小化补丁，不动测试断言本身。
+#====================================================================
+
+id:                     DRAFT-LIBNVME-1162-OHOS-TEST-INFRA-TRIO
+trigger_tool:           meson|meson test|bash|toybox tar|clang
+phase:                  testing
+error_signature:        can't create temporary file for log buf: Permission denied|env: exec bash -e: No such file or directory|tar: can't link '.*' -> '.*': No such file or directory|FileNotFoundError: .*kernel-doc-check
+
+severity:               2
+category:               testing|ohos-platform|toybox|musl|portability
+match_keywords:         tmpfile, TMPDIR, EACCES, read-only /tmp, musl, shebang, #!/bin/bash, env bash -e, toybox env, exit status 127, toybox tar, hardlink, self-referential, link to, tar -xk, meson test, testlog, libnvme, test harness
+
+title:                  上游测试套件在 OHOS 真机跑不起来的三连坑：tmpfile() 硬编码只读 /tmp、带参 shebang 被 toybox env 拒收、自引用硬链接 tarball 解包失败——三件全用"测试辅助文件最小补丁"解决，断言零改动
+
+root_cause:             三条 OHOS 与桌面 Linux 的运行环境语义差异，全部命中原样可跑的测试基建层：① musl 的 tmpfile() 硬编码在 /tmp 创建且不遵循 TMPDIR 环境变量（实测 TMPDIR=$HOME/tmp 下重跑仍 EACCES），OHOS /tmp 是只读 EROFS——上游测试用 tmpfile() 建日志缓冲的直接 exit 1；② toybox 的 /usr/bin/env 不支持带参数的 shebang：`#!/bin/bash -e` 会被当作单一程序名 "bash -e" 查找（exec ENOENT，exit 127），即使 /bin/bash 存在也救不了——上游测试包装脚本常用 `#!/bin/bash -e` 开头；③ toybox tar 对 tarball 内的自引用硬链接条目（成员 X 标记为 "link to X" 自身）先 unlink 目标再 link，自引用时源已被删 → ENOENT——sysfs 快照类测试数据（含数十个 power/uevent 属性文件的硬链接副本）解包必失败。三者的报错都发生在测试启动/夹具阶段，与被测代码无关。
+affected_scope:         任何在 OHOS 上真跑上游测试套件（meson test / ctest / make check）且测试夹具用到 tmpfile()、bash shebang 带参、或硬链接 tarball 夹具数据的包。libnvme 1.16.2 实测三坑全中：test/utils.c（tmpfile 日志）、test/{sysfs,config}/*-diff.sh（bash -e + sysfs tarball）、scripts/kernel-doc-check（/bin/bash shebang 且 mtest 对 ENOENT 不容错直接崩整个测试运行器）。
+verification_cmd:       TMPDIR=$HOME/tmp <test-bin> 2>&1 | grep -q "Permission denied" && echo musl-tmpfile-hit; head -1 <script> | grep -q "env bash" && <script> 2>&1 | grep -q "exec bash.*No such file" && echo shebang-hit; tar -tvf <fixture.tar.xz> 2>/dev/null | grep -c "link to"
+
+rec_priority:           1
+rec_approach:           ohos-test-fixture-minimal-patches
+rec_description:        三条最小补丁，全部只动测试辅助文件、不动断言：① tmpfile() → getenv("TMPDIR") + snprintf("%s/prefix-XXXXXX") + mkstemp + 立即 unlink + fdopen(w+)，保持 tmpfile() 的"匿名文件"语义（unlink 失败降级为 warning 不 abort）；② `#!/bin/bash -e` → `#!/usr/bin/env bash` + 体内第二行 `set -e`（同理由适用于所有 `#!/bin/bash` → `/usr/bin/env bash`：OHOS 无 /bin/bash 但 PATH 上有 hnp bash；注意 mtest 对脚本 ENOENT 会抛未捕获异常崩掉整个测试运行器，所以连"文档检查脚本"也要修）；③ 硬链接夹具 tarball → `tar -xk`（keep-existing）容错提取：普通文件成员先落盘被保留，自引用硬链接条目报 "File exists" 被忽略，再以"关键目录（sys/）存在"作为提取成功的判定。判定门禁用 meson test 自身退出码 + testlog.txt 的 `test:`/`result:` 段解析统计（注意 testlog.txt 是 "test:/result:" 键值对格式而非终端的 "N/M name OK" 格式）。
+rec_command:            cd <build_dir> && TMPDIR=$HOME/tmp meson test --print-errorlogs --num-processes 2 && grep -c "^test:" meson-logs/testlog.txt
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              15171
+source_commit:          3baa7f531
