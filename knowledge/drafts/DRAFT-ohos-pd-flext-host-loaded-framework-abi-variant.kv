@@ -1,0 +1,66 @@
+#====================================================================
+# DRAFT-ohos-pd-flext-host-loaded-framework-abi-variant
+# 宿主加载型 C++ 框架库把 ABI/线程模型编码进编译期宏：
+# 库与消费者必须使用同一变体选择符，否则符号按 _shared/_single 改名、
+# dlopen 在 BIND_NOW 下报 symbol not found
+#====================================================================
+
+id:                     DRAFT-ohos-pd-flext-host-loaded-framework-abi-variant
+trigger_tool:           clang|ld|runtime
+phase:                  linking
+error_signature:        symbol not found|Error relocating|undefined symbol|flext_(base|obj|root)_single|flext_(base|obj|root)_shared|couldn't create
+
+severity:               3
+category:               linking|plugins|toolchain|ohos|packaging
+match_keywords:         FLEXT_SYS, FLEXT_SHARED, FLEXT_EXPORTS, FLEXT_CLASSDEF, libflext-pd, flext_base_shared, flext_root_single, host-loaded framework, dlopen, BIND_NOW, FLAGS_1 NOW, symbol not found, Error relocating, compile-time ABI variant, pkg-config, pd external
+title:                  宿主加载型 C++ 框架库把 ABI/线程模型编码进编译期宏：库与消费者必须使用同一变体选择符（如 flext 的 -DFLEXT_SHARED），否则类名被按 _shared/_single 改名、dlopen 在 BIND_NOW 下报 symbol not found
+
+root_cause:             flext 这类"宿主加载型 C++ 框架库"把**编译期宏当作 ABI 选择符**：flprefix.h 依据 FLEXT_SYS 选区宿主（Pd=2/Max=1），依据 FLEXT_SHARED 选"共享+多线程 vs 单线程"变体，并用 FLEXT_CLASSDEF 把基类符号改名（flext_base_shared / flext_base_single，flext_root_single 等）。框架共享库本身用 -DFLEXT_SYS=2 -DFLEXT_SHARED -DFLEXT_EXPORTS 编译，只导出 *_shared 符号；消费者（外接对象）必须带**同样的** -DFLEXT_SHARED（库侧多一个 EXPORTS）。若消费者漏掉该宏，它引用的是 *_single 符号；由于产物是共享对象（允许未定义符号），**编译与链接都不报错**，直到宿主 dlopen 时才失败。OHOS clang 默认 BIND_NOW（readelf: FLAGS_1 NOW），加载即做立即重定位，于是报 `Error relocating ...: _ZN17flext_root_singlenwEm: symbol not found`，Pd 打印 `... couldn't create`。该协议由上游 pd-flext.pc 发布（Cflags 里带 -DFLEXT_SYS=2 -DFLEXT_SHARED），消费者若不走 pkg-config / 不采信包的 cxxflags 就会踩。
+affected_scope:         HarmonyOS PC（aarch64, ohos-aarch64 profile）上，任何"宿主加载型 C++ 框架库"（flext 及其下游 pd-pool 等 flext 外接）在库侧与消费者侧使用不同变体选择符时；pd-flext 0.6.4 实测。通用到其它"用编译期宏标注 ABI 变体"的库（如 STL 的 _GLIBCXX_DEBUG、Eigen 的 EIGEN_* 宏族）。
+verification_cmd:       1) readelf -d <pkg>/lib/libflext-pd.so.0.6.4 | grep -E 'SONAME|FLAGS' 应见 SONAME=libflext-pd.so.0.6 与 FLAGS_1 NOW；2) llvm-nm -u <libflext-pd.so> 可见 UND 的宿主符号 class_new/gfxstub_*/outlet_*（宿主 pd 以 -rdynamic 导出，加载时绑定）；3) 用 pd-flext 安装包编外接时带/不带 -DFLEXT_SHARED 各一次，不带者能编能链但 pd -open 时 `symbol not found`。
+
+rec_priority:           1
+rec_approach:           export-abi-selectors-from-library-package
+rec_description:        把框架库的编译期变体选择符作为**包的公共接口**发布：在 Conan 里写入 cpp_info.cxxflags（-DFLEXT_SYS=2 -DFLEXT_SHARED -pthread）并生成 pd-flext.pc（Cflags 同款），消费者通过 Conan 生成器或 pkg-config 取到，绝不靠记忆手写；库侧单独加 -DFLEXT_EXPORTS（导出侧），消费者不加。这样库与消费者天然同变体。
+rec_command:            conanfile package_info(): self.cpp_info.cxxflags = ["-DFLEXT_SYS=2","-DFLEXT_SHARED","-pthread"]; 并写 lib/pkgconfig/pd-flext.pc: Cflags: -I${includedir} -I${pdincdir} -DFLEXT_SYS=2 -DFLEXT_SHARED -pthread
+rec_auto_fix:           false
+rec_impl:               conan-cppinfo-cxxflags-and-pcfile
+
+fallback_priority:      2
+fallback_approach:      link-static-framework-into-consumer
+fallback_description:   若目标环境不便交付/加载框架共享库，可改用框架的**静态**变体（flext 的 libflext-pd_s.a，上游注释为 -DPD 的 static 变体）并把框架代码链进外接对象；此时不存在 DT_NEEDED 与 soname 问题，但框架与消费者仍必须同变体，且消费者需自带宿主运行时。
+fallback_command:       clang++ -shared -fPIC ... myobj.cpp <pkg>/lib/libflext-pd_s.a -o myobj.pd_linux
+fallback_auto_fix:      false
+fallback_impl:          static-link-framework
+
+forbid_1_pattern:       clang\+\+.*-shared(?!.*-DFLEXT_SHARED).*-lflext-pd
+forbid_1_reason:        消费者不带与库一致的变体宏就链接共享框架库：共享对象允许未定义符号，编译/链接静默通过，错误被推迟到宿主 dlopen（BIND_NOW 立即重定位）。
+forbid_1_consequence:   Pd 加载外接时报 `Error relocating ...flext_root_single...: symbol not found` 且 `... couldn't create`；对象创建失败但构建日志全绿，极难定位。
+
+forbid_2_pattern:       (strip|删除).*(-DFLEXT_SHARED|-DFLEXT_SYS)|--no-undefined.*flext
+forbid_2_reason:        变体选择符是 ABI 语义的一部分，不是可随意增删的编译开关；用 --no-undefined 强行提前报错虽能暴露问题，但不能替代让库与消费者同变体。
+forbid_2_consequence:   掩盖根因或把可移植性补丁做成平台特例，换个框架/库仍会复现。
+
+principles:             R34
+
+causes:                 []
+caused_by:              []
+similar_to:             E442, DRAFT-E623-libheif-dav1d-1.23.0-plugin-consumer-contract-and-dlopen-signing, DRAFT-E641-conan-baked-paths-relocatable-dlopen-plugins
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               doc/DRAFT-ohos-pd-flext-host-loaded-framework-abi-variant.md
+last_updated:           2026-10-12
+source_event:
+
+authors:                frj__ <241250055@smail.nju.edu.cn>
+source_pr:
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft:                  true
+contributor_id:         frj__
