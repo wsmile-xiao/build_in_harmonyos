@@ -1,0 +1,46 @@
+#====================================================================
+# Draft: cpp-ipc 1.3.0 on OHOS -- three futex operations are missing
+#        (FUTEX_CMP_REQUEUE_PI / FUTEX_WAIT_REQUEUE_PI / FUTEX_TRYLOCK_PI
+#        return ENOSYS), so the a0 cross-process condition variable
+#        cannot broadcast or wait
+#====================================================================
+
+id:                     DRAFT-CPP-IPC-130-FUTEX-REQUEUE-PI-TRYLOCK-PI-ENOSYS
+trigger_tool:           conan|clang|make|test
+phase:                  compilation|runtime|testing
+error_signature:        fail condition broadcast\[38\]|fail condition wait\[38\]|Function not implemented|FUTEX_CMP_REQUEUE_PI|FUTEX_WAIT_REQUEUE_PI|FUTEX_TRYLOCK_PI|errno=38.*futex
+
+severity:               2
+category:               platform, kernel, syscall, limitation, ohos
+match_keywords:         futex, FUTEX_CMP_REQUEUE_PI, FUTEX_WAIT_REQUEUE_PI, FUTEX_TRYLOCK_PI, ENOSYS, errno 38, Function not implemented, condition broadcast, condition wait, a0, alephzero, shared memory IPC, PI futex, requeue, robust mutex, cpp-ipc, shared memory IPC
+prescan_pattern:        FUTEX_CMP_REQUEUE_PI|FUTEX_WAIT_REQUEUE_PI|FUTEX_TRYLOCK_PI|a0_ftx_cmp_requeue_pi|a0_ftx_wait_requeue_pi|a0_ftx_trylock_pi
+prescan_globs:          "*.c, *.h, *.cc, *.cpp"
+title:                  OHOS 内核不实现 futex 的 REQUEUE_PI/TRYLOCK_PI 三种操作（ENOSYS 38）：靠 PI-requeue 实现的跨进程条件变量 wait/broadcast 整体失效，而基础 FUTEX_WAIT/WAKE/LOCK_PI/UNLOCK_PI 正常
+
+root_cause:             HongMeng 内核的 futex 只实现了基础子集，FUTEX_CMP_REQUEUE_PI、FUTEX_WAIT_REQUEUE_PI、FUTEX_TRYLOCK_PI 三种「PI 重新排队/尝试锁」操作经 syscall(SYS_futex=98) 直接返回 errno=38(ENOSYS)，不是 seccomp 杀进程（无 SIGSYS）。上游 a0（AlephZero）层把跨进程条件变量的唤醒与等待全押在这三种操作上——a0_cnd_wake 走 a0_ftx_cmp_requeue_pi、a0_cnd_timedwait_impl 走 a0_ftx_wait_requeue_pi、owner-died 恢复分支走 a0_ftx_trylock_pi——于是 cond broadcast/wait 恒返回 ENOSYS，事件通知链断裂：日志刷 fail condition broadcast[38] / fail condition wait[38]，依赖广播的用例超时或 abort，锁恢复路径退化。
+affected_scope:         任何用 PI-futex requeue 实现跨进程条件变量/读写锁的库（cpp-ipc 1.3.0 的 src/libipc/platform/linux/a0、AlephZero 系、自研 shm+cond 同步的高性能 IPC 库）。选型/适配期用 prescan_pattern 扫源码即可预判；**只用 POSIX 共享内存（shm_open+mmap）、不碰条件变量唤醒路径**的用法不受影响（本包 SHM.* 5/5 实测全过）。注意：本包队列单播用例也非全绿（Queue.prod_cons_NvN_unicast 超时、直接因果未取证），故不把「单播/无锁队列路径」整体列为不受影响。
+verification_cmd:       clang futex_probe.c -o futex_probe && ./futex_probe
+rec_priority:           1
+rec_approach:           probe-futex-op-availability-then-degrade-to-plain-wake
+rec_description:        动手前先用 30 行探针对 futex 逐操作打可用性表（逐个 syscall(SYS_futex, &v, OP, 1, 0, NULL, 0) 看 errno），确认哪些操作缺失再改。命中 REQUEUE_PI/TRYLOCK_PI 缺失后按「被禁的具体操作」降级：唤醒侧 FUTEX_CMP_REQUEUE_PI 改 FUTEX_WAKE，等待侧 FUTEX_WAIT_REQUEUE_PI 改 FUTEX_WAIT 并由等待者自己重新加锁（丢失 PI 优先级继承，换来可用），owner-died 恢复分支跳过 trylock_pi 走普通锁路径。若不接受改并发语义，就如实登记为平台限制、在 notes 与 PR 里写清哪些用例因此失败，不要把它误判为包缺陷或测试脚本问题。
+rec_command:             clang futex_probe.c -o futex_probe && ./futex_probe
+rec_auto_fix:            false
+rec_impl:                manual
+
+fallback_priority:       2
+fallback_approach:       pthread-futex-free-sync
+fallback_description:    改用 pthread_cond/pthread_mutex（musl 封装内部只走基础 futex 操作，实测可用）或 POSIX 信号量 sem_post/sem_wait（OHOS 实测 sem_open 跨进程可用）+ 共享内存标志位轮询，绕开 PI-requeue 语义。
+fallback_command:        grep -rn "FUTEX_CMP_REQUEUE_PI|FUTEX_WAIT_REQUEUE_PI|FUTEX_TRYLOCK_PI" src/
+fallback_auto_fix:       false
+
+forbid_1_pattern:        静默吞掉 ENOSYS|把 ENOSYS 当 EAGAIN|忽略 a0_err_t 返回值
+forbid_1_reason:         广播失败被吞掉后等待者永远等不到唤醒，表现为无界挂死或 25s 超时，根因会被误判成「上游 bug」
+forbid_1_consequence:    测试无界挂死、进程 abort，且日志里唯一线索 fail condition broadcast[38] 已被过滤掉，无法定位
+
+principles:
+
+similar_to:              E192（musl 不支持 robust mutex，同属内核/libc 能力缺口，但签名与解法不同：那条是编译期缺符号、源码补丁；本条是运行期 ENOSYS、需降级同步路径）；E051（seccomp 对某些 syscall 直接 SIGSYS 杀进程，本条是返回 ENOSYS 不杀进程）
+caused_by:
+conflicts_with:
+source_pr:
+source_commit:
