@@ -1,0 +1,79 @@
+#====================================================================
+# Draft: OHOS 内核头 linux/keyctl.h 把 struct keyctl_dh_params 的
+#        private 成员改成 union(__linux_private / priv)，
+#        上游按 POSIX/glibc 形状写 .private 设计符即编译失败
+# 实证: ell 0.71 (任务 14896) 2026-10-06 B 机实测
+#====================================================================
+
+id:                     DRAFT-ell-0.71-ohos-keyctl-dh-params-union-no-private-member
+trigger_tool:           clang
+phase:                  compilation
+error_signature:        field designator 'private' does not refer to any field in type 'struct keyctl_dh_params'|no member named 'private' in 'struct keyctl_dh_params'|keyctl_dh_params
+
+severity:               2
+category:               kernel, headers, libc, portability
+match_keywords:         keyctl_dh_params, KEYCTL_DH_COMPUTE, field designator, no member named, private, priv, __linux_private, union, linux/keyctl.h, Diffie-Hellman, DH, syscall, musl, OHOS, HarmonyOS, kernel header
+
+title:                  OHOS linux/keyctl.h 的 struct keyctl_dh_params 无 private 成员（改为 union）：按上游形状写 .private 设计符即编译失败
+
+root_cause:             OHOS 内核 UAPI 头 linux/keyctl.h 把 struct keyctl_dh_params 定义成
+                        "union { __s32 __linux_private; __s32 priv; } + prime + base"（避免与
+                        C++ 关键字/上游字段名冲突），而 glibc/musl-上游视图与 Linux 主线内核的
+                        形状是 "int private; int prime; int base"。ell 等库在系统头已提供
+                        KEYCTL_PKEY_QUERY 时走 "#define dh_params keyctl_dh_params" 分支，
+                        随后用 struct dh_params params = { .private = ..., ... } 初始化，
+                        设计符 private 在 OHOS 结构体里根本不存在 => clang 报
+                        "field designator 'private' does not refer to any field" 并终止编译。
+                        内存布局兼容（union 内单个 __s32 占位，整体仍为 3 x 4 字节），
+                        因此问题只在**编译期字段名**层面，不在 ABI/syscall 语义层面。
+
+affected_scope:         任何读取/构造 struct keyctl_dh_params 并使用 .private 设计符的软件
+                        （KEYCTL_DH_COMPUTE Diffie-Hellman 密钥派生路径）：keyctl(2)/keyctl(1)、
+                        systemd、gnutls/openssh 的内核 DH 后端、以及所有"系统头已定义
+                        KEYCTL_PKEY_QUERY 时改用系统 struct"的上游代码。判据是源码里同时出现
+                        `struct keyctl_dh_params` 与 `.private`。
+
+verification_cmd:       printf '#include <linux/keyctl.h>\nstruct keyctl_dh_params p = { .private = 1, .prime = 2, .base = 3 };\n' | clang -xc -c - -o /dev/null 2>&1 | grep "field designator"
+                         printf '#include <linux/keyctl.h>\nstruct keyctl_dh_params p = { .priv = 1, .prime = 2, .base = 3 };\n' | clang -xc -c - -o /dev/null && echo OHOS_FIELD_OK
+
+rec_priority:           1
+rec_approach:           use-upstream-shaped-struct-under-platform-guard
+rec_description:         在走系统 struct 的 #else 分支里，用 #ifdef __OHOS__ 守卫重新声明一个与上游同形状的私有 struct dh_params { int32_t private; int32_t prime; int32_t base; }，让 .private 设计符继续成立；不要改调用点去用 .priv（那会让补丁在非 OHOS 平台失效），也不要删除 KEYCTL_DH_COMPUTE 相关代码（会让 DH 能力整体丧失）。等效性依据：OHOS 的 union 内只有一个 __s32 成员，结构体仍是 3 x 4 字节、字段顺序 private/prime/base 一致，syscall(__NR_keyctl, KEYCTL_DH_COMPUTE, &params, ...) 交给内核的仍是同一布局。
+rec_command:             |
+                         #else
+                         #if defined(__OHOS__)
+                         struct dh_params {
+                                 int32_t private;
+                                 int32_t prime;
+                                 int32_t base;
+                         };
+                         #else
+                         #define dh_params keyctl_dh_params
+                         #endif
+                         #endif
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      field-rename-at-call-site
+fallback_description:    仅当同一文件多处构造该结构体、补公共头会扩散时，改为在调用点用 OHOS 实际成员名 (.priv = ...)，并用 #ifdef __OHOS__ 包住赋值；代价是补丁与上游代码分叉更大、回移植更难。
+fallback_command:        grep -rn "keyctl_dh_params\|\.private *=" <src>
+fallback_auto_fix:       false
+fallback_impl:           source-patch
+
+safety_boundary:        只改结构体声明的归属（用上游形状的私有 struct），不改 syscall 号、不改 KEYCTL_DH_COMPUTE 语义、不动 payload/len 传参；不适用于结构体本身布局不一致的场景（须逐字节核对后再用）。
+prescan_pattern:        keyctl_dh_params|KEYCTL_DH_COMPUTE
+prescan_globs:          **/*.c,**/*.h
+
+similar_to:             E091 (OHOS linux/socket.h 与 musl sys/socket.h 结构体重定义 —— 同为"OHOS 内核 UAPI 与上游/libc 视图不一致"家族，但那条是重定义、本条是字段名缺失，签名与解法均不同)
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+source_event:           ell-0.71 任务 14896 本地 make 首错（B 机 2026-10-06 01:0x）
+doc_file:               knowledge/drafts/DRAFT-ell-0.71-ohos-keyctl-dh-params-union-no-private-member.md
+last_updated:           2026-10-06
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:
+source_commit:
