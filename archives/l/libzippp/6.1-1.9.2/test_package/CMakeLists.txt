@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(libzippp_consumer LANGUAGES CXX)
+find_package(libzippp CONFIG REQUIRED)
+add_executable(libzippp_consumer test.cpp)
+target_compile_features(libzippp_consumer PRIVATE cxx_std_17)
+target_link_libraries(libzippp_consumer PRIVATE libzippp::libzippp ${CMAKE_DL_LIBS})

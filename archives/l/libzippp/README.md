@@ -9,4 +9,5 @@ libzippp 是 libzip 的 C++ 封装库，提供面向对象的 ZIP 归档操作�
 - **依赖链**: libzip（→ zlib）
 - **上游仓库**: https://github.com/ctabin/libzippp（已从 ctasada/libzippp 迁移）
 - **版本索引**:
+  - 6.1-1.9.2 — 2026-10-05 原生正式 Conan 与上游24/24、消费者1/1、鸿蒙专项1/1通过；发布状态仍独立记录。
   - 7.1-1.10.1 — 2026-09-20 适配（tag libzippp-v7.1-1.10.1，对应 libzip 1.10.x，兼容制品仓 libzip/1.11.4）
