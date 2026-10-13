@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(utf8proc_consumer C)
+find_package(utf8proc CONFIG REQUIRED)
+add_executable(utf8proc_consumer test_utf8proc.c)
+target_link_libraries(utf8proc_consumer PRIVATE utf8proc::utf8proc)

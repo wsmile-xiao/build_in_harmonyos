@@ -11,7 +11,7 @@
 | 版本 | 2.11.3 |
 | 状态 | ✅ success |
 | 构建系统 | Makefile (非 autotools) |
-| 源码路径 | https://github.com/JuliaStrings/utf8proc/releases/download/v2.11.3/utf8proc-2.11.3.tar.gz |
+| 源码路径 | https://github.com/JuliaStrings/utf8proc/archive/v2.11.3.tar.gz |
 
 ## 二、编译阶段（checkbox 实时更新）
 
