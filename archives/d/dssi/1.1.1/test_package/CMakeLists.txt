@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(dssi_consumer C)
+find_package(dssi CONFIG REQUIRED)
+add_executable(dssi_consumer consumer.c)
+target_link_libraries(dssi_consumer PRIVATE dssi::dssi)
