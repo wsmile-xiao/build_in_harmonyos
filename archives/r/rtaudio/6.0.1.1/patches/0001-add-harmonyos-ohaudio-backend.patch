@@ -1,0 +1,754 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8e021dc..7c8d5bf 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -56,6 +56,12 @@ option(RTAUDIO_API_ALSA "Build ALSA API" ${LINUX})
+ option(RTAUDIO_API_PULSE "Build PulseAudio API" ${pulse_FOUND})
+ option(RTAUDIO_API_JACK "Build JACK audio server API" ${HAVE_JACK})
+ option(RTAUDIO_API_CORE "Build CoreAudio API" ${APPLE})
++if(CMAKE_SYSTEM_NAME MATCHES "^(OHOS|HarmonyOS)$")
++  set(RTAUDIO_OHAUDIO_DEFAULT ON)
++else()
++  set(RTAUDIO_OHAUDIO_DEFAULT OFF)
++endif()
++option(RTAUDIO_API_OHAUDIO "Build HarmonyOS OHAudio API" ${RTAUDIO_OHAUDIO_DEFAULT})
+ 
+ # Check for functions
+ include(CheckFunctionExists)
+@@ -104,6 +110,17 @@ set(LIBS_REQUIRES)
+ set(API_DEFS)
+ set(API_LIST)
+ 
++if(RTAUDIO_API_OHAUDIO)
++  if(NOT CMAKE_SYSTEM_NAME MATCHES "^(OHOS|HarmonyOS)$")
++    message(FATAL_ERROR "RTAUDIO_API_OHAUDIO is only supported on HarmonyOS")
++  endif()
++  set(NEED_PTHREAD ON)
++  list(APPEND rtaudio_SOURCES RtAudioOHOS.cpp RtAudioOHOS.h)
++  list(APPEND LINKLIBS ohaudio)
++  list(APPEND API_DEFS RTAUDIO_OHAUDIO_ENABLED)
++  list(APPEND API_LIST "ohaudio")
++endif()
++
+ # Tweak API-specific configuration.
+ 
+ # Jack
+@@ -276,6 +293,9 @@ target_include_directories(rtaudio
+ # Set compile-time definitions
+ target_compile_definitions(rtaudio PRIVATE ${API_DEFS})
+ target_compile_definitions(rtaudio PRIVATE RTAUDIO_EXPORT)
++if(RTAUDIO_API_OHAUDIO)
++  target_compile_definitions(rtaudio PUBLIC RTAUDIO_OHAUDIO_ENABLED)
++endif()
+ target_link_libraries(rtaudio ${LINKLIBS})
+ 
+ # Subdirs
+diff --git a/RtAudio.cpp b/RtAudio.cpp
+index b13f04e..874e62e 100644
+--- a/RtAudio.cpp
++++ b/RtAudio.cpp
+@@ -42,6 +42,9 @@
+ // RtAudio: Version 6.0.1
+ 
+ #include "RtAudio.h"
++#if defined(RTAUDIO_OHAUDIO_ENABLED)
++#include "RtAudioOHOS.h"
++#endif
+ #include <iostream>
+ #include <cstdlib>
+ #include <cstring>
+@@ -428,6 +431,7 @@ const char* rtaudio_api_names[][2] = {
+   { "wasapi"      , "WASAPI" },
+   { "ds"          , "DirectSound" },
+   { "dummy"       , "Dummy" },
++  { "ohaudio"     , "OHAudio" },
+ };
+ 
+ const unsigned int rtaudio_num_api_names = 
+@@ -462,6 +466,9 @@ extern "C" const RtAudio::Api rtaudio_compiled_apis[] = {
+ #endif
+ #if defined(__RTAUDIO_DUMMY__)
+   RtAudio::RTAUDIO_DUMMY,
++#endif
++#if defined(RTAUDIO_OHAUDIO_ENABLED)
++  RtAudio::OHOS_OHAUDIO,
+ #endif
+   RtAudio::UNSPECIFIED,
+ };
+@@ -558,6 +565,10 @@ void RtAudio :: openRtApi( RtAudio::Api api )
+   if ( api == RTAUDIO_DUMMY )
+     rtapi_ = new RtApiDummy();
+ #endif
++#if defined(RTAUDIO_OHAUDIO_ENABLED)
++  if ( api == OHOS_OHAUDIO )
++    rtapi_ = new RtApiOHOS();
++#endif
+ }
+ 
+ RtAudio :: RtAudio( RtAudio::Api api, RtAudioErrorCallback&& errorCallback )
+diff --git a/RtAudio.h b/RtAudio.h
+index e767ddb..4dedcf2 100644
+--- a/RtAudio.h
++++ b/RtAudio.h
+@@ -280,6 +280,7 @@ class RTAUDIO_DLL_PUBLIC RtAudio
+     WINDOWS_WASAPI, /*!< The Microsoft WASAPI API. */
+     WINDOWS_DS,     /*!< The Microsoft DirectSound API. */
+     RTAUDIO_DUMMY,  /*!< A compilable but non-functional API. */
++    OHOS_OHAUDIO,   /*!< The HarmonyOS OHAudio API. */
+     NUM_APIS        /*!< Number of values in this enum. */
+   };
+ 
+@@ -672,7 +673,7 @@ class RTAUDIO_DLL_PUBLIC RtAudio
+ // Setup for "dummy" behavior if no apis specified.
+ #if !(defined(__WINDOWS_DS__) || defined(__WINDOWS_ASIO__) || defined(__WINDOWS_WASAPI__) \
+       || defined(__LINUX_ALSA__) || defined(__LINUX_PULSE__) || defined(__UNIX_JACK__) \
+-      || defined(__LINUX_OSS__) || defined(__MACOSX_CORE__))
++      || defined(__LINUX_OSS__) || defined(__MACOSX_CORE__) || defined(RTAUDIO_OHAUDIO_ENABLED))
+ 
+   #define __RTAUDIO_DUMMY__
+ 
+diff --git a/rtaudio_c.h b/rtaudio_c.h
+index 2a6c4dc..f1bd3a7 100644
+--- a/rtaudio_c.h
++++ b/rtaudio_c.h
+@@ -149,5 +149,6 @@ enum rtaudio_api {
+   RTAUDIO_API_WINDOWS_WASAPI, /*!< The Microsoft WASAPI API. */
+   RTAUDIO_API_WINDOWS_DS,     /*!< The Microsoft DirectSound API. */
+   RTAUDIO_API_DUMMY,          /*!< A compilable but non-functional API. */
++  RTAUDIO_API_OHAUDIO,        /*!< The HarmonyOS OHAudio API. */
+   RTAUDIO_API_NUM,            /*!< Number of values in this enum. */
+ };
+diff --git a/RtAudioOHOS.cpp b/RtAudioOHOS.cpp
+new file mode 100644
+index 0000000..9055f33
+--- /dev/null
++++ b/RtAudioOHOS.cpp
+@@ -0,0 +1,572 @@
++/*
++  RtAudio OHAudio backend.
++  Copyright (c) 2026 OpenHarmony PC Developer community.
++  Distributed under the same MIT license as RtAudio.
++*/
++
++#include "RtAudioOHOS.h"
++
++#if defined(RTAUDIO_OHAUDIO_ENABLED)
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
++#include <cstdlib>
++#include <cstring>
++#include <map>
++#include <mutex>
++#include <new>
++#include <thread>
++#include <vector>
++
++#include <ohaudio/native_audio_routing_manager.h>
++
++struct RtApiOHOS::OHAudioHandle {
++  OH_AudioStreamBuilder *rendererBuilder;
++  OH_AudioStreamBuilder *capturerBuilder;
++  OH_AudioRenderer *renderer;
++  OH_AudioCapturer *capturer;
++  char *outputBuffer;
++  char *inputBuffer;
++  char *pendingInput;
++  size_t outputBytes;
++  size_t inputBytes;
++  bool rendererStarted;
++  bool capturerStarted;
++  std::atomic<bool> running;
++  bool inputAvailable;
++  bool inputOverflow;
++  std::atomic<bool> stopRequested;
++  std::mutex inputMutex;
++  std::mutex controlMutex;
++  std::mutex stopMutex;
++  std::condition_variable stopCondition;
++  bool shuttingDown;
++  std::thread stopThread;
++
++  OHAudioHandle()
++    : rendererBuilder(0), capturerBuilder(0), renderer(0), capturer(0),
++      outputBuffer(0), inputBuffer(0), pendingInput(0), outputBytes(0),
++      inputBytes(0), rendererStarted(false), capturerStarted(false),
++      running(false), inputAvailable(false), inputOverflow(false), stopRequested(false),
++      shuttingDown(false) {}
++};
++
++namespace {
++
++bool queryPreferredDevice(OH_AudioRoutingManager *manager, bool output,
++                          uint32_t &deviceId)
++{
++  OH_AudioDeviceDescriptorArray *devices = 0;
++  OH_AudioCommon_Result result;
++  if (output) {
++    result = OH_AudioRoutingManager_GetPreferredOutputDevice(
++      manager, AUDIOSTREAM_USAGE_MUSIC, &devices);
++  } else {
++    result = OH_AudioRoutingManager_GetPreferredInputDevice(
++      manager, AUDIOSTREAM_SOURCE_TYPE_MIC, &devices);
++  }
++  if (result != AUDIOCOMMON_RESULT_SUCCESS || !devices || devices->size == 0) {
++    if (devices) OH_AudioRoutingManager_ReleaseDevices(manager, devices);
++    return false;
++  }
++  const bool ok = OH_AudioDeviceDescriptor_GetDeviceId(
++    devices->descriptors[0], &deviceId) == AUDIOCOMMON_RESULT_SUCCESS;
++  OH_AudioRoutingManager_ReleaseDevices(manager, devices);
++  return ok;
++}
++
++unsigned int maximumChannelCount(OH_AudioDeviceDescriptor *descriptor)
++{
++  uint32_t *counts = 0;
++  uint32_t count = 0;
++  unsigned int maximum = 0;
++  if (OH_AudioDeviceDescriptor_GetDeviceChannelCounts(
++        descriptor, &counts, &count) == AUDIOCOMMON_RESULT_SUCCESS) {
++    for (uint32_t i = 0; i < count; ++i)
++      maximum = std::max(maximum, static_cast<unsigned int>(counts[i]));
++  }
++  return maximum;
++}
++
++} // namespace
++
++RtApiOHOS::RtApiOHOS() {}
++
++RtApiOHOS::~RtApiOHOS()
++{
++  closeStream();
++}
++
++void RtApiOHOS::probeDevices()
++{
++  OH_AudioRoutingManager *manager = 0;
++  OH_AudioDeviceDescriptorArray *devices = 0;
++  std::map<uint32_t, size_t> indices;
++  uint32_t preferredOutput = 0;
++  uint32_t preferredInput = 0;
++  bool havePreferredOutput = false;
++  bool havePreferredInput = false;
++
++  deviceList_.clear();
++  if (OH_AudioManager_GetAudioRoutingManager(&manager) != AUDIOCOMMON_RESULT_SUCCESS ||
++      !manager)
++    return;
++  havePreferredOutput = queryPreferredDevice(manager, true, preferredOutput);
++  havePreferredInput = queryPreferredDevice(manager, false, preferredInput);
++  if (OH_AudioRoutingManager_GetDevices(manager, AUDIO_DEVICE_FLAG_ALL,
++                                        &devices) != AUDIOCOMMON_RESULT_SUCCESS ||
++      !devices)
++    return;
++
++  for (uint32_t i = 0; i < devices->size; ++i) {
++    OH_AudioDeviceDescriptor *descriptor = devices->descriptors[i];
++    OH_AudioDevice_Role role;
++    uint32_t id = 0;
++    char *name = 0;
++    if (!descriptor ||
++        OH_AudioDeviceDescriptor_GetDeviceRole(descriptor, &role) != AUDIOCOMMON_RESULT_SUCCESS ||
++        OH_AudioDeviceDescriptor_GetDeviceId(descriptor, &id) != AUDIOCOMMON_RESULT_SUCCESS)
++      continue;
++    OH_AudioDeviceDescriptor_GetDeviceName(descriptor, &name);
++
++    size_t index;
++    std::map<uint32_t, size_t>::iterator found = indices.find(id);
++    if (found == indices.end()) {
++      RtAudio::DeviceInfo info;
++      info.ID = id;
++      info.name = name && name[0] ? name : "HarmonyOS audio device";
++      info.nativeFormats = RTAUDIO_SINT16;
++      info.preferredSampleRate = 48000;
++      info.currentSampleRate = 0;
++      index = deviceList_.size();
++      deviceList_.push_back(info);
++      indices[id] = index;
++    } else {
++      index = found->second;
++    }
++
++    RtAudio::DeviceInfo &info = deviceList_[index];
++    unsigned int channels = maximumChannelCount(descriptor);
++    if (channels == 0) channels = (role == AUDIO_DEVICE_ROLE_OUTPUT) ? 2 : 1;
++    if (role == AUDIO_DEVICE_ROLE_OUTPUT) {
++      info.outputChannels = channels;
++      info.isDefaultOutput = havePreferredOutput ? id == preferredOutput : false;
++    } else if (role == AUDIO_DEVICE_ROLE_INPUT) {
++      info.inputChannels = channels;
++      info.isDefaultInput = havePreferredInput ? id == preferredInput : false;
++    }
++
++    uint32_t *rates = 0;
++    uint32_t rateCount = 0;
++    if (OH_AudioDeviceDescriptor_GetDeviceSampleRates(
++          descriptor, &rates, &rateCount) == AUDIOCOMMON_RESULT_SUCCESS) {
++      for (uint32_t r = 0; r < rateCount; ++r)
++        if (std::find(info.sampleRates.begin(), info.sampleRates.end(), rates[r]) == info.sampleRates.end())
++          info.sampleRates.push_back(rates[r]);
++    }
++  }
++
++  if (devices) OH_AudioRoutingManager_ReleaseDevices(manager, devices);
++  for (size_t i = 0; i < deviceList_.size(); ++i) {
++    RtAudio::DeviceInfo &info = deviceList_[i];
++    if (info.sampleRates.empty()) {
++      info.sampleRates.assign(SAMPLE_RATES, SAMPLE_RATES + MAX_SAMPLE_RATES);
++    }
++    if (!info.sampleRates.empty()) {
++      info.preferredSampleRate = info.sampleRates[0];
++      if (std::find(info.sampleRates.begin(), info.sampleRates.end(), 48000) != info.sampleRates.end())
++        info.preferredSampleRate = 48000;
++    }
++    info.duplexChannels = (info.inputChannels && info.outputChannels)
++      ? std::min(info.inputChannels, info.outputChannels) : 0;
++  }
++
++  if (!havePreferredOutput) {
++    for (size_t i = 0; i < deviceList_.size(); ++i)
++      if (deviceList_[i].outputChannels) { deviceList_[i].isDefaultOutput = true; break; }
++  }
++  if (!havePreferredInput) {
++    for (size_t i = 0; i < deviceList_.size(); ++i)
++      if (deviceList_[i].inputChannels) { deviceList_[i].isDefaultInput = true; break; }
++  }
++}
++
++bool RtApiOHOS::probeDeviceOpen(unsigned int deviceId, StreamMode mode,
++                                unsigned int channels, unsigned int firstChannel,
++                                unsigned int sampleRate, RtAudioFormat format,
++                                unsigned int *bufferSize,
++                                RtAudio::StreamOptions *options)
++{
++  RtAudio::DeviceInfo info = getDeviceInfo(deviceId);
++  const bool output = mode == OUTPUT;
++  if ((output && !info.isDefaultOutput) || (!output && !info.isDefaultInput)) {
++    errorText_ = "RtApiOHOS::probeDeviceOpen: OHAudio uses the system preferred route; the requested device is not preferred.";
++    return FAILURE;
++  }
++  const unsigned int maximum = output ? info.outputChannels : info.inputChannels;
++  if (channels == 0 || firstChannel + channels > maximum) {
++    errorText_ = "RtApiOHOS::probeDeviceOpen: requested channel range is not supported by the preferred device.";
++    return FAILURE;
++  }
++  if (std::find(info.sampleRates.begin(), info.sampleRates.end(), sampleRate) == info.sampleRates.end()) {
++    errorText_ = "RtApiOHOS::probeDeviceOpen: requested sample rate is not reported by the preferred device.";
++    return FAILURE;
++  }
++
++  const bool firstDirection = stream_.mode == UNINITIALIZED;
++  OHAudioHandle *handle = static_cast<OHAudioHandle *>(stream_.apiHandle);
++  if (!handle) {
++    handle = new (std::nothrow) OHAudioHandle();
++    if (!handle) {
++      errorText_ = "RtApiOHOS::probeDeviceOpen: unable to allocate stream state.";
++      return FAILURE;
++    }
++    stream_.apiHandle = handle;
++    try {
++      handle->stopThread = std::thread(&RtApiOHOS::stopRequestLoop, this);
++    } catch (...) {
++      delete handle;
++      stream_.apiHandle = 0;
++      errorText_ = "RtApiOHOS::probeDeviceOpen: unable to start stream control thread.";
++      return FAILURE;
++    }
++    stream_.sampleRate = sampleRate;
++    stream_.bufferSize = bufferSize && *bufferSize ? *bufferSize : 512;
++    if (bufferSize) *bufferSize = stream_.bufferSize;
++    stream_.nBuffers = 2;
++    stream_.userFormat = format;
++    stream_.userInterleaved = !(options && (options->flags & RTAUDIO_NONINTERLEAVED));
++    stream_.state = STREAM_STOPPED;
++  } else if (stream_.sampleRate != sampleRate ||
++             stream_.userFormat != format ||
++             (bufferSize && *bufferSize && stream_.bufferSize != *bufferSize)) {
++    errorText_ = "RtApiOHOS::probeDeviceOpen: input and output stream parameters must use the same sample rate, format, and frame count.";
++    return FAILURE;
++  }
++
++  if (options && options->flags & RTAUDIO_NONINTERLEAVED)
++    stream_.userInterleaved = false;
++
++  stream_.mode = firstDirection ? mode : DUPLEX;
++  stream_.deviceId[mode] = deviceId;
++  stream_.nUserChannels[mode] = channels;
++  stream_.channelOffset[mode] = firstChannel;
++  stream_.nDeviceChannels[mode] = channels + firstChannel;
++  stream_.deviceFormat[mode] = RTAUDIO_SINT16;
++  stream_.deviceInterleaved[mode] = true;
++  stream_.doConvertBuffer[mode] = true;
++  OH_AudioStreamBuilder **builder = output ? &handle->rendererBuilder : &handle->capturerBuilder;
++  if (*builder) {
++    errorText_ = "RtApiOHOS::probeDeviceOpen: duplicate OHAudio direction requested.";
++    closeStream();
++    return FAILURE;
++  }
++  OH_AudioStream_Result result = OH_AudioStreamBuilder_Create(
++    builder, output ? AUDIOSTREAM_TYPE_RENDERER : AUDIOSTREAM_TYPE_CAPTURER);
++  if (result != AUDIOSTREAM_SUCCESS) {
++    errorStream_ << "RtApiOHOS::probeDeviceOpen: OHAudio builder creation failed (" << result << ").";
++    errorText_ = errorStream_.str(); errorStream_.str(""); errorStream_.clear();
++    closeStream();
++    return FAILURE;
++  }
++
++  result = OH_AudioStreamBuilder_SetSamplingRate(*builder, static_cast<int32_t>(sampleRate));
++  if (result == AUDIOSTREAM_SUCCESS)
++    result = OH_AudioStreamBuilder_SetChannelCount(*builder, static_cast<int32_t>(channels + firstChannel));
++  if (result == AUDIOSTREAM_SUCCESS)
++    result = OH_AudioStreamBuilder_SetSampleFormat(*builder, AUDIOSTREAM_SAMPLE_S16LE);
++  if (result == AUDIOSTREAM_SUCCESS)
++    result = OH_AudioStreamBuilder_SetEncodingType(*builder, AUDIOSTREAM_ENCODING_TYPE_RAW);
++  if (result == AUDIOSTREAM_SUCCESS)
++    result = OH_AudioStreamBuilder_SetFrameSizeInCallback(*builder, static_cast<int32_t>(stream_.bufferSize));
++  if (result == AUDIOSTREAM_SUCCESS) {
++    result = output
++      ? OH_AudioStreamBuilder_SetRendererInfo(*builder, AUDIOSTREAM_USAGE_MUSIC)
++      : OH_AudioStreamBuilder_SetCapturerInfo(*builder, AUDIOSTREAM_SOURCE_TYPE_MIC);
++  }
++  if (result == AUDIOSTREAM_SUCCESS) {
++    result = output
++      ? OH_AudioStreamBuilder_SetRendererWriteDataCallback(*builder, rendererWrite, this)
++      : OH_AudioStreamBuilder_SetCapturerReadDataCallback(*builder, capturerRead, this);
++  }
++  if (result != AUDIOSTREAM_SUCCESS) {
++    errorStream_ << "RtApiOHOS::probeDeviceOpen: OHAudio stream configuration failed (" << result << ").";
++    errorText_ = errorStream_.str(); errorStream_.str(""); errorStream_.clear();
++    closeStream();
++    return FAILURE;
++  }
++
++  int32_t callbackFrames = 0;
++  if (output) {
++    result = OH_AudioStreamBuilder_GenerateRenderer(*builder, &handle->renderer);
++    if (result == AUDIOSTREAM_SUCCESS)
++      result = OH_AudioRenderer_GetFrameSizeInCallback(handle->renderer, &callbackFrames);
++  } else {
++    result = OH_AudioStreamBuilder_GenerateCapturer(*builder, &handle->capturer);
++    if (result == AUDIOSTREAM_SUCCESS)
++      result = OH_AudioCapturer_GetFrameSizeInCallback(handle->capturer, &callbackFrames);
++  }
++  if (result != AUDIOSTREAM_SUCCESS || callbackFrames <= 0) {
++    errorStream_ << "RtApiOHOS::probeDeviceOpen: OHAudio stream creation or callback frame-size query failed ("
++                 << result << ", " << callbackFrames << ").";
++    errorText_ = errorStream_.str(); errorStream_.str(""); errorStream_.clear();
++    closeStream();
++    return FAILURE;
++  }
++  if (firstDirection) {
++    stream_.bufferSize = static_cast<unsigned int>(callbackFrames);
++  } else if (stream_.bufferSize != static_cast<unsigned int>(callbackFrames)) {
++    errorText_ = "RtApiOHOS::probeDeviceOpen: input and output OHAudio callback frame sizes do not match.";
++    closeStream();
++    return FAILURE;
++  }
++  if (bufferSize) *bufferSize = stream_.bufferSize;
++
++  setConvertInfo(mode, firstChannel);
++  const size_t userBytes = static_cast<size_t>(stream_.bufferSize) * channels * formatBytes(format);
++  char **userBuffer = &stream_.userBuffer[mode];
++  if (!*userBuffer) {
++    *userBuffer = static_cast<char *>(calloc(userBytes, 1));
++    if (!*userBuffer) {
++      errorText_ = "RtApiOHOS::probeDeviceOpen: unable to allocate the RtAudio user buffer.";
++      closeStream();
++      return FAILURE;
++    }
++  }
++
++  if (output) {
++    handle->outputBytes = static_cast<size_t>(stream_.bufferSize) *
++      stream_.nDeviceChannels[OUTPUT] * formatBytes(stream_.deviceFormat[OUTPUT]);
++    handle->outputBuffer = static_cast<char *>(calloc(handle->outputBytes, 1));
++    if (!handle->outputBuffer) {
++      errorText_ = "RtApiOHOS::probeDeviceOpen: unable to allocate the renderer buffer.";
++      closeStream();
++      return FAILURE;
++    }
++  } else {
++    handle->inputBytes = static_cast<size_t>(stream_.bufferSize) *
++      stream_.nDeviceChannels[INPUT] * formatBytes(stream_.deviceFormat[INPUT]);
++    handle->inputBuffer = static_cast<char *>(calloc(handle->inputBytes, 1));
++    if (stream_.mode == DUPLEX)
++      handle->pendingInput = static_cast<char *>(calloc(handle->inputBytes, 1));
++    if (!handle->inputBuffer || (stream_.mode == DUPLEX && !handle->pendingInput)) {
++      errorText_ = "RtApiOHOS::probeDeviceOpen: unable to allocate the capturer buffer.";
++      closeStream();
++      return FAILURE;
++    }
++  }
++
++  return SUCCESS;
++}
++
++OH_AudioData_Callback_Result RtApiOHOS::rendererWrite(OH_AudioRenderer *,
++                                                       void *userData,
++                                                       void *audioData,
++                                                       int32_t audioDataSize)
++{
++  RtApiOHOS *api = static_cast<RtApiOHOS *>(userData);
++  OHAudioHandle *handle = static_cast<OHAudioHandle *>(api->stream_.apiHandle);
++  if (!handle || !audioData || audioDataSize <= 0)
++    return AUDIO_DATA_CALLBACK_RESULT_INVALID;
++  const size_t expected = handle->outputBytes;
++  if (static_cast<size_t>(audioDataSize) != expected) {
++    memset(audioData, 0, static_cast<size_t>(audioDataSize));
++    api->errorText_ = "RtApiOHOS::rendererWrite: OHAudio callback frame size changed unexpectedly.";
++    return AUDIO_DATA_CALLBACK_RESULT_VALID;
++  }
++
++  if (!handle->running.load()) {
++    memset(audioData, 0, expected);
++    return AUDIO_DATA_CALLBACK_RESULT_VALID;
++  }
++
++  RtAudioStreamStatus status = 0;
++  if (api->stream_.mode == DUPLEX) {
++    std::lock_guard<std::mutex> lock(handle->inputMutex);
++    if (handle->inputAvailable) {
++      memcpy(handle->inputBuffer, handle->pendingInput, handle->inputBytes);
++      handle->inputAvailable = false;
++    } else {
++      memset(handle->inputBuffer, 0, handle->inputBytes);
++      status |= RTAUDIO_INPUT_OVERFLOW;
++    }
++    if (handle->inputOverflow) {
++      status |= RTAUDIO_INPUT_OVERFLOW;
++      handle->inputOverflow = false;
++    }
++    api->convertBuffer(api->stream_.userBuffer[INPUT], handle->inputBuffer,
++                       api->stream_.convertInfo[INPUT]);
++  }
++
++  RtAudioCallback callback = reinterpret_cast<RtAudioCallback>(api->stream_.callbackInfo.callback);
++  int callbackResult = 0;
++  if (callback && handle->running.load()) {
++    callbackResult = callback(api->stream_.userBuffer[OUTPUT],
++      api->stream_.mode == DUPLEX ? api->stream_.userBuffer[INPUT] : 0,
++      api->stream_.bufferSize, api->getStreamTime(), status,
++      api->stream_.callbackInfo.userData);
++    api->tickStreamTime();
++  }
++  if (callbackResult == 1 || callbackResult == 2)
++    api->requestStop();
++
++  memset(handle->outputBuffer, 0, expected);
++  api->convertBuffer(handle->outputBuffer, api->stream_.userBuffer[OUTPUT],
++                     api->stream_.convertInfo[OUTPUT]);
++  memcpy(audioData, handle->outputBuffer, expected);
++  return AUDIO_DATA_CALLBACK_RESULT_VALID;
++}
++
++void RtApiOHOS::capturerRead(OH_AudioCapturer *, void *userData,
++                             void *audioData, int32_t audioDataSize)
++{
++  RtApiOHOS *api = static_cast<RtApiOHOS *>(userData);
++  OHAudioHandle *handle = static_cast<OHAudioHandle *>(api->stream_.apiHandle);
++  if (!handle || !audioData || audioDataSize <= 0) return;
++  const size_t bytes = std::min(static_cast<size_t>(audioDataSize), handle->inputBytes);
++  if (api->stream_.mode == DUPLEX) {
++    std::lock_guard<std::mutex> lock(handle->inputMutex);
++    if (handle->inputAvailable) handle->inputOverflow = true;
++    memset(handle->pendingInput, 0, handle->inputBytes);
++    memcpy(handle->pendingInput, audioData, bytes);
++    handle->inputAvailable = true;
++    return;
++  }
++  if (!handle->running.load()) return;
++  memset(handle->inputBuffer, 0, handle->inputBytes);
++  memcpy(handle->inputBuffer, audioData, bytes);
++  api->convertBuffer(api->stream_.userBuffer[INPUT], handle->inputBuffer,
++                     api->stream_.convertInfo[INPUT]);
++  RtAudioCallback callback = reinterpret_cast<RtAudioCallback>(api->stream_.callbackInfo.callback);
++  if (callback) {
++    int result = callback(0, api->stream_.userBuffer[INPUT], api->stream_.bufferSize,
++                          api->getStreamTime(), 0, api->stream_.callbackInfo.userData);
++    api->tickStreamTime();
++    if (result == 1 || result == 2) api->requestStop();
++  }
++}
++
++void RtApiOHOS::requestStop()
++{
++  OHAudioHandle *handle = static_cast<OHAudioHandle *>(stream_.apiHandle);
++  if (!handle) return;
++  handle->stopRequested.store(true);
++  handle->stopCondition.notify_one();
++}
++
++void RtApiOHOS::stopRequestLoop(RtApiOHOS *api)
++{
++  OHAudioHandle *handle = static_cast<OHAudioHandle *>(api->stream_.apiHandle);
++  std::unique_lock<std::mutex> lock(handle->stopMutex);
++  while (!handle->shuttingDown) {
++    handle->stopCondition.wait(lock, [handle]() {
++      return handle->shuttingDown || handle->stopRequested.load();
++    });
++    if (handle->shuttingDown) break;
++    handle->stopRequested.store(false);
++    lock.unlock();
++    {
++      std::lock_guard<std::mutex> control(handle->controlMutex);
++      api->stopHardware(handle);
++    }
++    lock.lock();
++  }
++}
++
++void RtApiOHOS::stopHardware(OHAudioHandle *handle)
++{
++  handle->running.store(false);
++  if (handle->rendererStarted) {
++    OH_AudioRenderer_Stop(handle->renderer);
++    handle->rendererStarted = false;
++  }
++  if (handle->capturerStarted) {
++    OH_AudioCapturer_Stop(handle->capturer);
++    handle->capturerStarted = false;
++  }
++  stream_.state = STREAM_STOPPED;
++  stream_.callbackInfo.isRunning = false;
++}
++
++RtAudioErrorType RtApiOHOS::startStream()
++{
++  OHAudioHandle *handle = static_cast<OHAudioHandle *>(stream_.apiHandle);
++  if (!handle || stream_.state == STREAM_CLOSED) {
++    errorText_ = "RtApiOHOS::startStream: no open stream.";
++    return error(RTAUDIO_WARNING);
++  }
++  std::lock_guard<std::mutex> control(handle->controlMutex);
++  if (stream_.state == STREAM_RUNNING) {
++    errorText_ = "RtApiOHOS::startStream: stream is already running.";
++    return error(RTAUDIO_WARNING);
++  }
++  stream_.state = STREAM_RUNNING;
++  stream_.callbackInfo.isRunning = true;
++  handle->running.store(true);
++  OH_AudioStream_Result result = AUDIOSTREAM_SUCCESS;
++  if (handle->capturer) {
++    result = OH_AudioCapturer_Start(handle->capturer);
++    handle->capturerStarted = result == AUDIOSTREAM_SUCCESS;
++  }
++  if (result == AUDIOSTREAM_SUCCESS && handle->renderer) {
++    result = OH_AudioRenderer_Start(handle->renderer);
++    handle->rendererStarted = result == AUDIOSTREAM_SUCCESS;
++  }
++  if (result != AUDIOSTREAM_SUCCESS) {
++    stopHardware(handle);
++    errorStream_ << "RtApiOHOS::startStream: OHAudio stream start failed (" << result << ").";
++    errorText_ = errorStream_.str(); errorStream_.str(""); errorStream_.clear();
++    return error(RTAUDIO_SYSTEM_ERROR);
++  }
++  return RTAUDIO_NO_ERROR;
++}
++
++RtAudioErrorType RtApiOHOS::stopStream()
++{
++  OHAudioHandle *handle = static_cast<OHAudioHandle *>(stream_.apiHandle);
++  if (!handle || stream_.state == STREAM_CLOSED) {
++    errorText_ = "RtApiOHOS::stopStream: no open stream.";
++    return error(RTAUDIO_WARNING);
++  }
++  std::lock_guard<std::mutex> control(handle->controlMutex);
++  if (stream_.state != STREAM_RUNNING) {
++    errorText_ = "RtApiOHOS::stopStream: stream is already stopped.";
++    return error(RTAUDIO_WARNING);
++  }
++  stopHardware(handle);
++  return RTAUDIO_NO_ERROR;
++}
++
++RtAudioErrorType RtApiOHOS::abortStream()
++{
++  return stopStream();
++}
++
++void RtApiOHOS::closeStream()
++{
++  OHAudioHandle *handle = static_cast<OHAudioHandle *>(stream_.apiHandle);
++  if (handle) {
++    if (stream_.state == STREAM_RUNNING) stopStream();
++    {
++      std::lock_guard<std::mutex> lock(handle->stopMutex);
++      handle->shuttingDown = true;
++    }
++    handle->stopCondition.notify_one();
++    if (handle->stopThread.joinable()) handle->stopThread.join();
++    if (handle->renderer) OH_AudioRenderer_Release(handle->renderer);
++    if (handle->capturer) OH_AudioCapturer_Release(handle->capturer);
++    if (handle->rendererBuilder) OH_AudioStreamBuilder_Destroy(handle->rendererBuilder);
++    if (handle->capturerBuilder) OH_AudioStreamBuilder_Destroy(handle->capturerBuilder);
++    free(handle->outputBuffer);
++    free(handle->inputBuffer);
++    free(handle->pendingInput);
++    delete handle;
++  }
++  free(stream_.userBuffer[OUTPUT]);
++  free(stream_.userBuffer[INPUT]);
++  clearStreamInfo();
++}
++
++#endif
+diff --git a/RtAudioOHOS.h b/RtAudioOHOS.h
+new file mode 100644
+index 0000000..baef2d6
+--- /dev/null
++++ b/RtAudioOHOS.h
+@@ -0,0 +1,50 @@
++/*
++  RtAudio OHAudio backend.
++
++  This backend uses HarmonyOS' routed OHAudio renderer and capturer. OHAudio
++  chooses devices through system routing, so RtAudio exposes the currently
++  preferred route and rejects attempts to open a different device ID.
++*/
++
++#ifndef RTAUDIO_OHAUDIO_H
++#define RTAUDIO_OHAUDIO_H
++
++#if defined(RTAUDIO_OHAUDIO_ENABLED)
++
++#include "RtAudio.h"
++#include <ohaudio/native_audiocapturer.h>
++#include <ohaudio/native_audiorenderer.h>
++#include <ohaudio/native_audiostreambuilder.h>
++
++class RtApiOHOS : public RtApi
++{
++public:
++  RtApiOHOS();
++  ~RtApiOHOS() override;
++  RtAudio::Api getCurrentApi() override { return RtAudio::OHOS_OHAUDIO; }
++  void closeStream() override;
++  RtAudioErrorType startStream() override;
++  RtAudioErrorType stopStream() override;
++  RtAudioErrorType abortStream() override;
++
++private:
++  struct OHAudioHandle;
++
++  void probeDevices() override;
++  bool probeDeviceOpen(unsigned int deviceId, StreamMode mode, unsigned int channels,
++                       unsigned int firstChannel, unsigned int sampleRate,
++                       RtAudioFormat format, unsigned int *bufferSize,
++                       RtAudio::StreamOptions *options) override;
++  static OH_AudioData_Callback_Result rendererWrite(OH_AudioRenderer *renderer,
++                                                     void *userData,
++                                                     void *audioData,
++                                                     int32_t audioDataSize);
++  static void capturerRead(OH_AudioCapturer *capturer, void *userData,
++                           void *audioData, int32_t audioDataSize);
++  static void stopRequestLoop(RtApiOHOS *api);
++  void requestStop();
++  void stopHardware(OHAudioHandle *handle);
++};
++
++#endif
++#endif
