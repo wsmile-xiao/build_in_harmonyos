@@ -1,0 +1,64 @@
+#====================================================================
+# DRAFT-viewnior-1.8-glib-force-shared-mime-info-binary-missing — force 提升 glib 使 ohpcd 已发布 shared-mime-info 二进制 package_id 失效 → 依赖包源码构建撞 tree-magic 链接缺陷
+#====================================================================
+
+id:                     DRAFT-viewnior-1.8-glib-force-shared-mime-info-binary-missing
+trigger_tool:           conan|conan create|build_and_test.sh|meson|ninja|ld.lld
+phase:                  dependency-resolve|build|linking
+error_signature:        No compatible configuration found|Main binary package .* missing|undefined symbol: g_file_|undefined symbol: g_object_ref|Error in build\(\) method.*ninja -C|Linking target tree-magic|ld\.lld: error: undefined symbol
+
+severity:               2
+category:               ohos|conan|dependency-graph|package-id|force|glib|shared-mime-info|meson-test-link|gtk2
+match_keywords:         force=True, glib/2.84.0.1, glib/2.84.0, shared-mime-info, package_id, No compatible configuration found, source build, tree-magic, g_file_, g_object_ref, gio-2.0, gobject-2.0, PkgConfigDeps, synthesised .pc, viewnior, gtk2 消费者, 依赖包源码构建, 版本收敛
+
+title:                  viewnior 1.8 以 force=True 收敛 glib 到 2.84.0.1，使 ohpcd 已发布的 shared-mime-info/2.5.1 二进制（基于 glib/2.84.0 构建）package_id 失效 → 被迫源码构建 → 撞 shared-mime-info 配方注入的 tree-magic 测试目标链接缺陷（只链 glib-2.0 却引用 GIO/GObject 符号）
+
+root_cause:             viewnior 依赖图同时含 gtk2 链（pin glib/2.84.0.1）与 shared-mime-info/2.5.1（pin glib/2.84.0），配方用 self.requires("glib/2.84.0.1", force=True) 收敛。conan 的 package_id 含直接依赖版本，shared-mime-info 的 glib 依赖被 force 到 2.84.0.1 后 package_id 从 ohpcd 已发布的 2b6465ed（requires glib/2.84.0#f67d9941…）变为 0079104f，CI 查 `No compatible configuration found` → 被迫源码构建。而 ohpcd 官方 shared-mime-info 配方（build-tests=true）在 build() 中往根 meson.build 注入 `test_tree_magic = executable('tree-magic', 'src/test-tree-magic.c', dependencies: [dependency('glib-2.0')], install: false)`，test-tree-magic.c 实际使用 GIO（g_file_*）与 GObject（g_object_ref）符号，链接命令只带 -lglib-2.0 缺 gio-2.0/gobject-2.0 → ld.lld undefined symbol → ninja 失败 → conan create 失败。本地通过是假象：本地 conan 缓存 e73f7b6a 配方为 LOCAL ONLY 修改版（glib/2.84.0.1 + build-tests=false + 跳过 tree-magic 注入），本地 viewnior 构建复用其产物，CI 用 ohpcd 官方配方必然失败。
+
+affected_scope:         OHOS aarch64 下消费 gtk2 链 + shared-mime-info 的 application；凡 force 提升共享依赖（glib 等）版本使已发布下游二进制 package_id 失效者；凡 application 对某包仅需 pkg-config 版本探测（meson dependency('xxx', version)）而无链接需求者。
+
+verification_cmd:       conan list 'shared-mime-info/2.5.1:*' -r ohpcd 查已发布二进制的 requires glib 版本；对比 viewnior force 后依赖图计算出的 package_id（0079104f）与 ohpcd 已发布（2b6465ed）；源码构建段看 tree-magic 链接命令行缺 -lgio-2.0/-lgobject-2.0
+
+rec_priority:           1
+rec_approach:           drop-pkgconfig-probe-only-requires
+rec_description:        application 若对某依赖仅需 meson 版本探测且 generate() 已合成 .pc（version only, nothing linked），则从 requirements() 移除该 requires：合成 .pc 已满足 `dependency('xxx', version: '>= X.Y')`，依赖图不再包含该包 → 不触发其二进制解析/源码构建。viewnior 对 shared-mime-info 正是此情形（_synthesize_shared_mime_info_pc 合成 Version 2.5.1 的 .pc），GTK+2 消费者先例（xsane/ant-phone）均不 requires shared-mime-info。
+rec_command:            在 viewnior conanfile.py requirements() 删除 self.requires("shared-mime-info/2.5.1") 一行；保留 generate() 中 _synthesize_shared_mime_info_pc；本地用 CI 同款 profile（ci/conan/profiles/ohos-aarch64）跑 conan create 验证
+rec_auto_fix:           true
+rec_impl:               conan-recipe-requires
+
+fallback_priority:      2
+fallback_approach:      wait-published-binary-compat
+fallback_description:   若 application 运行时确需该包（非仅探测），则不能删 requires；需等待 ohpcd 发布基于 force 后版本（glib/2.84.0.1）的下游二进制，或在依赖包 PR 中将其 glib pin 与主导链对齐并重新发布（E538 同族思路：published-binary-wait）。
+fallback_command:       conan create archives/v/viewnior/1.8 --profile:host=ohos-aarch64 --profile:build=ohos-aarch64 --build=missing
+fallback_auto_fix:      false
+fallback_impl:          published-binary-wait
+
+forbid_1_pattern:       修改 shared-mime-info 配方让 tree-magic 依赖 gio-2.0
+forbid_1_reason:        依赖包 tree-magic 注入缺陷不在本 PR 范围（CI 提示"请先提交依赖包的 PR"），且 shared-mime-info 已发布二进制的 recipe revision 已固定；改它需单独 PR 重新发布。
+forbid_1_consequence:   越权改依赖包违反 PR 单软件原子性（JC6），且旧二进制不可复用。
+forbid_2_pattern:       本地用 LOCAL ONLY 修改版配方（build-tests=false）验证通过即推送
+forbid_2_reason:        本地缓存 e73f7b6a 是本地临时修改（glib/2.84.0.1 + 关测试），与 ohpcd 官方配方（glib/2.84.0 + build-tests=true）不一致，导致"本地过、CI 挂"的假象。
+forbid_2_consequence:   重复 #85597 类失败，浪费 CI 轮次。
+
+principles:             W2,W3
+causes:                 []
+caused_by:              []
+similar_to:             [E538, DRAFT-conandata-single-url-ci-mirror-fallback, DRAFT-apt-pkg-2.7.14-conandata-single-element-list-ci-mirror-skip]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-viewnior-1.8-glib-force-shared-mime-info-binary-missing.md
+last_updated:           2026-10-13
+source_event:           viewnior 1.8 PR #15134:构建 #85597 conan-build-test 失败——shared-mime-info/2.5.1 源码构建 tree-magic 链接 undefined symbol g_file_*/g_object_ref（viewnior force glib/2.84.0.1 致 ohpcd 二进制不可复用）。
+
+authors:                AtomCode
+source_pr:              15134
+source_commit:          3d30f21e
+
+metrics_success_count:  0
+metrics_fail_count:     1
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 856F
