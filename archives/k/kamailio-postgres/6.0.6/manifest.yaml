@@ -1,0 +1,87 @@
+# 版本级 manifest — kamailio-postgres 6.0.6
+# 遵循 ARCHIVE-SPEC v2.0
+
+version: "6.0.6"
+software: "kamailio-postgres"
+status: built
+build_date: "2026-10-10"
+build_system: makefile                # kamailio 经典 Makefile 体系（非 autotools/cmake）
+conan_ref: "kamailio-postgres/6.0.6@ohpcd/stable"
+
+# ============================================================
+# 源码信息
+# ============================================================
+
+source:
+  # kamailio.org 官方发布端点（源码包含 db_postgres 模块与本包 R51 上游测试入口）
+  url: "https://www.kamailio.org/pub/kamailio/6.0.6/src/kamailio-6.0.6_src.tar.gz"
+  sha256: "32e4290c6813c9d0289abe9ec2de9138e12e0381179218a7fed374ad813ecc48"
+  tar_format: tar.gz
+
+# ============================================================
+# 构建配置
+# ============================================================
+
+build:
+  system: makefile
+  scope: "仅 db_postgres 模块（Alpine kamailio-postgres 子包口径：_mod_list_postgres=\"db_postgres\"），不编译 kamailio 主程序"
+  configure_options:
+    - "make cfg include_modules=db_postgres LOCALBASE=<libpq package_folder> LIBPQ_BUILDER= PGCFG=（生成 src/config.mak）"
+    - "make modules modules=modules/db_postgres -j1 LOCALBASE=<libpq package_folder> LIBPQ_BUILDER= PGCFG="
+  platform_vars: "CC=<clang> CPATH=<libpq>/include LIBRARY_PATH=<libpq>/lib；LIBPQ_BUILDER=/PGCFG= 为空以钉死 LOCALBASE 回退分支（防止宿主 pkg-config libpq / pg_config 被自动探测命中）"
+  parallel_jobs: 1
+  parallel_jobs_reason: "E525/E074：OHOS SELinux 禁止用户进程创建 FIFO，GNU make jobserver 靠 FIFO 传递令牌 → -j>1 有挂起/报错风险；与同族 kamailio-* 配方一致固定 -j1"
+  modules:
+    - db_postgres
+  dependencies:
+    - libpq/18.6.1
+  cc: clang
+  cxx: clang++
+
+# ============================================================
+# 上游测试（R51 三步法台账，完整清单见 notes.md 第四节）
+# ============================================================
+# 清点面 = 官方源码包内 test/、tests/ 目录文件数（4 个目录 / 17 个文件）
+# 实测 = 其中唯一自包含、无需运行中 kamailio 实例的上游 unittest（3 个用例）已真实执行
+upstream_tests:
+  command: "python3 dbtextdb_test.py -v"
+  source_path: "kamailio-6.0.6/utils/kamctl/dbtextdb/dbtextdb_test.py"
+  test_count: 17
+  executed_count: 3
+  passed: 3
+  failed: 0
+  notes: "17 = 源码包内 test/tests 目录文件数（10 个 dbtextdb 用例数据 + janssonrpcc 3 + rtpproxy 3 + tm 1）。仅 dbtextdb_test.py 可自执行（3 个 unittest 用例，仅依赖 Python 标准库），已在 conanfile.py build() 末尾真实执行并 3/3 通过；其余 14 项逐项技术原因见 test_package/MANIFEST.yml 的 upstream_tests[].not_executed_reason。"
+
+# ============================================================
+# 补丁信息
+# ============================================================
+
+# 上游 6.0.6 源码包原生识别 aarch64-unknown-linux-ohos，未应用任何补丁
+patches_applied: []
+patch_generation:
+  method: none
+  patches_count: 0
+  note: "探索阶段未改动任何源文件，0 候选；conandata.yml 为 patches: {}"
+
+# ============================================================
+# 验证记录
+# ============================================================
+
+verification:
+  conan_create: "本机 conan create 全绿（构建 0 error；上游 unittest 3/3；打包 + test_package 全过）"
+  full_package_reference: "kamailio-postgres/6.0.6@ohpcd/stable#befb446f539c3c6077f1ff8ed4bd2553:76fd2f7f67dece130c9907f35828a3845ee631d4#4547001d864b9ab84b4f93bb2884c4cc"
+  log: "reports/conan-create.log"
+  test_package:
+    structure_checker: "check_db_postgres.py — 12/12 PASS（含 DF_1_NOW、NEEDED 纯文件名、无 RPATH/RUNPATH）"
+    e2e: "test_db_postgres_e2e — 15 项断言全 PASS + 1 项 SKIP（init 联库段需 PostgreSQL 服务端）"
+
+# ============================================================
+# 知识沉淀
+# ============================================================
+
+knowledge_gained:
+  - "kamailio 模块构建必须先 `make cfg`，否则报 No rule to make target 'cfg-defs'"
+  - "db_postgres 模块 Makefile 的 libpq 探测有三级：pkg-config libpq → `which pg_config` → LOCALBASE/SYSBASE 回退。构建机若存在系统 libpq 的 pkg-config 或 pg_config，会注入宿主路径 → 必须显式传 LIBPQ_BUILDER= 与 PGCFG=（make 命令行变量优先级高于 Makefile 内部赋值）钉死回退分支，并以 LOCALBASE 指向 conan 的 libpq 包目录"
+  - "libpq/18.6.1 包同时提供 include/libpq-fe.h、lib/libpq.so.5.x 与 lib/pkgconfig/libpq.pc，`-lpq` 默认取动态库；db_postgres.so 的 NEEDED 即 libpq.so.5 + libc.so"
+  - "OHOS/musl 加载器不做惰性绑定，且 kamailio 模块产物带 FLAGS_1=DF_1_NOW：独立 dlopen 该模块时，consumer 进程必须导出模块引用的全部 core 符号（db_use_table/db_do_init/db_do_init2/db_pool_*/_pkg_root/db_fld 等），否则报 Error relocating … symbol not found —— 这使 test_package 的 e2e 用例成为真正的平台加载契约验证"
+  - "kamailio 源码包内自包含可跑的上游测试只有 utils/kamctl/dbtextdb/dbtextdb_test.py（3 个 unittest 用例）；其余 test/tests 内容都需要运行中的 kamailio 主程序"
