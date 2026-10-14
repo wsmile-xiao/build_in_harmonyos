@@ -1,0 +1,105 @@
+Subject: [PATCH] Allow building with fuse3
+
+Upstream PR: https://github.com/abique/tmfs/pull/35
+Debian: tmfs 7-1, debian/patches/fuse3-#35 (author nabijaczleweli)
+
+The 7 release predates libfuse 3: it hard-codes `pkg_check_modules(FUSE REQUIRED
+fuse)`, `#define FUSE_USE_VERSION 26` and the fuse2-only `fuse_operations`
+signatures (getattr/readdir without the fuse3 arguments, fuse_fill_dir_t
+without the flags argument).  Debian builds the package against libfuse3-dev,
+so the package could not be built without this patch.
+
+With it, the single source tree supports both fuse2 and fuse3, selected by the
+`FUSE` macro derived from the pkg-config module name.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -5,9 +5,13 @@
+ set(CMAKE_CXX_STANDARD 17)
+ 
+ find_package(PkgConfig)
+-pkg_check_modules(FUSE REQUIRED fuse)
++pkg_check_modules(FUSE fuse3)
++if(NOT FUSE_FOUND)
++  pkg_check_modules(FUSE REQUIRED fuse)
++endif()
++string(REGEX REPLACE "\\..*" "" FUSE_VERSION ${FUSE_VERSION})
+ 
+-add_definitions(${FUSE_CFLAGS} -Wall)
++add_definitions(${FUSE_CFLAGS} -DFUSE=${FUSE_VERSION} -Wall)
+ include_directories(${Boost_INCLUDE_DIRS})
+ 
+ add_executable(tmfs
+--- a/src/getattr.cc
++++ b/src/getattr.cc
+@@ -1,6 +1,6 @@
+ #include "tmfs.hh"
+ 
+-int tmfs_getattr(const char *path, struct stat *stbuf)
++int tmfs_getattr(const char *path, struct stat *stbuf FUSE3_ONLY(, struct fuse_file_info *))
+ {
+   // get the real path
+   std::string real_path = get_real_path(path);
+--- a/src/readdir.cc
++++ b/src/readdir.cc
+@@ -1,7 +1,7 @@
+ #include "tmfs.hh"
+ 
+ int tmfs_readdir(const char * path, void * buf, fuse_fill_dir_t filler_cb, off_t offset,
+-                 struct fuse_file_info * fi)
++                 struct fuse_file_info * fi FUSE3_ONLY(, enum fuse_readdir_flags))
+ {
+   // get the real path
+   std::string real_path = get_real_path(path);
+@@ -15,8 +15,8 @@
+   // report ./ and ../
+   stbuf.st_mode = __S_IFDIR | 0755;
+   stbuf.st_nlink = 2;
+-  filler_cb(buf, ".", &stbuf, 0);
+-  filler_cb(buf, "..", &stbuf, 0);
++  filler_cb(buf, ".", &stbuf, 0 FUSE3_ONLY(, FUSE_FILL_DIR_PLUS));
++  filler_cb(buf, "..", &stbuf, 0 FUSE3_ONLY(, FUSE_FILL_DIR_PLUS));
+ 
+   // now iterate over the real directory
+   DIR * dir = opendir(real_path.c_str());
+@@ -28,11 +28,11 @@
+   {
+     // stat the file pointed by entry
+     auto file_path = fs::path(path) / entry->d_name;
+-    if (tmfs_getattr(file_path.string().c_str(), &stbuf))
++    if (tmfs_getattr(file_path.string().c_str(), &stbuf FUSE3_ONLY(, nullptr)))
+       continue;
+     stbuf.st_mode |= 0755;
+     // report the entry
+-    filler_cb(buf, entry->d_name, &stbuf, 0);
++    filler_cb(buf, entry->d_name, &stbuf, 0 FUSE3_ONLY(, FUSE_FILL_DIR_PLUS));
+   }
+   closedir(dir);
+ 
+--- a/src/tmfs.hh
++++ b/src/tmfs.hh
+@@ -1,6 +1,12 @@
+ #pragma once
+ 
++#if FUSE == 2
+ #define FUSE_USE_VERSION 26
++#define FUSE3_ONLY(...)
++#else
++#define FUSE_USE_VERSION FUSE_MAKE_VERSION(3, 14)
++#define FUSE3_ONLY(...) __VA_ARGS__
++#endif
+ 
+ #include <sys/time.h>
+ #include <sys/types.h>
+@@ -38,9 +44,9 @@
+ 
+ /** fuse functions
+  * @{ */
+-int tmfs_getattr(const char * path, struct stat *stbuf);
++int tmfs_getattr(const char * path, struct stat *stbuf FUSE3_ONLY(, struct fuse_file_info *));
+ int tmfs_readdir(const char * path, void * buf, fuse_fill_dir_t filler_callback,
+-                 off_t offset, struct fuse_file_info * fi);
++                 off_t offset, struct fuse_file_info * fi FUSE3_ONLY(, enum fuse_readdir_flags));
+ int tmfs_read(const char * path, char * buf, size_t nbytes, off_t offset,
+               struct fuse_file_info * fi);
+ int tmfs_readlink(const char * path, char * buf, size_t size);
