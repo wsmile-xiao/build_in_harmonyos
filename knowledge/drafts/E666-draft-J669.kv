@@ -1,0 +1,85 @@
+draft: E666-draft-J669
+status: pending-editor-review
+title: "Qt5 线二进制 ABI 互斥的供给线选择与 QSQLITE 插件配方内自编（HMDFS 挂载路径消费者视角注入配套）"
+category: conan, qt, linking, platform, build-system
+match_keywords: >
+  qt_version_tag, Cannot mix incompatible Qt library, qt5-qtsql, qt-unixodbc,
+  QSQLITE, sqldrivers, libqsqlite, libQt5Sql, qtbase-everywhere-src,
+  qt_version_tag ABI, KPEOPLE_SO_PATH, /proc/self/maps, HMDFS path not openable,
+  consumer-perspective path, moc plugin manual build
+error_signature: >
+  Cannot mix incompatible Qt library|qt_version_tag.*mismatch|qt5-qtsql/5\.15\.19.*incompatible|QSQLITE driver not loaded| QSqlDatabase: QSQLITE driver not available|available drivers:.*\(.*\)|Error relocating.*QSqlDriver::notification\(QString\): symbol not found|fopen.*/data/service/el2.*Permission denied|/proc/self/maps.*not openable
+root_cause: >
+  1) Qt5 各 .so 在链接期把 qt_version_tag 符号按"构建时的 Qt 补丁行"烧进二进制；
+  运行时 QLibrary 加载器逐符号比对 qt_version_tag——不同补丁行（5.15.2 线 vs
+  5.15.19 线）的 libQt5Sql/libQt5Core 混装立即 abort("Cannot mix incompatible Qt
+  library")。ohpcd 仓里 qt5-qtbase 主线是 5.15.2.2，而 qt5-qtsql 主线是 5.15.19
+  （其附带的 QSQLITE 插件也是 5.15.19 线），KF5 全链（kcoreaddons5 等已发布包全部
+  requires qt5-qtbase/5.15.2.2）在二进制层面无法消费 qt5-qtsql/5.15.19——这不是
+  cmake 版本号约束能解决的配置问题，而是 ELF 符号级 ABI 边界。
+  2) KPeople PersonManager 把 persons 数据库存进 sqlite
+  （QSqlDatabase::addDatabase("QSQLITE")），需要 5.15.2 线的 QSQLITE 驱动插件，
+  但 5.15.2 线仓库只有 qt-unixodbc（其配方用"官方 qtbase-everywhere-src-5.15.2
+  tarball + 手动 clang+moc 流程"自编 ODBC 插件）——Sql 库存在而 SQLITE 插件不存在。
+  3) HMDFS 挂载路径在进程沙箱内不可 fopen（/proc/self/maps 报内核侧
+  /data/service/el2/... 路径，消费者视角的包路径与之不同），测试想对已加载的
+  libKF5People.so 做 ELF 动态段断言时拿不到可打开的路径——这是 HMDFS 路径差异的
+  新形态（区别于 E011/E052 已收录的"只读/临时目录权限"条目：本条是"路径查询通道
+  本身给出不可开路径"）。
+solution: |
+  三段组合（kpeople5 5.116.0 实证，PR #14576，本机 conan create 干净重跑 RC=0）：
+  ```python
+  # ① 供给线选择：qt-unixodbc/5.15.2 线 Qt5Sql（而非 qt5-qtsql/5.15.19）
+  #    ——qt-unixodbc 与 5.15.2 线 libQt5Core 出自同一官方 tarball，
+  #    qt_version_tag 匹配；qt5-qtsql/5.15.19 运行期 ABI 互斥不可用
+  self.requires("qt-unixodbc/5.15.2")
+  # 头文件从 qt5-qtbase/5.15.2.2 取（qt-unixodbc 不带 cmake config/头文件）：
+  deps.set_property("qt-unixodbc", "cmake_find_mode", "none")
+  # 手写 Qt5SqlConfig.cmake（IMPORTED UNKNOWN 库指向 qt-unixodbc 的 libQt5Sql.so，
+  # INTERFACE_INCLUDE_DIRECTORIES 用 qt5-qtbase 的 include + include/QtSql），
+  # 并把 qtbase src/sql/qtsql-config.h 暂存到 <generators>/QtSql/
+  #（打包的 QtSql 公共头会 include <QtSql/qtsql-config.h>，它不在 include/QtSql 里）
+  ```
+  ```python
+  # ② QSQLITE 插件配方内自编（qt-unixodbc 同款手法）：
+  #    conandata 指官方 qtbase-everywhere-src-5.15.2.tar.xz，
+  #    sources() 期下载解包，_build_qsqlite_plugin() 手动驱动：
+  #    a) qtbase bin/moc 预跑 qsql_sqlite.h 生成 moc_qsql_sqlite.cpp
+  #    b) sqlite3.c（qt 自带 3rdparty）与 qsql_sqlite.cpp/smain.cpp 各自 -c
+  #    c) -DQT_DISABLE_DEPRECATED_BEFORE=0x050F00 把 1 参 notification() 编译掉
+  #       （5.15.2 线 libQt5Sql 未导出该重载，不剪会 dlopen 报
+  #        "Error relocating QSqlDriver::notification(QString): symbol not found"，
+  #        3 参重载保留、通知能力不损失）
+  #    d) cxx -shared -o libqsqlite.so ... -lQt5Sql -lQt5Core -Wl,-soname,libqsqlite.so
+  #    e) 双布局落盘：<build>/bin/sqldrivers（Qt 扫 app 目录）+
+  #       <build>/qsqlite-stage/plugins/sqldrivers（QT_PLUGIN_PATH 条目；
+  #       ECMAddTests 会在 configure 期把 QT_PLUGIN_PATH 冻进 ctest
+  #       ENVIRONMENT 属性，覆盖运行期 env——两处都必须放）
+  ```
+  ```cmake
+  # ③ KPEOPLE_SO_PATH 消费者视角路径注入（HMDFS 路径不可开的新形态修法）：
+  # test_package/CMakeLists.txt 在 configure 期从 imported target 取真实包路径：
+  target_compile_definitions(test_kpeople5 PRIVATE
+      KPEOPLE_SO_PATH="$<TARGET_FILE:KF5::People>")
+  # test.cpp 优先用该宏，仅空时回退 /proc/self/maps 解析：
+  std::string so_path = KPEOPLE_SO_PATH;
+  if (so_path.empty()) { so_path = loaded_library_path("libKF5People.so"); }
+  ```
+fallback: >
+  ① 供给线：若 5.15.2 线 Qt5Sql 不可得，只能整链统一切到 qt5-qtsql/5.15.19 线
+  （连 qt5-qtbase 一起换）——对已发布 KF5 包依赖链通常不可行；或静态链接 Qt5Sql
+  规避运行期比对。② 插件：若 qtbase 源码 tarball 在 CI 白名单外，可改为
+  conandata 直接镜像该 tarball 的 sha256 固定副本；或用 sqlite3 源码 + Qt Sql
+  私有头直接编独立驱动包。③ 路径：若被测库不是 cmake imported target 消费，
+  可用 dl_iterate_phdr 取 dlpi_name（消费者视角）替代 /proc/self/maps；
+  或 dlopen 成功后用 dladdr 取路径。完全无法取路径时跳过 ELF 段断言并注明
+  环境限制。
+verify_builds: "PR #14576 本机 conan create -pr:h=ohos-aarch64 --build=missing 全绿（conan remove 干净重跑 RC=0）：persondatatest 7/7 + personsproxymodeltest 3/3（QSQLITE 自编插件驱动 sqlite 库真实读写）+ test_package 12/12"
+reference_impl: >
+  kpeople5 5.116.0 → archives/k/kpeople5/5.116.0/conanfile.py
+  （_build_qsqlite_plugin / Qt5SqlConfig.cmake 生成 / 三源 Qt5 接线）+
+  test_package/CMakeLists.txt（KPEOPLE_SO_PATH 注入）+ test_package/test.cpp
+  （消费者视角优先解析）。Qt5Sql 供给线与 moc 手法先例：qt-unixodbc/5.15.2 配方。
+  PR：https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/pulls/14576
+id: E666
+doc_file: doc/E666.md
