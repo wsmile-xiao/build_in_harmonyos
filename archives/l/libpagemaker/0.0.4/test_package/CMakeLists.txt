@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(libpagemaker_consumer LANGUAGES CXX)
+find_package(libpagemaker CONFIG REQUIRED)
+add_executable(test_pmd test_pmd.cpp)
+target_link_libraries(test_pmd PRIVATE libpagemaker::libpagemaker)
