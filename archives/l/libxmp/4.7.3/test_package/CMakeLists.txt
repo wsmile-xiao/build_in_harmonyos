@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(libxmp_consumer LANGUAGES C)
+find_package(libxmp CONFIG REQUIRED)
+add_executable(test_xmp test_xmp.c)
+target_link_libraries(test_xmp PRIVATE libxmp::libxmp)
