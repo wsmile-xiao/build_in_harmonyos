@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(highway_consumer LANGUAGES CXX)
+find_package(hwy CONFIG REQUIRED)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+add_executable(consumer consumer.cpp)
+target_link_libraries(consumer PRIVATE hwy::hwy hwy::hwy_contrib)
+target_compile_features(consumer PRIVATE cxx_std_17)
