@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OHPC <ohpc@example.com>
+Date: Wed, 1 Oct 2026 22:00:00 +0800
+Subject: [PATCH 1/2] cmake: decouple tools/examples from EVMC_TESTING and allow
+ dependency discovery without Hunter
+
+Two upstream CMake issues prevent the complete EVMC build (libraries + tools +
+examples + the full CTest suite) in the offline OpenHarmony cross-build.
+
+1) Hunter is used to obtain the build/test-time dependencies (GTest for the
+   internal unit tests and the evmc-vmtester tool, CLI11 for the evmc-tool
+   CLI). Hunter is a network-only package manager: on the first configure it
+   downloads and bootstraps an archive from GitHub, which cannot work offline.
+   HunterGate.cmake already implements a "disabled mode" -- with
+   HUNTER_ENABLED=OFF the HunterGate() macro installs an empty
+   hunter_add_package() and skips all network access. The obstacle is that the
+   upstream CMakeLists includes HunterGate.cmake and calls HunterGate()
+   exclusively inside `if(HUNTER_ENABLED)`, so with HUNTER_ENABLED=OFF the macro
+   is never evaluated and hunter_add_package stays undefined at its use sites
+   in test/unittests/CMakeLists.txt, tools/vmtester/CMakeLists.txt and
+   tools/evmc/CMakeLists.txt.
+
+   Fix: always include HunterGate.cmake and always call HunterGate(). With
+   HUNTER_ENABLED=ON this is behaviour-preserving (the gate is a no-op after
+   the first call). With HUNTER_ENABLED=OFF it enables Hunter's documented
+   disabled mode and the dependencies are resolved by find_package() against
+   the ambient CMake package registry (here: Conan's CMakeDeps packages).
+
+2) EVMC_TOOLS and EVMC_EXAMPLES were declared with cmake_dependent_option()
+   guarded by "NOT EVMC_TESTING" and <force> = ON. CMakeDependentOption sets
+   the option to <force> whenever the dependency is false
+   (CMakeDependentOption.cmake: `set(${option} ${force})`), so with
+   EVMC_TESTING=ON -- exactly when the test suite is requested -- both options
+   were forced ON regardless of any -D on the command line, and could not be
+   turned off. The forced EVMC_TOOLS also feeds HUNTER_ENABLED's default
+   (`${EVMC_TOOLS}`), which re-enables Hunter's network bootstrap, and pulls in
+   tools/, whose evmc-vmtester target test/vmtester/CMakeLists.txt requires
+   (evmc_add_vm_test() raises FATAL_ERROR without it).
+
+   Fix: declare both as plain options with the same OFF defaults, so the caller
+   can actually choose. With EVMC_TESTING=OFF nothing changes (both default to
+   OFF, so a plain library-only build is identical to before).
+
+No test case, assertion, test input or expected exit code is modified.
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e2344af..fb61c4a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -20,18 +20,33 @@ option(EVMC_INSTALL "Enable EVMC installation (e.g. make install)" ON)
+ 
+ option(EVMC_TESTING "Build everything (libraries, tools, examples, internal tests)" OFF)
+ 
+-cmake_dependent_option(EVMC_TOOLS "Build EVMC tools" OFF
+-    "NOT EVMC_TESTING" ON)
+-
+-cmake_dependent_option(EVMC_EXAMPLES "Build EVMC examples" OFF
+-    "NOT EVMC_TESTING" ON)
++# These are plain options rather than cmake_dependent_options on
++# EVMC_TESTING. CMakeDependentOption resolves the option to <force> (=ON here)
++# whenever the dependency is false, so with EVMC_TESTING=ON both were forced ON
++# and could not be turned off from the command line; the forced EVMC_TOOLS also
++# feeds HUNTER_ENABLED's default and re-enables Hunter's network bootstrap.
++option(EVMC_TOOLS "Build EVMC tools" OFF)
++option(EVMC_EXAMPLES "Build EVMC examples" OFF)
+ 
+ option(HUNTER_ENABLED "Enable Hunter package manager support" ${EVMC_TOOLS})
+ 
++# HunterGate.cmake must be included and HunterGate() called unconditionally.
++# With HUNTER_ENABLED=ON this is behaviour-preserving (the gate is a no-op after
++# the first call, and this is exactly where upstream called it). With
++# HUNTER_ENABLED=OFF it installs a no-op hunter_add_package() -- Hunter's
++# documented "disabled mode" -- so the dependencies can be resolved by
++# find_package() against the ambient CMake package registry (here: Conan's
++# CMakeDeps output) instead of being bootstrapped over the network.
++include(HunterGate)
++
++HunterGate(
++    URL "https://github.com/cpp-pm/hunter/archive/v0.25.6.tar.gz"
++    SHA1 "69e4a05bd514bb05cb2c5aa02ce8ac420516aaf7"
++)
++
+ if(HUNTER_ENABLED)
+     set(HUNTER_CONFIGURATION_TYPES Release CACHE STRING "Build type of Hunter packages")
+     option(HUNTER_USE_CACHE_SERVERS "Use default Hunter cache servers" NO)
+-    include(HunterGate)
+     include(Hunter/init)
+ endif()
+ 
