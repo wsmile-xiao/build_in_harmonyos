@@ -1,0 +1,7 @@
+if(CMAKE_SYSTEM_NAME MATCHES "^(HarmonyOS|OHOS|OpenHarmony)$")
+  foreach(lang C CXX)
+    set(CMAKE_SHARED_LIBRARY_SONAME_${lang}_FLAG "-Wl,-soname,")
+    set(CMAKE_SHARED_LIBRARY_RUNTIME_${lang}_FLAG "-Wl,-rpath,")
+    set(CMAKE_SHARED_LIBRARY_RUNTIME_${lang}_FLAG_SEP ":")
+  endforeach()
+endif()
