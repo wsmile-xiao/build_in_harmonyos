@@ -1,94 +1,19 @@
-# utf8proc 2.11.3 — 编译进度
+# utf8proc 2.11.3
 
-> 档案创建时间: 2026-04-25 21:23:00
-> 最后更新: 2026-04-25 21:25:00
-> 当前会话 ID: utf8proc-compile-session
+## Package
 
-## 一、基本信息
-| 项目 | 值 |
-|------|-----|
-| 软件 | utf8proc |
-| 版本 | 2.11.3 |
-| 状态 | ✅ success |
-| 构建系统 | Makefile (非 autotools) |
-| 源码路径 | https://github.com/JuliaStrings/utf8proc/archive/v2.11.3.tar.gz |
+- Upstream: https://github.com/JuliaStrings/utf8proc
+- Source archive: https://github.com/JuliaStrings/utf8proc/archive/v2.11.3.tar.gz
+- Build system: CMake
+- OHOS target: armv8
 
-## 二、编译阶段（checkbox 实时更新）
+## Tests
 
-### Phase 1: 环境准备
-- [x] ohc-run.py init-build 完成 / 源码下载解压
+- Upstream CMake defaults `UTF8PROC_ENABLE_TESTING` to `Off`; the recipe explicitly enables it and runs CTest with `--no-tests=error`.
+- The upstream CMake configuration registers 10 CTest cases on OHOS/Linux. It downloads `NormalizationTest.txt` and `GraphemeBreakTest.txt` from unicode.org during configuration, so that host must be reachable in CI.
+- The test package supplies decomposed `e` + combining acute to `utf8proc_map`, then checks the 3-byte NFC output `Aé`.
+- The upstream Makefile test path was previously skipped because its test-data generation requires Julia. The CMake test path now enables the upstream suite, but passing results still require confirmation from the target CI run.
 
-### Phase 2: 编译（configure + make + make install）
-- [x] configure 完成（无需 configure，直接使用 Makefile）
-- [x] make 编译完成（无错误）
-- [x] make install 完成（DESTDIR=$TEST_PREFIX）
+## Validation status
 
-### Phase 2.5: 独立目录安装验证（⭐ 必须做）
-- [x] 干净源码 + 补丁应用（无补丁）
-- [x] 独立 TEST_PREFIX make install 完成
-- [x] 功能回归测试结果：库文件完整，包含静态库和共享库
-
-### Phase 3: 测试验证
-- [x] CMake CTest 测试通过 `cmake.test()` 执行
-- [x] 安全弹窗触发确认：无二进制可执行文件（仅库文件）
-
-### Phase 4: 预编译包制作（⭐ verify PASS 后必须）
-- [x] Step 1-10 打包流程完成（有权限警告但成功）
-
-### Phase 5: 归档收尾
-- [x] 补丁生成（无补丁）
-- [x] manifest.yaml / README.md / PROGRESS.md 更新
-- [x] ohc-run.py verify-build 质量门禁通过
-
-## 三、对话记录（⭐ 断点续传核心）
-
-### 对话 #1 — 2026-04-25 21:23
-**操作**: 执行 ohc-run.py init-build utf8proc 2.11.3
-**结果**: 成功初始化，下载源码并创建归档目录
-**发现的问题**: utf8proc 不在 registry 中，需要手动提供下载 URL
-**当前状态**: Phase 1 完成
-**遗留问题**: 无
-
-### 对话 #2 — 2026-04-25 21:24
-**操作**: 
-1. 检查构建系统（发现是 Makefile，非 autotools）
-2. 执行 make -j$(nproc) prefix=$DEFAULT_PREFIX
-3. 执行 make install prefix=$DEFAULT_PREFIX DESTDIR=$TEST_PREFIX
-**结果**: 编译成功，安装成功
-**发现的问题**: 无
-**当前状态**: Phase 2 完成
-**遗留问题**: 无
-
-### 对话 #3 — 2026-04-25 21:24
-**操作**: 尝试执行 make check
-**结果**: CMake 测试入口由 Conan `cmake.test()` 执行
-**当前状态**: Phase 3 已纳入构建流程
-**遗留问题**: 无
-
-### 对话 #4 — 2026-04-25 21:25
-**操作**: 
-1. 执行 ohc-run.py verify-build（通过）
-2. 执行 ohc-run.py package（成功）
-3. 执行 make install（本地安装）
-**结果**: 预编译包制作成功，本地安装成功
-**发现的问题**: package 时有软链接权限警告，但不影响打包结果
-**当前状态**: Phase 4-5 完成
-**遗留问题**: 无
-
-## 四、源码修改清单
-| 文件 | 原因 | 方式 | 补丁状态 |
-|------|------|------|---------|
-| 无 | 无需修改源码 | - | 无补丁 |
-
-## 五、预编译包交付物
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| utf8proc-2.11.3-ohos-aarch64.tar.gz | 780KB | 预编译包 |
-
-## 六、结束记录
-- **最终状态**: success
-- **结束时间**: 2026-04-25 21:25
----
-
-**编译结束**: 2026-04-25 21:25
-**最终状态**: success
+The recipe and metadata have not yet been validated by a successful target CI run for this revision. Do not mark this version as built until CI confirms the package build, upstream tests, and test package all pass.
