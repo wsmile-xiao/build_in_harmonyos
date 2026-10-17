@@ -3,7 +3,7 @@
 ## Package
 
 - Upstream: https://github.com/JuliaStrings/utf8proc
-- Source archive: https://github.com/JuliaStrings/utf8proc/archive/v2.11.3.tar.gz
+- Source archive: https://github.com/JuliaStrings/utf8proc/releases/download/v2.11.3/utf8proc-2.11.3.tar.gz
 - Build system: CMake
 - OHOS target: armv8
 
