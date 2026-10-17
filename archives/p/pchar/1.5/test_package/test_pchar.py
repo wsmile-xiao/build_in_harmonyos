@@ -26,11 +26,13 @@ def main():
         raise AssertionError("saved-trace replay did not report a one-hop path")
 
     version = run_installed("--version")
-    if "pchar 1.5" not in version.stdout:
+    version_output = version.stdout + version.stderr
+    if "pchar 1.5" not in version_output:
         raise AssertionError("--version did not identify pchar 1.5")
 
     help_output = run_installed("--help")
-    if "Usage:" not in help_output.stdout:
+    help_text = help_output.stdout + help_output.stderr
+    if "Usage:" not in help_text:
         raise AssertionError("--help did not print usage")
 
 
