@@ -1,0 +1,140 @@
+--- a/accel-pppd/triton/md.c
++++ b/accel-pppd/triton/md.c
+@@ -1,67 +1,109 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <sys/time.h>
+ #include <signal.h>
+ #include <string.h>
+ #include <errno.h>
+ #include <unistd.h>
+ #include <fcntl.h>
++#if defined(__linux__) && !defined(__GLIBC__)
++#include <stdint.h>
++#include <sys/eventfd.h>
++#endif
+ 
+ #include "triton_p.h"
+ 
+ extern int max_events;
+ 
+ static int epoll_fd;
+ static struct epoll_event *epoll_events;
+ 
+ static pthread_t md_thr;
+ static void *md_thread(void *arg);
++
++#if defined(__linux__) && !defined(__GLIBC__)
++/* HarmonyOS musl (E127) has no pthread_cancel. Wake the epoll loop with an
++ * eventfd and let the thread exit cooperatively instead. */
++static volatile int md_stop;
++static int md_wake_fd = -1;
++static struct _triton_md_handler_t md_wake_handler;
++
++static void md_wakeup(void)
++{
++	uint64_t one = 1;
++
++	if (md_wake_fd >= 0)
++		(void)write(md_wake_fd, &one, sizeof(one));
++}
++#endif
+ 
+ static mempool_t *md_pool;
+ 
+ static pthread_mutex_t freed_list_lock = PTHREAD_MUTEX_INITIALIZER;
+ static LIST_HEAD(freed_list);
+ static LIST_HEAD(freed_list2);
+ 
+ int md_init(void)
+ {
+ 	epoll_fd = epoll_create(1);
+ 	if (epoll_fd < 0) {
+ 		perror("md:epoll_create");
+ 		return -1;
+ 	}
+ 
+ 	fcntl(epoll_fd, F_SETFD, O_CLOEXEC);
+ 
++#if defined(__linux__) && !defined(__GLIBC__)
++	md_wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
++	if (md_wake_fd >= 0) {
++		struct epoll_event ev;
++
++		memset(&ev, 0, sizeof(ev));
++		ev.events = EPOLLIN;
++		ev.data.ptr = &md_wake_handler;
++		epoll_ctl(epoll_fd, EPOLL_CTL_ADD, md_wake_fd, &ev);
++	}
++#endif
++
+ 	epoll_events = malloc(max_events * sizeof(struct epoll_event));
+ 	if (!epoll_events) {
+ 		fprintf(stderr,"md:cann't allocate memory\n");
+ 		return -1;
+ 	}
+ 
+ 	md_pool = mempool_create(sizeof(struct _triton_md_handler_t));
+ 
+ 	return 0;
+ }
+ void md_run(void)
+ {
+ 	if (pthread_create(&md_thr, NULL, md_thread, NULL)) {
+ 		triton_log_error("md:pthread_create: %s", strerror(errno));
+ 		_exit(-1);
+ 	}
+ }
+ 
+ void md_terminate(void)
+ {
++#if defined(__linux__) && !defined(__GLIBC__)
++	md_stop = 1;
++	md_wakeup();
++	pthread_join(md_thr, NULL);
++	if (md_wake_fd >= 0) {
++		close(md_wake_fd);
++		md_wake_fd = -1;
++	}
++#else
+ 	pthread_cancel(md_thr);
+ 	pthread_join(md_thr, NULL);
++#endif
+ }
+ 
+ static void *md_thread(void *arg)
+ {
+ 	int i,n,r;
+ 	struct _triton_md_handler_t *h;
+ 	sigset_t set;
+ 
+ 	sigfillset(&set);
+ 	sigdelset(&set, SIGKILL);
+@@ -72,20 +114,27 @@
+ 		n = epoll_wait(epoll_fd, epoll_events, max_events, -1);
+ 		if (n < 0) {
+ 			if (errno == EINTR)
+ 				continue;
+ 			triton_log_error("md:epoll_wait: %s", strerror(errno));
+ 			_exit(-1);
+ 		}
+ 
+ 		for(i = 0; i < n; i++) {
+ 			h = (struct _triton_md_handler_t *)epoll_events[i].data.ptr;
++#if defined(__linux__) && !defined(__GLIBC__)
++			if (h == &md_wake_handler) {
++				if (md_stop)
++					return NULL;
++				continue;
++			}
++#endif
+ 			if (!h->ud)
+ 				continue;
+ 			spin_lock(&h->ctx->lock);
+ 			if (h->ud) {
+ 				h->trig_epoll_events |= epoll_events[i].events;
+ 				if (!h->pending) {
+ 					list_add_tail(&h->entry2, &h->ctx->pending_handlers);
+ 					h->pending = 1;
+ 					__sync_add_and_fetch(&triton_stat.md_handler_pending, 1);
+ 					r = triton_queue_ctx(h->ctx);

@@ -1,0 +1,136 @@
+#====================================================================
+# E665 (draft) — Qt5 双包供给缩减版 shim（构建组合方案，触发器④）
+# Software: kholidays5/5.116.0（泛化：任何伞形 find_package(Qt5 COMPONENTS Core Qml)
+#           的 KF5 Tier-1 / Qt5 消费件）
+# Source: PR #14846（任务卡 #14898，j669539）
+# Status: pending-editor-review（拟提升 E665，定稿编号由主编确认）
+#====================================================================
+
+draft: E665-draft-j669539
+status: pending-editor-review
+title: "Qt5 双包供给缩减版 shim：qt5-qtbase 原生 config + qt5-qtdeclarative CMakeDeps Qt5Qml，手写聚合 Qt5Config.cmake 置 Qt5_FOUND 防重入守卫（kpeople5 三包方案缩减为两包）"
+trigger_tool: cmake / conan (CMakeDeps)
+phase: configuration
+category: cmake, cross-compile, qt
+severity: 3
+
+error_signature: >
+  Could NOT find Qt5 \(missing: Qml\)|CMake Error at .*Qt5QmlConfig\.cmake.*find_dependency|Target "Qt5::Qml".*but the target was not found|Could not find a package configuration file provided by "Qt5"
+
+match_keywords: >
+  Qt5Config.cmake, Qt5_FOUND, find_dependency(Qt5), cmake_file_name Qt5Qml,
+  cmake_find_mode none, qt5-qtbase, qt5-qtdeclarative, 双包供给, 聚合 config,
+  防重入守卫, KF5 Tier-1, ECMQmlModule5, plan2 预生成解析器, bison, flex, m4,
+  holidayparserplan, holidayscannerplan
+
+root_cause: |
+  OHPCD 的 Qt5 链按 Qt 模块拆成多个 conan 包且构建形态互异：
+  1. qt5-qtbase/5.15.2.2 为 qmake 原生构建，携带原生 per-module config
+     （Qt5CoreConfig.cmake 等）；配方侧 cmake_find_mode=none 抑制 CMakeDeps
+     转发 config，直接消费原生 config。
+  2. qt5-qtdeclarative/5.15.2 只出库不出 config：CMakeDeps 以
+     cmake_file_name=Qt5Qml 为其生成包级 Qt5QmlConfig.cmake。
+  3. 任何伞形 find_package(Qt5 5.15.2 CONFIG REQUIRED Core Qml) 的 KF5 Tier-1
+     消费件（kholidays5 这类零 KF5 库依赖、只需 Qt5 Core+Qml 的库）都缺一个能
+     同时分发两包组件的聚合 config：qtbase 的原生 Qt5Config 只在自己包前缀内
+     找组件；CMakeDeps 为 qt5-qtdeclarative 传递 requires 生成的小写
+     qt5-config.cmake 聚合不含 Qml 组件。
+  4. Qt5QmlConfig 内部 find_dependency(Qt5) 回调会在聚合 shim 执行中途重入，
+     形成互相 include 的循环，必须以 Qt5_FOUND 守卫截断。
+
+solution: |
+  在消费件配方 generate() 中，tc.generate() 之后向 generators 目录写手写聚合
+  Qt5Config.cmake（generators 位于 CMAKE_PREFIX_PATH 最前，精确名匹配优先于
+  CMakeDeps 为传递 requires 生成的小写 qt5-config.cmake 聚合）。核心序列
+  （完整实现见 kholidays5/5.116.0 conanfile.py generate()）：
+
+  ```python
+  deps = CMakeDeps(self)
+  # qt5-qtbase 走原生 per-module config；qt5-qtdeclarative 只出 Qt5Qml config
+  deps.set_property("qt5-qtbase", "cmake_find_mode", "none")
+  deps.set_property("qt5-qtdeclarative", "cmake_file_name", "Qt5Qml")
+  deps.generate()
+  tc = CMakeToolchain(self)   # QT_MAJOR_VERSION=5, BUILD_TESTING=ON, ...
+  tc.generate()
+
+  qt_prefix = qtbase.package_folder
+  shim = [
+      "include(CMakeFindDependencyMacro)",
+      # ★ 防重入守卫：Qt5QmlConfig 的 find_dependency(Qt5) 回调先读到
+      #   Qt5_FOUND=TRUE 即短路，不会重入本 shim
+      "set(Qt5_FOUND TRUE)",
+      'find_dependency(Qt5Core 5.15.2 PATHS "%s/lib/cmake/Qt5Core" NO_DEFAULT_PATH)'
+      % qt_prefix,
+  ]
+  # Network/Gui 被 CMakeDeps 生成的 Qt5Qml target 接口引用
+  # （qt5-qtdeclarative cpp_info.requires），必须先于 Qt5QmlConfig 预物化；
+  # Test 服务 autotests 的 find_package(Qt5Test CONFIG REQUIRED)
+  for comp in ("Network", "Gui", "Test"):
+      shim.append(
+          'find_dependency(Qt5%s 5.15.2 PATHS "%s/lib/cmake/Qt5%s" NO_DEFAULT_PATH)'
+          % (comp, qt_prefix, comp))
+  shim += [
+      "find_dependency(Qt5Qml)",
+      "set(Qt5_Core_FOUND TRUE)",
+      "set(Qt5_Network_FOUND TRUE)",
+      "set(Qt5_Gui_FOUND TRUE)",
+      "set(Qt5_Test_FOUND TRUE)",
+      "set(Qt5_Qml_FOUND TRUE)",
+      'set(Qt5_VERSION_STRING "5.15.2.2")',
+  ]
+  # 写 generators/Qt5Config.cmake；另写 Qt5ConfigVersion.cmake
+  # （set(PACKAGE_VERSION 5.15.2.2) + VERSION_LESS 兼容判定）
+  ```
+  配套向 conan_cmakedeps_paths.cmake 追加（conan toolchain 会 include 它）：
+  set(CMAKE_FIND_PACKAGE_PREFER_CONFIG ON)、两包根的
+  CMAKE_PREFIX_PATH/CMAKE_LIBRARY_PATH/CMAKE_INCLUDE_PATH PREPEND、qtbase 的
+  lib/cmake 子路径、ECM 的 share/ECM/cmake（MODULE_PATH+PREFIX_PATH）、
+  ${CMAKE_CURRENT_LIST_DIR}（generators 自身置最前）。
+
+  与 kpeople5/5.116.0 三包方案（PR #14576：staged-fixed qtbase config 树 +
+  symlink 整包镜像 + MkspecDir regex 修复）相比，本缩减版对 Tier-1 仅
+  Core+Qml 需求的依赖图：两包即足、零 staged 复制、零 symlink 镜像、零
+  regex 修复——qtbase 原生 config 自身可重定位（_prepare_qt_mkspec_compat
+  把包内 mkspecs 静态拷到同级 b/ 目录即满足 MkspecDir 探测）。
+
+fallback: |
+  不写聚合 shim 的替代路径：
+  1. 改上游 CMakeLists 为逐组件 find_package(Qt5Core)/find_package(Qt5Qml)
+     ——侵入源码，KDE 上游不接受；
+  2. 等平台发单一聚合 Qt5 包（supply-side 修复）；
+  3. 退回 kirigami2 式三包 staged-fixed 全量桥接（DRAFT-E5xx-qt5-conan-split-
+     cmake-bridge：复制 qtbase lib/cmake ~0.9MB + symlink 镜像整包布局 +
+     MkspecDir regex）——本条证明对 Tier-1 两组件需求这些全部可省，仅在需要
+     Quick/QuickTest/QuickControls2 等多组件时才需全量桥接。
+
+verify_builds: "#14846 kholidays5 5.116.0（本机 conan create -pr:h=ohos-aarch64 --build=missing 全绿：上游 ctest 5/5 目标 22/22 函数 + test_package 20/20；conan remove 后干净重跑 RC=0）"
+
+reference_impl: |
+  kholidays5/5.116.0 conanfile.py generate()（PR #14846）
+  先例对照：kpeople5/5.116.0 三包方案（PR #14576，B 申报线为 QSQLITE 插件
+  配方内自编）；kirigami2/5.116.0 staged-fixed 全量桥接
+  （DRAFT-E5xx-qt5-conan-split-cmake-bridge）；kcoreaddons5/kcalcore 的
+  conan_cmakedeps_paths.cmake 手工接线先例。
+
+similar_to: DRAFT-E5xx-qt5-conan-split-cmake-bridge（kirigami2 三包全量桥接；本条为其 Tier-1 两组件缩减版+防重入守卫增量）、kpeople5 #14576（三包方案，重叠主题作融合上下文）
+
+related_knowledge: |
+  1. KF5/KF6 两线解析器策略差异（同 PR 验证）：kholidays 5.116.0 tarball 的
+     src/parsers/plan2/ 内置预生成 holidayparserplan.cpp / holidayscannerplan.cpp
+     （与 .ypp/.lpp 语法文件同装），零 tool_requires；KF6 kholidays/6.28.0
+     tarball 已删预生成文件，需 bison/3.8.2 + flex/2.6.4 + m4/1.4.19——KF5 线
+     适配时切勿照抄 KF6 线的工具依赖。
+  2. ECMQmlModule Qt5 分支（ECMQmlModule5.cmake）OHOS 首次验证可用：
+     QT_MAJOR_VERSION=5 时 ecm_add_qml_module 仅设 target 属性，
+     ecm_finalize_qml_module 生成 qmldir 并 install(TARGETS) 到
+     KDE_INSTALL_QMLDIR（默认 lib/qml）；无 qmlplugindump/qmlimportscanner
+     调用（纯 C++ QML 插件 + .moc 场景），AUTOMOC_MOC_OPTIONS
+     -Muri=<uri> 由 ECM 注入。
+
+id: E665
+doc_file: knowledge/drafts/E665-draft-j669539.md
+authors: j669539
+source_pr: "14846"
+source_task: "14898"
+source_commit: b667b9fa10
+last_updated: 2026-10-06

@@ -1,0 +1,154 @@
+#====================================================================
+# DRAFT-fex-emu-2608-ohos-libcxx-missing-cxx-facilities
+#   OHOS libc++ 15 裁剪掉 C++17/20 设施（std::pmr / std::atomic_ref /
+#   ranges 算法），二进制重编译器源码零改动编译失败——按"设施缺口"补 shim
+# 来源: feat/fex-emu-2608 适配 HarmonyOS PC（路径C 高难度挑战）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-fex-emu-2608-ohos-libcxx-missing-cxx-facilities
+trigger_tool:           clang++
+phase:                  build
+error_signature:        fatal error: 'memory_resource' file not found|
+                         no member named 'atomic_ref' in namespace 'std'|
+                         no member named '(any_of|find_if|sort|is_sorted|equal|copy|find|upper_bound|lower_bound)' in namespace 'std::ranges'|
+                         _LIBCPP_HAS_NO_INCOMPLETE_RANGES
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               libcxx, cxx17, cxx20, pmr, atomic_ref, ranges, jit,
+                        binary-translation, ohos, portability-shim
+match_keywords:         memory_resource, std::pmr, polymorphic_allocator,
+                        atomic_ref, std::ranges, any_of, find_if,
+                        _LIBCPP_HAS_NO_INCOMPLETE_RANGES,
+                        _LIBCPP_ENABLE_EXPERIMENTAL, libcxx-ohos, 重编译器,
+                        动态二进制翻译, JIT, shim, polyfill
+title:                  OHOS libc++ 15 缺失 C++17 pmr / C++20 atomic_ref / ranges 算法：以最小 shim 补设施而非改上游语义
+prescan_pattern:        std::pmr::|std::atomic_ref<|std::ranges::
+prescan_globs:          **/*.h, **/*.hpp, **/*.cpp, **/*.inl
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OpenHarmony SDK 自带 libc++（libcxx-ohos, _LIBCPP_VERSION
+                        15004）是裁剪版：①C++17 <memory_resource> 整份缺失
+                        （std::pmr 命名空间、polymorphic_allocator、容器别名
+                        std::pmr::map/list/vector/string 全部不存在，容器头也
+                        没有 pmr 别名；std::experimental::pmr 仅有声明、libc++
+                        库里没有符号，链接期 undefined）；②C++20 std::atomic_ref
+                        缺失（__atomic/atomic_ref.h 不存在）；③C++20 ranges 算法
+                        被 __config:256 的 `#if !defined(_LIBCPP_ENABLE_EXPERIMENTAL)
+                        && !defined(_LIBCPP_BUILDING_LIBRARY)` 关掉，于是
+                        _LIBCPP_HAS_NO_INCOMPLETE_RANGES 被定义、ranges_*.h 全部
+                        失效。上游 FEX CI 用 libc++ ≥16（ranges 默认开、std::function
+                        有条件 noexcept），因此在 Linux 上没有暴露该组合。
+                        注意：这不是"改改编译开关"就完事——pmr 与 atomic_ref 是
+                        真缺失，只能补设施；且 JIT 重编译器的 atomic_ref 用法
+                        （128 位 CAS、内存序）必须语义等价，不能降级成裸访问。
+
+affected_scope:         所有用 C++17/20 现代设施、且依赖"小对象内联存储"性质的
+                        库在 OHOS 上的适配。本题实证：FEX-Emu 2608（JIT 重编译器
+                        + pmr 自研 arena + atomic_ref 回填已生成机器码）；
+                        同族：mesa/llvm/spirv 系列、任何用 std::pmr 做 arena 的
+                        JIT/编译器项目。涉及审查对"适配是否改变上游语义"的关注点。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           feature-detected-shim-headers-in-tree
+rec_description:        【定性三步】
+                        ① `echo '#include <memory_resource>' | clang++ -std=c++20 -x c++ - -fsyntax-only`
+                           与 `std::atomic_ref<int>` 探针 → 区分"头缺失"与"用法错"；
+                        ② `ls $SDK/.../c++/v1/ | grep -E 'memory_resource|atomic_ref'`
+                           + `grep -n INCOMPLETE_RANGES $SDK/.../__config` → 定位是
+                           *裁剪* 还是 *开关*（ranges 属开关，pmr/atomic_ref 属裁剪）；
+                        ③ 对 ranges：加 `-D_LIBCPP_ENABLE_EXPERIMENTAL` 后重跑探针；
+                           实测本环境由 `no member named 'any_of'` 变为编译通过。
+
+                        【补设施（只在前沿缺失时生效，其它平台自动透传）】
+                        ⓐ ranges：CMake 侧 `add_compile_definitions(_LIBCPP_ENABLE_EXPERIMENTAL)`，
+                           仅对 OHOS 生效；libc++≥16 无副作用。
+                        ⓑ atomic_ref：新增自带头 `FEXCore/Utils/AtomicRef.h`，
+                           以 `__atomic_load/store/exchange/fetch_add/fetch_sub/
+                           compare_exchange_weak|strong` 实现 `std::atomic_ref<T>`
+                           子集，外层 `#if !defined(__cpp_lib_atomic_ref)` 守卫；
+                           128 位类型实测由 clang 内联为 ldaxp/stxp，不需要 libatomic。
+                        ⓒ pmr：新增自带头 `FEXCore/fextl/pmr.h`，用
+                           `__has_include(<memory_resource>)` 守卫；缺时给出
+                           memory_resource / polymorphic_allocator（含
+                           new_object/delete_object/allocate_bytes/uses-allocator
+                           construct）/ new_delete_resource / get|set_default_resource
+                           / 容器别名；把上游三处 `#include <memory_resource>`
+                           改指到该头。
+                        ⓓ `std::function` 条件 noexcept：libc++ 15 的转换构造
+                           非 noexcept，FEX 的 `fextl::move_only_function` 依赖
+                           "小 callable 不分配"的编译期证明。按 libc++ 的
+                           内联缓冲定义（__functional/function.h:
+                           aligned_storage<3*sizeof(void*)>）补一条
+                           `sizeof(F)<=3*sizeof(void*) && alignof(F)<=alignof(void*)`
+                           判据，恢复"小对象直接内联、大对象走自研分配器"的分支，
+                           并用 `std::invoke` 让包装分支也能调用成员函数指针。
+
+                        【铁律】不得直接把 libc++ 内部实现改造成"跳过设施"（如把
+                        pmr 全部换成 malloc）——那会改变上游 allocator 语义与
+                        性能契约；也不得用 -stdlib=libstdc++ 混搭。
+rec_command:            echo '#include <memory_resource>' | clang++ -std=c++20 -x c++ - -fsyntax-only
+                        # 期望（修复前）: fatal error: 'memory_resource' file not found
+                        # 见 archives/f/fex-emu/2608/patches/0002-add-atomic-ref-shim.patch
+                        #    archives/f/fex-emu/2608/patches/0003-add-pmr-shim.patch
+rec_auto_fix:           false
+rec_impl:               in-tree-shim-headers-plus-feature-guards
+
+fallback_priority:      2
+fallback_approach:      overlay-upstream-libcxx-headers
+fallback_description:   若缺失面进一步扩大（例如需要完整 <format>），可叠加
+                        与 libc++ 同版本（LLVM 15.0.4）的上游头文件目录，并保留
+                        OHOS 的 __config_site（_LIBCPP_ABI_VERSION/_LIBCPP_ABI_NAMESPACE
+                        必须沿用），否则 ABI 不一致。风险：跨版本混搭（如 llvm@21
+                        头 + libc++15 库）会 do_dlsym 失败（实测 clang 21 bindings
+                        对 libc++15 报 clang_CXXMethod_isDeleted 缺失）。属最后手段。
+fallback_command:       见 notes.md「libc++ 叠加层评估」小节
+fallback_auto_fix:      false
+fallback_impl:          libcxx-header-overlay
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       -stdlib=libstdc\+\+|混用 libstdc\+\+.*libc\+\+
+forbid_1_reason:        本环境唯一可用 C++ 运行库是 OHOS libc++；混搭会引入 ABI 不一致
+forbid_1_consequence:   运行期崩溃或链接期符号缺失，且无法复现上游行为
+forbid_2_pattern:       把 std::pmr::.*替换为 malloc|删掉.*atomic_ref.*改成裸读写
+forbid_2_reason:        pmr 是上游的 arena/性能契约，atomic_ref 是 JIT 回填代码的同步
+                        原语；替换即改变语义（丢内存序、丢批量释放语义）
+forbid_2_consequence:   适配"看起来过了"但行为不等价，重编译器正确性不成立
+forbid_3_pattern:       改上游.*#include <memory_resource>.*为.*删除
+forbid_3_reason:        应按"缺口补设施"路径解决；删头会让其它平台编译失败
+forbid_3_consequence:   破坏跨平台可构建性，审查拒收
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             DRAFT-ada-3.3.0-ohos-ranges-algorithm-polyfill（同一
+                        libc++ ranges 缺口的另一实例）、
+                        DRAFT-fex-emu-2608-ohos-musl-uapi-runtime-differences（同一
+                        库的另一类 OHOS 差异）
+caused_by:
+conflicts_with:
+prerequisite_of:        任何依赖 C++17/20 现代设施的大型项目在 OHOS libc++15 上的适配
+
+# ═══ 元数据 ═══
+verification_cmd:       cd archives/f/fex-emu/2608 && conan create . \
+                        -pr:h=<repo>/ci/conan/profiles/ohos-aarch64 \
+                        -pr:b=<repo>/ci/conan/profiles/ohos-aarch64 --build=missing
+                        # 期望: rc=0，且 test_package smoke 通过
+doc_file:               knowledge/drafts/DRAFT-fex-emu-2608-ohos-libcxx-missing-cxx-facilities.md
+last_updated:           2026-09-30
+source_event:           feat/fex-emu-2608 适配：日志见
+                        learninglog/20260929fex-emu-2608/证据七环.md（F2/F3/F4/F5/F6/F7）
+authors:                Hawkninja21
+source_pr:              （本单 PR 号待填）
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-30

@@ -1,0 +1,172 @@
+--- a/Rendering/OpenGL2/vtkOpenGLShaderCache.cxx
++++ b/Rendering/OpenGL2/vtkOpenGLShaderCache.cxx
+@@ -1,13 +1,14 @@
+ // SPDX-FileCopyrightText: Copyright (c) Ken Martin, Will Schroeder, Bill Lorensen
+ // SPDX-License-Identifier: BSD-3-Clause
+ #include "vtkOpenGLShaderCache.h"
++#include <regex>
+ #include "vtk_glew.h"
+ 
+ #include "vtkObjectFactory.h"
+ #include "vtkOpenGLError.h"
+ #include "vtkOpenGLHelper.h"
+ #include "vtkOpenGLRenderWindow.h"
+ #include "vtkShader.h"
+ #include "vtkShaderProgram.h"
+ 
+ #include <cmath>
+@@ -91,31 +92,35 @@
+   // first handle renaming any Fragment shader inputs
+   // if we have a geometry shader. By default fragment shaders
+   // assume their inputs come from a Vertex Shader. When we
+   // have a Geometry shader we rename the fragment shader inputs
+   // to come from the geometry shader
+   if (!GSSource.empty())
+   {
+     vtkShaderProgram::Substitute(FSSource, "VSOut", "GSOut");
+   }
+ 
+-#ifdef GL_ES_VERSION_3_0
+-  std::string version = "#version 300 es\n";
+-#else
+   if (!this->OpenGLMajorVersion)
+   {
+     this->OpenGLMajorVersion = 3;
+     this->OpenGLMinorVersion = 2;
+     glGetIntegerv(GL_MAJOR_VERSION, &this->OpenGLMajorVersion);
+     glGetIntegerv(GL_MINOR_VERSION, &this->OpenGLMinorVersion);
+   }
+ 
++#ifdef GL_ES_VERSION_3_0
++  // ES 3.2 adds the geometry stage and fragment primitive IDs.
++  std::string version = this->OpenGLMajorVersion > 3 ||
++      (this->OpenGLMajorVersion == 3 && this->OpenGLMinorVersion >= 2)
++    ? "#version 320 es\n"
++    : "#version 300 es\n";
++#else
+   std::string version = "#version 150\n";
+   if (this->OpenGLMajorVersion == 3 && this->OpenGLMinorVersion == 1)
+   {
+     version = "#version 140\n";
+   }
+ #endif
+ 
+   vtkShaderProgram::Substitute(VSSource, "//VTK::System::Dec",
+     version +
+       "#ifndef GL_ES\n"
+@@ -125,26 +130,30 @@
+       "#endif // GL_ES\n"
+       "#define attribute in\n" // to be safe
+       "#define varying out\n"  // to be safe
+   );
+ 
+   vtkShaderProgram::Substitute(FSSource, "//VTK::System::Dec",
+     version +
+       "#ifdef GL_ES\n"
+       "#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
+       "precision highp float;\n"
++      "precision highp int;\n"
+       "precision highp sampler2D;\n"
+       "precision highp sampler3D;\n"
++      "precision highp samplerCube;\n"
+       "#else\n"
+       "precision mediump float;\n"
++      "precision highp int;\n"
+       "precision mediump sampler2D;\n"
+       "precision mediump sampler3D;\n"
++      "precision mediump samplerCube;\n"
+       "#endif\n"
+ #ifdef GL_ES_VERSION_3_0
+       "#define texelFetchBuffer(a,b) texelFetch(a, Get2DIndexFrom1DIndex(b, textureSize(a, 0)), "
+       "0)\n"
+ #else
+       "#define texelFetchBuffer texelFetch\n"
+ #endif
+       "#define texture1D texture\n"
+       "#define texture2D texture\n"
+       "#define texture3D texture\n"
+@@ -160,28 +169,37 @@
+       "#endif\n"
+       "#endif // GL_ES\n"
+       "#define varying in\n" // to be safe
+   );
+ 
+   vtkShaderProgram::Substitute(GSSource, "//VTK::System::Dec",
+     version +
+       "#ifdef GL_ES\n"
+       "#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
+       "precision highp float;\n"
++      "precision highp int;\n"
++#ifdef GL_ES_VERSION_3_0
++      "#define texelFetchBuffer(a,b) texelFetch(a, Get2DIndexFrom1DIndex(b, textureSize(a, 0)), 0)\n"
++#endif
+       "#else\n"
+       "precision mediump float;\n"
++      "precision highp int;\n"
+       "#endif\n"
+       "#else // GL_ES\n"
+       "#define highp\n"
+       "#define mediump\n"
+       "#define lowp\n"
+-      "#endif // GL_ES\n");
++      "#endif // GL_ES\n"
++#ifndef GL_ES_VERSION_3_0
++      "#define texelFetchBuffer texelFetch\n"
++#endif
++    );
+ 
+   unsigned int count = 0;
+   std::string fragDecls;
+   bool done = false;
+   while (!done)
+   {
+     std::ostringstream src;
+     std::ostringstream dst;
+     src << "gl_FragData[" << count << "]";
+     // this naming has to match the bindings
+@@ -194,31 +212,34 @@
+       src.str("");
+       src.clear();
+       src << count;
+       fragDecls += "layout(location = " + src.str() + ") ";
+ #endif
+       fragDecls += "out vec4 " + dst.str() + ";\n";
+       count++;
+     }
+   }
+ #ifdef GL_ES_VERSION_3_0
+-  vtkShaderProgram::Substitute(FSSource, "samplerBuffer", "sampler2D");
+-  vtkShaderProgram::Substitute(FSSource, "void main()",
+-    "ivec2 Get2DIndexFrom1DIndex(int idx, ivec2 texSize)\n"
+-    "{\n"
+-    "  float w = float(texSize.x);\n"
+-    "  float idx_f = float(idx);\n"
+-    "  int i = int(mod(idx_f, w));\n"
+-    "  int j = (idx - i) / texSize.x;\n"
+-    "  return ivec2(i, j);\n"
+-    "}\n"
+-    "void main()");
++  for (std::string* stage : { &VSSource, &GSSource, &FSSource })
++  {
++    // Match complete sampler types, including integer samplers and an
++    // existing precision qualifier, without rewriting identifier substrings.
++    static const std::regex bufferSampler(
++      R"(\b(?:(?:lowp|mediump|highp)\s+)?([iu]?)samplerBuffer\b)");
++    *stage = std::regex_replace(*stage, bufferSampler, "highp $1sampler2D");
++    vtkShaderProgram::Substitute(*stage, "void main()",
++      "ivec2 Get2DIndexFrom1DIndex(int idx, ivec2 texSize)\n"
++      "{\n"
++      "  return ivec2(idx % texSize.x, idx / texSize.x);\n"
++      "}\n"
++      "void main()");
++  }
+ #endif
+   vtkShaderProgram::Substitute(FSSource, "//VTK::Output::Dec", fragDecls);
+   return count;
+ }
+ 
+ vtkShaderProgram* vtkOpenGLShaderCache::ReadyShaderProgram(
+   std::map<vtkShader::Type, vtkShader*> shaders, vtkTransformFeedback* cap)
+ {
+   std::string VSSource = shaders[vtkShader::Vertex]->GetSource();
+   std::string FSSource = shaders[vtkShader::Fragment]->GetSource();

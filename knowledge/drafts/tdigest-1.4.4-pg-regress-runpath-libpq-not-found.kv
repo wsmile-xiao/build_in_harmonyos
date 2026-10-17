@@ -1,0 +1,97 @@
+# ═══ Draft knowledge entry — conan postgresql 包内 pg_regress 的 RUNPATH 只对 bin/ 生效 ═══
+# Software: tdigest 1.4.4 (PostgreSQL extension, upstream test suite via pg_regress)
+# Evidence: OHOS PC aarch64, postgresql/18.3 @ ohpcd, pg_regress 运行期报 libpq.so.5 缺失
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: tdigest-1.4.4-pg-regress-runpath-libpq-not-found
+severity: 2
+category: build-system, testing, linking, dependency, conan
+trigger_tool: make|test|runtime|pg_regress|pg_config
+phase: testing|runtime
+
+title: 用 conan postgresql 包跑上游 pg_regress 时，需为 pg_regress 显式设置 LD_LIBRARY_PATH
+
+keywords: pg_regress, installcheck, PGXS, RUNPATH, $ORIGIN/../lib, libpq.so.5, LD_LIBRARY_PATH, live server test
+
+error_signature: Error loading shared library libpq\.so\.5|symbol not found.*PQ|pg_regress.*Error 127|could not load library.*libpq
+
+match_keywords: pg_regress, installcheck, PGXS, RUNPATH, $ORIGIN/../lib, libpq.so.5, LD_LIBRARY_PATH, postgresql conan package, exit 127
+
+root_cause: |
+  PostgreSQL 以 `--enable-rpath --prefix=/` 构建时，可执行文件的 RUNPATH 形如
+  `//lib:$ORIGIN/../lib`，其中相对项**只对 `<prefix>/bin/` 下的程序成立**。
+  但 `pg_regress` 并不在 bin/，它位于 `<prefix>/lib/postgresql/pgxs/src/test/regress/`，
+  于是 `$ORIGIN/../lib` 解析成 `<prefix>/lib/postgresql/pgxs/src/test/lib`（不存在），
+  它依赖的 `libpq.so.5`（实际在 `<prefix>/lib/`）找不到：
+  `Error loading shared library libpq.so.5: (needed by .../pg_regress)` /
+  `Error relocating .../pg_regress: PQpingParams: symbol not found`，
+  make 以 `exit 127` 结束（PGXS `installcheck` 目标 433 行）。
+
+affected_scope: |
+  任何"用 conan postgresql 包提供 PostgreSQL 运行环境、再用 PGXS 的
+  `make installcheck` / 直接调用 pg_regress 跑上游回归套件"的扩展配方，
+  在 conan 包被复制/重定位到任意目录时都会命中。
+
+verification_cmd: |
+  readelf -d "$PGROOT/lib/postgresql/pgxs/src/test/regress/pg_regress" | grep -E "RUNPATH|NEEDED"
+  # RUNPATH 含 $ORIGIN/../lib、NEEDED 含 libpq.so.5 → 直接运行必失败
+
+rec_priority: 1
+rec_approach: export-LD_LIBRARY_PATH-to-pg-lib-for-test-process
+rec_description: |
+  测试脚本在调用 pg_regress 前导出 `LD_LIBRARY_PATH=<PGROOT>/lib`，
+  让 pg_regress 通过加载器搜索路径找到 libpq.so.5。不改动 PostgreSQL 包内容，
+  也不依赖 LD_LIBRARY_PATH 影响被测模块（模块的 DT_NEEDED 只有 libc）。
+rec_command: |
+  export LD_LIBRARY_PATH="$PGROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  ( cd "$TESTDIR" && "$PGROOT/lib/postgresql/pgxs/src/test/regress/pg_regress" \
+      --inputdir="$TESTDIR" --outputdir="$TESTDIR" --bindir="$PGROOT/bin" \
+      --dbname=contrib_regression $REGRESS )
+rec_auto_fix: false
+rec_impl: test-harness-env
+
+fallback_priority: 2
+fallback_approach: copy-libpq-next-to-pg_regress
+fallback_description: |
+  把 libpq.so.5* 复制到 pg_regress 同级目录，使 `$ORIGIN/../lib` 之外的
+  同目录查找命中；会污染/复制大文件，仅在无法设置环境变量（如直接执行无 shell 包装）时使用。
+fallback_command: cp -a "$PGROOT/lib/libpq.so.5"* "$PGROOT/lib/postgresql/pgxs/src/test/regress/"
+fallback_auto_fix: false
+fallback_impl: file-copy-workaround
+
+forbid_1_pattern: 修改 conan 缓存内的 postgresql 包（patch/替换二进制）|rpath 后处理 pg_regress
+forbid_1_reason: conan 缓存包是只读基线，改动会造成校验失败、并发任务互相污染，且 CI 与本地行为不一致。
+forbid_1_consequence: 包完整性校验失败 / CI 与本地结果不可复现。
+forbid_2_pattern: 用系统安装的 pg_regress 或跳过 installcheck
+forbid_2_reason: 系统无 OHOS 版 PostgreSQL；跳过即等于没有执行上游测试（R51 硬性不通过）。
+forbid_2_consequence: 上游测试覆盖率证据缺失，PR 被评审拒绝。
+
+principles: P012, P014
+
+causes: []
+caused_by: []
+similar_to: []
+conflicts_with: []
+prerequisite_of: []
+
+doc_file: doc/tdigest-1.4.4-pg-regress-runpath-libpq-not-found.md
+
+last_updated: 2026-09-24
+source_event: tdigest 1.4.4 OHOS 适配：make installcheck 首次执行失败（exit 127）
+
+evidence: |
+  tdigest 1.4.4 + postgresql/18.3 @ ohpcd（OHOS PC aarch64）：
+  - `readelf -d <PGROOT>/lib/postgresql/pgxs/src/test/regress/pg_regress`
+      RUNPATH: [//lib:$ORIGIN/../lib]   NEEDED: [libpq.so.5] [libc.so]
+  - 失败原文（make installcheck，exit=2，make 报 Error 127）：
+      Error loading shared library libpq.so.5: (needed by .../pgxs/src/test/regress/pg_regress)
+      Error relocating .../pg_regress: PQpingParams: symbol not found
+      make: *** [pgxs.mk:433: installcheck] Error 127
+  - 加 `LD_LIBRARY_PATH=<PGROOT>/lib` 后同一命令立即进入用例执行阶段，
+      上游 10 个回归用例全部执行（首轮 9/10，唯一失败项根因见同批草稿
+      `tdigest-1.4.4-upstream-pg-test-hardcoded-tmp-readonly`），修复该项后 10/10。
+
+authors:
+source_pr:
+source_commit:
+draft_date: 2026-09-24

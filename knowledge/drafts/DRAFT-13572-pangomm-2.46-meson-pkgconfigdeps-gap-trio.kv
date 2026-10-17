@@ -1,0 +1,155 @@
+#====================================================================
+# DRAFT-13572-pangomm-2.46-meson-pkgconfigdeps-gap-trio
+#   conan 2 PkgConfigDeps 与 meson 依赖探测的三类缺口及配方侧补齐
+# 来源: PR feat(pangomm-2.46): 2.46.5 适配 HarmonyOS PC（任务 13572）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-13572-pangomm-2.46-meson-pkgconfigdeps-gap-trio
+trigger_tool:           conan|meson|pkg-config
+phase:                  generate|build|configure
+error_signature:        meson.*get_variable.*gmmprocdir.*not defined|
+                         Dependency.*pangocairo.*found: NO|
+                         cpp_compiler.find_library.*not found|
+                         pkg-config.*requires.*unknown package|
+                         meson.build:.*ERROR.*dependency.*lookup failed
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               1
+category:               conan2, pkgconfigdeps, meson, generate-hook
+match_keywords:         PkgConfigDeps, get_variable, gmmprocdir,
+                        dependency('pangocairo'), alias pc, 转发型 .pc,
+                        find_library, extra_defs, pkg_config_custom_content,
+                        sharedlinkflags, exelinkflags, MesonToolchain
+title:                  conan 2 PkgConfigDeps 生成的 .pc 与上游 meson 探测方式有「自定义变量 / 别名 pc / find_library」三类缺口，一律在配方 generate() 里补齐
+prescan_pattern:        get_variable\(|dependency\('[a-z0-9-]+'\)|find_library
+prescan_globs:          **/meson.build, **/conanfile.py
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             conan 2 的 PkgConfigDeps 按 package_info 的
+                        pkg_config_name 生成 .pc，但只写**标准变量**
+                        （prefix/libdir/includedir/Libs/Cflags/Requires），
+                        而 GNOME mm 家族等上游 meson 项目的探测方式超出
+                        这个子集，造成三类 configure 期缺口：
+                        ① **自定义 pc 变量丢失**：上游 meson.build 调
+                           glibmm_dep.get_variable('gmmprocdir')（pangomm
+                           2.46.5 L123、2.50.1 L140 无条件调用），上游自家
+                           glibmm.pc.in 里 gmmprocdir=${libdir}/glibmm-2.4/
+                           proc，但 conan 生成的 .pc 不含该变量 →
+                           meson configure 报 get_variable 未定义；
+                        ② **别名 pc 查找落空**：上游用
+                           dependency('pangocairo')，而 pango 配方的
+                           PkgConfigDeps 只生成 pango.pc（组件名不感知）→
+                           Dependency found: NO；
+                        ③ **编译器 find_library 工具库不在搜索路径**：
+                           pangomm 的 tools/extra_defs_gen 用
+                           cpp_compiler.find_library('glibmm_generate_
+                           extra_defs-2.4') 找 glibmm 包内工具库（glibmm
+                           侧 subdir('tools') 无条件构建安装），该库只在
+                           conan 的 glibmm package_folder/lib，meson 原生
+                           不搜 → 找不到后走 dependency('', fallback:)
+                           直接报错（wrap_mode=nodownload 下必炸）。
+                        三类缺口都应在**本包配方**的 generate() 里补齐，
+                        不改上游、不加 patch。
+
+affected_scope:         所有用 meson + conan 2 PkgConfigDeps 的包，尤其是
+                        GNOME mm 家族（pangomm/gtkmm/atkmm 全系对 glibmm
+                        gmmprocdir、pango 别名 pc、extra_defs 工具库同款需求）。
+                        仓内实证：pangomm/2.50.1 模板已含①②③全套机制，
+                        本任务 pangomm-2.46 2.46.5 换 ABI 标识复用成功。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           patch-generated-pc-files-in-generate
+rec_description:        【缺口① 自定义 pc 变量】generate() 里 PkgConfigDeps
+                        生成后，读回依赖方 pc 文件，若缺该变量则 append：
+                        for _pv in ['glibmm-2.4:gmmprocdir=${libdir}/
+                        glibmm-2.4/proc']: 取 pc 名与 k=v，存在该 pc 且
+                        未含变量名时追加一行（变量取值照抄上游 .pc.in 的
+                        同名变量；libdir 引用生成 pc 里已有的 ${libdir}）。
+                        【缺口② 别名 pc】上游 dependency('pangocairo') 而
+                        PkgConfigDeps 只出 pango.pc：写转发型 .pc
+                        「Name/Description/Requires: pango/Version」四行，
+                        Version 从 pango.pc 实测读出（pkg-config 0.29.2
+                        校验三字段缺一不可；meson 的 version: 要求也靠它
+                        满足）。pangocairo=pango 与 pangoft2=pango 两个
+                        别名一次都建（新线模板同款）。
+                        【缺口③ find_library 工具库】把提供工具库的依赖
+                        （glibmm）的 cpp_info.libdirs 注入
+                        tools.build:sharedlinkflags/exelinkflags（append
+                        '-L<libdir>'，经 MesonToolchain 落入 native file
+                        的 cpp_link_args/c_link_args），使 meson 的
+                        find_library 能搜到 glibmm_generate_extra_defs-*。
+                        【配套】同栈钉版冲突 override=True 统一
+                        （libsigc/2.12.1、fontconfig/2.18.1.1，见 ABI 线
+                        草稿）；MesonToolchain 固定 maintainer-mode=false
+                        + wrap_mode=nodownload + build-documentation=false，
+                        生成后 _inject_meson_binaries() 补 ar/ranlib/
+                        pkg-config 绝对路径（工具链不在 PATH 的 worker）。
+rec_command:            # 生成后核验：三缺口是否都已补齐
+                        grep -c gmmprocdir <gen>/glibmm-2.4.pc        # 期望 >=1
+                        cat <gen>/pangocairo.pc                        # 期望四行转发
+                        grep sharedlinkflags <gen>/conan_meson_native.ini
+rec_auto_fix:           false
+rec_impl:               generate-hook-pc-patching
+
+fallback_priority:      2
+fallback_approach:      pkg-config-path-fallback
+fallback_description:   若 worker 上 pkg-config 二进制缺失/不在 PATH（meson
+                        看不到任何 PkgConfigDeps 产物），先 _inject_meson_
+                        binaries() 补 pkg-config 绝对路径；仍失败则检查
+                        tools.gnu:pkg_config conf 与 PATH，不要绕开
+                        PkgConfigDeps 手写全部 .pc（维护性差且 rule 审查挂）。
+fallback_command:       shutil.which("pkg-config") || shutil.which("pkgconf")
+fallback_auto_fix:      false
+fallback_impl:          human-clarification
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       patch.*meson.build.*改掉.*get_variable|patch.*改.*dependency\(
+forbid_1_reason:         改上游源码是最后手段：三类缺口都是 conan 生成侧缺失，
+                        配方 generate() 补齐即解决且不改上游；patch 会背上
+                        上游升级维护包袱并违反最小改动原则
+forbid_1_consequence:   配方 patch 包袱 + 上游升级即碎，审查 rule 风险
+forbid_2_pattern:       转发.*\.pc.*只写.*Requires.*一行|少.*Name|少.*Version
+forbid_2_reason:         pkg-config 0.29.2 校验转发 pc 必须有
+                        Name/Description/Version 三字段，缺失直接拒绝解析；
+                        Version 空还会挂掉 meson 的 version: 断言
+forbid_2_consequence:   pkg-config 解析失败 → dependency found: NO
+forbid_3_pattern:       find_library.*失败.*就.*去.*下载.*glibmm.*源码.*重编
+forbid_3_reason:         工具库已在 glibmm 制品包内（subdir('tools') 无条件
+                        构建安装），只需让链接器看得见路径（-L 注入）；
+                        重编依赖制品违反复用原则（E542 精神）
+forbid_3_consequence:   制品重复、版本漂移、构建时间爆炸
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             DRAFT-13572-pangomm-2.46-legacy-mm-abi-line-matching
+                        （ABI 线选对依赖之后的下游补齐，本任务两草稿成对）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       grep -c gmmprocdir <generators_folder>/glibmm-2.4.pc && \
+                        cat <generators_folder>/pangocairo.pc
+doc_file:               knowledge/drafts/DRAFT-13572-pangomm-2.46-meson-pkgconfigdeps-gap-trio.md
+last_updated:           2026-09-27
+source_event:           任务 13572 pangomm-2.46 2.46.5 适配：meson 上游
+                        L123 get_variable('gmmprocdir') 无条件调用 +
+                        dependency('pangocairo') 别名查找 +
+                        tools/extra_defs_gen find_library
+                        (glibmm_generate_extra_defs-2.4)；配方 generate()
+                        三招补齐，真机八门禁 Verdict PASS 全实录
+authors:                LIMInGZE666
+source_pr:              13572
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-27

@@ -1,0 +1,173 @@
+# ═══ Draft knowledge entry — 给 Makefile 注入 -I/-L 必须走环境变量：命令行 `make CFLAGS=` 会顶掉上游 `+=` 默认值；tag 归档无 .git 时 `git describe` 条件赋值静默回退，产物自报版本与 tag 不符 ═══
+# Timestamp: 2026-09-21
+# Software: lemonbar 1.5 (LemonBoy/bar，基于 xcb 的 X11 状态栏)
+# Gate: 构建期参数注入（构建可行性与产物正确性判定）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-lemonbar-1.5-makefile-env-flags-and-git-describe-version-fallback
+trigger_tool:           make|cc|clang|ld
+phase:                  build
+error_signature:        use of undeclared identifier.*VERSION|
+                         make: \*\*\* .*VERSION.*No such file|
+                         CFLAGS=.*-D.*make|make\s+CFLAGS=|make\s+LDFLAGS=|
+                         VERSION\s*=\s*1\.4|git describe --always|
+                         --version 输出与 tag 不一致|version.*mismatch.*tag
+
+severity:               2
+category:               build, makefile, flags, conan, portability, versioning
+match_keywords:         makefile, CFLAGS +=, LDFLAGS +=, command line variable, environment
+                         variable, override directive, git describe, GIT_DESC, tag tarball,
+                         no .git, VERSION fallback, GNU make precedence, flag injection,
+                         -I -L injection, DT_RPATH, $ORIGIN, OHOS clang, lemonbar
+
+title:                  向 Makefile 工程注入编译/链接参数只能走**环境变量**——命令行
+                        `make CFLAGS=...` 会把上游 `CFLAGS += ` 的默认值一起顶掉；
+                        另外 tag 归档里没有 `.git` 时，`GIT_DESC=$(shell git describe)`
+                        这类条件赋值必然失配，产物会静默自报硬编码的旧版本号
+
+root_cause: >
+  两个独立的「Makefile 变量优先级」陷阱，在同一个包里同时命中。
+
+  (1) **命令行变量 = 被 override，Makefile 的 `+=` 不再追加。**
+  GNU make 里命令行赋值的变量等价于被 `override` 声明：
+      CFLAGS += -Wall -std=c99 -Os -DVERSION="\"$(VERSION)\"" -D_GNU_SOURCE
+  这行在 `make`（无参）时生效；但一旦写成 `make CFLAGS='-I<dep> -DXXX'`，
+  Makefile 里的 `+=` 对 CFLAGS **完全失效**，上游默认的 -Wall/-std=c99/-Os/
+  -DVERSION/-D_GNU_SOURCE 全部丢失。最钝的后果是 `-DVERSION` 丢失后
+  `printf("lemonbar version %s\n", VERSION)` 里的 VERSION 成了未定义标识符，
+  编译直接失败（int 版写法则是静默取到 0/空串）。
+  来自**环境变量**的 CFLAGS/LDFLAGS 则不同：Makefile 的 `+=` 照常在其上追加。
+  lemonbar 上游自己的流水线 .github/workflows/check.yml 就是
+  `CFLAGS='-DWITH_XINERAMA=1' make` 的命令行写法 —— 与它想打开的 XINERAMA
+  宏无关，这个写法本身顺带把 -DVERSION 顶掉了。
+  正确姿势：`-I`/`-L`/`-Wl,...` 经 `os.environ["CFLAGS"]/["LDFLAGS"]` 注入
+  （并在注入前 `os.environ.get(...)` 追加而非替换），只有**语义上属于构建参数
+  选择**的变量（如 VERSION）才用命令行变量传。
+
+  (2) **tag 归档无 `.git` → `git describe` 条件赋值静默失配。**
+      VERSION = 1.4
+      GIT_DESC=$(shell test -d .git && git describe --always 2>/dev/null)
+      ifneq "$(GIT_DESC)" ""
+          VERSION=$(GIT_DESC)
+      endif
+  上游靠 `git describe` 得到「1.5-<n>-g<sha>」这样的版本串，所以 Makefile 里的
+  默认常量从 1.4 之后**再没上调过**。从 GitHub tag 归档（或任何 tarball）里
+  构建时没有 `.git`，`GIT_DESC` 为空 → 条件赋值不进 → VERSION 回落到 1.4。
+  构建成功、链接成功、测试全绿，**唯一异常是产物自报的版本号错了**，没有任何
+  报错信号。lemonbar 的现场：适配 v1.5，产物报 "lemonbar version 1.4"。
+  判定手段是读 Makefile 里有没有 `$(shell ... git describe ...)` 之类的
+  版本探测 + 一个硬编码回退值，而不是看构建日志。
+
+affected_scope: >
+  一切「上游用 Makefile 的 `+=` 累加编译/链接参数，而打包方向 make 传参」的场景；
+  以及一切「自报版本由 `git describe`/`git log`/`version.sh` 在构建期探测、
+  并且带一个硬编码回退值」的 tag 归档构建。
+  判据一（参数注入）：`grep -nE '^(CFLAGS|CPPFLAGS|LDFLAGS|CXXFLAGS)\s*\+=' Makefile`
+  有输出 → 这些变量**只能**经环境变量注入，命令行注入会顶掉默认值。
+  判据二（版本回退）：`grep -nE 'git describe|git rev-parse|git log' Makefile`
+  有输出且伴随 `VAR = <常量>` 形态的默认值 → tag/tarball 构建必然回退到该常量。
+  反向判据：Makefile 里用 `override CFLAGS += ...` 或 `CFLAGS := $(CFLAGS) ...`
+  时命令行注入不会丢默认值；上游把版本写死在源码/头文件里时不存在版本回退。
+  容易踩的推断：看到「构建成功」就认为参数注入没问题 —— (1) 丢 -D 宏有时不报错，
+  (2) 版本号错了更不会报错。
+
+verification_cmd: >
+  # 判据一：Makefile 是否用 += 累加参数（决定注入通道）
+  grep -nE '^(CFLAGS|CPPFLAGS|LDFLAGS)\s*\+=' Makefile
+  #   有输出 → 必须走环境变量；命令行 make CFLAGS= 会顶掉这些默认值
+
+  # 判据二：默认值有没有被真正带上（用 dry-run 看真实编译命令行）
+  make -n VERSION=1.5 2>/dev/null | grep -m1 -- '-DVERSION'   # 期望命中 -DVERSION="1.5"
+  make -n CFLAGS='-DWITH_XINERAMA=1' 2>/dev/null | grep -c -- '-DVERSION'  # 期望 0 → 被顶掉
+
+  # 判据三：版本是否靠 git 探测（决定 tag 归档会不会回退）
+  grep -nE 'git describe|git rev-parse|GIT_DESC' Makefile
+  test -d .git && echo "有 .git（不会回退）" || echo "无 .git → 条件赋值必失配，VERSION 回退硬编码值"
+
+  # 判据四：产物自报的版本（需要可执行的环境；无 X 时可能不可达）
+  ./lemonbar -h 2>&1 | head -1    # 期望 "lemonbar version 1.5"
+
+  # 判据五：运行期库靠 $ORIGIN 而不是 LD_LIBRARY_PATH 找到
+  readelf -d ./lemonbar | grep -E 'RPATH|RUNPATH'   # 期望含 $ORIGIN 且无绝对构建路径
+
+rec_priority:           1
+rec_approach:           inject-flags-via-environment-and-pass-only-semantic-knobs-on-the-command-line
+rec_description: >
+  两条通道各归其位：
+    (A) `-I`/`-L`/`-Wl,-rpath,'$ORIGIN'` 等**路径与链接器开关**经环境变量注入，
+        且在注入前先读 `os.environ.get("CFLAGS", "")` 追加，绝不整体替换；
+    (B) `VERSION=<tag 版本>` 这类**语义参数**用 make 命令行变量传，它的优先级
+        最高，正好用来盖掉 git-describe 回退值。
+  同时把 rpath 写成 `-Wl,--disable-new-dtags -Wl,-rpath,'$ORIGIN'`：
+  单引号必须保留在传给 make 的字符串里，因为链接行是由 shell 执行的，裸
+  `$ORIGIN` 会被 shell 展开成空串；`--disable-new-dtags` 强制生成 DT_RPATH
+  而非 DT_RUNPATH，兼容性更好（OHOS musl 两者都认，但仍以 RPATH 稳妥）。
+  打包时把运行期 .so 一并装入 bin/，让 $ORIGIN 有东西可解析。
+  自检：`make -n VERSION=1.5 | grep -- -DVERSION` 必须命中。
+rec_command:            >
+  os.environ["CFLAGS"]  = (os.environ.get("CFLAGS","")  + " -I<dep-include>").strip()
+  os.environ["LDFLAGS"] = (os.environ.get("LDFLAGS","") + " -L<dep-lib>"
+                           + " -Wl,--disable-new-dtags -Wl,-rpath,'$ORIGIN'").strip()
+  self.run("make -j1 CC={cc} VERSION={version}".format(...))
+rec_auto_fix:           false
+rec_impl:               recipe
+
+fallback_priority:      2
+fallback_approach:      pass-everything-on-the-command-line-and-re-declare-upstream-defaults-by-hand
+fallback_description:   >
+  如果出于某种原因必须用命令行变量（例如构建系统只认命令行），那么必须把上游
+  `+=` 里被顶掉的那一整套默认值**逐条抄回**命令行，并且抄的是当前上游版本的内容
+  （`make CFLAGS='-Wall -std=c99 -Os -DVERSION="\"1.5\"" -D_GNU_SOURCE -I...'`）。
+  不可取：这是把「上游默认值」在配方里复制了一份，上游一改就静默漂移，
+  而且漏抄一条（例如 -D_GNU_SOURCE）只会表现为功能异常而非编译失败，极难发现。
+  仅在没有环境变量通道时才用，且必须在 notes.md 里登记为技术债务
+  （P-CFLAGS-001）。
+fallback_command:       （不推荐）make -j1 CC=<cc> CFLAGS='-Wall -std=c99 -Os -DVERSION="\"1.5\"" -D_GNU_SOURCE -I<dep>'
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       make\s+.*(CFLAGS|CPPFLAGS|LDFLAGS|CXXFLAGS)\s*=\s*[^|]*-I|make\s+.*(CFLAGS|LDFLAGS)\s*=\s*[^|]*-D
+forbid_1_reason:        命令行变量会被 make 当作 override，Makefile 里 `CFLAGS += `
+                        的上游默认值（-Wall/-std=c99/-Os/-DVERSION/-D_GNU_SOURCE）
+                        全部失效；丢了 -DVERSION 还可能直接编译不过。正确通道是
+                        环境变量。
+forbid_1_consequence:   上游默认编译行为被静默剥离：优化级别、标准版本、功能宏
+                        全变，产物与上游 `make` 不等价，且症状（功能异常/未定义
+                        标识符）离原因很远。
+
+forbid_2_pattern:       sed\s+-i.*VERSION\s*=\s*1\.|把 Makefile 里的 VERSION 常量改成 1\.5|改上游源码里的版本常量
+forbid_2_reason:        直接改上游 Makefile 的版本常量，是把「这个归档没有 .git」
+                        的构建环境问题写成了上游源码变更；非归档场景（有 .git 时
+                        `git describe` 会覆盖它）行为反而被破坏，上游升级必冲突。
+forbid_2_consequence:   适配不可上游化（P005），补丁成为长期维护负担且语义错误。
+
+forbid_3_pattern:       chmod.*\$ORIGIN|\$ORIGIN.*未加引号|LD_LIBRARY_PATH=\S+.*(test|运行|rpath)
+forbid_3_reason:        `$ORIGIN` 不加单引号传给 make 会被 shell 展开成空串，
+                        rpath 变成 `-Wl,-rpath,` 而被静默忽略（不报错）；而依赖
+                        LD_LIBRARY_PATH 承载运行期 .so 在 OHOS 无效 —— musl 加载器
+                        忽略该变量。
+forbid_3_consequence:   本机（有 LD_LIBRARY_PATH 生效的 glibc 环境）测试通过、
+                        OHOS 上找不到共享库，适配不可复现。
+
+principles:             P014, P005
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-unuran-1.12.0-configure-auxdir-triplet-patch-and-doc-subdir-make
+                        （同族：Makefile/autotools 工程的「构建期参数与上游默认值
+                         的优先级」问题；本条聚焦 make 变量通道选择 + git 版本回退）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-lemonbar-1.5-makefile-env-flags-and-git-describe-version-fallback.md
+last_updated:           2026-09-21
+source_event:           archives/l/lemonbar/1.5 适配（tag 归档无 .git → 产物自报 1.4；
+                        上游 CI 用命令行 CFLAGS 顶掉 -DVERSION）
+
+authors:                2301_76770579
+source_pr:              11594
+source_commit:          0d5a7275f
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-21

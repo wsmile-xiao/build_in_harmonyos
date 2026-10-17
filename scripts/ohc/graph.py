@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from .models import parse_kv_file, parse_index_tsv, parse_principles
-from .utils import graph_dir, log_info, log_ok, log_warn, log_fail
+from .utils import find_project_dir, graph_dir, log_info, log_ok, log_warn, log_fail
 
 # ── Constants ──
 
@@ -71,6 +71,8 @@ _TEMPLATE_FIELDS = {
     # Quality metrics (方案 D)
     "metrics_success_count", "metrics_fail_count",
     "metrics_confidence", "metrics_last_used",
+    # v12.5: 预扫描动态派生字段（PreScanner 运行时读取，知识条目即规则源）
+    "prescan_pattern", "prescan_globs", "prescan_severity",
 }
 
 # Regex pattern for dynamic forbid_N_xxx fields
@@ -286,7 +288,7 @@ def cmd_add(
 
     if draft:
         # In draft mode, write to draft/ directory
-        draft_dir = gdir / "draft"
+        draft_dir = _gdir(pdir).parent / "drafts"
         draft_dir.mkdir(exist_ok=True)
         kv_path = draft_dir / f"{eid}-draft-{agent_id}.kv"
         md_path = draft_dir / f"{eid}-draft-{agent_id}.md"
@@ -906,6 +908,98 @@ def cmd_validate(
     print(f"     auto_fix=true:      {autofix_true}, auto_fix=false: {autofix_false}")
 
     print()
+
+    # Check 10: template placeholder residue
+    _TEMPLATE_PLACEHOLDERS = {
+        "keyword1", "keyword2", "keyword3",
+        "category-name", "approach-identifier",
+    }
+    for kvf in kv_files:
+        data = parse_kv_file(str(kvf))
+        # Check match_keywords for template default
+        mk = data.get("match_keywords", "").strip()
+        if mk.lower() == "keyword1, keyword2, keyword3":
+            log_fail(f"[C10] {kvf.stem}.match_keywords: unchanged template default keywords")
+            errors += 1
+        # Check category for template placeholder
+        cat = data.get("category", "").strip()
+        if cat.lower() == "category-name":
+            log_fail(f"[C10] {kvf.stem}.category: unchanged template placeholder")
+            errors += 1
+    if verbose:
+        log_ok("[C10] Template placeholder check")
+
+    # Check 11: rec_auto_fix must be exactly true or false (no pipe values)
+    for kvf in kv_files:
+        af_raw = _kv_get(kvf, "rec_auto_fix")
+        af = af_raw.strip()
+        # Strip inline comments
+        if " #" in af:
+            af = af[:af.index(" #")].strip()
+        if "|" in af:
+            log_fail(f"[C11] {kvf.stem}.rec_auto_fix: invalid pipe-separated value '{af}' (must be 'true' or 'false')")
+            errors += 1
+        elif af not in ("true", "false"):
+            log_fail(f"[C11] {kvf.stem}.rec_auto_fix: must be 'true' or 'false', got '{af}'")
+            errors += 1
+    if verbose:
+        log_ok("[C11] rec_auto_fix format checked")
+
+    # Check 12: draft leakage detection
+    # No .kv file in knowledge/graph/ should contain draft:true
+    for kvf in kv_files:
+        data = parse_kv_file(str(kvf))
+        if data.get("draft", "").strip().lower() == "true":
+            log_fail(f"[C12] {kvf.stem}: contains 'draft: true' — draft file leaked into formal graph directory")
+            errors += 1
+        if data.get("contributor_id", "").strip():
+            log_fail(f"[C12] {kvf.stem}: contains 'contributor_id' — draft field leaked into formal graph directory")
+            errors += 1
+    # Also check that knowledge/graph/draft/ directory does not exist
+    draft_subdir = gdir / "draft"
+    if draft_subdir.is_dir():
+        leaked = list(draft_subdir.glob("*.kv"))
+        if leaked:
+            log_fail(f"[C12] knowledge/graph/draft/ directory exists with {len(leaked)} .kv files — use knowledge/drafts/ instead")
+            errors += 1
+    if verbose:
+        log_ok("[C12] Draft leakage check")
+
+    # Check 13: category 受控词表 lint（warning 级，长尾词渐进收敛）
+    from .kb_taxonomy import lint_category
+    longtail_files = 0
+    for kvf in kv_files:
+        unknown = lint_category(_kv_get(kvf, "category"))
+        if unknown:
+            longtail_files += 1
+            log_warn(f"[C13] {kvf.stem}.category: 长尾词 {unknown}（建议改用受控词表词，见 ohc/kb_taxonomy.py）")
+            warnings += 1
+    if verbose and not longtail_files:
+        log_ok("[C13] Category vocabulary lint")
+
+    # Check 14: 编号连续性 + id 字段与文件名一致性
+    id_mismatch = 0
+    holes: list[int] = []
+    nums = set()
+    for kvf in kv_files:
+        m = re.match(r"^E(\d+)\.kv$", kvf.name)
+        if not m:
+            continue
+        nums.add(int(m.group(1)))
+        inner = _kv_get(kvf, "id").strip()
+        if inner and inner != kvf.stem:
+            log_fail(f"[C14] {kvf.stem}: id 字段 '{inner}' 与文件名不一致")
+            id_mismatch += 1
+            errors += 1
+    if nums:
+        holes = [n for n in range(1, max(nums) + 1) if n not in nums]
+        if holes:
+            log_warn(f"[C14] 编号空洞: {['E%03d' % h for h in holes]}"
+                     f"（graph add 将优先复用空洞；若为有意留空请忽略）")
+            warnings += 1
+    if verbose:
+        log_ok(f"[C14] ID continuity: E001-E{max(nums):03d}, {len(nums)} entries, {len(holes)} holes")
+
     if errors:
         log_fail(f"❌ {errors} errors, {warnings} warnings")
     else:
@@ -993,6 +1087,19 @@ def cmd_promote(
     content = draft_path.read_text(encoding="utf-8")
     fields = _parse_fields(content)
 
+    # ── Category 归一化（受控词表，仅统一表达形式，不改知识内容）──
+    from .kb_taxonomy import normalize_category
+    raw_cat = fields.get("category", "").strip()
+    if raw_cat:
+        norm_cat, unknown_toks = normalize_category(raw_cat)
+        if norm_cat and norm_cat != raw_cat:
+            content = re.sub(r"^category:\s*.+$", f"category:               {norm_cat}",
+                             content, count=1, flags=re.M)
+            fields["category"] = norm_cat
+            log_info(f"  🏷️ category 已归一化: {raw_cat!r} → {norm_cat!r}")
+            if unknown_toks:
+                log_warn(f"  ⚠️ 长尾词保留: {unknown_toks}（审核时可考虑改用受控词表词）")
+
     # ── Quality gate ──
     quality_fields = ['error_signature', 'root_cause', 'rec_approach']
     missing_quality = [f for f in quality_fields if not fields.get(f, '').strip()]
@@ -1073,17 +1180,25 @@ def cmd_promote(
 
     # ── Write doc ──
     doc_dir.mkdir(parents=True, exist_ok=True)
-    app = fields.get('rec_approach', fields.get('root_cause', ''))[:60]
+    title_text = fields.get('title', '').strip() or fields.get('rec_approach', fields.get('root_cause', ''))[:60]
     doc_path = doc_dir / f"{target_id}.md"
     contrib_line = ', '.join(unique_contributors[:3]) if unique_contributors else 'unknown'
+    rec_cmd = fields.get('rec_command', '').strip()
+    verif_cmd = fields.get('verification_cmd', '').strip()
     doc_path.write_text(
-        f"# {target_id}: {app or '未命名错误模式'}\n\n"
+        f"# {target_id}: {title_text or '未命名错误模式'}\n\n"
         f"## 基本信息\n- **严重度**: {fields.get('severity', '2')}\n"
-        f"- **类别**: {fields.get('category', '')}\n\n"
-        f"## 错误特征\n```\n{fields.get('error_signature', '(待补充)')}\n```\n\n"
+        f"- **类别**: {fields.get('category', '')}\n"
+        f"- **作者**: {contrib_line}\n"
+        + (f"- **来源 PR**: {fields.get('source_pr', '')}\n" if fields.get('source_pr', '').strip() else "")
+        + f"\n## 错误特征\n```\n{fields.get('error_signature', '(待补充)')}\n```\n\n"
         f"## 根因分析\n{fields.get('root_cause', '(待补充)')}\n\n"
-        f"## 来源\n- 草稿: {draft_id}\n- 合并: {', '.join(d.stem for _, _, d in [(d[0], d[1], d[0]) for d in merged_drafts]) or '无'}\n"
-        f"- 贡献者: {contrib_line}\n- 提升日期: {date.today()}\n",
+        f"## 推荐方案\n**方法**: {fields.get('rec_approach', '(待补充)')}\n\n"
+        f"**说明**: {fields.get('rec_description', '(待补充)')}\n"
+        + (f"\n**修复命令**:\n```\n{rec_cmd}\n```\n" if rec_cmd else "")
+        + (f"\n**验证**:\n```\n{verif_cmd}\n```\n" if verif_cmd else "")
+        + f"\n## 来源\n- 草稿: {draft_id}\n- 合并: {', '.join(d.stem for _, _, d in [(d[0], d[1], d[0]) for d in merged_drafts]) or '无'}\n"
+        f"- 提升日期: {date.today()}\n",
         encoding="utf-8")
     log_ok(f"✅ 配套文档: {doc_path.relative_to(project)}")
 
@@ -1095,8 +1210,15 @@ def cmd_promote(
 
     # ── Remove drafts ──
     draft_path.unlink()
+    draft_md = draft_path.with_suffix('.md')
+    if draft_md.exists():
+        draft_md.unlink()
+        log_info(f"  🗑️ 已移除草稿文档: {draft_md.stem}.md")
     for other_path, _, _ in merged_drafts:
         other_path.unlink()
+        other_md = other_path.with_suffix('.md')
+        if other_md.exists():
+            other_md.unlink()
         log_info(f"  🗑️ 已移除合并草稿: {other_path.stem}")
 
     log_info(f"🎉 {draft_id} → {target_id} 提升完成"

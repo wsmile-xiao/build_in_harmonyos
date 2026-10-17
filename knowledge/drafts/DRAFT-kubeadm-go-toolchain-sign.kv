@@ -1,0 +1,125 @@
+#====================================================================
+# DRAFT: OHOS 上自举的 Go 工具链自身 ELF 必须批量自签后才能执行 go build
+#   —— kubeadm 1.36.2 (k8s.io/kubernetes cmd/kubeadm) 真实确认实例
+# 状态: 草稿（未审核、未合入正式知识库）
+# 查重:
+#   - E250 覆盖"OHOS 无 Go 工具链、go build 失败 → 下载 SDK"，
+#     但方案只到 get() 下载，未覆盖 SDK 内 ELF 的签名问题；
+#   - E318 覆盖"go test 临时测试 ELF 未签名不可执行"，
+#     对象是测试产物而非工具链本身；
+#   - E523 覆盖"Go 链接器 fallocate EACCES / mapping output file
+#     permission denied"，是链接输出文件问题；
+#   本稿填补"工具链自身 ELF 签名"真空档，并给出 recipe 自举完整
+#   环境面（conan 2.29.1 无 conan.tools.go/unpack 的纯 get()+sign 路线）。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-kubeadm-go-toolchain-sign
+trigger_tool:           go
+phase:                  compilation
+error_signature:        go: not found|go: No such file or directory|/go/bin/go: Permission denied|sh: \S*/go: Permission denied|inaccessible or not found.*go
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               toolchain, go, ohos, security
+match_keywords:         go toolchain, go sdk, GOROOT, go1.26, dl.google.com,
+                         golang.google.cn, binary-sign-tool, selfSign, .codesign,
+                         pkg/tool, Permission denied, GOSANDBOX, GOTOOLCHAIN
+title:                  OHOS 上自举的 Go 工具链自身 ELF（bin/go、gofmt、
+                         pkg/tool/*）必须批量自签后才能执行 go build
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OHOS 内核拒绝加载未签名 ELF。Go SDK 官方 tarball
+                         内 bin/go、bin/gofmt 及 pkg/tool/linux_arm64/* 全部
+                         是未签名静态 ELF，CI worker 无预装 Go 时 recipe 自举
+                         下载后直接调用即报 Permission denied（exit 126）。
+                         E250 的 download-go-sdk 方案止于"下载+设 GOROOT/PATH"，
+                         E318 只签 go test 产物——工具链本体的签名环节两处都缺，
+                         导致自举链路断在第一步。
+affected_scope:         所有在 OHOS CI（worker 无预装 Go）上用 recipe 自举 Go
+                         SDK 的 Go 项目（kubeadm/kind/kustomize/helm 等
+                         k8s.io 工具链、任意 CGO_ENABLED=0 的 Go 包）。
+verification_cmd:       # 签前应报 Permission denied，签后 go version 正常
+                         /path/to/go/bin/go version    # 未签: Permission denied
+                         # 签后: go1.26.4 linux/arm64
+                         grep -c ".codesign" <go>/bin/go  # 签名段存在
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           toolchain-elf-batch-sign
+rec_description: >
+  recipe 自举 Go SDK 的完整链路：get() 镜像列表下载（先 golang.google.cn，
+  后备 dl.google.com，sha256 校验）→ 对工具链全部 ELF（bin/go、bin/gofmt、
+  pkg/tool/linux_<arch>/*，kubeadm 实测共 10 个）逐个
+  binary-sign-tool sign -selfSign 1 -signAlg SHA256withECDSA → .ohos-signed
+  marker 文件避免重入时重复签名 → 签名后再做 go version 校验与 build。
+  签名判定：ELF 魔数 \x7fELF + 文件内无 .codesign/.note.ohos 段才签，
+  已签的仅补 chmod 755。conan 2.29.1 无 conan.tools.go、无 unpack()，
+  全程 conan.tools.files.get() + subprocess.check_call 即可。
+rec_command: >
+  # conanfile.py build()（kubeadm 1.36.2 实测）
+  for candidate in [goroot/bin/go, goroot/bin/gofmt] + glob(goroot/pkg/tool/linux_arm64/*):
+      if is_elf(candidate) and not has_ohos_signature(candidate):
+          subprocess.check_call(["binary-sign-tool", "sign", "-selfSign", "1",
+              "-signAlg", "SHA256withECDSA", "-inFile", candidate,
+              "-outFile", candidate + ".signed"])
+          shutil.move(candidate + ".signed", candidate); os.chmod(candidate, 0o755)
+rec_auto_fix:           false
+rec_impl:               conanfile-build-method
+
+# 环境变量面（与签名同等必要，缺一即断链）
+# fallback_priority:      2
+fallback_priority:      2
+fallback_approach:      ohos-go-env-surface
+fallback_description: >
+  go build 的环境变量面：CGO_ENABLED=0（静态链接）、GOOS=linux GOARCH=arm64
+  （OHOS 映射）、GOPROXY=off + GOFLAGS=-mod=vendor（源码自带 vendor/ 时离线）、
+  GOTOOLCHAIN=local（go.mod 声明版本低于工具链版本时禁止自动下载 toolchain）、
+  GOSANDBOX=off（关闭 go 沙箱）、TMPDIR/GOTMPDIR/GOCACHE/GOMODCACHE 全部指向
+  可写 workspace（/tmp 只读、HMDFS fallocate EACCES，见 E523）；链接输出文件
+  同样放可写 workspace 目录（linker 对输出文件做 RWX mmap，见 E523）。
+  工具链下载 URL 选择：codeload/gitee 镜像对 python-requests UA 可能返回
+  HTML 拦截页，dl.google.com 与 golang.google.cn 对任意 UA 均返回真实
+  tarball（kubeadm 实测 63,740,285 B，sha256 校验通过）。
+fallback_command:       export CGO_ENABLED=0 GOOS=linux GOARCH=arm64 GOPROXY=off GOFLAGS=-mod=vendor GOTOOLCHAIN=local GOSANDBOX=off
+fallback_auto_fix:      false
+fallback_impl:          conanfile-generate-env
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+forbid_1_pattern:       which.*go.*||.*true|shutil\.which\("go"\) or "go"|go version 2>/dev/null || true
+forbid_1_reason:        "go 不存在时静默回退到字符串 'go'" 会让 go build 报
+                         "go: not found" 而非明确错误，掩盖工具链自举缺失。
+forbid_1_consequence:   编译失败信息误导为源码问题，自举逻辑从未触发。
+forbid_2_pattern:       # 只下载不签名
+forbid_2_reason:        只 get() 下载 SDK 不对其 ELF 自签，OHOS 内核拒绝加载，
+                         go version 即 Permission denied（E250 方案不完整之处）。
+forbid_2_consequence:   自举链路断在第一步，误判为 worker 环境问题反复排查。
+
+principles:             P017
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              [E250]
+similar_to:             [E318, E523, E128]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-kubeadm-go-toolchain-sign.md
+last_updated:           2026-09-24
+source_event:           kubeadm 1.36.2 适配（PR #12137，k8s.io/kubernetes
+                         cmd/kubeadm，go.mod 要求 go >= 1.26.0，CI worker
+                         无预装 Go）；本地 arm64 实测：工具链 10 个 ELF 自签后
+                         go version 正常输出 go1.26.4 linux/arm64，
+                         小规模 go build（module+vendor 全链路）通过。
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                xiao921924 <xiao921924@noreply.gitcode.com>
+source_pr:              12137
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-24

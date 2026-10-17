@@ -48,7 +48,12 @@ glslang 是 OpenGL 和 OpenGL ES 的着色器前端和验证器，支持：
 - `libglslang.a`: 核心库
 - `libSPIRV.a`: SPIR-V 支持
 - `libSPVRemapper.a`: SPIR-V 重映射
-- `libHLSL.a`: HLSL 支持
+- `libMachineIndependent.a`: 平台无关前端（启用 HLSL 时包含 HLSL 源码）
+- `libOSDependent.a`: 平台相关实现
+- `libGenericCodeGen.a`: 通用代码生成
+- `libglslang-default-resource-limits.a`: 默认资源限制实现
+
+此版本不会生成或安装独立的 `libHLSL.a`。
 
 ## 使用示例
 

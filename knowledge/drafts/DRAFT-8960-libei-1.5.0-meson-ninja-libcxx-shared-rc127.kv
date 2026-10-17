@@ -1,0 +1,74 @@
+#====================================================================
+# DRAFT-8960-libei-1.5.0-meson-ninja-libcxx-shared-rc127 — meson ninja 探测失败：/data/service/hnp/bin/ninja 依赖 libc++_shared.so 而 LD_LIBRARY_PATH 缺干净 /system/lib64 项
+# 触发事件: libei 1.5.0 适配（conan create 报 "Could not detect Ninja v1.8.2 or newer"）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-8960-libei-1.5.0-meson-ninja-libcxx-shared-rc127
+trigger_tool:           meson setup|conan create|conan-verify
+phase:                  configuration
+error_signature:        Could not detect Ninja v1\.8\.2 or newer|ERROR: Could not detect Ninja
+
+severity:               2
+category:               ohos|meson|toolchain|conan|environment
+match_keywords:         meson, ninja, detect, Could not detect Ninja,
+                         libc++_shared.so, Error loading shared library,
+                         returncode 127, rc 127, LD_LIBRARY_PATH,
+                         /system/lib64, hnp ninja, meson setup 失败
+
+title:                  Prepend a clean /system/lib64 to LD_LIBRARY_PATH in the conanfile build env when meson cannot detect ninja (hnp ninja needs libc++_shared.so, default LD_LIBRARY_PATH has a whitespace-polluted path entry)
+
+topic: >
+  conan create / meson setup 报 "Could not detect Ninja v1.8.2 or newer"，
+  且 meson-log.txt 里完全没有任何 ninja 探测痕迹（没有 Running command:
+  ninja --version 行）。根因不在 meson 也不在 ninja 本身：
+  /data/service/hnp/bin/ninja 动态依赖 /system/lib64/libc++_shared.so，
+  而默认 LD_LIBRARY_PATH 含带空格的脏路径项（"         /system/lib64"，
+  平台拼接产物），干净的 /system/lib64 目录项不在其中 → ninja --version
+  以 rc=127 退出（Error loading shared library libc++_shared.so）。
+  meson 的 detect_ninja 对 returncode 127（进程已启动但动态库加载失败）
+  不属于 FileNotFoundError/PermissionError，静默跳过该 candidate →
+  ninja/ninja-build/samu 全部 fail → 报探测失败。
+
+root_cause: >
+  三层叠加：
+  1) /data/service/hnp/bin/ninja 非静态链接，依赖 /system/lib64/libc++_shared.so；
+  2) 交互 shell 的 LD_LIBRARY_PATH 默认值含空格污染项（"         /system/lib64"），
+     语义上是另一个路径名，干净的 /system/lib64 项实际缺失；
+  3) meson tooldetect.detect_ninja_command_and_version 的异常捕获只有
+     FileNotFoundError/PermissionError，rc=127（动态库加载失败）被当成
+     "版本不匹配"静默跳过，日志零痕迹。
+  手动验证：PATH 正确、ninja --version 直接跑返回 127 并报
+  "Error loading shared library libc++_shared.so"。
+
+fix_pattern: >
+  conanfile.py 的 generate() 里给 build env 前置干净的 /system/lib64：
+
+  from conan.tools.env import Environment
+
+  def generate(self):
+      tc = MesonToolchain(self)
+      ...
+      tc.generate()
+      env = Environment()
+      env.prepend_path("LD_LIBRARY_PATH", "/system/lib64")
+      env.vars(self, scope="build").save_script("conanbuild_libcxx")
+
+  等价于 /storage/Users/currentUser/usr/local/bin/ninja wrapper 脚本的手法
+  （export LD_LIBRARY_PATH=/system/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}）。
+
+fallback: >
+  排障路径（本次实测有效）：
+  1) 在 conan 构建目录 source conanbuild.sh 后跑 meson setup 复现；
+  2) 用 env 二分 PATH 逐目录定位（注意：直接 env 改 PATH 会丢 LD_LIBRARY_PATH，
+     需要显式传入）；
+  3) 用 python subprocess.run(['/data/service/hnp/bin/ninja','--version'])
+     直接看 rc 与 stderr——rc=127 + libc++_shared.so 报错即实锤；
+  4) 替代方案：PATH 前置 ~/usr/local/bin（ninja wrapper 自带 LD_LIBRARY_PATH），
+     但 CI worker 的 wrapper 分布不可控，conanfile 内注入最稳。
+
+verify_builds:          libei 1.5.0 conan create G2 全绿（修复前同环境同
+                         命令必现失败）
+applies_to:             所有 meson 构建的 conan 配方在 OHOS 沙箱跑
+                         conan create 的场景（CI worker 与本地同构）
+kb_ref:                 E481（llvm-ar 注入先例——同为 meson 工具探测类）、E346（make/cmake 的 /bin/sh 127——同为 rc=127 但根因不同：那是 SHELL 问题，这是动态库）

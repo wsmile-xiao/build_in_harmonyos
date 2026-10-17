@@ -1,0 +1,86 @@
+# ═══ Draft knowledge entry — OHOS /dev/hidraw* 节点存在但用户态 open EACCES 且无 udev 放权：HID 数据面包的统一收口签名 ═══
+# Timestamp: 2026-09-24
+# Software: usbrelay 1.0（通用：任何经 /dev/hidraw 或 hidapi-hidraw 数据面访问 USB HID 设备的包——
+#           继电器板/DMX/LED 控制器/厂商配置工具/opensc/libftdi-hid 模式等）
+# Gate: 真机 C 探针逐字实测（open errno + 节点清单 + ioctl 头文件缺项），未实测前不称 create 成立
+# Status: DRAFT — needs human/AI review to promote to E-entry
+# 用法：本包已真实撞出该签名；后续 hidraw 族包可直接取用此签名做收口模板。
+
+id:                     DRAFT-usbrelay-1.0-ohos-hidraw-devnodes-eacces-no-udev-data-plane
+trigger_tool:           open|ioctl|hidapi|runtime
+phase:                  runtime
+error_signature:        /dev/hidraw\d+ open=-1 errno=13\(Permission denied\)|cannot open hidraw|unable to open HID device: Permission denied
+severity:               2
+category:               ohos, compat, limitation, kernel, posix
+match_keywords:         hidraw, /dev/hidraw, EACCES, Permission denied, udev, 50-usbrelay.rules, MODE=0660, hidapi, hid_enumerate, 枚举为空, 数据面, CONFIG_HIDRAW
+
+title:                  OHOS 真机 /dev/hidraw* 节点存在（内核 hidraw 已绑定设备）但用户态 open(O_RDWR)=EACCES，且上游靠 udev 规则放权而 OHOS 无 udev——HID 数据面包在鸿蒙的确定性收口签名（枚举恒 0、无崩溃、不谎报功能可验证）
+
+root_cause: 三层事实叠加（逐层实测、勿跳层归因）：OHOS 内核 hidraw 已启用且节点真实存在，但用户态 open(O_RDWR) 被拒 EACCES，且上游放权依赖的 udev 机制在 OHOS 整体不存在。
+  (1) 内核层：hidraw 子系统存在且已绑定设备（/dev/hidraw0、/dev/hidraw1 节点真实存在，
+      /dev/hidraw2=ENOENT 划出边界）——不是"没有 hidraw"；
+  (2) 权限层：节点属主/模式不向普通用户态放行，open(O_RDWR) 稳定返回 errno=13 EACCES；
+  (3) 放权机制层：Linux 桌面发行版靠 udev 规则（usbrelay 的 50-usbrelay.rules
+      KERNEL=="hidraw*", MODE=...）放权，而 OHOS 无 udev 守护与规则通道
+      ⇒ 上游"装规则即可用"的安装路径整体失效，用户态无合规修法。
+  叠加后果：hidapi 公共调用链可通（hid_enumerate 不崩溃、返回空/无匹配），
+  所有"以设备存在为前置"的功能不可验证——失败发生在 open，而非枚举本身。
+
+affected_scope: 任何 /dev/hidraw* 数据面（含 hidapi-hidraw 后端直连）的包；
+  旁证同族面：OHOS 无 udev 亦波及其他 KERNEL== 规则放权模型（input/serial 等，
+  本探针仅实测 hidraw，其余不代答）。
+verification_cmd: 最小 C 探针 open("/dev/hidraw0",O_RDWR) 打印 errno —— 实测输出 "-1 Permission denied"（本包 notes.md 003 行有 /dev/hidraw0/1/2 三点逐字读数）
+
+rec_priority:           1
+rec_approach:           compile-link-api-verify-plus-empty-enumeration-closeout
+rec_description:        归档范围照常交付（编译/链接/打包/API 行为验证全做），把数据面断言设计成
+  "调用链无崩溃 + 枚举恒 0/未命中路径正确"，在 manifest compatibility 与 PR 正文
+  如实收口"设备控制功能面不可在 OHOS 验证"，不谎报、不 chmod 他人设备节点、不伪造放行。
+rec_command:            消费者测试断言模板：n=enumerate(...); assert(n>=0 && n==count()/*实测 0*/); find(未命中)==NULL; operate(坏路径)<0; shutdown() 干净
+rec_auto_fix:           false
+
+fallback_priority:      2
+fallback_approach:      switch-backend-if-api-equivalent
+fallback_description:   若上游可选后端（如 hidapi 的 libusb 后端）且公共 API 等价，
+  可切后端（本包即 make 命令行 HIDAPI=libusb 切到已发布形态）；但切后端**不解决**
+  权限面（libusb 路径同样需设备授权），只解决"目标后端无发布制品"的编译面——
+  两问题勿混谈。
+fallback_command:       make HIDAPI=libusb
+fallback_auto_fix:      false
+
+forbid_1_pattern:       chmod .*/dev/hidraw|chown .*/dev/hidraw|run.*as.*root.*enumerate
+forbid_1_reason:        设备节点是系统/他人资产，越权改动或按 root 演示都不可复现于 CI/用户环境，且违反设备共用纪律。
+forbid_1_consequence:   假验证 + 影响其他窗口的设备使用；评审按"环境特权演示"打回。
+forbid_2_pattern:       声称.*(控制|驱动|切换).*成功|CHECK.*enumerate.*>.*0
+forbid_2_reason:        枚举恒 0 环境下把"能编译"包装成"功能可用"，或写出依赖真实板卡的断言。
+forbid_2_consequence:   rule 级虚假申报（§10 红线）；CI 上断言随机红。
+
+principles:             P002, P006, P011
+
+causes:                 []
+caused_by:              []
+similar_to:             E237, E008
+conflicts_with:         []
+prerequisite_of:        []
+
+# safety_boundary（适用边界/反例）：
+#   - 仅当探针实测到"节点存在 + open EACCES"本签名时套用；若节点整体不存在
+#     （纯 ENOENT）是另一问题（内核缺 CONFIG_HIDRAW），如实分开申报；
+#   - E237（特权 daemon 运行期降级）不覆盖本形态：本包非 daemon、失败在 open 层、
+#     放权机制平台性缺失，签名与解法均不同，similar_to 互指而不合并；
+#   - 有真实设备在场的环境（如用户插板运维）不属本草稿的验证场景——本草稿只
+#     界定"CI/归档验证面"如何诚实收口。
+#   - linux/hidraw.h 在本机 SDK 无 HIDIOCGRAWUNIQ 宏（编译期签名，佐证内核头面
+#     与桌面 Linux 有差异），探针用 HIDIOCGRAWNAME 即可，勿依赖新宏。
+
+doc_file:
+last_updated:           2026-09-24
+source_event:           usbrelay 1.0 适配（任务 11563，feat/usbrelay-1.0）真机探针
+authors:                hw-4 <hw-4@local>
+source_pr:
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:

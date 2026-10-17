@@ -1,0 +1,218 @@
+--- a/Rendering/OpenGL2/vtkOpenGLRenderer.cxx
++++ b/Rendering/OpenGL2/vtkOpenGLRenderer.cxx
+@@ -546,26 +546,21 @@
+ 
+     vtkRenderState s(this);
+     s.SetPropArrayAndCount(this->PropArray, this->PropArrayCount);
+     s.SetFrameBuffer(fbo);
+     this->LastRenderingUsedDepthPeeling = 0;
+     this->TranslucentPass->Render(&s);
+     this->NumberOfPropsRendered += this->TranslucentPass->GetNumberOfRenderedProps();
+   }
+   else // depth peeling.
+   {
+-#ifdef GL_ES_VERSION_3_0
+-    vtkErrorMacro("Built in Dual Depth Peeling is not supported on ES3. "
+-                  "Please see TestFramebufferPass.cxx for an example that should work "
+-                  "on OpenGL ES 3.");
+-    this->UpdateTranslucentPolygonalGeometry();
+-#else
++
+     if (!this->DepthPeelingPass)
+     {
+       if (this->IsDualDepthPeelingSupported())
+       {
+         vtkDebugMacro("Using dual depth peeling.");
+         vtkDualDepthPeelingPass* ddpp = vtkDualDepthPeelingPass::New();
+         this->DepthPeelingPass = ddpp;
+       }
+       else
+       {
+@@ -604,21 +599,20 @@
+     }
+ 
+     this->DepthPeelingPass->SetMaximumNumberOfPeels(this->MaximumNumberOfPeels);
+     this->DepthPeelingPass->SetOcclusionRatio(this->OcclusionRatio);
+     vtkRenderState s(this);
+     s.SetPropArrayAndCount(this->PropArray, this->PropArrayCount);
+     s.SetFrameBuffer(fbo);
+     this->LastRenderingUsedDepthPeeling = 1;
+     this->DepthPeelingPass->Render(&s);
+     this->NumberOfPropsRendered += this->DepthPeelingPass->GetNumberOfRenderedProps();
+-#endif
+   }
+ 
+   vtkOpenGLCheckErrorMacro("failed after DeviceRenderTranslucentPolygonalGeometry");
+ }
+ 
+ //------------------------------------------------------------------------------
+ void vtkOpenGLRenderer::PrintSelf(ostream& os, vtkIndent indent)
+ {
+   this->Superclass::PrintSelf(os, indent);
+ }
+@@ -868,38 +862,162 @@
+     hasBug = (v.find("NVIDIA") != std::string::npos) ? QueryAllocStatus::Yes : QueryAllocStatus::No;
+   }
+ 
+   return hasBug == QueryAllocStatus::Yes;
+ #else
+   return false;
+ #endif
+ }
+ 
+ //------------------------------------------------------------------------------
++#ifdef GL_ES_VERSION_3_0
++namespace
++{
++bool vtkProbeFloatMaxBlending(vtkOpenGLRenderWindow* context)
++{
++  auto state = context->GetState();
++  auto cache = context->GetShaderCache();
++  vtkSmartPointer<vtkShaderProgram> previousShader = cache->GetLastShaderBound();
++  GLint previousProgram = 0, previousVAO = 0, previousBuffer = 0;
++  GLint previousTexture = 0, previousPackBuffer = 0, previousUnpackBuffer = 0;
++  glGetIntegerv(GL_CURRENT_PROGRAM, &previousProgram);
++  glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &previousVAO);
++  glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &previousBuffer);
++  glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
++  glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &previousPackBuffer);
++  glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &previousUnpackBuffer);
++  const GLenum packNames[] = { GL_PACK_ROW_LENGTH, GL_PACK_SKIP_ROWS, GL_PACK_SKIP_PIXELS };
++  GLint packValues[3];
++  for (int i = 0; i < 3; ++i)
++  {
++    glGetIntegerv(packNames[i], &packValues[i]);
++    state->vtkglPixelStorei(packNames[i], 0);
++  }
++  state->Push();
++  state->vtkglPixelStorei(GL_PACK_ALIGNMENT, 1);
++  glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
++  glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
++
++  GLuint texture = 0, framebuffer = 0;
++  glGenTextures(1, &texture);
++  glBindTexture(GL_TEXTURE_2D, texture);
++  glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, 1, 1, 0, GL_RG, GL_FLOAT, nullptr);
++  glGenFramebuffers(1, &framebuffer);
++  state->vtkglBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
++  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
++  GLenum colorBuffer = GL_COLOR_ATTACHMENT0;
++  state->vtkglDrawBuffers(1, &colorBuffer);
++  state->vtkglReadBuffer(GL_COLOR_ATTACHMENT0);
++  bool supported = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
++  supported = glGetError() == GL_NO_ERROR && supported;
++  if (supported)
++  {
++    state->vtkglDisable(GL_SCISSOR_TEST);
++    state->vtkglDisable(GL_STENCIL_TEST);
++    state->vtkglDisable(GL_DEPTH_TEST);
++    state->vtkglDisable(GL_CULL_FACE);
++    state->vtkglColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
++    state->vtkglViewport(0, 0, 1, 1);
++    state->vtkglClearColor(-1.f, -1.f, 0.f, 0.f);
++    state->vtkglClear(GL_COLOR_BUFFER_BIT);
++    state->vtkglEnable(GL_BLEND);
++    state->vtkglBlendFunc(GL_ONE, GL_ONE);
++    state->vtkglBlendEquation(GL_MAX);
++    const char* fragment = R"(//VTK::System::Dec
++uniform vec2 testValue;
++in vec2 texCoord;
++out vec4 color;
++void main() { color = vec4(testValue + texCoord - vec2(0.5), 0.0, 1.0); }
++)";
++    vtkOpenGLQuadHelper quad(context, nullptr, fragment, "");
++    supported = quad.Program && quad.Program->GetCompiled();
++    if (supported)
++    {
++      const float first[] = { 0.25f, 0.75f };
++      const float second[] = { 0.5f, 0.25f };
++      quad.Program->SetUniform2f("testValue", first);
++      quad.Render();
++      quad.Program->SetUniform2f("testValue", second);
++      quad.Render();
++      supported = glGetError() == GL_NO_ERROR;
++      float pixels[4] = {};
++      glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, pixels);
++      supported = glGetError() == GL_NO_ERROR && supported &&
++        std::abs(pixels[0] - 0.5f) < 1.e-5f && std::abs(pixels[1] - 0.75f) < 1.e-5f;
++    }
++  }
++  glBindTexture(GL_TEXTURE_2D, previousTexture);
++  glDeleteTextures(1, &texture);
++  glDeleteFramebuffers(1, &framebuffer);
++  glBindBuffer(GL_PIXEL_PACK_BUFFER, previousPackBuffer);
++  glBindBuffer(GL_PIXEL_UNPACK_BUFFER, previousUnpackBuffer);
++  state->Pop();
++  for (int i = 0; i < 3; ++i)
++  {
++    state->vtkglPixelStorei(packNames[i], packValues[i]);
++  }
++  if (previousShader && previousShader->GetHandle() == static_cast<unsigned int>(previousProgram))
++  {
++    cache->ReadyShaderProgram(previousShader);
++  }
++  else
++  {
++    cache->ReleaseCurrentShader();
++    glUseProgram(previousProgram);
++  }
++  glBindVertexArray(previousVAO);
++  glBindBuffer(GL_ARRAY_BUFFER, previousBuffer);
++  return supported;
++}
++}
++#endif
++
+ bool vtkOpenGLRenderer::IsDualDepthPeelingSupported()
+ {
+   vtkOpenGLRenderWindow* context = vtkOpenGLRenderWindow::SafeDownCast(this->RenderWindow);
+   if (!context)
+   {
+     vtkDebugMacro("Cannot determine if dual depth peeling is support -- no "
+                   "vtkRenderWindow set.");
+     return false;
+   }
+ 
+   // Dual depth peeling requires:
+   // - float textures (ARB_texture_float)
+   // - RG textures (ARB_texture_rg)
+   // - MAX blending (added in ES3).
+-  // requires that RG textures be color renderable (they are not in ES3)
++  // Color renderability and 32-bit float blending are distinct capabilities.
+ #ifdef GL_ES_VERSION_3_0
+-  // ES3 is not supported, see TestFramebufferPass.cxx for how to do it
+-  bool dualDepthPeelingSupported = false;
++  bool floatAttachments = false;
++  bool floatBlending = false;
++  GLint extensionCount = 0;
++  glGetIntegerv(GL_NUM_EXTENSIONS, &extensionCount);
++  for (GLint i = 0; i < extensionCount; ++i)
++  {
++    const char* extension = reinterpret_cast<const char*>(glGetStringi(GL_EXTENSIONS, i));
++    if (extension)
++    {
++      floatAttachments |= std::string(extension) == "GL_EXT_color_buffer_float";
++      floatBlending |= std::string(extension) == "GL_EXT_float_blend";
++    }
++  }
++  if (floatAttachments && !floatBlending)
++  {
++    const vtkMTimeType created = context->GetContextCreationTime();
++    if (!this->FloatBlendCheckContextTime || this->FloatBlendCheckContextTime != created)
++    {
++      this->FloatBlendCheckSucceeded = vtkProbeFloatMaxBlending(context);
++      this->FloatBlendCheckContextTime = created;
++    }
++    floatBlending = this->FloatBlendCheckSucceeded;
++  }
++  bool dualDepthPeelingSupported = floatAttachments && floatBlending;
+ #else
+   bool dualDepthPeelingSupported = true;
+ #endif
+ 
+   // There's a bug on current mesa master that prevents dual depth peeling
+   // from functioning properly, something in the texture sampler is causing
+   // all lookups to return NaN. See discussion on
+   // https://bugs.freedesktop.org/show_bug.cgi?id=94955
+   // This has been fixed in Mesa 17.2.
+   const char* glVersionC = reinterpret_cast<const char*>(glGetString(GL_VERSION));

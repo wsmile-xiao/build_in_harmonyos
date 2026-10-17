@@ -1,0 +1,144 @@
+#====================================================================
+# DRAFT-ohos-test-subprocess-overrides-pythonpath-needs-venv —— 上游测试套件
+#   以子进程起服务并覆盖 PYTHONPATH 时，「注入 PYTHONPATH」的测试法失效，须改用独立 venv
+# 对应文档: knowledge/drafts/DRAFT-ohos-test-subprocess-overrides-pythonpath-needs-venv.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-ohos-test-subprocess-overrides-pythonpath-needs-venv
+trigger_tool:           python|pytest|conan
+phase:                  testing
+error_signature:        PackageNotFoundError: No package metadata was found for .*|
+                         ConnectionRefusedError.*wait_ready|
+                         FileNotFoundError.*\.sock|
+                         ModuleNotFoundError: No module named '.*'.*subprocess|
+                         Failed: Timeout \(>.*\) from pytest-timeout
+
+severity:               2
+category:               python, testing, conan, packaging, environment
+match_keywords:         PYTHONPATH, subprocess, conftest, dev_server, DevServerClient,
+                         sys.executable, importlib.metadata, .dist-info, venv,
+                         PYTEST_DISABLE_PLUGIN_AUTOLOAD, pytest-timeout, 上游测试回填,
+                         werkzeug, jinja2, R51, site-packages
+title:                  上游 pytest 套件若以子进程起服务（env 覆盖 PYTHONPATH + 复用
+                        sys.executable），则「注入 PYTHONPATH」的测试法必然失效 —— 须建
+                        独立 venv 把被测包 pip install 进去
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             本仓 Python 包适配的通行测试手法是「把被测源码目录与依赖的
+                        site-packages 注入 PYTHONPATH，再用宿主解释器跑上游 pytest」
+                        （jinja2 3.1.6、setuptools 84.0.0 等）。该手法**隐含前提**是
+                        测试进程与子进程都继承这份 PYTHONPATH。当上游套件自己**以子进程
+                        起真实服务**时前提不成立：
+
+                        werkzeug 的 `tests/conftest.py` 中 DevServerClient 这样起服务：
+                        ```python
+                        subprocess.Popen([sys.executable, ...run.py, ...],
+                                         env={**os.environ, "PYTHONUNBUFFERED": "1",
+                                              "PYTHONPATH": tmp_dir})
+                        ```
+                        两个致命点：
+                        ① `env={**os.environ, "PYTHONPATH": tmp_dir}` —— **整体覆盖**
+                           PYTHONPATH，注入的源码目录与依赖目录全部丢失；
+                        ② 解释器是 `sys.executable`（宿主），子进程只能从**宿主
+                           site-packages** 找被测包。
+
+                        叠加第三个坑：werkzeug `serving.py:813` 在构造 WSGI server 时调
+                        `importlib.metadata.version("werkzeug")`，需要包**带 .dist-info**。
+                        仅把源码目录放进 site-packages（无 dist-info）→ 子进程抛
+                        `PackageNotFoundError` → 服务器根本没起来 → 父进程
+                        `wait_ready()` 空转死等 → pytest-timeout 超时。
+
+                        误导性表现：**宿主若恰好装了同名包**（本机实测宿主就有
+                        werkzeug 3.1.8），部分用例会"假通过"——从宿主 site-packages
+                        命中旧包；CI 干净环境则必然全挂。这类"本地绿、CI 红"极难排查。
+
+affected_scope:         所有上游 pytest 套件含**子进程起服务/子进程 import 被测包**
+                        的 Python 包适配。典型信号：conftest 里出现
+                        `subprocess.Popen([sys.executable, ...])` 且显式传
+                        `env={"PYTHONPATH": ...}`；或测试标记为 dev_server / live_server /
+                        integration。werkzeug 3.1.8 实测 25 个 dev_server 用例全部超时。
+verification_cmd:       ① 看上游 conftest 是否覆盖 PYTHONPATH 并复用 sys.executable：
+                          grep -n "PYTHONPATH" <src>/tests/conftest.py
+                          grep -n "sys.executable" <src>/tests/conftest.py
+                        # ② 子进程侧的报错会写进测试落盘的服务器日志（如
+                        #    <basetemp>/<case>/log.txt），而不是 pytest 输出：
+                        grep -rn "PackageNotFoundError\|No module named" <basetemp>/*/log.txt
+                        # ③ 反证「PYTHONPATH 注入」无效：注入后仍需 dist-info 才能起服务
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           build-isolated-venv-and-pip-install-under-test
+rec_description:        按**上游 tox 的同一思路**做：构建期建独立 venv →
+                        `pip install <source>`（被测源码，**同时获得 .dist-info 包元
+                        数据**）→ 安装上游声明的测试依赖 → 用该 venv 的 python 跑套件。
+                        这样子进程继承 `sys.executable` = venv python，
+                        site-packages 与 `importlib.metadata` 双双命中，且与宿主环境彻底
+                        隔离（顺带解决宿主 pytest 与 py3.12 不兼容的问题）。
+                        若某依赖是 **C 扩展且只能由 Conan 提供**（如 markupsafe），把它
+                        的 Conan site-packages 路径写成 `.pth` 放进 venv
+                        site-packages（子进程同样无法靠 PYTHONPATH 得到它）。
+                        运行前显式校验 venv 可 import 被测包与该依赖，失败直接抛错
+                        （R51：不静默降级为"跳过"）。
+rec_command:            # 构建期（conanfile.py build() 内）
+                        # 1) python3 -m venv <build>/test-venv
+                        # 2) <venv>/bin/python -m pip install -r <test deps>
+                        # 3) <venv>/bin/python -m pip install --no-deps <source_folder>
+                        # 4) echo <conan dep site-packages> > <venv>/site-packages/zz-dep.pth
+                        # 5) <venv>/bin/python -m pytest tests -q -p no:cacheprovider
+rec_auto_fix:           false
+rec_impl:               venv-pip-under-test
+
+fallback_priority:      2
+fallback_approach:      deselect-subprocess-cases-with-probe
+fallback_description:   若 venv 路径不可行（如目标环境无法建 venv / 无 pip 源），退而
+                        用 `-m "not dev_server"` 或 `--deselect` 排除子进程类用例，
+                        但**必须**：①先用探针实测确认失败根因确属子进程环境而非库缺陷；
+                        ②在 MANIFEST.yml / manifest.yaml / notes.md 逐条如实申报，
+                        并写清"平台放行后如何恢复执行"。禁止把排除当成"通过"来算
+                        通过率分母。
+fallback_command:       python3 -m pytest tests -q -m "not dev_server" --deselect <case>
+fallback_auto_fix:      false
+fallback_impl:          pytest-mark-deselect
+
+forbid_1_pattern:       PYTHONPATH.*注入.*(通过|success).*却.*(子进程|subprocess).*(起|启动)服务|
+                        assert.*__version__.*(忽略|不管).*子进程.*失败
+forbid_1_reason:        子进程覆盖 PYTHONPATH 时注入必然无效；若因宿主恰好装同名包而"假
+                        通过"，等于用宿主环境污染伪造本地绿，CI 干净环境必红。
+forbid_1_consequence:   本地验证结论不可迁移到 CI（R15/PR6096 同类教训），浪费整轮 CI 额度。
+
+forbid_2_pattern:       把.*(子进程|subprocess).*类用例.*(超时|失败).*(跳过|排除).*(不|未).*(申报|记录)
+forbid_2_reason:        R51 要求上游测试实测并如实回填；静默排除会让通过率分母失真。
+forbid_2_consequence:   PR 测试数据造假，评审据假绿放行。
+
+principles:             real-upstream-test-evidence, reproducible-build-test,
+                        measure-not-assume
+
+causes:                 []
+caused_by:              []
+similar_to:             [E512, E004,
+                         DRAFT-ohos-source-copy-python-no-dist-info-version-unavailable,
+                         DRAFT-ohos-pytest-host-py312-incompat,
+                         DRAFT-apertium-ohos-python-bare-name-test-subprocess,
+                         DRAFT-ohos-pythonpath-entry-skips-pth]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-test-subprocess-overrides-pythonpath-needs-venv.md
+last_updated:           2026-09-20
+source_event:           werkzeug 3.1.8 适配 —— dev_server 类用例（conftest 覆盖
+                        PYTHONPATH + sys.executable 起服务）在 PYTHONPATH 注入法下
+                        全部超时；改独立 venv + pip install 被测包后 967 passed
+
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:              11302
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20
+
+draft:                  true
+contributor_id:         3211

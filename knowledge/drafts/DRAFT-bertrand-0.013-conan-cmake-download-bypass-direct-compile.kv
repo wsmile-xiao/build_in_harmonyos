@@ -1,0 +1,90 @@
+#====================================================================
+# DRAFT-bertrand-0.013-conan-cmake-download-bypass-direct-compile -
+# 上游测试目录配置期 file(DOWNLOAD) 拉取 conan.cmake 网络阻塞 → 用
+# registry catch2 头文件直接编译运行上游测试源
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-bertrand-0.013-conan-cmake-download-bypass-direct-compile
+source_lib:             bertrand 0.013
+trigger_tool:           cmake|conan|catch2|clang++
+phase:                  configuration|testing
+error_signature:        Downloading conan.cmake from https://github.com/conan-io/cmake-conan|raw\.githubusercontent\.com.*conan\.cmake|file\(DOWNLOAD.*conan\.cmake|configure 挂起.*conan\.cmake
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan|cmake|catch2|testing|network|header-only
+match_keywords:         conan.cmake, cmake-conan, file(DOWNLOAD), raw.githubusercontent.com, Catch2, catch2, configure hang, 网络阻塞, 直接编译, clang++, registry 头文件, test source, R51, 上游测试
+title:                  上游测试目录在 CMake 配置期 file(DOWNLOAD) 自下载 conan.cmake 网络不可达时，绕开 cmake-conan，用 registry 的 Catch2 头文件直接编译运行上游测试源
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  上游项目（常见于早期 cmake-conan 集成写法）在测试子目录 CMakeLists 中执行
+  `file(DOWNLOAD "https://raw.githubusercontent.com/conan-io/cmake-conan/v0.15/conan.cmake")`
+  再从下载的 conan.cmake 调用 conan_cmake_run 安装 Catch2。执行端/CI 网络策略
+  不放开 raw.githubusercontent.com 时，configure 阶段无限挂起或失败，
+  BUILD_TESTING 分支无法进入，上游测试入口被整体封锁。这不是当前库源码缺陷，
+  而是"测试引导机制依赖外网下载"的环境阻塞。
+affected_scope: >
+  任何上游 CMake 测试目录配置期 file(DOWNLOAD) 拉取 conan.cmake（cmake-conan
+  引导）且执行端外网受限的 C++ 库；对 Catch2 系（单头/合并头 2.x）尤其适用，
+  因为 2.13.x 的 include/catch2/catch.hpp 可直接头文件编译，无需框架二进制。
+
+verification_cmd: >
+  conan install --requires=catch2/2.13.10 -r=ohpcd -pr:h=ci/conan/profiles/ohos-aarch64
+  -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing -of=<out> ；
+  clang++ -std=c++17 -I <src>/include -I <catch2>/include
+  -DBERTRAND_ENABLE_CONTRACTS -DBERTRAND_CONTRACTS_ARE_EXCEPTIONS
+  <src>/test/src/Catch2Main.cc <src>/test/src/bertrand_tests.cc
+  <src>/test/src/in_operator_tests.cc <src>/test/src/text_tests.cc -o bertrand_tests
+  && ./bertrand_tests  # 期望: All tests passed (18 assertions in 16 test cases)
+
+# ═══ Layer 3: 方案层 (Solution Space) ═══
+rec_priority:           1
+rec_approach:           registry-header-direct-compile
+rec_description: >
+  1) 保留上游测试源码不动（零源码修改、零补丁）；2) 用 ohpcd registry 可得
+  的 Catch2 版本（如 catch2/2.13.10）`conan install --build=missing` 拿到头文件
+  （2.13.x 单头 catch.hpp 布局直接可用）；3) 按上游测试 CMakeLists 中
+  add_executable 的真实源文件清单，用 clang++（-I 上游 include + -I catch2
+  include，附上游同款业务宏/编译选项）把 Catch2Main（CATCH_CONFIG_MAIN）+ 各
+  用例源直接编成测试可执行并运行。执行端的环境性阻塞用"可得版本头文件 +
+  直接编译"解掉，测试真实运行而非跳过。
+rec_command: >
+  上游测试声明的宏必须在 include 前生效：test_package 场景用
+  target_compile_definitions 传宏（如 BERTRAND_ENABLE_CONTRACTS、
+  BERTRAND_CONTRACTS_ARE_EXCEPTIONS），与上游测试编译选项保持一致；
+  上游源码中 find_package(Catch2)/头文件 include 写法不变。
+rec_auto_fix:           false
+rec_impl:               manual-direct-compile-run
+
+fallback_priority:      2
+fallback_approach:      rm-cached-isolate-not-applicable
+fallback_description:   若上游测试源依赖 framework main 之外的多头/二进制符号，
+                        且 registry 只有不兼容版本，才考虑 flush 无法执行并如实
+                        记台账；不得伪造 conan.cmake 或把网络阻塞写成库失败。
+fallback_command:       如执行端网络恢复，优先改回上游自下载路径并重跑
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       伪造.*conan\.cmake|跳过上游测试.*不记录|把网络阻塞写成库源码失败
+forbid_1_reason:        R51 上游测试三步法：可运行就必须实际运行；阻塞必须如实记录。
+
+# ═══ Layer 4: 防护层 (Guard) ═══
+guard_pattern:          file\(DOWNLOAD.*conan\.cmake|conan_cmake_run|raw\.githubusercontent\.com.*conan
+guard_check:            配置期出现 conan.cmake 下载/挂起即命中本模式：不修改上游
+                        CMakeLists，改用 registry 头文件直接编译运行测试源。
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                pc4-21
+source_lib:             bertrand 0.013
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-22
+
+doc_file:               drafts/DRAFT-bertrand-0.013-conan-cmake-download-bypass-direct-compile.md

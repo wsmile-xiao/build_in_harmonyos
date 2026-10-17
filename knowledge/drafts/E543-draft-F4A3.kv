@@ -1,0 +1,69 @@
+#====================================================================
+# E543 — ExternalProject/configure 期 googletest 下载 blocked 时，
+#         改用 Conan gtest 包 + 裸 target 桥接（保留完整上游测试）
+# 触发事件: cpu_features 0.9.0 HarmonyOS PC 适配（archives/c/cpu_features/0.9.0）
+# 主从明确: 上游 Configure 期 git clone googletest（github 不可达）→
+#           find_package(GTest CONFIG) + INTERFACE IMPORTED 裸 target 桥接
+#           GTest::gtest/GTest::gmock_main，conanfile test_requires gtest/1.17.0
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E543
+trigger_tool: cmake|conan
+phase: configuration
+error_signature: CMake step for googletest failed|git clone.*googletest.*failed|googletest-download.*(FAILED|error)|Could not download.*googletest|GIT_REPOSITORY.*googletest.*Operation timed out
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 2
+category: build-system,cmake,conan,testing,network
+prescan_pattern: (ExternalProject|FetchContent).*googletest|googletest\.CMakeLists\.txt\.in|GIT_TAG.*gtest|add_subdirectory\(.*googletest-src
+prescan_globs: CMakeLists.txt, *.cmake, **/CMakeLists.txt
+match_keywords: googletest, ExternalProject, GTest, gmock_main, find_package, test_requires, offline CI, CMake step for googletest failed
+title: ExternalProject 期 googletest 下载失败时用 Conan gtest 包 + 裸 target 桥接保留上游测试
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: 上游 CMakeLists 在 BUILD_TESTING 分支里用 configure_file + execute_process 驱动
+  googletest-download（GIT_REPOSITORY https://github.com/google/googletest.git）。
+  OHOS CI worker 无法访问 GitHub（连接超时），且该下载在 configure 阶段执行，
+  任何依赖它的包在配置期即失败；同时下载工程用 cmake_minimum_required(VERSION 2.8.2)，
+  会触发新 CMake 的 "Compatibility with CMake < 3.5 has been removed" 错误。
+affected_scope: 所有上游把 googletest 以 ExternalProject/FetchContent 形式在 configure 期
+  下载的 CMake 项目；尤其 OHOS/离线 CI 上需要保留完整上游测试套件的库。
+verification_cmd: cd <pkg> && conan create . -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 2>&1 | tail -20; ctest --output-on-failure 或直接运行各测试可执行
+
+# ═══ Layer 3: 方案层 (Solution Space) ═══
+rec_priority: 1
+rec_approach: external-gtest-via-conan-plus-bare-target-bridge
+rec_description: 不打注释式跳过。把 configure 期 googletest 下载块整体替换为
+  find_package(GTest CONFIG REQUIRED) + 两个 INTERFACE IMPORTED 裸 target（gtest、
+  gmock_main）桥接到 Conan gtest 包导出的 GTest::gtest / GTest::gmock_main；
+  conanfile.py 的 build_requirements() 里 test_requires("gtest/1.17.0")，
+  generate() 里把 GTest_DIR 指向 gtest.package_folder/lib/cmake/GTest。
+  这样上游 test/CMakeLists.txt 的 link_libraries(gtest gmock_main) 无需改动，
+  BUILD_TESTING 保持 ON，全套上游测试照常构建运行。
+rec_command: 补丁: find_package(GTest CONFIG REQUIRED); if(NOT TARGET gtest)
+  add_library(gtest INTERFACE IMPORTED) set_target_properties(gtest PROPERTIES
+  INTERFACE_LINK_LIBRARIES GTest::gtest); gmock_main 同理映射 GTest::gmock_main。
+  conanfile.py: build_requirements() → self.test_requires("gtest/1.17.0");
+  generate() → tc.variables["GTest_DIR"] = gtest.package_folder/lib/cmake/GTest
+rec_auto_fix: false
+rec_impl: conan-recipe-patch
+
+fallback_priority: 2
+fallback_approach: fetchcontent-source-dir-injection
+fallback_description: 若框架未发布到制品仓，保留上游下载逻辑，用
+  -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=<已核验本地源码树> 指向校验过的本地源码，
+  但必须记录该树来源（可复现性依赖它）。
+fallback_command: cmake -DBUILD_TESTING=ON -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=<src> <source>; ctest --output-on-failure
+fallback_auto_fix: false
+fallback_impl: manual
+
+forbid_1_pattern: BUILD_TESTING.?=.?OFF.*googletest|跳过.*googletest|\|\| true
+forbid_1_reason: 直接关测试或吞下载失败会隐藏不可复现的网络前置，且丢失上游测试覆盖。
+forbid_1_consequence: CI 间歇性在编译前失败，或 PR 无上游测试证据。
+forbid_2_pattern: sed -i.*googletest|self.run\(.*patch.*CMakeLists
+forbid_2_reason: 绕过 patches/ 补丁管线直接改上游构建文件，无评审 diff、无法从干净源码重放。
+forbid_2_consequence: 构建不可复现，下次配方刷新静默丢失修复。
+forbid_3_pattern: CMAKE_POLICY_VERSION_MINIMUM.?=.?3\.5.*googletest.*只加这个
+forbid_3_reason: 只加 CMake 策略版本绕过旧版 min 错误，不解决 GitHub 不可达的下载本身。
+forbid_3_consequence: 编译仍会在 clone googletest 时失败。

@@ -1,0 +1,71 @@
+#!/bin/sh
+# crystal 的 LLVM 链接标志**包装器**（OHOS 专用）。
+#
+# 背景：crystal 在编译期用 `llvm-config --libs --system-libs --ldflags` 取链接标志
+# （src/llvm/lib_llvm.cr:23），而 OHOS SDK 的 llvm-config 会列出 **110 个组件库**
+# （libLLVMX86CodeGen / libLLVMRISCVDisassembler / libLLVMLoongArchCodeGen ...），
+# SDK 里却**只有 3 个单体库**（libLLVM.so / libLLVM-15.so / libLLVM-15.0.4.so）→
+#   ld.lld: error: unable to find library -lLLVMX86CodeGen（刷屏）
+#
+# 修法（实测有效）：crystal 支持 `LLVM_CONFIG` 环境变量（lib_llvm.cr:20），
+# 把本脚本作为 LLVM_CONFIG 指过去，由它把 `--libs` 的答案换成**单体库**。
+# 比设 LLVM_LDFLAGS 更可靠：lib_llvm.cr:23 里 LLVM_LDFLAGS 与 llvm-config 是
+# 二选一，而 LLVM_CONFIG 直接决定 llvm-config 这个**可执行体**，不受 env 传递影响。
+#
+# 其余子命令一律原样转发给真实 llvm-config，保证 --version / --targets-built /
+# --includedir 等探测结果不变。
+
+# 真实 llvm-config 的定位（**不写死路径**，也用不写死的方式兜底）：
+#   1) 优先取 $CRYSTAL_REAL_LLVM_CONFIG（由 conanfile 在构建期解析后注入）；
+#   2) 否则在 PATH 中找第一个**不是本包装器自身**的 llvm-config
+#      （本文件被命名为 llvm-config 并置于 PATH 最前，故必须排除自身，否则递归）；
+#   3) 都找不到再退回 SDK 的已知安装位置。
+self=$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")
+
+find_real_llvm_config() {
+  if [ -n "${CRYSTAL_REAL_LLVM_CONFIG:-}" ] && [ -x "$CRYSTAL_REAL_LLVM_CONFIG" ]; then
+    printf '%s\n' "$CRYSTAL_REAL_LLVM_CONFIG"; return 0
+  fi
+  rest=${PATH:-}
+  while [ -n "$rest" ]; do
+    case $rest in
+      *:*) d=${rest%%:*}; rest=${rest#*:} ;;
+      *)   d=$rest; rest="" ;;
+    esac
+    [ -n "$d" ] || continue
+    cand="$d/llvm-config"
+    [ -x "$cand" ] || continue
+    rp=$(readlink -f "$cand" 2>/dev/null) || rp="$cand"
+    [ "$rp" != "$self" ] || continue
+    printf '%s\n' "$rp"; return 0
+  done
+  return 1
+}
+
+REAL_LLVM_CONFIG=$(find_real_llvm_config) \
+  || REAL_LLVM_CONFIG=/data/service/hnp/bin/llvm-config
+# 单体库所在目录与库名（去掉 lib 前缀与 .so 后缀后即为 -l 参数）
+MONO_DIR="${CRYSTAL_LLVM_MONO_DIR:-/data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/llvm/lib}"
+MONO_LIB="${CRYSTAL_LLVM_MONO_LIB:-LLVM-15.0.4}"
+
+case "$1" in
+  --libs)
+    # 单体库 + 必要的系统库（原 --system-libs 的常见项）
+    printf -- "-L%s -l%s -lm -ldl -lpthread -lz -lstdc++\n" "$MONO_DIR" "$MONO_LIB"
+    ;;
+  --ldflags)
+    printf -- "-L%s\n" "$MONO_DIR"
+    ;;
+  --system-libs)
+    printf -- "-lm -ldl -lpthread -lz\n"
+    ;;
+  --link-shared)
+    # 忽略；调用方通常组合使用 --libs --link-shared，此处仍返回单体库
+    printf -- "-L%s -l%s\n" "$MONO_DIR" "$MONO_LIB"
+    ;;
+  *)
+    # 其余（--version / --targets-built / --includedir / --cxxflags / --libdir ...）
+    # 原样转发，保持探测语义不变。多参数调用时逐个转发。
+    exec "$REAL_LLVM_CONFIG" "$@"
+    ;;
+esac

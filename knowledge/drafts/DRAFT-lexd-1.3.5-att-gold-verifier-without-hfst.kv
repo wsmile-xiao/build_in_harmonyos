@@ -1,0 +1,104 @@
+#====================================================================
+# Draft: lexd 1.3.5 — 上游正例测试的 oracle 依赖 HFST 命令行工具
+#        （hfst-txt2fst / hfst-fst2strings，制品仓未发布）时，
+#        用自带的 ATT 读取器 + 按位置索引 DP 复核 *.strings.gold：
+#        798 条断言 / 216 组合全过，且对路径爆炸夹具不截断
+#====================================================================
+
+id:                     DRAFT-LEXD-135-ATT-GOLD-VERIFIER-WITHOUT-HFST
+trigger_tool:           conan|python3|make
+phase:                  testing
+error_signature:        hfst-txt2fst: command not found|
+                         hfst-fst2strings: command not found|
+                         make: *** \[.*\.strings\.check\] Error 1|
+                         No rule to make target .hfst|
+                         Package .[a-z]+. was not found in the pkg-config search path
+
+severity:               2
+category:               testing|transducer|att|hfst|finite-state|pkg-config|missing-dependency
+match_keywords:         hfst-txt2fst, hfst-fst2strings, hfst, obey-flags, ATT transducer,
+                         strings.gold, at&T format, flag diacritic, @0@ epsilon,
+                         @U.F.B@, lexd, apertium, transducer oracle, path explosion,
+                         enumerate accepted strings, dynamic programming membership,
+                         -c 10 counter cutoff, gold is a subset
+title:                  上游 ATT transducer 的 gold 比对不一定要 HFST：@0@ 视作空标签、其余 @X.Y@ 视作 flag diacritic（等价 hfst -X obey-flags），用按位置索引的 DP 做成员判定，可在无 hfst 环境下复核全部 gold（lexd 1.3.5：36 夹具 × 6 变体 = 216 组合 / 798 断言全过）
+
+root_cause:             Apertium 家族包（lexd、hfst-twolc 系列）的上游正例测试把
+                        编译器输出交给 HFST 命令行工具做判定：
+
+                            hfst-txt2fst <lexd 输出> | hfst-fst2strings -X obey-flags -c 10 \
+                              | LC_ALL=C sort -u  >  $@
+                            diff -U0 $^ <test-X.lexd.txt.strings.gold>
+
+                        HFST 与其依赖 Foma 在 ohpcd 制品仓都**未发布**，CI 上
+                        没有这两个可执行文件，于是 `make check` 的正例部分必然
+                        失败（`hfst-txt2fst: command not found` → `.strings.check`
+                        目标报 Error 1）。而这套 oracle 本身并不依赖 HFST 的内部
+                        实现，只依赖 AT&T 格式里三个可解析的约定：
+                          1. 每行 `in_state out_state [in_label out_label] weight`
+                             （标签可缺省 = epsilon；末段单状态行 = final state）；
+                          2. `@0@` 是空标签；
+                          3. `-X obey-flags` 的语义 = 把 `@X.Y@` 形式的 flag
+                             diacritic 当**元数据**而非字面字符。
+                        掌握这三点就能自己枚举/判定转换器接受的字符串。
+
+                        两个必须避开的坑：
+                        - **不要用「枚举全部路径再查表」**：lexd 的
+                          test-disjoint-opt / test-pattern-independence 在
+                          minimize 变体下路径数组合爆炸（实测触发 OOM 被 kill，
+                          rc=137），必须改成成员判定。
+                        - **gold 是子集不是全集**：上游用 `hfst-fst2strings -c 10`
+                          做计数截断，只保留出现 ≥10 次的串，所以实际可接受串
+                          ⊋ gold。断言必须写成「gold ⊆ 实际集合」，不能要求相等
+                          （相等断言会得到 111/216 的假失败）。
+
+affected_scope:         任何「上游测试把 ATT/VRT/FST 输出交给外部 FST 工具比对
+                        gold」而该工具未发布的包：lexd、hfst 系列、apertium 的
+                        相关子测试。判据：上游测试 Makefile 里出现
+                        `hfst-*` / `foma` / `hfst2txt` 等外部可执行文件名。
+
+verification_cmd:       # 1) 先确认工具真的缺（不要假设）
+                        command -v hfst-txt2fst hfst-fst2strings || echo "HFST absent"
+                        conan download "hfst/*" -r=ohpcd --only-recipe   # 0 recipes
+                        # 2) gold 行数清点（决定断言规模）
+                        wc -l tests/feature/*.strings.gold | tail -1
+                        # 3) 验证读取器：成员判定必须覆盖 pair 渲染与纯 surface 渲染
+                        #    '@0@'=空标签、'@X.Y@'=flag diacritic、final state=末段单状态行
+                        python3 test_package/att_check.py <bin/lexd> <data-dir> /tmp/r.txt
+                        # 期望: "798 gold assertions over 216 fixture-variant combinations OK"
+
+rec_priority:           1
+rec_approach:           att-gold-dp-membership-verifier
+rec_description:        ① **解析**：逐行判字段数与类型区分「转移」（≥5 字段）/
+                        「epsilon 转移」（2 字段且都是整数状态号）/
+                        「final state」（1 字段或末段单状态行）；注意这三种行
+                        都可能只有 2 个 tab 分段，**不能只看字段数**。
+                        ② **flag diacritic 不可见**：`@0@` 与所有
+                        `^@[A-Z][A-Za-z0-9.]*@$` 在左右两侧都当作「不产生字符」，
+                        这正是 `-X obey-flags` 的语义；否则 `-f/--flags` 变体
+                        的 surface 串会带上 `@U.F.B@` 之类元数据而全量 mismatch。
+                        ③ **按位置索引的 DP 成员判定**（不要枚举路径）：
+                        `dp[i] = {(state, 右侧已拼串)}` 表示「恰好吃掉 surface
+                        前 i 个字符后可达的状态集」；在每个 i 上先做
+                        epsilon/flag 的不动点闭包，再把可见标签按
+                        `left.startswith(label, i)` 转移到 `dp[i+len(label)]`；
+                        最后 `dp[len(left)]` 里有 final state 且右侧串相等即命中。
+                        复杂度 O(len×|E|)，对指数级路径数免疫。
+                        ④ **两种渲染都要接受**：gold 行含 `:` 时按
+                        `left:right` 判定；不含 `:` 时按纯 surface 判定
+                        （HFST 在转移左右标签相同时只打印一侧）。
+                        ⑤ **断言方向是包含**：`gold ⊆ 实际可接受串`，
+                        因为上游有 `-c 10` 计数截断。空 gold（test-empty.lexd）
+                        要单独处理：断言「不接受任何串」，而**不是**断言
+                        「输出非空」——把空 gold 当失败会得到 6/216 的假失败。
+                        ⑥ **仍然要跑能跑的**：`make -C tests/feature LEXD_TEST_FLAGS=…`
+                        的 `check-neg`（只依赖退出码）必须真实执行，把排除项
+                        写进 HMBS_UPSTREAM_TEST_RESULT 的 `skipped` + `reason`，
+                        不允许静默跳过（R51）。
+
+rec_command:            python3 test_package/att_check.py "$LEXD_BIN" test_package/data "$RESULT"
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              PENDING
+source_commit:          PENDING

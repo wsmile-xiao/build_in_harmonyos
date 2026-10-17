@@ -1,0 +1,72 @@
+#====================================================================
+# E429-draft-0B67.kv — 知识图谱草稿（路径 B 候选）
+# 主题: 上游只在 target 存在时就链接 OpenMP::OpenMP_CXX，关闭构建开关不足以去掉 -fopenmp
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E429
+trigger_tool:           cmake|clang|ld|make|ninja
+phase:                  linking
+error_signature: undefined symbol: __kmpc_|__kmpc_end_critical|__kmpc_for_static_init|__kmpc_global_thread_num|__kmpc_critical
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 2
+category: cmake, openmp, linking, ohos
+match_keywords: __kmpc, libomp, OpenMP::OpenMP_CXX, find_package(OpenMP), CMAKE_DISABLE_FIND_PACKAGE_OpenMP, BUILD_WITH_OPENMP, -fopenmp, omp.h, undefined symbol, TARGET OpenMP, static archive, package_info
+title: 上游只在 target 存在时就链接 OpenMP::OpenMP_CXX，构建选项置 OFF 仍会注入 -fopenmp
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: 上游 CMake 把 OpenMP 接线写成 `if(TARGET OpenMP::OpenMP_CXX) target_link_libraries(<lib> OpenMP::OpenMP_CXX) endif()`——只判断 target 是否存在，不判断自家的 <PRJ>_BUILD_WITH_OPENMP 选项。OHOS clang SDK 自带 libomp.so / libomp.a / omp.h，find_package(OpenMP QUIET) 必然成功，于是即便选项已置 OFF，该库仍被 -fopenmp 编译；源码里 `#pragma omp critical` / `#pragma omp parallel for` 若无 `#ifdef _OPENMP` 守卫，就在静态归档里留下 __kmpc_* 未定义符号，而 Conan 的 package_info() 不会声明 libomp，任何消费者链接都失败（本地 conan create 的构建与测试阶段反而全绿，因为构建树里该目标自身带着 -fopenmp 与运行时）。
+affected_scope: 所有在 OHOS clang SDK 上构建、且把 OpenMP 接线写成「只判 target 存在」的 CMake 库；首见于 libosmscout 2024.06.02.1 的 libosmscout-import
+verification_cmd: nm -u <pkg>/lib/lib<name>.a | grep -c __kmpc ; conan create . -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority: 1
+rec_approach: disable-openmp-package-lookup
+rec_description: 在 generate() 的 CMakeToolchain 里除 <PRJ>_BUILD_WITH_OPENMP=OFF 外，追加 CMAKE_DISABLE_FIND_PACKAGE_OpenMP=ON，让 find_package(OpenMP) 直接返回未找到、OpenMP::OpenMP_CXX 目标不存在，-fopenmp 不再注入；无 OpenMP 时 #pragma omp critical 退化为普通语句块、parallel for 退化为串行循环，语义等价
+rec_command: tc.variables["<PRJ>_BUILD_WITH_OPENMP"]=False ; tc.variables["CMAKE_DISABLE_FIND_PACKAGE_OpenMP"]=True
+rec_auto_fix: false
+rec_impl: manual
+
+# 回退方案
+fallback_priority: 2
+fallback_approach: declare-libomp-dependency
+fallback_description: 若确实需要多线程（如导入流水线性能敏感），把 libomp 作为 requires 声明并让 CMakeDeps 提供 OpenMP::OpenMP_CXX，使消费者链接时带上运行时；代价是多一个共享库运行时依赖，在 OHOS 存储卷上还需注意 .so 的符号链接加载问题（见 E479）
+fallback_command: self.requires("libomp/<version>")
+fallback_auto_fix: false
+fallback_impl: none
+
+# ★ 禁止策略 ★
+forbid_1_pattern: CFLAGS=.*-fopenmp|CXXFLAGS=.*-fopenmp|LDFLAGS=.*-lomp|#define _OPENMP
+forbid_1_reason: 手工注入或伪造 -fopenmp/-lomp/_OPENMP 会让运行时依赖脱离 Conan 依赖图：既躲过 package_info() 的传递，也让消费者在缺 libomp 的环境下链接失败；#define _OPENMP 更是绕过上游开关语义
+forbid_1_consequence: 消费者链接仍失败或运行期加载 libomp 失败；CI L0 系列门禁与包可用性受损
+
+# ═══ Layer 4: 原则引用 ═══
+principles: P001, P006
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E214]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+platform_only: true
+doc_file:               E429-draft-0B67.md
+last_updated: 2026-09-29
+source_event: libosmscout 2024.06.02.1 适配：消费者链接 libosmscout_import.a 报 __kmpc_* 未定义
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors: kongling <308360610@qq.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used: 2026-09-29
+
+draft: true
+contributor_id: 0B67

@@ -1,0 +1,175 @@
+--- a/src/libs/zbxnix/ipc.c
++++ b/src/libs/zbxnix/ipc.c
+@@ -16,7 +16,10 @@
+ 
+ #include "zbxcommon.h"
+ 
++#include <fcntl.h>
+ #include <sys/mman.h>
++#include <sys/stat.h>
++#include <unistd.h>
+ 
+ /******************************************************************************
+  *                                                                            *
+@@ -73,3 +76,120 @@
+ 	if (-1 == munmap(real_base, total))
+ 		zbx_error("cannot remove existing shared memory: %s", zbx_strerror(errno));
+ }
++
++/******************************************************************************
++ *                                                                            *
++ * Purpose: Create a named block of shared memory that can be re-mapped by    *
++ *          other processes via its name (shm_open + ftruncate + mmap).       *
++ *                                                                            *
++ ******************************************************************************/
++void	*zbx_shm_create_named(size_t size, char *name, size_t name_len)
++{
++	size_t		header_size, total;
++	void		*base;
++	int		fd;
++	static ZBX_THREAD_LOCAL unsigned int	counter = 0;
++
++	header_size = ZBX_SIZE_T_ALIGN8(sizeof(size_t));
++	total = header_size + size;
++
++	zbx_snprintf(name, name_len, ZBX_SHM_NAME_PREFIX "%d_%u", (int)getpid(), counter++);
++
++	if (-1 == (fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600)))
++	{
++		zabbix_log(LOG_LEVEL_CRIT, "cannot create shared memory object '%s': %s", name,
++				zbx_strerror(errno));
++		return NULL;
++	}
++
++	if (-1 == ftruncate(fd, (off_t)total))
++	{
++		zabbix_log(LOG_LEVEL_CRIT, "cannot resize shared memory object '%s': %s", name,
++				zbx_strerror(errno));
++		close(fd);
++		shm_unlink(name);
++		return NULL;
++	}
++
++	if (MAP_FAILED == (base = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)))
++	{
++		zabbix_log(LOG_LEVEL_CRIT, "cannot map shared memory object '%s': %s", name,
++				zbx_strerror(errno));
++		close(fd);
++		shm_unlink(name);
++		return NULL;
++	}
++
++	close(fd);
++
++	*(size_t *)base = total;
++
++	return (char *)base + header_size;
++}
++
++/******************************************************************************
++ *                                                                            *
++ * Purpose: Map an existing named shared memory block created by another      *
++ *          process. Returns the base address of the mapped region.           *
++ *                                                                            *
++ ******************************************************************************/
++void	*zbx_shm_attach_named(const char *name, size_t *size)
++{
++	struct stat	st;
++	size_t		header_size;
++	void		*base;
++	int		fd;
++
++	if (-1 == (fd = shm_open(name, O_RDWR, 0600)))
++	{
++		zabbix_log(LOG_LEVEL_DEBUG, "cannot open shared memory object '%s': %s", name,
++				zbx_strerror(errno));
++		return NULL;
++	}
++
++	if (-1 == fstat(fd, &st))
++	{
++		zabbix_log(LOG_LEVEL_DEBUG, "cannot stat shared memory object '%s': %s", name,
++				zbx_strerror(errno));
++		close(fd);
++		return NULL;
++	}
++
++	if (MAP_FAILED == (base = mmap(NULL, (size_t)st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)))
++	{
++		zabbix_log(LOG_LEVEL_DEBUG, "cannot map shared memory object '%s': %s", name,
++				zbx_strerror(errno));
++		close(fd);
++		return NULL;
++	}
++
++	close(fd);
++
++	header_size = ZBX_SIZE_T_ALIGN8(sizeof(size_t));
++
++	if (NULL != size)
++		*size = (size_t)st.st_size - header_size;
++
++	return (char *)base + header_size;
++}
++
++/******************************************************************************
++ *                                                                            *
++ * Purpose: Unmap and remove a named shared memory block.                     *
++ *                                                                            *
++ ******************************************************************************/
++void	zbx_shm_destroy_named(void *base, const char *name)
++{
++	size_t	header_size, total;
++	void	*real_base;
++
++	header_size = ZBX_SIZE_T_ALIGN8(sizeof(size_t));
++	real_base = (char *)base - header_size;
++	total = *(size_t *)real_base;
++
++	if (-1 == munmap(real_base, total))
++		zbx_error("cannot unmap shared memory object '%s': %s", name, zbx_strerror(errno));
++
++	if (-1 == shm_unlink(name))
++		zbx_error("cannot remove shared memory object '%s': %s", name, zbx_strerror(errno));
++}
+--- a/include/zbxnix.h
++++ b/include/zbxnix.h
+@@ -66,8 +66,14 @@
+ /* IPC start */
+ #define ZBX_NONEXISTENT_SHMID		(-1)
+ 
++#define ZBX_SHM_NAME_LEN		64
++#define ZBX_SHM_NAME_PREFIX		"/zbx_shm_"
++
+ void	*zbx_shm_create(size_t size);
+ void	zbx_shm_destroy(void *base);
++void	*zbx_shm_create_named(size_t size, char *name, size_t name_len);
++void	*zbx_shm_attach_named(const char *name, size_t *size);
++void	zbx_shm_destroy_named(void *base, const char *name);
+ 
+ /* data copying callback function prototype */
+ typedef void	(*zbx_shm_copy_func_t)(void *dst, size_t size_dst, const void *src);
+@@ -75,7 +81,10 @@
+ /* dynamic shared memory data structure */
+ typedef struct
+ {
+-	/* shared memory base address */
++	/* cross-process identifier of the shared memory segment */
++	char			name[ZBX_SHM_NAME_LEN];
++
++	/* shared memory base address (local to this process) */
+ 	void			*addr;
+ 
+ 	/* allocated size */
+@@ -91,7 +100,10 @@
+ /* local process reference to dynamic shared memory data */
+ typedef struct
+ {
+-	/* shared memory base address */
++	/* name of the shared memory segment this process has mapped */
++	char	name[ZBX_SHM_NAME_LEN];
++
++	/* shared memory base address (local to this process) */
+ 	void	*addr;
+ }
+ zbx_dshm_ref_t;

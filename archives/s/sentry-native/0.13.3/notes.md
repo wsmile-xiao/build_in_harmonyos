@@ -80,3 +80,10 @@ ls ~/usr/local/include/sentry.h → 存在
 
 **编译结束**: 2026-06-09 16:28
 **最终状态**: published
+
+## 积分赛测试口径
+
+- 上游共注册 312 个单元测试。
+- OHOS `inproc` backend 与 `none` transport 配置下，307 个适用测试全部通过，适用测试通过率为 307/307（100%）。
+- `basic_transport_thread_name`、`module_finder`、`process_spawn`、`symbolizer`、`unwinder` 共 5 项依赖当前 OHOS 配置未提供的传输、进程、模块发现、符号化或栈回溯能力，作为不适用项单列，不计入执行分母。
+- 当前 PR 通过 CTest `-E` 正则显式排除上述 5 项；当前 SHA 的最终结果仍以官方测试阶段复验为准。

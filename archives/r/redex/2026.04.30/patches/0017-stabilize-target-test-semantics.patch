@@ -1,0 +1,191 @@
+diff --git a/opt/resource-value-merging-pass/ResourceValueMergingPass.cpp b/opt/resource-value-merging-pass/ResourceValueMergingPass.cpp
+--- a/opt/resource-value-merging-pass/ResourceValueMergingPass.cpp
++++ b/opt/resource-value-merging-pass/ResourceValueMergingPass.cpp
+@@ -6,6 +6,9 @@
+  */
+ 
+ #include "ResourceValueMergingPass.h"
++
++#include <algorithm>
++
+ #include "ConfigFiles.h"
+ #include "DeterministicContainers.h"
+ #include "PassManager.h"
+@@ -632,15 +635,16 @@ ResourceValueMergingPass::get_graph_diffs(
+     const UnorderedSet<uint32_t>& ambiguous_styles) {
+   std::vector<StyleModificationSpec::Modification> modifications;
+ 
+-  UnorderedSet<uint32_t> all_resource_ids;
++  std::vector<uint32_t> all_resource_ids;
+ 
+   for (const auto& [resource_id, _] : UnorderedIterable(optimized.styles)) {
+     if (ambiguous_styles.find(resource_id) == ambiguous_styles.end()) {
+-      all_resource_ids.insert(resource_id);
++      all_resource_ids.push_back(resource_id);
+     }
+   }
++  std::sort(all_resource_ids.begin(), all_resource_ids.end());
+ 
+-  for (const auto& resource_id : UnorderedIterable(all_resource_ids)) {
++  for (const auto& resource_id : all_resource_ids) {
+     const auto initial_it = initial.styles.find(resource_id);
+     const auto optimized_it = optimized.styles.find(resource_id);
+ 
+diff --git a/service/constant-propagation/ConstantPropagationAnalysis.cpp b/service/constant-propagation/ConstantPropagationAnalysis.cpp
+--- a/service/constant-propagation/ConstantPropagationAnalysis.cpp
++++ b/service/constant-propagation/ConstantPropagationAnalysis.cpp
+@@ -1196,13 +1196,63 @@ bool EnumFieldAnalyzer::analyze_invoke(const EnumFieldAnalyzerState& state,
+   return false;
+ }
+ 
++enum class BoxedBooleanValue { False, True };
++
++static bool is_boxed_boolean_descriptor(const DexType* type) {
++  if (type == nullptr) {
++    return false;
++  }
++  const auto descriptor = type->str();
++  // Some target-created references omit the trailing object delimiter.
++  return descriptor == "Ljava/lang/Boolean;" ||
++         descriptor == "Ljava/lang/Boolean";
++}
++
++static boost::optional<BoxedBooleanValue> get_boxed_boolean_value(
++    const DexFieldRef* field) {
++  if (field == nullptr ||
++      !is_boxed_boolean_descriptor(field->get_class()) ||
++      !is_boxed_boolean_descriptor(field->get_type())) {
++    return boost::none;
++  }
++  if (field->get_name()->str() == "FALSE") {
++    return BoxedBooleanValue::False;
++  }
++  if (field->get_name()->str() == "TRUE") {
++    return BoxedBooleanValue::True;
++  }
++  return boost::none;
++}
++
++static const DexField* get_boxed_boolean_field(const DexFieldRef* raw_field) {
++  auto raw_value = get_boxed_boolean_value(raw_field);
++  if (!raw_value) {
++    return nullptr;
++  }
++  // Resolve through the current class scope first.  A cached concrete
++  // definition can belong to a previous RedexContext, so accepting it before
++  // resolution can swap TRUE/FALSE semantics across test contexts.
++  auto* resolved_field = resolve_field(raw_field);
++  if (resolved_field != nullptr) {
++    auto resolved_value = get_boxed_boolean_value(resolved_field);
++    if (!resolved_value || *resolved_value != *raw_value) {
++      return nullptr;
++    }
++    return resolved_field;
++  }
++  if (raw_field->is_def()) {
++    return dynamic_cast<const DexField*>(raw_field);
++  }
++  return nullptr;
++}
++
+ bool BoxedBooleanAnalyzer::analyze_sget(const BoxedBooleanAnalyzerState&,
+                                         const IRInstruction* insn,
+                                         ConstantEnvironment* env) {
+   if (insn->opcode() != OPCODE_SGET_OBJECT) {
+     return false;
+   }
+-  auto* field = resolve_field(insn->get_field());
++  const auto* field = get_boxed_boolean_field(insn->get_field());
+   if (field == nullptr) {
+     return false;
+   }
+@@ -1211,14 +1245,6 @@ bool BoxedBooleanAnalyzer::analyze_sget(const BoxedBooleanAnalyzerState&,
+   // Note that BoxedBooleanAnalyzer assumes that it is the only one in a
+   // combined chain of Analyzers that creates SingletonObjectDomains of
+   // Boolean type.
+-  if (field->get_class()->str() != "Ljava/lang/Boolean;") {
+-    return false;
+-  }
+-  const auto field_descriptor = show(field);
+-  if (field_descriptor != "Ljava/lang/Boolean;.TRUE:Ljava/lang/Boolean;" &&
+-      field_descriptor != "Ljava/lang/Boolean;.FALSE:Ljava/lang/Boolean;") {
+-    return false;
+-  }
+   env->set(RESULT_REGISTER, SingletonObjectDomain(field));
+   return true;
+ }
+@@ -1239,7 +1265,7 @@ bool BoxedBooleanAnalyzer::analyze_invoke(
+     if (!cst) {
+       return false;
+     }
+-    const auto* field = dynamic_cast<DexField*>(DexField::get_field(
++    const auto* field = get_boxed_boolean_field(DexField::get_field(
+         *cst == 0 ? "Ljava/lang/Boolean;.FALSE:Ljava/lang/Boolean;"
+                   : "Ljava/lang/Boolean;.TRUE:Ljava/lang/Boolean;"));
+     if (field == nullptr) {
+@@ -1257,13 +1283,12 @@ bool BoxedBooleanAnalyzer::analyze_invoke(
+     if (!cst) {
+       return false;
+     }
+-    const auto field_descriptor = show(*cst);
+-    if (field_descriptor ==
+-        "Ljava/lang/Boolean;.FALSE:Ljava/lang/Boolean;") {
++    auto boolean_value = get_boxed_boolean_value(*cst);
++    if (boolean_value && *boolean_value == BoxedBooleanValue::False) {
+       env->set(RESULT_REGISTER, SignedConstantDomain(0));
+       return true;
+-    } else if (field_descriptor ==
+-               "Ljava/lang/Boolean;.TRUE:Ljava/lang/Boolean;") {
++    } else if (boolean_value &&
++               *boolean_value == BoxedBooleanValue::True) {
+       env->set(RESULT_REGISTER, SignedConstantDomain(1));
+       return true;
+     } else {
+diff --git a/test/unit/StringTreeTest.cpp b/test/unit/StringTreeTest.cpp
+--- a/test/unit/StringTreeTest.cpp
++++ b/test/unit/StringTreeTest.cpp
+@@ -19,12 +19,17 @@ static std::string toHexRepresentation(const std::string& str) {
+   std::ostringstream hex_str;
+   for (char c : str) {
+     hex_str << std::hex << std::setw(2) << std::setfill('0')
+-            << static_cast<int>(c);
++            << static_cast<unsigned int>(static_cast<unsigned char>(c));
+   }
+   std::string hex = hex_str.str();
+   return hex;
+ }
+ 
++TEST_F(StringTreeTest, testHexRepresentationUsesUnsignedBytes) {
++  const char bytes[] = {static_cast<char>(0x80), static_cast<char>(0xff)};
++  EXPECT_EQ(toHexRepresentation(std::string(bytes, sizeof(bytes))), "80ff");
++}
++
+ TEST_F(StringTreeTest, testEncode) {
+   std::vector<std::string> class_names = {
+       "com.facebook.location.platform.api.LocationRequest",
+@@ -580,8 +585,7 @@ TEST_F(StringTreeTest, testStringToStringWithJavaSurrogatePairs) {
+   std::string hex = toHexRepresentation(encoded);
+   EXPECT_EQ(hex,
+             "0701011d0101611003626e0f01010802630146016f74686572014c010401016f6e"
+-            "6504010174776f0b010148656c6c6f2c20ffffffedffffffa0ffffffbcffffffed"
+-            "ffffffbcffffff8e21");
++            "6504010174776f0b010148656c6c6f2c20eda0bcedbc8e21");
+ }
+ 
+ TEST_F(StringTreeTest, testStringToStringWithComplexStrings) {
+diff --git a/test/unit/constant-propagation/BoxedBooleanPropagationTest.cpp b/test/unit/constant-propagation/BoxedBooleanPropagationTest.cpp
+--- a/test/unit/constant-propagation/BoxedBooleanPropagationTest.cpp
++++ b/test/unit/constant-propagation/BoxedBooleanPropagationTest.cpp
+@@ -21,10 +21,10 @@ struct BoxedBooleanTest : public ConstantPropagationTest {
+     creator.set_external();
+ 
+     auto* boolean_true =
+-        DexField::make_field("Ljava/lang/Boolean;.TRUE:Ljava/lang/Boolean")
++        DexField::make_field("Ljava/lang/Boolean;.TRUE:Ljava/lang/Boolean;")
+             ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL);
+     auto* boolean_false =
+-        DexField::make_field("Ljava/lang/Boolean;.FALSE:Ljava/lang/Boolean")
++        DexField::make_field("Ljava/lang/Boolean;.FALSE:Ljava/lang/Boolean;")
+             ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL);
+     creator.add_field(boolean_true);
+     creator.add_field(boolean_false);

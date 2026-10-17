@@ -1,0 +1,53 @@
+#====================================================================
+# DRAFT-autotools-ac-prog-lex-demotes-lex-when-libfl-unlinkable.kv
+# AC_PROG_LEX(yywrap) 在 -lfl 链接探测失败时把 LEX 静默降级为 ':'，
+# scanner/parser 生成规则空转 → 构建失败；应在 make 前按上游命令行预生成。
+# 完整叙事与证据见同目录 .md
+#====================================================================
+
+id:                     DRAFT (proposed 编号由知识库主编确认)
+trigger_tool:           configure|make|flex
+phase:                  configuration|compilation
+error_signature:        yywrap not found; giving up on flex|cannot stat.*lex\.yy\.c|No rule to make target.*scan\.c|^LEX = :$
+severity:               3
+category:               autotools, build-system, flex, lex, ohos
+match_keywords:         AC_PROG_LEX, AM_PROG_LEX, yywrap, giving up on flex, LEX, lex.yy.c, -lfl, libfl, scanner, servscan, clientscan, pregenerate
+title:                  AC_PROG_LEX(yywrap) 在链接不到 yywrap 库时把 LEX 静默降级为 ':'，scanner 规则空转导致构建失败——应在 make 前按上游原命令行预生成生成物
+root_cause:             autoconf AC_PROG_LEX/AM_PROG_LEX(yywrap) 在选定 flex 后用 -lfl 链接探测 yywrap 符号；探测失败的直接原因不是 flex 缺失而是 libfl 不在默认链接搜索路径（OHOS 设备 flex 2.6.4 的 libfl.a 位于 /data/service/hnp/flex.org/flex_2.6.4/lib，默认路径 clang -lfl 报 ld.lld: error: unable to find library -lfl，已实测）。探测失败后 configure 仅打 WARNING: yywrap not found; giving up on flex 并把 LEX 降级为 ':'（LEXLIB 置空），不报错不中止；随后 make 执行 scanner 规则 "$(LEX) $< && mv lex.yy.c $@" 时 ':' 空转成功、lex.yy.c 不存在 → mv 失败或编译期缺 scanner .c → 构建失败。源头树按上游惯例不含生成物时必现
+affected_scope:         任何在 flex 库不在默认链接搜索路径的环境（OHOS 设备即此布局）上、使用 AC_PROG_LEX/AM_PROG_LEX(yywrap) 且源树不含 scanner/parser 生成物的 autotools 项目；tarball 只发布 .l/.y 而把 .c 列为构建产物的包全部命中
+verification_cmd:       在设备上新 shell 依次执行：printf 'int yywrap(void){return 1;}\nint main(void){return 0;}\n' > /data/storage/el2/base/probe-fl.c && /data/service/hnp/bin/clang /data/storage/el2/base/probe-fl.c -lfl -o /data/storage/el2/base/probe-fl（预期 ld.lld: error: unable to find library -lfl，证明默认路径无 libfl）；再加 -L/data/service/hnp/flex.org/flex_2.6.4/lib 重复（预期链接成功，证明 libfl 存在仅路径不可达）；最后对任一含 .l 且不带生成物的 autotools 源树跑 configure 后 grep -E '^LEX' Makefile（预期 "LEX = :"）且 config.log 含 "giving up on flex"；删除 /data/storage/el2/base/probe-fl*
+rec_priority:           1
+rec_approach:           pregenerate-lex-yacc-outputs-before-make
+rec_description:        在 make 前用上游 Makefile 规则的原样命令行预生成全部 scanner/parser 产物，使 make 不再调用 $(LEX)/$(YACC)。要点：(1) 命令必须逐字取自上游 Makefile.in 规则（如 flex servscan.l && mv lex.yy.c servscan.c、bison -tdv 后按 y.tab.h/y.tab.c 与目标名 cmp 后 mv），不得手写等价命令引入版本差异；(2) 生成动作放进 recipe build() 而非补丁进源码，保持源树可向上游提交；(3) scanners 自带 yywrap 的包无需 -lfl，预生成后链接面不变
+rec_command:            cd $SRC && flex servscan.l && mv lex.yy.c servscan.c && bison -tdv servparse.y && { cmp -s y.tab.h servparse.h || mv y.tab.h servparse.h; } && { cmp -s y.tab.c servparse.c || mv y.tab.c servparse.c; } && rm -f y.tab.h y.tab.c   #（对每个 scanner/parser 重复；YACC 用 configure 选定的 bison -y 等价命令）
+rec_auto_fix:           false
+rec_impl:               manual-conan-recipe
+fallback_priority:      2
+fallback_approach:      expose-libfl-search-path
+fallback_description:   退路：向 configure 传 LDFLAGS=-L<flex 安装目录>/lib（OHOS 设备为 /data/service/hnp/flex.org/flex_2.6.4/lib）使 yywrap 链接探测通过、LEX 保持 flex。诚实权衡：路径绑定设备 hnp 布局、随设备布局变化失效；且 scanners 自带 yywrap 的包会引入非必需的 -lfl 链接依赖——仅作退路，不作主方案
+fallback_command:       LDFLAGS="-L/data/service/hnp/flex.org/flex_2.6.4/lib" ./configure ...
+fallback_auto_fix:      false
+fallback_impl:          manual-conan-recipe
+forbid_1_pattern:       touch.*scan.*\.c|echo.*>.*scan\.c|cp.*dummy.*scan\.c
+forbid_1_reason:        用空文件/占位文件伪造 scanner 生成物绕过 LEX 降级，掩盖的是生成失败而非修复探测问题
+forbid_1_consequence:   生成物与 .l/.y 源不一致，编译能过但词法/语法行为漂移，问题延迟到运行期且不可审计
+forbid_2_pattern:       sed -i.*Makefile.*LEX|make LEX=flex
+forbid_2_reason:        事后改写生成后的 Makefile 变量或命令行覆盖 LEX，只是绕过降级结果而不解决 libfl 不可达的探测根因
+forbid_2_consequence:   重新 configure 即复发；修复不可迁移到其他同为 flex 布局的包
+principles:             P-AUTOTOOLS-002,P-ENV-001
+causes:                 []
+caused_by:              []
+similar_to:             [E386,E146,E277]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               DRAFT-autotools-ac-prog-lex-demotes-lex-when-libfl-unlinkable.md
+last_updated:           2026-09-10
+source_event:           dictd 1.13.3 OHOS PC 适配（run dictd-1.13.3；configure 实测降级 + 预生成后权威 CI PASS）
+authors:                sea_crab / 不知对不队 (curator 汇编)
+source_pr:              pending（随 feat 分支交付）
+source_commit:          3bff290f0500428b51a18426d70ebb44705be915
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-10

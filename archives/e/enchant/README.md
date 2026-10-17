@@ -1,13 +1,13 @@
 # enchant
 
-**Description**: A spell checking library and command-line tool that provides a uniform interface to various spell checking engines (aspell, hunspell, nuspell, etc.).
+**Description**: Uniform spell-checking library and command-line tools.
 
-**Website**: https://github.com/AbiWord/enchant
+**Website**: https://rrthomas.github.io/enchant/
 
-**License**: LGPL-2.1+
+**License**: LGPL-2.1-or-later
 
 ## Available Versions
 
 | Version | Status | Date |
 |---------|--------|------|
-| 2.8.2 | published | 2026-06-09 |
+| 2.8.2 | built | 2026-08-04 |

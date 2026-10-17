@@ -1,0 +1,92 @@
+#====================================================================
+# DRAFT-lib32-gcc-16.1.1-ohos-arm-cross-toolchain - aarch64-hosted cross GCC emitting 32-bit ARM (arm-linux-ohos)
+#====================================================================
+
+id:                     DRAFT-lib32-gcc-16.1.1-ohos-arm-cross-toolchain
+trigger_tool:           conan|gcc|binutils|autotools|readelf
+phase:                  source|build|package|testing
+error_signature:        arm-linux-ohos-gcc|armv5t|gcc-16.1.0.tar.xz|collect-ld|ELF32|_build_target_gas|_install_target_gas|armelf_linux_eabi|unknown pseudo-op|posix_spawnp: Permission denied|gcc.c-torture/execute|上游 N 少报
+
+severity:               2
+category:               toolchain|autotools|cross-compiler|ohos-platform|pr-review-compliance
+match_keywords:         lib32-gcc, cross compiler, 32-bit ARM, arm-linux-ohos, collect-ld, unlink, device GNU ld, binutils backend, GNU ARM gas, driver wrapper, prefixed install, versioned symlink, dumpversion, torture compile-only, readelf ELF32, ELF signing, HMDFS, armv5t, upstream test census, full inventory N, consumer end-to-end flow, cross-TU symbol resolution
+title:                  aarch64 宿主上的 ARM32 交叉 GCC：collect-ld 让位、前缀命名面、配方自建目标汇编器与消费者端到端用例
+classification:         Path B / Path C candidate; final classification is subject to review
+
+root_cause:             lib32-gcc 是在 aarch64 HarmonyOS PC 宿主上自举、向 32 位 ARM（arm-linux-ohos）发射代码的交叉编译器包。collect2 按「名字外层（real-ld→collect-ld→ld）× COMPILER_PATH 前缀内层」双重搜索，configure 自动生成的构建树 gcc/collect-ld shebang 脚本跨前缀抢先命中，HMDFS 禁止不可信链 direct spawn shebang 脚本，导致 torture 全批链接失败。交叉 make install 只装前缀名且版本 symlink 记录真实内部版本（16.1.0 ≠ 包版本名 16.1.1）；设备 GNU binutils 2.45 只有 AArch64 后端，ARM32 目标汇编必须由配方自建的 GNU ARM gas 补齐。
+followup_root_cause:    修复 collect-ld 有两条路线：unlink 构建树 collect-ld/real-ld 让搜索落到设备 GNU ld（要求设备 ld 支持目标 emulation，本包设备 ld 2.45 多目标构建含 armelf_linux_eabi）；或构造签名 ELF launcher 三别名（gcc-snapshot 路线，适合设备 ld 不可用场景）。只改 -B 顺序无效，因为名字外层循环仍先命中构建树脚本。
+followup_root_cause_2:  交叉 GCC 的裸名 gcc 属于宿主编译器命名约定，本包不交付；wrapper 必须以 sh 入口合成 gcc/前缀名/版本名/cpp 四名字，且内部版本从版本 symlink 解析（.real 改名保留真身），不能用包版本号拼接 libdir。
+followup_root_cause_3:  消费场景的 armv5t 等老架构汇编在 hnp/bin/as 上直接失败（无 ARM 后端），SDK clang 又因 spawn 管控不可用；解法是配方在 build() 期从 conandata.yml 声明的 binutils 官方镜像回退源自建 RUNPATH-free GNU ARM gas（make all-gas、LDFLAGS=-static），装为构建期 target-tools/as 与包内 bin/as 并签名，缺失即硬失败。禁止再用"外部预编译 gas 环境变量"通道（CI 与本地会走不同分支）。
+followup_root_cause_4:  aarch64 宿主不能执行 ARM32 产物，torture 的验证口径是每例由构建树交叉驱动（xgcc+xgcc-sign wrapper→cc1→包内 gas→collect2→设备 ld）编译+链接，llvm-readelf -h 校验产物为合法 ELF（逐例校验合法 ELF；ELF32/ARM 机型断言由 test_package 消费者流程强制）；结论写 compile+link 100/100，不写执行通过。上游 N 必须按所驱动套件全家底清点（gcc.c-torture/execute = 1685 .c 源文件），实际执行的子集（100）作为 N′ 单列并逐项写明未执行的技术原因，把 N′ 写成 N 会被判少报。
+followup_root_cause_5:  交叉工具链的目标产物在宿主上不可执行时，鸿蒙特有测试不得退化为孤立断言：需构造跨 TU 的完整消费者流程（预处理 → 编译 TU-A → 编译 TU-B（符号 UND）→ 汇编 → 链接 → 产物校验：Type EXEC/DYN、入口地址非 0、main 与跨 TU 符号 DEFINED、.ARM.attributes 指纹），并以 ignore_errors=False 让链接失败直接判负。该形态空壳包不可伪造（CI L1e 移走包内 bin/ 后链接必失败）。
+followup_root_cause_6:  ci/config/build_timeouts.txt 属基础设施（协作者铁律 ci/ 只读、SKILL §W2 框架改动须单独 PR）：超时条目随软件 PR 提交会被 rule5（非 archives/knowledge 目录改动）判 FAIL，与条目内容正确与否无关。正确通道是独立【基础设施】PR，合入 main 后 rebase 软件分支再触发 CI。
+affected_scope:         aarch64 宿主 + ARM32/其他 32 位目标的交叉工具链包；交付 GNU 工具链语义、目标汇编器需随包交付、宿主不可执行目标产物的编译器类包；以及受 pc-pr-review rule4/rule5/rule12 门禁约束的软件 PR。
+verification_cmd:       在 OHOS 设备上执行 `conan create archives/l/lib32-gcc/16.1.1 -pr:h ci/conan/profiles/ohos-aarch64 -pr:b ci/conan/profiles/ohos-aarch64 --build=lib32-gcc/*`；torture 子集应 100/100（compile+link 口径，N′=100 / N=1685）；test_package 消费者端到端流程应 2 用例 / 31 断言全通过（预处理 → 编译 TU-A/TU-B → 汇编 → 链接 → 产物校验，含 -dumpmachine==arm-linux-ohos、readelf ELF32/ARM、跨 TU 符号 DEFINED、__OHOS__ 编译期断言）。
+
+rec_priority:           1
+rec_approach:           unlink-collect-ld-plus-recipe-built-target-gas-plus-consumer-flow
+rec_description:        torture/build 前幂等 unlink 构建树 collect-ld/real-ld 让 collect2 落到设备多目标 GNU ld；driver wrapper 合成四名字并从版本 symlink 解析内部版本；配方在 build() 期自建 GNU ARM gas（binutils 官方源 make all-gas）装为 target-tools/as 与包内 bin/as 并签名；torture 采用 compile+link+readelf 验证口径（N 取套件全家底 1685、N′ 取执行数 100）；test_package 构造跨 TU 消费者端到端流程（31 断言）；超时条目走独立基础设施 PR；版本名与源码版本解耦（conandata 头注 + sha512 逐字节比对）。
+rec_command:            _run_torture_execute_subset(): unlink gcc/collect-ld and gcc/real-ld (OHOS-only, idempotent); _install_ohos_driver_wrapper(): rename real driver to arm-linux-ohos-gcc-<ver>.real, synthesize gcc/prefixed/versioned/cpp wrappers via /bin/sh; _build_target_gas(): download binutils from conandata.yml mirror list in build(), make all-gas, install as target-tools/as; _install_target_gas(): copy to p/bin/as then sign; test_package: gcc -E probe -> -c consumer_lib.c -> -c consumer_main.c -> link consumer_program -> llvm-readelf -h/-s assertions -> -DEXPECT_OHOS=1 test_gcc.c
+rec_auto_fix:           false
+rec_impl:               conan-recipe-plus-target-binutils
+
+path_b_candidate:       true
+path_b_boundary:        只记录 lib32-gcc 自身的交叉编译器适配知识（collect-ld 双重搜索、前缀命名面、目标汇编器缺口、ARM32 torture 口径与上游 N 清点、消费者端到端用例范式、超时条目的基础设施归属、版本名解耦）；spawn/签名/HMDFS 通用定律引用既有条目不展开；flex/2.6.4 保持独立库边界。
+path_b_evidence:        source URL 与 sha512 逐字节比对；ci10→ci12 三轮失败签名与修复；torture 100/100 双次（ci12 + conan-verify 干净重建）且按 N=1685 / N′=100 如实申报；test_package 2 用例 / 31 断言（宿主 clang 复检 31 项真实执行、10 项 OHOS 专有项待真机复验）；L2 informational（gcc-ar/nm/ranlib --version 失败）如实记录；commands.json binary:false 与制品未 upload 一致
+
+path_c_candidate:       true
+path_c_qualifying_items: criterion 3 - 交叉自举工具链需协调配方自建 gas、设备多目标 ld、全链 ELF 签名与 -B 搜索顺序; criterion 4 - bundled GMP/MPFR/MPC + 独立 flex/2.6.4 + 全量 GCC 交叉自举与双次干净重建的高成本验证
+path_c_boundary:         当前 recipe 限定 C frontend、非 bootstrap、非 multilib、静态交付；候选申报，最终等级由维护者和评审确认。
+
+reusable_knowledge_count: 7
+reusable_knowledge_1:    collect2 按「名字×前缀」双重搜索；构建树自动生成的 collect-ld shebang 脚本会跨前缀抢先命中。修复二选一：unlink 让位设备 ld（设备 ld 须支持目标 emulation），或签名 ELF launcher 三别名；只改 -B 顺序无效。
+reusable_knowledge_2:    交叉 GCC make install 只装前缀名（ELF + 版本 symlink），无裸 gcc；wrapper 需合成四名字命名面，内部版本从 symlink 解析，不得用包版本号拼接 libdir。
+reusable_knowledge_3:    设备 binutils 与目标架构能力差是结构性的（2.45 仅 AArch64 后端），且 clang 路线被 spawn 管控阻断；解法是配方 build() 期自建 RUNPATH-free GNU ARM gas（binutils 官方镜像回退源 + make all-gas + LDFLAGS=-static），装为 target-tools/as 与包内 bin/as 并签名，-B 前置包内 bin；缺失硬失败，不设外部预编译工件通道。
+reusable_knowledge_4:    宿主不可执行目标产物时，torture 口径=构建树交叉驱动 compile+link + llvm-readelf -h 合法 ELF 校验（机型断言在消费者测试强制），双次执行（初跑+干净重建）排除缓存；结论必须写明 compile+link 口径，不混写为执行通过。同期上游 N 必须按所驱动套件全家底清点（本例 gcc.c-torture/execute = 1685 .c 文件），执行子集（100）作为 N′ 单列并对未执行逐项列具体技术原因——把 N′ 写成 N 即判少报（rule4）。
+reusable_knowledge_5:    任务版本名与上游源码版本解耦时（16.1.1 任务名 vs 16.1.0 源码），诚实记录映射：conandata 头注 + 本地计算 sha256 + 与官方 sha512.sum 逐字节比对的交叉证据；内部版本解析走真实来源。
+reusable_knowledge_6:    构建超时条目属基础设施（ci/config/build_timeouts.txt）：随软件 PR 提交会被 rule5（非 archives/knowledge 目录改动）判 FAIL，与条目正确性无关；正确通道是独立基础设施 PR，合入并 rebase 后软件 PR 的 CI 才有窗口。落地顺序不可颠倒，否则软件 PR 表面红在 3600s 超时上。
+reusable_knowledge_7:    目标产物不可执行时的消费者端到端用例范式：预处理（-E 验证 __OHOS__ 生效）→ 编译 TU-A（DEFINED FUNC + .ARM.attributes + Type REL）→ 编译 TU-B（符号 UND）→ 链接 → 产物校验（Type EXEC/DYN、入口地址非 0、跨 TU 符号 DEFINED）→ 编译期 ABI 程序（#error/_Static_assert）。跨 TU 符号 DEFINED、入口地址非 0、汇编器指纹三件事空壳包无法伪造，故构成端到端证据；孤立断言条数再多都不满足 rule12。
+diagnostic_matrix:       torture 全批 posix_spawnp 失败 -> collect2 -debug 查 ld_file_name + unlink collect-ld/real-ld; package 找不到 gcc -> 前缀命名面 wrapper + symlink 解析版本; armv5t/unknown pseudo-op -> 配方自建 GNU ARM gas + 包内 bin/as; -B libdir 不存在 -> 内部版本从 symlink/dumpversion 解析; 宿主无法运行产物 -> compile+link+readelf 口径; rule4 少报 -> N 取套件全家底 + N′ 单列; rule12 只有断言 -> 跨 TU 消费者端到端流程; rule5 非 archives 改动 -> ci/ 改动拆独立基础设施 PR
+knowledge_reuse_scope:   GCC/Clang/binutils 等交叉工具链包；aarch64 宿主 + 32 位目标；交付 GNU 工具链语义且宿主不可执行目标产物的场景；受 pc-pr-review 门禁约束的软件 PR 申报口径
+
+fallback_priority:      2
+fallback_approach:      signed-launcher-aliases
+fallback_description:   若设备 ld 不支持目标 emulation（如 armelf_linux_eabi），unlink 路线失效，改用 gcc-snapshot 的签名 ELF launcher 三别名路线（ld/collect-ld/real-ld）。
+fallback_command:        build minimal signed ELF launcher via OHOS clang-sign and provide ld/collect-ld/real-ld aliases in build tree and package
+fallback_auto_fix:      false
+fallback_impl:          signed-elf-launcher
+
+forbid_1_pattern:       package_version_to_libdir
+forbid_1_reason:        包版本名（16.1.1）与内部版本（16.1.0）解耦；用包版本号拼接 -B libdir 会指向不存在目录。
+forbid_1_consequence:   wrapper 运行时找不到内部 libdir，所有编译调用失败。
+
+forbid_2_pattern:       naked-gcc-to-host-compiler-symlink
+forbid_2_reason:        裸 gcc 指向宿主编译器会让门禁假通过，交付语义错乱（包是 ARM32 交叉编译器，不是宿主编译器）。
+forbid_2_consequence:   消费方拿到错误工具链语义，产物架构与声明不符。
+
+forbid_3_pattern:       ci-config-changes-inside-software-pr
+forbid_3_reason:        ci/ 为协作者只读基础设施，超时条目等框架改动必须单独提 PR（SKILL §W2）。
+forbid_3_consequence:   rule5 判 FAIL（非 archives/knowledge 目录改动），返修时须剥离重提。
+
+forbid_4_pattern:       upstream-N-as-executed-subset
+forbid_4_reason:        上游 N 的口径是所驱动套件全家底；用实际执行子集当 N 申报即少报。
+forbid_4_consequence:   rule4 判 FAIL（实测 N > 声明 N），且掩盖未执行范围。
+
+principles:             []
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-gcc-snapshot-20260705-ohos-source-tree-and-fresh-build
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-lib32-gcc-16.1.1-ohos-arm-cross-toolchain.md
+last_updated:           2026-09-25
+source_event:           lib32-gcc/16.1.1 HarmonyOS PC 适配：ci10 torture 0/100（collect-ld 劫持取证）→ ci11 package 前缀命名面修复 → ci12 exit 0；conan-verify G0-G4 PASS；finish W3 本地 CI L0/L1/L2 pass；人工审查 VERDICT=FAIL（rule4 少报 / rule5 非 archives 改动 / rule12 只有断言）返修：N 改按全家底 1685 申报、ci 超时条目拆独立基础设施 PR、test_package 改造为跨 TU 消费者端到端流程（2 用例 / 31 断言）
+authors:                SunShine_06
+source_pr:
+source_commit:
+
+metrics_success_count:  4
+metrics_fail_count:     2
+verification_result:    ci12 full conan create exit 0 with torture subset 100/100 (compile+link via packaged driver chain, readelf ELF32/ARM validated; declared as N=1685 upstream inventory vs N'=100 executed); conan-verify G0/G1/G2(clean rebuild)/G3/G4 all PASS; finish W3 local CI L0/L1/L2 pass with build summary Success: 1, Pass rate 100.0%; test_package consumer end-to-end flow 2 cases / 31 assertions (preprocess -> compile TU-A/TU-B -> assemble -> link -> artifact validation: ELF32/ARM, Type REL/EXEC, non-zero entry point, cross-TU symbols DEFINED, .ARM.attributes fingerprint, plus the -DEXPECT_OHOS=1 compile-time ABI program); host-side mechanical re-run of the same flow executed all 31 assertions with only the 10 OHOS-specific ones failing by design; honestly recorded L2 informational: arm-linux-ohos-gcc-ar/-nm/-ranlib --version failed while core driver commands all OK; artifact upload not performed, commands.json written binary:false per R38
+current_blocker:        artifact-repo upload pending task decision; the package-level 7200s CI timeout lives in a separate infrastructure PR and must land + be rebased before this software PR's CI can pass

@@ -1,0 +1,84 @@
+#====================================================================
+# DRAFT-dc3dd-7.3.1-autotools-gnulib-ohos-runtime-tests
+# — old Autotools + bundled gnulib CLI on HarmonyOS PC
+#====================================================================
+
+id:                     DRAFT-dc3dd-7.3.1-autotools-gnulib-ohos-runtime-tests
+trigger_tool:           configure|make|clang|ld|conan|test|runtime
+phase:                  configuration|compilation|linking|packaging|testing
+error_signature:        cannot guess build type.*HarmonyOS|
+                         Invalid configuration.*linux-ohos|
+                         Please port gnulib fseterr.c to your platform|
+                         _IO_read_ptr.*undeclared|
+                         opaque.*FILE|
+                         undefined symbol: pthread_cancel|
+                         undefined reference to pthread_cancel|
+                         Can't locate Locale/gettext.pm|
+                         BEGIN failed--compilation aborted.*help2man|
+                         test_data/reference_images/ref-pat.img.*No such file|
+                         test passed WITHOUT package artifacts|
+                         interrupt: exit message verb should be 'aborted'
+
+severity:               2
+category:               autotools|gnulib|musl|libc|threading|conan|testing|cli-tool
+match_keywords:         dc3dd, Autotools, config.guess, config.sub, linux-ohos, umask 077,
+                         gnulib, freadahead, freadptr, freadseek, fseterr, opaque FILE,
+                         pthread_cancel, pthread_kill, pthread_join, sigwait, help2man,
+                         Locale::gettext, man_MANS, test-file-imaging.sh, test-hashing.sh,
+                         synthetic fixture, /tmp not writable, CLI application package
+title:                  老 Autotools + gnulib CLI 在 OHOS 上可能串联触发平台识别、opaque FILE、pthread_cancel、help2man 和上游功能测试夹具问题
+
+root_cause:             老 GNU/Autotools 发布包常同时携带过时 config.guess/config.sub、gnulib stdio helper、pthread cancel 生命周期假设和文档生成规则。HarmonyOS PC 的 linux-ohos triplet、HMDFS 权限模型、musl-like opaque FILE、pthread cancellation 缺失、缺少 Perl Locale::gettext，以及设备端 /tmp/fixture/signal timing 差异，会让同一 CLI 包依次在 configure、compile、link、man generation、package 和 upstream runtime tests 阶段失败。dc3dd 7.3.1 实测必须逐层修复并验证，不能只用单一平台宏或 smoke test 收尾。
+affected_scope:         Autotools + bundled gnulib 的 C CLI 包，尤其是使用 freadahead/freadptr/freadseek/fseterr、signal handling thread、help2man/man_MANS、文件成像或 hash fixture 上游脚本的 GNU 风格工具。适用于 coreutils/findutils/dd 类单工具或 forensic imaging 工具的 HarmonyOS PC 适配预审。
+verification_cmd:       1) grep -R "freadahead\\|freadptr\\|freadseek\\|fseterr\\|pthread_cancel\\|help2man" <src>; 2) conan create . -pr:h=ohos-aarch64-fixed -pr:b=ohos-aarch64-fixed -c tools.build:jobs=1; 3) 设备端单独运行 tests/test-hashing.sh 与 tests/test-file-imaging.sh，并记录 fixture、TMPDIR、device-node 测试边界。
+
+rec_priority:           1
+rec_approach:           layered-autotools-gnulib-cli-port-with-runtime-test-evidence
+rec_description:        分层处理：先补 config.guess/config.sub 与 HMDFS-safe umask；再按 gnulib helper 的函数语义补 OHOS/musl fallback；对 pthread_cancel 读取线程角色并保持可 join 的生命周期；绕过需要 Perl Locale::gettext 的 man 生成规则，直接构建代码目录并复用 release 手册页；最后用 test_package 和上游 hashing/file-imaging 脚本证明包内 CLI 行为。
+rec_command:            configure via selected shell; autotools.make(args=["-j1", "-C", "lib"]); autotools.make(args=["-j1", "-C", "src"]); package() copy build/src/<tool> and shipped man/<tool>.1; test_package runs installed binary; device runs tests/test-hashing.sh and tests/test-file-imaging.sh with writable TMPDIR.
+rec_auto_fix:           false
+rec_impl:               conan-recipe-plus-source-patches-plus-device-runtime-tests
+
+fallback_priority:      2
+fallback_approach:      split-code-build-and-upstream-test-harness-adjustment
+fallback_description:   如果上游顶层 make 无法避开 man/po/doc 子目录，可只构建代码子目录，并在 package() 手动安装 release 已有制品；上游脚本只在远端临时副本中调整 TMPDIR、缺失 fixture 和 timing，不把测试环境补丁混入源码。
+fallback_command:       make -C lib && make -C src; package copy bin + shipped man page; run upstream scripts from writable device scratch directory.
+fallback_auto_fix:      false
+fallback_impl:          manual-conan-recipe-and-device-test-harness
+
+forbid_1_pattern:       int pthread_cancel\(.*\).*return 0|#define pthread_cancel.*0|stub.*pthread_cancel
+forbid_1_reason:        空 pthread_cancel stub 不会终止 joinable worker，可能让主线程错误地销毁同步对象或在 join/退出路径挂起。
+forbid_1_consequence:   线程泄漏、挂起、竞态或 falsely passed test_package。
+
+forbid_2_pattern:       FILE.*->_|_IO_read_ptr|_IO_write_ptr|struct _IO_FILE|cast.*FILE
+forbid_2_reason:        OHOS/musl 的 FILE 对调用方不透明，直接访问或强转内部布局不可移植。
+forbid_2_consequence:   编译失败、数据损坏或不同 libc 版本下运行时崩溃。
+
+forbid_3_pattern:       HELP2MAN=/bin/true.*top-level make|make install.*HELP2MAN=/bin/true.*without.*man_MANS|ignore.*Locale/gettext.pm
+forbid_3_reason:        生成器替换不保证 Automake/man 子目录不会直接调用捆绑 help2man 或安装缺失手册页。
+forbid_3_consequence:   构建或安装阶段仍会因 Perl Locale::gettext 或缺失 man page 失败。
+
+forbid_4_pattern:       test-file-imaging.*passed.*without.*fixture|device.*imaging.*passed.*without.*device path|only.*--version.*passed
+forbid_4_reason:        文件成像 CLI 的行为验证必须覆盖真实输入/输出/hash/split/pattern/interrupt；缺失官方 fixture 或设备节点权限时必须标注边界。
+forbid_4_consequence:   把 smoke test 或合成 fixture 误写成完整官方测试，导致测试证据失真。
+
+principles:             P004, P014, P020
+causes:                 []
+caused_by:              [E020, E085, E127, E289, E513]
+similar_to:             [E020, E289, E513, DRAFT-coreutils-sha512sum-autotools-built-sources-test-package-path]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-dc3dd-7.3.1-autotools-gnulib-ohos-runtime-tests.md
+last_updated:           2026-09-13
+source_event:           dc3dd 7.3.1 HarmonyOS PC adaptation: r2 fseterr -> r3 pthread_cancel/help2man -> r4 build/package/test_package; upstream hashing 532 MD5 + 523 SHA1 and file-imaging 29 result stages passed with documented harness boundaries.
+authors:                AtomCode (GLM-5.2) <atomcode-bot@atomgit.com>
+source_pr:              pending
+source_commit:          pending
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-13
+
+draft:                  true

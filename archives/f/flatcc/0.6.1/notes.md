@@ -125,4 +125,8 @@ G0 脚本（clean_verify.py）硬编码 `bash ./configure`，不支持 cmake 项
 
 **编译开始**: 2026-06-17 03:51 (init-build)
 **编译结束**: 2026-06-17 06:54 (finish published)
-**最终状态**: published
+**最终状态**: built (conan-verify G0-G4 通过, W3 本地 CI 模拟通过)
+---
+
+**编译结束**: 2026-07-16 20:44
+**最终状态**: built

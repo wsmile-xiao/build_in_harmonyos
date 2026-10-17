@@ -48,8 +48,8 @@ $TEST_PREFIX/$DEFAULT_PREFIX/share/pipewire/     — PipeWire配置
 
 | 文件 | 大小 | 说明 |
 |------|------|------|
-| packaging/asahi-audio-v3.4-aarch64.tar.gz | TBD | aarch64预编译包 |
-| packaging/asahi-audio-v3.4-aarch64-debug.tar.gz | TBD | aarch64-debug预编译包 |
+| packaging/asahi-audio-v3.4-aarch64.tar.gz | N/A | aarch64预编译包（纯数据包，无平台二进制） |
+| packaging/asahi-audio-v3.4-aarch64-debug.tar.gz | N/A | aarch64-debug预编译包（纯数据包，无平台二进制） |
 
 ## 注意事项
 
@@ -58,5 +58,5 @@ $TEST_PREFIX/$DEFAULT_PREFIX/share/pipewire/     — PipeWire配置
 - 此包专为Apple Silicon (Asahi Linux)设计，在OpenHarmony/aarch64上作为数据配置包使用
 ---
 
-**编译结束**: 2026-05-29 15:50
+**编译结束**: 2026-07-15 21:49
 **最终状态**: built

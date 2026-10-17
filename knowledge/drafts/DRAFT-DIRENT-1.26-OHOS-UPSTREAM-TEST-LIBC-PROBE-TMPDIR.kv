@@ -1,0 +1,85 @@
+#====================================================================
+# DRAFT-DIRENT-1.26-OHOS-UPSTREAM-TEST-LIBC-PROBE-TMPDIR —
+# OHOS 上游 C 测试源码兼容: libc 探针兜底 GNU 扩展函数 + $TMPDIR 探针替换硬编码 /tmp
+# 触发事件: dirent 1.26 适配（t-strverscmp/t-scandir/t-symlink 编译/运行失败）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-DIRENT-1.26-OHOS-UPSTREAM-TEST-LIBC-PROBE-TMPDIR
+trigger_tool:           ctest|conan create|cc|make check
+phase:                  testing
+error_signature:        undefined symbol: strverscmp|undefined symbol: versionsort|use of undeclared identifier 'versionsort'|Cant create directory /tmp|Cannot create directory /tmp|PATH_MAX.*undeclared
+
+severity:               2
+category:               ohos|testing|libc|musl|portability
+match_keywords:         strverscmp, versionsort, GNU extension, musl, OHOS,
+                         upstream test, libc probe, __GLIBC__, /tmp, read-only,
+                         erofs, TMPDIR, PATH_MAX, limits.h, CMakeLists, ITEMS,
+                         dirent, scandir, symlink
+
+title:                  OHOS 上游 C 测试源码适配双探针: libc 探针给 musl 缺失的 GNU 扩展函数（strverscmp/versionsort）兜底自带可移植实现 + $TMPDIR 探针替换硬编码 /tmp 路径
+
+topic: >
+  dirent 1.26 在 OHOS PC (musl libc) 上，CMakeLists.txt `foreach(... ITEMS ...)`
+  声明的 9 个独立上游 CTest 测试中有 3 个无法编译/运行：
+    * t-strverscmp.c 直接调用 strverscmp() —— GNU 扩展，musl 无此符号
+      （链接 ld.lld: undefined symbol: strverscmp）
+    * t-scandir.c    直接调用 versionsort() —— 同为 GNU 扩展，musl 无
+      （编译 use of undeclared identifier 'versionsort'）
+    * t-symlink.c/t-scandir.c test_large 硬编码 "/tmp/" 拼接临时目录
+      —— OHOS PC 的 /tmp 是只读 erofs 挂载，mkdir 必失败
+      （Cannot create directory /tmp/xxxx；t-scandir 1000 文件用例同样
+       mkdir(dirname,0700) 失败）
+  两条模式都是"上游测试源码"层面的适配（不能改库、不能只靠环境变量）：
+    A. libc 探针：在测试文件顶部 `#if !defined(__GLIBC__) && !defined(_MSC_VER)`
+       内提供 strverscmp/versionsort 的可移植实现（直接复用同库 dirent.h 中
+       自带的函数体），并 `#define versionsort dirent_portable_versionsort`
+       映射；glibc 平台自动走系统实现，零行为差异。R8 libc 探针例外,PR 已说明。
+    B. $TMPDIR 探针：把测试内 `strcpy(x,"/tmp/")` 替换为读 getenv("TMPDIR")
+       （回退 /tmp）的代码块；构建侧（conanfile build()/test()）把
+       TMPDIR/TMP/TEMP 指向 build_folder 下专用可写目录。
+  效果：9/9 上游测试全部编译实例化，7 pass + 2 skip（skip 是上游
+  #ifdef WIN32 专测,非本次引入），7/7 可执行集 100% 通过。
+
+root_cause:             OHOS 运行时 libc 为 musl：① 不提供 glibc 的 GNU 扩展
+                        strverscmp()/versionsort()（dirent 自带头文件里有
+                        可移植实现，但非 Windows 测试链接的是系统 dirent.h,
+                        拿不到该符号）；② 系统 /tmp 是 erofs 只读挂载
+                        （/dev/block/dm-0 ro），测试源码硬编码 "/tmp/" 时
+                        mkdir 必失败。环境变量 TMPDIR 只对读它的代码生效，
+                        对硬编码路径的测试源码无效，必须打源码补丁。
+
+fix_pattern: >
+  1. libc 探针兜底（t-strverscmp.c / t-scandir.c）：
+
+     #if !defined(__GLIBC__) && !defined(_MSC_VER)
+     static int dirent_portable_strverscmp(const char *a, const char *b)
+     { /* 与 include/dirent.h 中 strverscmp 相同函数体: 找首个差异字符,
+          向左定位数字段, 按"数字段长度/前导零"比较, 否则按字母比较 */ }
+     static int dirent_portable_versionsort(const struct dirent **a,
+                                            const struct dirent **b)
+     { return dirent_portable_strverscmp((*a)->d_name, (*b)->d_name); }
+     #define strverscmp dirent_portable_strverscmp
+     #define versionsort dirent_portable_versionsort
+     #endif
+
+  2. $TMPDIR 探针替换硬编码 /tmp（t-symlink.c / t-scandir.c test_large）：
+
+     #else
+       { const char *td = getenv("TMPDIR");
+         if (td != NULL && *td != '\0') { ...memcpy(base, td)+尾部'/'... }
+         else { strcpy(base, "/tmp/"); ... } }
+     #endif
+
+  3. 构建侧: conanfile.py build()/test() 内 os.makedirs(专用目录) 并设
+     os.environ["TMPDIR"]=os.environ["TMP"]=os.environ["TEMP"]=该目录
+
+rec_impl:               source-patch (测试源码 side-car 补丁，CMakeLists ITEMS 列表不变)
+
+affected_scope:         任何在 OHOS/musl 上构建且上游测试源码直接调用
+                        strverscmp/versionsort（或同类 GNU 扩展）或硬编码
+                        /tmp 临时路径的 C/C++ 库测试套件；同时应核对测试
+                        是否在 `#include <limits.h>` 之前就用 PATH_MAX
+                        （musl 不隐式传递,需补头文件）。
+
+verification_cmd:       ctest --output-on-failure   # 期望 fail=0, skip 仅为上游 #ifdef WIN32 专测

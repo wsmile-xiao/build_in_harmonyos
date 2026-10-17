@@ -1,0 +1,46 @@
+# 0001-mdm-run-fix-unsequenced-execvp.patch
+# 说明块（每行以 # 开头、位于 diff 之前，不是补丁内容；conan 走的 patch_ng
+# 解析器忽略它，已实测加块前后 patch 后的 programs/mdm-run.c sha256 一致）
+#
+# 修的是什么 —— 本包对该事实的唯一权威口径（另见 conandata.yml 的
+# patch_description、notes.md「症状 2 / 最终方案 2 / 适用边界 2」、版本级
+# manifest.yaml knowledge_gained 第 5 条；四处文字同义）：
+#   programs/mdm-run.c 直通模式上游写作 execvp(*argv, ++argv)。*argv 与
+#   ++argv 对同一对象无序读写，clang 15 在该行报 -Wunsequenced（上游原文件
+#   第 44 行），属 C 标准意义上的未定义行为。求值顺序不同时，被 exec 的程序名
+#   在「mdm-run 自身（argv[0]）」与「用户命令（argv[1]）」之间取值，而此刻
+#   参数向量已被推进为 argv[1..]，程序名与向量随之错位。补丁拆出
+#   char **args = argv + 1 后 execvp(args[0], args)，把「exec 用户命令、参数
+#   向量自该命令起」确定化（等价 gcc 下的实际行为与作者意图）。
+#
+# 为什么下面 hunk 里写进 programs/mdm-run.c 的两句英文注释与本块口径不一致：
+#   W4 整改 r2 对本补丁施加了「hunk 内容（首个 --- 行起到文件末）一个字节都
+#   不许变」的硬约束，目的是改注释绝不牵动代码行、使已验证过的构建产物与盘上
+#   源码逐字节一致；而那两句注释正位于 hunk 内（新增行），故冻结保留。其
+#   「clang may evaluate ++argv first ... the wrong program gets exec-ed」
+#   与紧随其后的「keep the intended semantics: exec argv[1] with argv[1..]」
+#   方向相反、互相否定 —— 权威表述以本说明块与上面三处文档为准。
+
+diff --git a/programs/mdm-run.c b/programs/mdm-run.c
+index 37f92de..7add766 100644
+--- a/programs/mdm-run.c
++++ b/programs/mdm-run.c
+@@ -40,9 +40,15 @@ int main(int argc, char *argv[])
+     errx(1, "Please supply command as arguments");
+ 
+   master_addr = getenv(CMD_SOCK_VAR);
+-  if (!master_addr)
+-    if (execvp(*argv, ++argv) < 0)
+-      errx(2, "execve: %s", *argv);
++  if (!master_addr) {
++    /* Unsequenced `execvp(*argv, ++argv)` (clang -Wunsequenced): clang may
++     * evaluate ++argv first, so *argv reads argv[1] and the wrong program
++     * gets exec-ed.  Split the increment out to keep the intended semantics:
++     * exec argv[1] with argv[1..] as its argument vector. */
++    char **args = argv + 1;
++    if (execvp(args[0], args) < 0)
++      errx(2, "execve: %s", args[0]);
++  }
+ 
+   if (lstat(master_addr, &sock_stat) < 0)
+     err(3, "%s: Cannot stat master socket", master_addr);

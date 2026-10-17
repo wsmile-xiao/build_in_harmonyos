@@ -1,0 +1,84 @@
+#====================================================================
+# DRAFT-d-language-toolchain-ohos-gap -
+# D 语言项目在 OHOS 的适配路径：工具链可经 ohpcd 取得（ldc/1.42.0 +
+# llvm/20.1.0），dub 缺失可用 GNUmakefile 绕开；且 LDC 1.42.0 前端拒绝
+# `inout typeof(this)` 形式的 opEquals（gir-to-d 0.23.3 实测）。
+#
+# 场景: gir-to-d 0.23.3（纯 D 的 GObject Introspection → D 绑定生成器）适配
+#       OHOS PC（aarch64-unknown-linux-ohos）。设备侧无任何 D 工具链
+#       （dmd/ldc2/ldmd2/gdc/dub 全无），D 亦不在框架 LANG_ENUM 内。
+#       经核查 ohpcd 制品仓已有 ldc/1.42.0（os=OHOS, arch=armv8）与
+#       llvm/20.1.0；dub 无制品，但上游 GNUmakefile 路径不需要 dub。
+# 适用: 所有 D 语言项目（dub.json / meson.build / Makefile 三类构建入口），
+#       以及"语言不在 LANG_ENUM、需靠 tool_requires 引入整条工具链"的场景。
+#
+# 注: 本文件所有字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-d-language-toolchain-ohos-gap
+source_lib:             gir-to-d 0.23.3
+trigger_tool:           dmd|ldc|ldc2|gdc|dub|make
+phase:                  configuration
+error_signature:        cannot implicitly convert expression of type.*inout|cannot find -lphobos2|ldc2: command not found|object\.d.*not found|std\.algorithm.*not found|Error loading shared library libLLVM\.so\.(\d+)|only parameters or stack-based variables can be `inout`
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               language, toolchain, build-system, portability, conan
+match_keywords:         D language, dlang, ldc, ldc2, ldmd2, dmd, gdc, dub, dub.json, druntime, phobos, libphobos2-ldc.a, libdruntime-ldc.a, libLLVM.so, tool_requires, LANG_ENUM, lang_detect, _EXT_LANG, GNUmakefile DC, inout typeof(this), opEquals, scope const, newaa, gir-to-d, girtod, stringImportPaths, VERSION.in, vcs_tag
+title:                  D 语言项目的 OHOS 适配：工具链经 ohpcd 取得（ldc+llvm），无 dub 时走 GNUmakefile 绕开；且 LDC 1.42.0 前端拒绝 inout 形式的 opEquals
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             三层成因。(1) 框架层：D 不在 LANG_ENUM（c/cpp/rust/python/go/perl/lua/nodejs/java/bash/mixed/other），且 .d 未登记于 lang_detect 的 _EXT_LANG，语言预检会把 .d 源码回退判为 c（误判而非报错，静默）。(2) 环境层：设备侧无任何 D 工具链，但 ohpcd 已有 ldc/1.42.0（提供 bin/ldc2、bin/ldmd2、libdruntime-ldc.a、libphobos2-ldc.a、include/d/）与 llvm/20.1.0（ldc2 的 NEEDED libLLVM.so.20.1 来源，ldc recipe 已自动 requires），故工具链可经 tool_requires 取得；唯一真缺的是 dub（ohpcd 无该制品）。(3) 编译器层：LDC 1.42.0 的 DMD 前端（v2.112.1）拒绝 `inout typeof(this)` 作为参数/成员值——core.internal.newaa 以 const 限定的 Key 实例化模板时，const(inout(Value[Key])) 无法转换为所需的 inout(const(Value[Key]))，报 "only parameters or stack-based variables can be inout"。
+affected_scope:         所有 D 语言项目（dub.json / meson.build / GNUmakefile 三类构建入口），以及"语言不在 LANG_ENUM、需靠 tool_requires 引入整条工具链"的场景。语料对照：gir-to-d（0.23.3，本条的实证来源）；广义含任何需要 ldc/dmd/gdc + druntime + Phobos 组合的 D 工程。dub 缺失本身**不是**硬阻塞——上游三条构建路径中只有 dub.json 需要它。
+verification_cmd:       ① 设备侧确认无 D 工具链：`for t in dmd ldc2 ldmd2 gdc dub; do command -v $t; done`（全部为空）。② ohpcd 制品：`conan search "ldc/*" -r=ohpcd` → 1.42.0（Found 1）；`conan search "dub/*" -r=ohpcd` → Found 0。③ ldc2 可运行性：在不设 LD_LIBRARY_PATH 时 `ldc2 --version` 报 `Error loading shared library libLLVM.so.20.1`（缺运行期库搜索路径，非缺库），设好后输出 `LDC 1.42.0 ... target aarch64-unknown-linux-ohos`。④ 构建：`make -f GNUmakefile DC=ldc2 GIR_TO_D_VERSION=v0.23.3 DCFLAGS="-O -I<ldc>/include/d" LDFLAGS="-L-L<ldc>/lib"` → 产出 girtod。⑤ 补丁必要性：不打补丁的原始源码同样报 newaa 的 inout 错误。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           tool-requires-ldc-plus-makefile-path
+rec_description:        以 tool_requires("ldc/1.42.0") 引入 D 工具链（其依赖 llvm/20.1.0 由 ldc recipe 自动带入，提供 ldc2 所需的 libLLVM.so）；构建入口优先选**不需要 dub** 的路径——上游若同时提供 GNUmakefile/meson.build/dub.json，选 GNUmakefile（只需 DC，按 dmd→ldc→ldc2→gdc 探测）。显式传三个参数：DC=ldc2、DCFLAGS="-O -I<ldc>/include/d"（ldc2 默认 import 路径在制品上不可用，不给会报 object/std.algorithm not found）、LDFLAGS="-L-L<ldc>/lib"（不给则链接失败）。若项目源码用 inout 形式的 opEquals，需打补丁改为现代 D 惯用的 scope const。版本号经 GIR_TO_D_VERSION 之类的变量注入（tarball 无 .git 时构建脚本会回退到上游写死值）。
+rec_command:            make -f GNUmakefile DC=ldc2 GIR_TO_D_VERSION=v<ver> DCFLAGS="-O -I<ldc_pkg>/include/d" LDFLAGS="-L-L<ldc_pkg>/lib"
+rec_auto_fix:           false
+rec_impl:               recipe-pattern
+
+fallback_priority:      2
+fallback_approach:      dub-path-when-available
+fallback_description:   若项目**仅有** dub.json（无 Makefile/meson.build），或构建流程强依赖 dub 的 registry/依赖解析，则须先立项 dub 工具链包（ohpcd 目前无该制品）；在此之前按 R47 上报 env_unsupported，而不是伪造通过。
+fallback_command:       conan search "dub/*" -r=ohpcd   # 当前 Found 0
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       /data/service/hnp/bin/clang.*\.d\b|gcc.*\.d\b
+forbid_1_reason:        把 .d 源码交给 C/C++ 编译器（因语言预检把 .d 误判为 c）：必然失败或产出错误产物，是"预检误判被静默吞掉"的典型表现
+forbid_1_consequence:   构建失败且根因被误记为 C 编译错误，浪费排查时间
+forbid_2_pattern:       export LD_LIBRARY_PATH=.*llvm.*conan.*/p/b/
+forbid_2_reason:        在配方里硬编码 conan 缓存绝对路径来喂 libLLVM：路径随构建机与包 revision 变化，不可复现，且绕过了 recipe 的 buildenv/runenv 注入机制
+forbid_2_consequence:   配方在 CI/他人机器上随机失败
+forbid_3_pattern:       edit.*LinkedHasMap\.d\s*(在\s*build\(\)|with open|sed -i)
+forbid_3_reason:        在 build() 里就地 sed/改源码而不固化为 patch 文件：改动不可审计、无法复现、违反补丁固化要求
+forbid_3_consequence:   评审拒绝；产物与源码不自洽
+
+principles:             P013, P015, P008
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E155]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-d-language-toolchain-ohos-gap.md
+last_updated:           2026-09-18
+source_event:           gir-to-d 0.23.3 OHOS aarch64 适配：ldc/1.42.0 + llvm/20.1.0 tool_requires + GNUmakefile 路径（绕开缺失的 dub）+ opEquals inout 补丁
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                ohpcd <ohpcd@localhost>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-18

@@ -1,0 +1,7 @@
+# Leptonica 1.86.0 / leptonlib — HarmonyOS PC
+
+The upstream release archive has SHA-256 `1fa08e40bb37fd45802d5e6e7b43927449a5c47d4608ef99d3bd3f0fa76baedc`. The Conan recipe retains all 148 Automake-registered regression programs and runs `make check` on the target. `--disable-programs` disables installed command-line utilities, not `check_PROGRAMS` or `TESTS`.
+
+OHOS `open_memstream` does not publish the output size on `fclose` alone; 21 serializers in the build-source copy flush before closing. The target's system `/tmp` is read-only, so the recipe routes upstream `/tmp` paths into a private `TMPDIR` and creates the multipage-TIFF temporary stream there. The target's gnuplot returns success for `set terminal png` but emits harmless state-file and font warnings; the upstream regression wrapper otherwise treats that output as a failed capability check and skips 25 registered tests. The recipe changes only that gate to use the command's exit status, and preserves each test's generate/compare operations.
+
+Frozen run `leptonlib-w3-20260926T072300Z`: `conan create` 0; upstream 148/148 PASS, 0 SKIP, 0 FAIL; installed PNG-memory-roundtrip consumer 1/1 PASS; W3 receipts 12/12 PASS. Raw log SHA-256: `0e693c4723d5ad3529ac5bd95f0b9f5b42164b9881700e5ffa4159fb21d489b8`. Failed or skipped earlier runs were released separately and were not combined into this result. The PR description records the detailed scope and inventory.

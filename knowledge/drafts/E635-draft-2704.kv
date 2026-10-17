@@ -1,0 +1,68 @@
+# ═══ Draft knowledge entry — x86_64 runner 无法启动 OHOS 动态产物时的功能验证路径 ═══
+# Timestamp: 2026-09-23
+# Software: multitee 3.0（CLI；本地 W3 / test_package 在 x86_64 runner 上执行）
+# Gate: W3 本地 conan create 的 test 阶段 + 适配期功能验证
+# Status: DRAFT — 主编审核后 promote
+
+id:                     E635
+title:                  x86_64 runner 经 binfmt 执行 OHOS aarch64 动态产物报 Could not open '/lib/ld-musl-aarch64.so.1'：功能验证改用同源 .o 静态重链 + qemu-aarch64，test_package 显式 SKIPPED
+trigger_tool:           runtime
+phase:                  testing
+error_signature:        aarch64-binfmt-P: Could not open '/lib/ld-musl-aarch64.so.1'|qemu-aarch64: Could not open '/lib/ld-musl-aarch64.so.1'|Could not open '/lib/ld-musl-aarch64.so.1': No such file or directory
+severity:               2
+category:               testing, platform, musl, limitation
+match_keywords:         ld-musl-aarch64.so.1, aarch64-binfmt-P, binfmt_misc, qemu-aarch64, x86_64 runner, PT_INTERP, 静态重链, clang -static, libc.a
+
+root_cause:             交叉构建 runner 是 x86_64，binfmt_misc 以 qemu-aarch64（flags POF）接管 aarch64 ELF；OHOS 产物是
+  PIE 且 PT_INTERP=/lib/ld-musl-aarch64.so.1 的动态可执行文件，宿主根文件系统没有这个 OHOS musl loader，
+  镜像在进入 main 之前就启动失败。test_package 在 conan create 的 test 阶段执行包内二进制时（本地 W3）
+  必然失败，而 CI（aarch64 OHOS worker）上同一测试正常
+affected_scope:         在 x86_64 runner 上做本地 W3 / 适配期功能验证的所有 OHOS CLI 与带可执行测试的配方；
+  纯库包的 test_package 同样受影响（链接出的测试程序也是 OHOS 动态可执行文件）
+verification_cmd:       file <bin> | grep -o 'interpreter [^,]*'; test -e /lib/ld-musl-aarch64.so.1 || echo 'no OHOS loader on host'; cat /proc/sys/fs/binfmt_misc/qemu-aarch64 | head -3
+
+rec_priority:           1
+rec_approach:           static-relink-same-objects-under-qemu
+rec_description:        conan create 的构建目录（$CONAN_HOME/p/b/<pkg>/b/...）保留着与交付产物同源的 .o：用同一把
+  OHOS clang 加 -static 链接 NDK sysroot 自带的 libc.a（usr/lib/aarch64-linux-ohos/libc.a），得到静态副本，
+  经 binfmt/qemu-aarch64 直接运行功能用例。test_package 脚本则只在启动失败带显式标记（Could not open
+  '/lib/ld-musl…'、Exec format error 等）时把功能层报为 SKIPPED，不能记成通过；aarch64 宿主上功能层强制
+  执行，缺二进制直接失败（保住 L1e 反向验证）。notes/PR 必须写明：静态副本验证的是程序逻辑与 OHOS musl
+  libc 的实现，不等于交付的动态产物已实跑；qemu-user 把系统调用转发给宿主 Linux 内核，也不覆盖 OHOS 内核差异
+rec_command:            B=$CONAN_HOME/p/b/<pkg-id>/b/src; /data/service/hnp/bin/clang -static -O3 -o $HOME/tmp/<tool>.static $B/*.o && $HOME/tmp/<tool>.static <args>
+rec_auto_fix:           false
+rec_impl:               manual-verification
+
+fallback_priority:      2
+fallback_approach:      foreign-musl-loader-with-shim
+fallback_description:   无法静态重链时（依赖 libc++_shared、dlopen 插件、只有共享库的依赖），改用通用 musl loader
+  并注入缺失的 OHOS fortify 符号（见 DRAFT-yosys-0.66-ohos-aarch64-local-run-missing-fd-chk）；两条路径
+  都只是本地佐证，以 aarch64 CI 为准
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          manual-verification
+
+forbid_1_pattern:       except (OSError|Exception).*:\s*(pass|return 0|sys\.exit\(0\))|\|\| *true
+forbid_1_reason:        test_package 把宿主无法执行镜像吞掉并返回 0（无标记、无 SKIPPED 声明）
+forbid_1_consequence:   假绿：aarch64 CI 上真实的启动/运行失败也会被同一分支掩盖，且 L1e 反向验证失效
+forbid_2_pattern:       QEMU_LD_PREFIX=.*(sysroot|native)
+forbid_2_reason:        把 NDK sysroot 当作 qemu 前缀来"让动态产物跑起来"
+forbid_2_consequence:   sysroot 里没有 lib/ld-musl-aarch64.so.1；把 SDK 的 libc.so 当 loader 会 segfault
+  （DRAFT-ada-gnats-native-only-toolchain-cross-build-trap 实测），改 loader 路径属于未验证的环境改造，结论也不可迁移到 CI
+
+principles:             P013
+
+causes:                 []
+caused_by:              []
+similar_to:             [DRAFT-yosys-0.66-ohos-aarch64-local-run-missing-fd-chk, DRAFT-ada-gnats-native-only-toolchain-cross-build-trap]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/E635-draft-2704.md
+last_updated:           2026-09-23
+source_event:           multitee 3.0：本地 W3 test 阶段 aarch64-binfmt-P: Could not open '/lib/ld-musl-aarch64.so.1'；
+  取 conan 构建目录 7 个 .o 静态重链（交付产物 sha256 与构建目录产物一致），qemu-aarch64 下 11 项功能用例
+  11/11 通过；test_package 在 x86_64 上输出 "[skip] F1-F11 not run"，在 aarch64 CI 上强制执行
+authors:                lkjing2021345 <1908499668@qq.com>
+source_pr:              (本 PR)
+source_commit:          (待合入后回填)

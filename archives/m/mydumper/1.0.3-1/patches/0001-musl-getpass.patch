@@ -1,0 +1,91 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -9,6 +9,11 @@ set(VERSION "${ver}-${rev}")
+ set(ARCHIVE_NAME "${CMAKE_PROJECT_NAME}-${VERSION}")
+ 
+ #Required packages
++# POSIX feature probe: musl has no getpass(3); the password prompt
++# fallback (termios inline) is selected by HAVE_GETPASS absence.
++include(CheckFunctionExists)
++check_function_exists(getpass HAVE_GETPASS)
++
+ set(CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake/modules)
+ find_package(MySQL)
+ find_package(ZLIB)
+@@ -108,10 +113,6 @@ INSTALL(TARGETS mydumper myloader
+   RUNTIME DESTINATION bin
+ )
+ 
+-INSTALL(FILES mydumper.cnf
+-  DESTINATION /etc
+-  COMPONENT config
+-)
+ 
+ add_custom_target(dist
+   COMMAND git archive --format=tar.gz --prefix=${ARCHIVE_NAME}/
+diff --git a/src/connection.c b/src/connection.c
+index 80ad891..12f0e95 100644
+--- a/src/connection.c
++++ b/src/connection.c
+@@ -22,6 +22,48 @@
+ #include <string.h>
+ #include <stdbool.h>
+ #include "config.h"
++
++#ifndef HAVE_GETPASS
++/* musl has no getpass(3). Inline a minimal termios-based replacement
++ * (same approach as openssh openbsd-compat readpassphrase): echo off
++ * while typing, terminal state restored afterwards. Selected purely by
++ * the CMake getpass() feature probe - no platform-specific macros. */
++#include <termios.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <string.h>
++
++static char *mydumper_getpass(const char *prompt)
++{
++    struct termios oldt, newt;
++    int tty = open("/dev/tty", O_RDWR);
++    char *ret = NULL;
++    static char buf[256];
++
++    if (tty < 0)
++        return NULL;
++    if (tcgetattr(tty, &oldt) == 0) {
++        newt = oldt;
++        newt.c_lflag &= ~(ECHO);
++        newt.c_lflag |= (ICANON | ISIG);
++        if (tcsetattr(tty, TCSAFLUSH, &newt) == 0) {
++            fputs(prompt, stderr);
++            fflush(stderr);
++            if (fgets(buf, sizeof(buf), stdin)) {
++                size_t len = strlen(buf);
++                while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r'))
++                    buf[--len] = 0;
++                ret = buf;
++            }
++            fputc('\n', stderr);
++            tcsetattr(tty, TCSAFLUSH, &oldt);
++        }
++    }
++    close(tty);
++    return ret;
++}
++#endif
++
+ #include "connection.h"
+ #include "common.h"
+ #include "logging.h"
+@@ -361,8 +403,12 @@ void hide_password(int argc, char *argv[]){
+ }
+ 
+ char *passwordPrompt(void) {
++#ifndef HAVE_GETPASS
++  char *p = mydumper_getpass("Enter MySQL Password: ");
++#else
+   char *p;
+   p = getpass("Enter MySQL Password: ");
++#endif
+ 
+   return p;
+ }

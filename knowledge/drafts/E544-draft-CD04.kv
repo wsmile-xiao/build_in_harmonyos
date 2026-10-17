@@ -1,0 +1,95 @@
+#====================================================================
+# E544-draft — 知识图谱草稿（贡献者 CD04）
+# 建议处置: merge-into E011
+#   错误面与 E011 同源（HMDFS mktemp/umask 权限）；本条新增：
+#   ①"本地绿 / CI 红"保真度证据（PATH 中的全局 mktemp 垫片掩盖问题）
+#   ②配方内化垫片 + 私有 PATH 注入的推荐实现（不依赖宿主机环境）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E544
+trigger_tool:           configure|make|install
+phase:                  configuration
+error_signature:        cannot create.*subs[0-9]*\.awk.*Permission denied|
+                        config\.status.*Permission denied|
+                        could not setup config files machinery|
+                        Error in build\(\) method.*autotools\.configure
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               hmdfs, platform, build-system, autotools, detection
+prescan_pattern:
+match_keywords:         subs1.awk, config.status, Permission denied, mktemp, umask 077,
+                        HMDFS, 本地绿 CI 红, mktemp shim, PATH, drwx--S---, confXXXXXX
+title:                  同一份代码本地 configure 全绿而 CI 报 config.status 写 subs1.awk: Permission denied——PATH 中的全局 mktemp 垫片掩盖了 HMDFS 的 0700 临时目录问题（根因同 E011）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             根因即 E011：HMDFS 上 `mktemp -d ./confXXXXXX` 创建的目录恒为
+                        drwx--S---（0700 + setgid），configure/config.status 内联的 umask 077
+                        对 HMDFS 目录无效，写临时 awk/sed 脚本被拒。
+                        本条补充"本地绿 / CI 红"的保真度陷阱：若运行环境 PATH 中存在全局
+                        mktemp 垫片（如 ~/usr/local/bin/mktemp 或 $TMPDIR/shimbin/mktemp——
+                        由此前某个任务的配方安装），本地 configure 会静默命中垫片
+                        （umask 002 + chmod 2770）而成功；CI worker 的 PATH 无垫片，
+                        同一份源码、同一 sha 直接红。
+                        判别特征：本地 W3 全绿 + CI 在数十秒内以 config.status 权限错误失败。
+affected_scope:         所有在 HMDFS 工作区跑 autotools configure 的包；特别是（a）配方自身
+                        安装过 mktemp 垫片、（b）多任务共用 workspace/共享前缀的 worker
+                        （垫片残留会跨任务传播，制造"本地绿 CI 红"）
+verification_cmd:       which -a mktemp; ls -l ~/usr/local/bin/mktemp /usr/local/bin/mktemp 2>/dev/null;
+                        umask 077; d=$(mktemp -d ./confXXXXXX) && ls -ld "$d"
+                        # 期望暴露：PATH 中存在垫片；直连 HMDFS 时目录为 drwx--S--- / 0700
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           recipe-internal-shim-with-private-path
+rec_description:        把 mktemp 垫片（umask 002 + chmod 2770）内化进配方，并在 build() 中以
+                        PATH="{shim_bin}:$PATH" 前缀注入 configure/make/install 全链——只依赖
+                        构建目录内的私有垫片，不依赖宿主机全局环境，CI 与本地行为一致
+rec_command:            conanfile.py build(): shim_bin = os.path.join(self.build_folder, "_shimbin");
+                        写入 mktemp 垫片脚本；autotools.configure() / make / make install 均在
+                        PATH 前缀下执行（参考实现: archives/s/syrep/0.9/conanfile.py）
+rec_auto_fix:           false
+rec_impl:               recipe-generate
+
+fallback_priority:      2
+fallback_approach:      edit-umask-in-configure
+fallback_description:   E011 推荐方案：在 configure/config.status 侧把 umask 077 改为 022
+                        （落成 patches/*.patch，R3），不改运行环境 PATH；适合单包一次性适配
+fallback_command:       sed -i 's/umask 077/umask 022/g' configure   # 建议固化为补丁随配方携带
+fallback_auto_fix:      true
+fallback_impl:          source-patch
+
+forbid_1_pattern:       (install|cp|tee).{0,40}mktemp.{0,40}(/usr/local|/usr/bin|~/usr/local)
+forbid_1_reason:        把垫片装进共享/用户前缀会让"本地绿"变成环境假象：后续任务与 CI 行为
+                        分叉，多任务共用文件系统时互相污染（R49/E524 同类教训）
+forbid_1_consequence:   本地 W3 全绿、CI 恒红（同一 sha 两次结果不同），排查成本极高
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E011
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E544.md
+last_updated:           2026-09-26
+source_event:           archives/s/syrep/0.9 PR #12742（CI 构建 #61679 红 / 本地 W3 同 sha 绿）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                weijiapan <weijiapan@noreply.gitcode.com>
+source_pr:              12742
+source_commit:          acf5ed561e
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: CD04

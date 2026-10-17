@@ -1,0 +1,212 @@
+diff --git a/src/abx.c b/src/abx.c
+index d8f174a..bd254be 100644
+--- a/src/abx.c
++++ b/src/abx.c
+@@ -24,6 +24,196 @@
+ #include <glib.h>
++#include <math.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++static int
++self_test_failure(const char *message)
++{
++    fprintf(stderr, "abx self-test: FAIL: %s\n", message);
++    return EXIT_FAILURE;
++}
++
++static int
++check_sound_file(const char *path, Metadata *metadata)
++{
++    Sound_file *file;
++    float *samples;
++    unsigned int frames_to_read;
++    unsigned int nread;
++    unsigned int i;
++    int found_signal = 0;
++    double midpoint;
++    double location;
++
++    file = open_sound_file(path);
++    if (!file) return self_test_failure("cannot open audio fixture");
++
++    *metadata = get_metadata(file);
++    if (metadata->bits <= 0 || metadata->channels <= 0
++        || metadata->frames < 2 || metadata->rate <= 0
++        || metadata->duration <= 0) {
++        close_sound_file(file);
++        return self_test_failure("invalid audio metadata");
++    }
++
++    frames_to_read = metadata->frames < 32 ? metadata->frames : 32;
++    samples = g_new(float, (gsize) frames_to_read * metadata->channels);
++    nread = read_pcm_data(file, samples, frames_to_read);
++    if (nread != frames_to_read) {
++        g_free(samples);
++        close_sound_file(file);
++        return self_test_failure("short PCM read");
++    }
++    for (i = 0; i < nread * metadata->channels; i++) {
++        if (fabs(samples[i]) > 0.0001) {
++            found_signal = 1;
++            break;
++        }
++    }
++    if (!found_signal) {
++        g_free(samples);
++        close_sound_file(file);
++        return self_test_failure("audio fixture contains only silence");
++    }
++
++    midpoint = metadata->duration / 2.0;
++    location = seek_sound_file(file, midpoint, SEEK_SET);
++    if (location < 0
++        || fabs(location - midpoint) > (1.0 / metadata->rate)
++        || read_pcm_data(file, samples, 1) != 1) {
++        g_free(samples);
++        close_sound_file(file);
++        return self_test_failure("PCM seek/read failed");
++    }
++
++    g_free(samples);
++    if (close_sound_file(file) != 0) {
++        return self_test_failure("audio fixture close failed");
++    }
++    return EXIT_SUCCESS;
++}
++
++static int
++check_gtk_runtime(void)
++{
++    GtkListStore *store;
++    GtkTreeIter iter;
++    int value = 0;
++
++    if (gtk_get_major_version() != 3) {
++        return self_test_failure("GTK runtime is not GTK3");
++    }
++    store = gtk_list_store_new(1, G_TYPE_INT);
++    if (!store) return self_test_failure("cannot create GTK list model");
++    gtk_list_store_append(store, &iter);
++    gtk_list_store_set(store, &iter, 0, 42, -1);
++    gtk_tree_model_get(GTK_TREE_MODEL(store), &iter, 0, &value, -1);
++    g_object_unref(store);
++    if (value != 42) return self_test_failure("GTK list model roundtrip failed");
++    return EXIT_SUCCESS;
++}
++
++static int
++check_portaudio_runtime(PaHostApiIndex *host_apis, PaDeviceIndex *devices)
++{
++    const PaVersionInfo *version;
++    PaDeviceIndex default_output;
++    PaError result;
++
++    version = Pa_GetVersionInfo();
++    if (!version || version->versionMajor != 19) {
++        return self_test_failure("unexpected PortAudio runtime version");
++    }
++    result = Pa_Initialize();
++    if (result != paNoError) {
++        return self_test_failure(Pa_GetErrorText(result));
++    }
++
++    *host_apis = Pa_GetHostApiCount();
++    *devices = Pa_GetDeviceCount();
++    default_output = Pa_GetDefaultOutputDevice();
++    if (*host_apis < 0 || *devices < 0
++        || (default_output != paNoDevice && default_output >= *devices)) {
++        Pa_Terminate();
++        return self_test_failure("PortAudio device inventory is inconsistent");
++    }
++    result = Pa_Terminate();
++    if (result != paNoError) {
++        return self_test_failure(Pa_GetErrorText(result));
++    }
++    return EXIT_SUCCESS;
++}
++
++static int
++run_self_test(const char *sample_a, const char *sample_b)
++{
++    const unsigned int trials = 8;
++    Metadata metadata_a;
++    Metadata metadata_b;
++    PaHostApiIndex host_apis;
++    PaDeviceIndex devices;
++    unsigned int i;
++    double p_value;
++
++    if (check_sound_file(sample_a, &metadata_a) != EXIT_SUCCESS
++        || check_sound_file(sample_b, &metadata_b) != EXIT_SUCCESS) {
++        return EXIT_FAILURE;
++    }
++    if (metadata_a.frames != metadata_b.frames
++        || metadata_a.rate != metadata_b.rate
++        || metadata_a.channels != metadata_b.channels
++        || fabs(metadata_a.duration - metadata_b.duration) > 1e-12) {
++        return self_test_failure("audio fixtures have different geometry");
++    }
++
++    g_random_set_seed(0xab001U);
++    if (init_test(sample_a, sample_b, trials) != 0
++        || !is_test_valid() || num_test_trials() != (int) trials) {
++        close_test();
++        return self_test_failure("cannot initialize ABX trial model");
++    }
++    for (i = 0; i < trials; i++) {
++        answer expected = get_answer(i);
++        if ((expected != SAMPLE_A && expected != SAMPLE_B)
++            || get_guess(i) != SAMPLE_NA
++            || set_guess(i, expected) != 0
++            || get_guess(i) != expected) {
++            close_test();
++            return self_test_failure("ABX answer/guess roundtrip failed");
++        }
++    }
++    if ((int) get_answer(trials) != -1
++        || (int) get_guess(trials) != -1
++        || set_guess(trials, SAMPLE_A) != -1) {
++        close_test();
++        return self_test_failure("ABX trial bounds check failed");
++    }
++    p_value = calculate_p_value();
++    if (fabs(p_value - 0.00390625) > 1e-12) {
++        close_test();
++        return self_test_failure("ABX p-value calculation failed");
++    }
++    close_test();
++    if (is_test_valid()) return self_test_failure("ABX test did not close");
++
++    if (check_gtk_runtime() != EXIT_SUCCESS
++        || check_portaudio_runtime(&host_apis, &devices) != EXIT_SUCCESS) {
++        return EXIT_FAILURE;
++    }
++
++    printf("abx self-test: PASS files=2 frames=%d trials=%u "
++           "gtk=%u.%u.%u portaudio-host-apis=%d portaudio-devices=%d\n",
++           metadata_a.frames, trials,
++           gtk_get_major_version(), gtk_get_minor_version(),
++           gtk_get_micro_version(), (int) host_apis, (int) devices);
++    return EXIT_SUCCESS;
++}
+-
++
+ int
+ main(int argc, char *argv[])
+ {
++    if (argc == 4 && strcmp(argv[1], "--self-test") == 0) {
++        return run_self_test(argv[2], argv[3]);
++    }
+     /* ui_main calls init_audio. */
+diff --git a/src/gtkui.c b/src/gtkui.c
+index f4a17a5..81c1382 100644
+--- a/src/gtkui.c
++++ b/src/gtkui.c
+@@ -75,3 +75,4 @@ parse_options(int *argc, char **argv[])
+             "  -l, --latency=L          Set suggested output latency to L milliseconds\n"
+-            "  -V, --version            Show version information\n",
++            "  -V, --version            Show version information\n"
++            "      --self-test A B      Run deterministic runtime integration checks\n",
+             stdout

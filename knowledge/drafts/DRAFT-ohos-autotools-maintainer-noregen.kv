@@ -1,0 +1,120 @@
+# ═══ Draft knowledge entry — autotools maintainer 再生成禁用在无工具链 CI ═══
+# Timestamp: 2026-09-05
+# Software: libapparmor 5.0.0
+# Gate: PR #8292 / CI build（conan create 失败链：aclocal inaccessible → autoconf-archive missing）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-ohos-autotools-maintainer-noregen
+trigger_tool:           make|autotools|autoconf|automake|aclocal|conan
+phase:                  build|package
+error_signature:        aclocal: inaccessible or not found|
+                         configure: error: 'autoconf-archive' missing|
+                         missing aclocal-1\.16|
+                         missing automake-1\.16 --foreign|
+                         config\.status --recheck|
+                         automake maintainer.*regenerate
+
+severity:               2
+category:               autotools|build-system|conan|ohos|portability
+match_keywords:         tool_requires automake, autoreconf, maintainer rule, regenerate configure,
+                         missing aclocal, missing automake, config.status --recheck,
+                         AUTOCONF absolute path, make command-line variable override,
+                         PERL5LIB automake-1.16 pollution, touch -t 200101010000
+title:                  autotools 项目的 make maintainer 规则重新生成 configure/Makefile.in——用 tool_requires+autoreconf 自举 + make 命令行变量覆盖绝对路径 AUTOCONF 禁用再生成
+
+root_cause: >
+  autotools（automake 1.x 生成）项目的 Makefile.in 含 maintainer 规则：当
+  configure.ac/aclocal.m4/Makefile.am/m4/*.m4 时间戳比 configure/Makefile.in 新时，
+  make 阶段会自动重新运行 aclocal/automake/autoconf 重新生成它们。CI worker（uid 100）
+  无 autotools 工具链：aclocal/automake 不在 PATH 且 usr/local/bin 无读权限
+  （"aclocal: inaccessible or not found"）；但 autoconf 存在（/data/service/hnp/bin/
+  autoconf，configure 时 AC_PATH_TOOL 找到并固化为 Makefile 变量 AUTOCONF 绝对路径）。
+  于是 make 触发链：missing aclocal-1.16（无工具→返回 0）→ missing automake-1.16 →
+  autoconf（真实执行）用无 AX_CHECK_COMPILE_FLAG 宏定义的 aclocal.m4 重新生成
+  configure → configure.ac 的 m4_ifndef 触发 "configure: error: 'autoconf-archive'
+  missing"。PATH 前置 fake 脚本无效：AUTOCONF 是绝对路径、ACLOCAL 经 missing 调用带
+  版本号（aclocal-1.16）。
+
+affected_scope:         autotools 老项目（gitlab archive 不含预生成 configure，需 autogen）
+                        在无 autotools 工具链的 CI（HarmonyOS PC buildbot worker uid 100）
+                        上的 Conan 适配；也影响 make install 阶段（同样触发 maintainer 规则）。
+
+verification_cmd:       在干净 Conan home 下执行
+                        conan create . -pr:h=.../ohos-aarch64 -pr:b=.../ohos-aarch64
+                        --build=missing
+                        应完整通过 configure/make/make install/test_package；
+                        grep conan 日志确认 make 阶段调用的是 fake-autotools-bin/autoconf
+                        而非 /data/service/hnp/bin/autoconf。
+
+rec_priority:           1
+rec_approach:           tool-requires-autoreconf + make-var-override
+rec_description: >
+  ①源码树无 configure 时用 conan tool_requires 工具链自举
+  （tool_requires("automake/1.18") + tool_requires("libtool/2.5.4")，与
+  psfex/scamp/skymaker 一致，不依赖宿主环境 aclocal/automake）——先写入缺失的
+  m4 宏（ax_check_compile_flag.m4/pkg.m4），再 autoreconf -fiv -I m4；
+  ②PERL5LIB 陷阱：conanbuildenv 生成的 PERL5LIB 是
+  "usr/local/share/automake-1.16:.../automake-1.18"（profile buildenv 的 1.16
+  在前），conan automake 1.18 会加载 1.16 模块报 version mismatch；self.run 会
+  重载 conanbuildenv 覆盖 os.environ 且 self.dependencies 取不到 tool_requires
+  包，需在命令内用 $AUTOMAKE 推算包内 share 并内联 PERL5LIB 前缀；
+  ③make/make install 用 make 命令行变量强制覆盖
+  AUTOCONF/ACLOCAL/AUTOMAKE/AUTOHEADER/LIBTOOLIZE 为 no-op 脚本（exit 0）——
+  命令行变量优先级最高，可覆盖 Makefile 里固化的绝对路径 AUTOCONF（AC_PATH_TOOL
+  检测结果），让 maintainer 规则"成功但不改动"；
+  ④源文件 touch 到 2000-01-01、预生成文件 touch 到 2001-01-01、./configure 产物
+  保持当前，使 make 认为生成文件最新，不触发 maintainer 再生成。
+rec_command: >
+  def build_requirements(self):
+      self.tool_requires("automake/1.18")
+      self.tool_requires("libtool/2.5.4")
+  # build():
+  self._write_m4_macros(libdir)   # 写 m4/ax_check_compile_flag.m4 + m4/pkg.m4
+  if not os.path.isfile(os.path.join(libdir, "configure")):
+      self.run(f"cd {libdir} && "
+               f"AM_PFX=$(dirname $(dirname \"$AUTOMAKE\")) && "
+               f"PERL5LIB=\"$AM_PFX/share/automake-1.18\" autoreconf -fiv -I m4")
+      self._patch_ohos_autotools(libdir)   # config.guess/sub 补 OHOS
+  self.run(f"cd {libdir} && ./configure --prefix=/ --enable-static --disable-shared")
+  fakebin = self._make_fake_autotools()
+  self.run(f"cd {libdir} && make -j1 "
+           f"AUTOCONF={fakebin}/autoconf ACLOCAL={fakebin}/aclocal "
+           f"AUTOMAKE={fakebin}/automake AUTOHEADER={fakebin}/autoheader "
+           f"LIBTOOLIZE={fakebin}/libtoolize")
+  # package() 的 make install 需同样覆盖
+rec_auto_fix:           true
+rec_impl:               autotools-maintainer-noregen
+
+fallback_priority:      2
+fallback_approach:      configure-disable-maintainer-mode
+fallback_description:   configure.ac 若启用 AM_MAINTAINER_MODE，configure 传
+                        --disable-maintainer-mode 可彻底关闭再生成；但多数老项目未启用，
+                        libapparmor 5.0.0 实测不支持该选项（configure --help 无此项）。
+fallback_command:       ./configure --disable-maintainer-mode ...
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       PATH=.*fake.*:\$PATH make|touch .*configure .*当前时间
+forbid_1_reason:        PATH 前置 fake 脚本无法覆盖 Makefile 里固化的绝对路径 AUTOCONF
+                        （AC_PATH_TOOL 检测结果）；把预生成文件 touch 为当前时间会导致
+                        config.status/Makefile（configure 产物，当前时间）早于 configure，
+                        make 认为 config.status 过期触发 config.status --recheck → 重跑 configure。
+forbid_1_consequence:   仍触发 autoconf 重新生成坏 configure，报
+                        "configure: error: 'autoconf-archive' missing"。
+
+principles:             R6
+similar_to:             DRAFT-6048, E059, E069, E175, E178
+conflicts_with:
+doc_file:               knowledge/drafts/DRAFT-ohos-autotools-maintainer-noregen.md
+last_updated:           2026-09-05
+source_event:           PR #8292 libapparmor 5.0.0 CI conan create 失败（aclocal inaccessible → autoconf-archive missing）
+metrics_success_count:  1
+metrics_fail_count:     5
+metrics_confidence:     medium
+draft:                  true

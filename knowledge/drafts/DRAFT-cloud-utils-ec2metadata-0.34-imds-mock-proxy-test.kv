@@ -1,0 +1,95 @@
+# ═══ Draft knowledge entry — ec2metadata/IMDS 硬编码端点工具的本地代理 mock 测试法 ═══
+# Timestamp: 2026-09-08
+# Software: cloud-utils-ec2metadata 0.34 (canonical/cloud-utils)
+# Gate: 本轮 OHOS 专项测试（本地 conan-verify + W3 均通过）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-cloud-utils-ec2metadata-0.34-imds-mock-proxy-test
+trigger_tool:           python|shell|conan|test_package|http
+phase:                  testing|test_package|conan_verify
+error_signature:        could not establish connection to: 169\.254\.169\.254|connect timed out|
+                         socket\.timeout|Operation timed out|undefined connection.*metadata|
+                         IMDSv2|X-aws-ec2-metadata-token|session token.*169\.254\.169\.254|
+                         metadata service.*unreachable|unavailable
+severity:               2
+category:               testing|network|hermetic|python|shell|portability
+match_keywords:         169.254.169.254, EC2 metadata, IMDSv2, session token, X-aws-ec2-metadata-token,
+                         ec2metadata, cloud-init, metadata server, http_proxy, mock proxy, hermetic test,
+                         offline test, hardcoded endpoint, connectivity probe, local mock
+title:                  硬编码外部服务端点（EC2 metadata 169.254.169.254 / IMDSv2 token）的脚本工具：
+                        用本地 http_proxy mock 在离线下做真实功能验证
+
+root_cause: >
+  ec2metadata 类工具把元数据服务端点硬编码为 169.254.169.254（IMDSv2 的 token 端点为
+  http://169.254.169.254/latest/api/token，元数据基址可被 -u/--url 覆盖）。在无 EC2
+  元数据服务的离线/开发/CI 环境下，直接运行会因 connect 黑洞（SYN 全丢）挂起数十秒到
+  数分钟，功能路径（token PUT + meta-data GET）完全无法验证。仅测 --help 又不满足
+  "test_package 必须实质执行被测包功能"（R34/PF3）。连带问题：本机无 root、无 iptables、
+  无 ip 工具时无法通过绑定 169.254.169.254 或重定向实现 mock。
+
+solution: >
+  利用 Python urllib/requests 遵循环境变量 http_proxy 的行为，起一个本地 HTTP 服务同时
+  扮演 ①正向代理 ②IMDS mock：把 http_proxy/http(s)_proxy 指到本地端口，工具对
+  169.254.169.254 的 token PUT 与对任意基址的 meta-data GET 全部经代理到达本地 mock，
+  mock 按 request-line 的绝对 URL（self.path 含完整 http://host/path）拆分路径应答：
+  PUT .../latest/api/token -> 200 返回 mock token；GET .../2009-04-04/meta-data/<key> ->
+  200 返回预设值。注意元数据基址必须指向 mock 真实监听端口（工具内部有直连连通性探测
+  _test_connectivity，127.0.0.1:0 随机端口由 socketserver 分配后回填），代理仅负责路由
+  169.254.169.254 与 127.0.0.1 的请求；no_proxy 需置空，否则本地地址被绕过。
+  实测（cloud-utils-ec2metadata 0.34 OHOS 适配）：--help（上游 usage() 写 stderr 且
+  exit 1 是设计行为，断言输出文本而非 rc）+ instance-id/ami-id 两枚 metadata 键真实
+  返回 mock 值（rc=0）+ 同包 python3 CLI（write-mime-multipart --help）三组断言全部
+  通过；该测试已随 test_package 进入 conan create 与 W3，验证路径本身被门禁真实消费。
+
+affected_scope:         所有硬编码知名外部服务端点（EC2/阿里云 metadata 169.254.169.254、
+                        云厂商 IAM/配置端点等）的 Python/shell CLI 工具在离线环境做功能验证；
+                        同类工具：ec2metadata、cloud-init、各类 instance-id/region 查询脚本。
+verification_cmd:       EC2METADATA_BIN=<pkg>/bin/ec2metadata python3 test_ohos_ec2metadata.py
+                        （test_package 内随 conan create 执行；本地运行返回 OHOS TEST PASSED, rc=0）
+rec_priority:           1
+rec_approach:           local-proxy-mock-imds-test
+rec_description: >
+  test_package/test() 里用 python3 socketserver.TCPServer(("127.0.0.1",0)) 起线程化
+  HTTP 服务，同时实现 do_PUT（应答 /latest/api/token）与 do_GET（按绝对 URL 或路径
+  拆 key，应答 meta-data/<key> 预设值），no_proxy="" 且 http_proxy/https_proxy/大写
+  全设本地端口；子进程 env 注入后运行被测二进制（-u http://127.0.0.1:<port>/2009-04-04
+  --instance-id 等），断言 stdout 含 mock 值。整个过程零外网、零挂起、真实执行功能路径。
+rec_command:            python3 test_ohos_ec2metadata.py
+rec_auto_fix:           false
+rec_impl:               test-package-proxy-mock-imds
+
+fallback_priority:      2
+fallback_approach:      connectivity-probe 短超时 + --help 冒烟
+fallback_description:   无法起本地代理时，仅验证 --help/语法（bash -n、py_compile）并接受
+                        功能路径不可测；--help 冒烟注意上游 usage() 常 exit 1（写 stderr），
+                        断言文本不苛求 rc=0。
+fallback_command:       python3 -m py_compile bin/ec2metadata && ec2metadata --help
+fallback_auto_fix:      false
+fallback_impl:          smoke-only-help
+
+forbid_1_pattern:       (bind|listen).*169\.254\.169\.254|iptables.*169\.254\.169\.254
+forbid_1_reason:        无 root/无 ip/无 iptables 时不可行，且污染宿主网络配置
+forbid_1_consequence:   测试挂起或失败，徒耗时间
+
+forbid_2_pattern:       --help.*rc\s*[!=]=\s*0.*assert
+forbid_2_reason:        ec2metadata 等使用 usage() 输出的工具对 --help 也 exit 1（stderr）
+forbid_2_consequence:   用 rc 断言 --help 会把设计行为误判为失败
+
+principles:             P012, P001
+similar_to:             E037, E049, E201, E325, E363
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-cloud-utils-ec2metadata-0.34-imds-mock-proxy-test.md
+last_updated:           2026-09-08
+source_event:           cloud-utils-ec2metadata 0.34 第一轮适配（OHOS PC）；
+                        上游 usage() --help exit 1、IMDSv2 token 端点硬编码 169.254.169.254
+                        导致直连 mock 测试挂起（connect 黑洞）→ 本地代理 mock 路由法通过
+authors:                pc1-33
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     2
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-08

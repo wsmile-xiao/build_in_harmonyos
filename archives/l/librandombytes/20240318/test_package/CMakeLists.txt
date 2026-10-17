@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_randombytes C)
+find_package(librandombytes REQUIRED)
+add_executable(test_randombytes test.c)
+target_link_libraries(test_randombytes PRIVATE librandombytes::librandombytes)
+enable_testing()
+add_test(NAME test_randombytes COMMAND test_randombytes)

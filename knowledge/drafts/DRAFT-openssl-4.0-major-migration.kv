@@ -1,0 +1,139 @@
+# ═══ Draft knowledge entry — openssl 4.x 大版本跟进：3.x 配方迁移到 4.0.1 的构建系统差异链 ═══
+# Timestamp: 2026-09-13
+# Software: openssl 4.0.1（从 3.5.6.1 底稿迁移）
+# Gate: PR #7905 / CI builds #37482、#37636、#5591（全绿）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-openssl4-migration
+draft:                  DRAFT-openssl4-migration
+status:                 pending-editor-review
+trigger_tool:           openssl|Configure|perl|conan|make
+phase:                  configure|build|package|test_package
+error_signature:        ENGINESDIR.*not defined|Unknown option.*engine|install_engines.*No rule to make target|
+                         no rule to make target.*install_engines|Can't locate.*engine|
+                         Warning:.*pinshared|ENGINESDIR.*deprecated|
+                         patch does not apply.*(speed\.c|sockets\.h)|
+                         undefined symbol.*__fd_chk
+
+severity:               2
+category:               build-system, migration, packaging, ohos, security
+match_keywords:         openssl 4.0, openssl 4.x, 大版本, major version, engines removed, ENGINESDIR,
+                         MODULESDIR, no-pinshared, pinshared, install_sw, install_dev, install_modules,
+                         install_runtime, QUIC default, patch regenerate, 上下文漂移, 底稿复用,
+                         __MUSL__, fd_set, __fd_chk, linux-aarch64, Configure, 迁移
+title:                  openssl 3.x→4.x 大版本跟进：engines 移除/安装目标分解/no-pinshared 新选项/补丁上下文漂移的四差异迁移链
+
+root_cause: >
+  OpenSSL 4.0 对构建系统做了结构性变更，3.x 时代配方直接迁移会在四个点断裂，且
+  断裂方式各不相同（编译期无错、安装期静默缺产物、链接期隐患、补丁期 dry-run 失败）：
+  1) engines 整体移除：engines/ 目录不复存在，no-engine 恒为禁用态（传了也只是
+     幂等），Makefile 中 ENGINESDIR 变量消失（只剩 OPENSSLDIR/MODULESDIR）。
+     3.x 配方若断言 ENGINESDIR 或调用 install_engines 目标，4.x 下 Make 会报
+     "No rule to make target 'install_engines'"；若仅是打包清理 engines 目录，
+     则静默变成 no-op——错误形态取决于配方写法，极易漏判。
+  2) install_sw 语义分解：4.x 的 install_sw 现在展开为
+     install_dev install_modules install_runtime（3.x 是 install_devs
+     install_engines install_runtime），无 install_engines。配方若手动列出
+     子目标会直接失败；用 install_sw 则平迁。
+  3) no-pinshared 新选项：4.x 静态构建（no-shared）默认 pin 共享库（链接器
+     -z nodelete 类标志），且 no-shared 不隐含 no-pinshared。Conan 静态打包
+     （R26 系统同名库隔离场景）若不显式传 no-pinshared，下游共享库静态链入
+     libcrypto 后会被意外 pin，改变下游运行时语义。
+  4) MODULESDIR 派生语义：--libdir=/lib 时 4.x 推导 MODULESDIR=/lib/ossl-modules，
+     打包需清理该目录（no-module 下为空目录但会创建）；OPENSSLDIR 断言从
+     ENGINESDIR 断言改为 MODULESDIR 断言。
+  另外 3.x 时代源码补丁（fd_set 有界实现等）在 4.0.1 树上 patch --dry-run
+  失败——上下文漂移（SM2_SECONDS/FFDH_SECONDS defines 移除、BIO_printf→
+  BIO_puts、sockets.h 新增 VXWORKS/TANDEM 分支），但底层问题在 4.0.1 仍存在，
+  必须按新树重新生成补丁而非丢弃。
+  大版本跟进方法论（跨库通用）：旧知识条目复用前必须在新版本上逐项验证
+  （本例 E006 no-asm / E235 getrandom 熵源在 4.0.1 复验仍有效；E220 的
+  __MUSL__ 守卫需注意 OHOS SDK clang 不预定义 __MUSL__，只预定义
+  __OHOS__/__OHOS_FAMILY__，须在 CC 命令注入 -D__MUSL__ 才激活 musl 守卫
+  的 fd_set 有界实现）。
+
+affected_scope:         openssl 3.x → 4.x 大版本跟进适配；其他大版本升级中构建系统
+                        结构性变更（安装目标重命名/Makefile 变量消失/新默认选项）的
+                        Conan 配方迁移；静态打包 + 下游共享库消费的场景。
+
+solution: |
+  以 3.5.6.1 配方为底稿迁移到 4.0.1 的 conanfile.py build()/package() 关键差异：
+  ```python
+  # Configure 参数：3.x 基线 + 新增 no-pinshared（4.x 新选项）
+  configure_args = [
+      f"{configure_perl} ./Configure",
+      "linux-aarch64",                    # 4.0.1 仍内置该 target（Configurations/10-main.conf）
+      '--prefix="/"', '--openssldir="/ssl"', "--libdir=/lib",
+      "--with-rand-seed=getrandom",       # E235 熵源策略，4.x 复验仍有效
+      "no-asm", "no-shared", "no-legacy", "no-module", "no-docs",
+      "no-pinshared",                     # ★ 4.x 新增：no-shared 不隐含，静态包必须显式
+  ]
+
+  # 编译环境：OHOS SDK clang 不预定义 __MUSL__，注入宏激活 musl 守卫
+  if self.settings.os == "OHOS":
+      compiler_command = f'"{compiler}" -D__MUSL__'   # 否则 sockets.h 的
+      # musl-guarded 有界 fd_set 帮助函数不激活，回落裸 FD_SET 宏 →
+      # 展开 __fd_chk 受检宏（libc 私有符号，E235 链条）
+
+  # package()：install_sw 平迁可用（内部已分解为 install_dev install_modules
+  # install_runtime，无 install_engines——不要手动列子目标）
+  self.run(f'"{make}" MAKE="{recursive_make}" PERL="{make_perl}" '
+           f'install_sw DESTDIR="{destdir}"', cwd=self.source_folder)
+  # 清理：4.x 无 engines，改为 modules + 上游元数据
+  rmdir(self, os.path.join(self.package_folder, "lib", "cmake"))
+  rmdir(self, os.path.join(self.package_folder, "lib", "pkgconfig"))
+  rmdir(self, os.path.join(self.package_folder, "lib", "ossl-modules"))
+  ```
+  补丁迁移：3.x 补丁在 4.x 树上 dry-run 失败时，先确认底层问题是否仍存在
+  （grep 源码找问题模式，如 apps/ 中残留的裸 FD_SET 调用点），存在则按新树
+  重新生成补丁（本例 0001 speed.c / 0002 sockets.h 均重生成，见 PR #7905）。
+  验证：llvm-nm -u 检查 libcrypto.a/libssl.a/CLI 零 __fd_chk 引用；
+  CLI 嵌入路径断言改为 OPENSSLDIR=/ssl + MODULESDIR=/lib/ossl-modules
+  （ENGINESDIR 断言移除——4.0 已无此概念）。
+
+fallback: >
+  若大版本差异过大导致底稿配方不可平迁（如 CMake-only 重构的上游），退路是
+  按"官方 conanfile + OHOS profile"从零构建，再用旧知识的验证命令
+  （nm -u __fd_chk、can_run 测试套件）逐项复验旧结论在新版本是否成立。
+  补丁层面：上下文漂移超过 50% 时放弃 fuzz apply（patch -F3），直接在
+  新树上重写等价改动并重新走 refresh-patch --auto 管线。
+
+verify_builds:          #37482, #37636, #5591
+
+reference_impl: >
+  PR #7905【依赖项】feat(openssl-4): 4.0.1 适配 HarmonyOS PC
+  （head feat/openssl-4-4.0.1，j669539；合并后由 !8952 迁移目录至
+  archives/o/openssl/4.0.1/ 并统一包名 openssl/4.0.1）
+  配方：archives/o/openssl/4.0.1/conanfile.py
+  补丁：archives/o/openssl/4.0.1/patches/0001-apps-speed.c.patch、
+        0002-include-internal-sockets.h.patch（按 4.0.1 树重新生成）
+
+principles:             P010, P012
+similar_to:             E006, E220, E235, E162
+conflicts_with:
+prerequisite_of:
+
+error_excerpt: >
+  [3.x 配方直接迁移 4.x 的断裂点速查]
+  - make install_engines → make: *** No rule to make target 'install_engines'
+  - grep ENGINESDIR Makefile → 无输出（4.x 只剩 OPENSSLDIR/MODULESDIR）
+  - patch -p1 --dry-run < 3.x.patch → hunk FAILED（上下文漂移：
+    SM2_SECONDS/FFDH_SECONDS 已移除、BIO_printf→BIO_puts、sockets.h 增
+    VXWORKS/TANDEM 分支）
+  - 静态链接下游 .so 后 dlopen/unload 语义异常 → 未传 no-pinshared
+  - llvm-nm -u openssl(CLI) 显示 U __fd_chk → __MUSL__ 守卫未激活
+    （OHOS SDK clang 只预定义 __OHOS__/__OHOS_FAMILY__）
+
+doc_file:               knowledge/drafts/DRAFT-openssl-4.0-major-migration.md
+last_updated:           2026-09-13
+source_event:           PR #7905 feat(openssl-4): 4.0.1 适配 HarmonyOS PC（平台任务 #7306）；
+                        CI #37482/#37636/#5591 全绿；上游测试 Files=363 Tests=4079 PASS
+authors:                j669539
+source_pr:              7905
+source_commit:          8f5a449114

@@ -12,6 +12,8 @@ https://download.osgeo.org/geos/
 
 ## 已编译版本
 - 3.13.0 (静态库版本)
+- 3.13.1 (conan 动态库，libgeos.so + libgeos_c.so，真机验证)
+- 3.14.1 (conan 动态库，libgeos.so + libgeos_c.so + geosop，真机验证)
 
 ## 依赖关系
 无外部依赖

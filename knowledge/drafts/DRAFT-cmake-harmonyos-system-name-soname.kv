@@ -1,0 +1,49 @@
+#====================================================================
+# DRAFT-cmake-harmonyos-system-name-soname - Conan os=OHOS 映射出 CMAKE_SYSTEM_NAME=HarmonyOS 而 CMake 无该 Platform 模块：SONAME 标志不定义，共享库须显式注入 -Wl,-soname 并关闭版本化软链
+#====================================================================
+
+id:                     DRAFT-cmake-harmonyos-system-name-soname
+trigger_tool:           cmake|conan|ld.lld|llvm-objdump|readelf
+phase:                  build|package|testing
+error_signature:        System is unknown to cmake|create: Platform/HarmonyOS|DT_SONAME|IMPORTED_NO_SONAME|Error loading shared library|symbol not found
+severity:               2
+category:               cmake|shared-library|soname|ohos-toolchain
+match_keywords:         HarmonyOS, CMAKE_SYSTEM_NAME, conan os=OHOS, Platform/HarmonyOS.cmake, Platform/OHOS.cmake, Platform/Linux.cmake, CMAKE_SHARED_LIBRARY_SONAME_C_FLAG, CMAKE_PLATFORM_NO_VERSIONED_SONAME, DT_SONAME, IMPORTED_NO_SONAME, DT_NEEDED, System is unknown to cmake, rpath, LD_LIBRARY_PATH, ctest
+title:                  Conan os=OHOS 映射出 CMAKE_SYSTEM_NAME=HarmonyOS 而 CMake 无该 Platform 模块，SONAME 标志不定义，共享库须显式注入 -Wl,-soname 并关闭版本化软链，测试期须显式注入 LD_LIBRARY_PATH
+root_cause:             OHOS 适配版 conan 的 CMakeToolchain 将 os=OHOS 映射为 CMAKE_SYSTEM_NAME=HarmonyOS（ci/conan/profiles/ohos-aarch64 自身注释文档化），而设备 CMake 4.1.2 只有 Platform/OHOS.cmake（内容仅 include(Platform/Linux)）、无 Platform/HarmonyOS.cmake，configure 逐字报 "System is unknown to cmake, create: Platform/HarmonyOS" → Platform/Linux.cmake 不加载，其中定义的 CMAKE_SHARED_LIBRARY_SONAME_{C,CXX}_FLAG 与 rpath 规则全部缺位：① 产物 ELF 无 DT_SONAME，CMake 导出 target 带 IMPORTED_NO_SONAME，下游链接器把 Conan 包缓存绝对路径写进 DT_NEEDED（不可重定位，缓存清理/revision 变更/换机即断，CI SONAME 门禁拦截）；② 链接行无 -rpath/-rpath-link，且 conanbuild 聚合 env 不下传 ctest，构建树测试可执行运行期加载不到本包与依赖 .so（E135 动态链接器错误族）。
+affected_scope:         任何经 OHOS 适配版 conan（os=OHOS）驱动的 CMake 共享库项目（不限 Qt 栈）；双失败面：构建树测试可执行运行期 .so 加载失败（ctest 阶段）与产物无 SONAME/下游不可重定位（打包/门禁/下游链接阶段）。与 DRAFT-expat-cmake-soname-1912、DRAFT-openjpeg2-hmdfs-versioned-soname 同域不同触发：两者 root_cause 是 HMDFS 拒绝创建版本化软链（cmake_symlink_library Permission denied），本条触发器是平台模块缺失导致 SONAME 标志从未定义。
+verification_cmd:       ls /data/service/hnp/cmake.org/cmake_4.1.2/share/cmake-4.1/Modules/Platform | grep -i harmonyos（空=模块缺失）；grep -n HarmonyOS /storage/Users/currentUser/build_in_harmonyos/ci/conan/profiles/ohos-aarch64（conan 映射证据）；最小共享库探针两遍：不带修复标志构建 → llvm-objdump -p libfoo.so | grep -c SONAME 得 0，带 CMAKE_PLATFORM_NO_VERSIONED_SONAME=ON + CMAKE_SHARED_LIBRARY_SONAME_{C,CXX}_FLAG=-Wl,-soname, → 得 1；llvm-objdump -p libX.so | grep DT_NEEDED（确认无包缓存绝对路径）；ctest 阶段以显式 LD_LIBRARY_PATH 运行测试可执行确认 .so 加载
+rec_priority:           1
+rec_approach:           explicit-soname-flag-no-versioned-symlink-plus-runtime-ld-library-path
+rec_description:        ① SONAME 主案（构建语义层）：recipe CMakeToolchain 显式设 CMAKE_PLATFORM_NO_VERSIONED_SONAME=ON（同时规避 HMDFS 路径版本化软链受限）并保留 CMAKE_SHARED_LIBRARY_SONAME_{C,CXX}_FLAG="-Wl,-soname,"，产物为带可重定位 ELF SONAME 的非版本化 lib<name>.so，导出 target 不再 IMPORTED_NO_SONAME，下游 DT_NEEDED 记 SONAME 而非包缓存绝对路径。② 运行期闭包主案（测试阶段）：recipe build() 内用 Environment() 显式 prepend LD_LIBRARY_PATH（构建树 lib 输出目录 + 依赖包 lib 目录）后再跑 ctest，不依赖 lld/加载器隐式解析、设备默认搜索路径或 conan 聚合 env 隐式下传；不要把 rpath 烧进安装产物（安装期 ELF 修改需按 E077 重签名）。机理在工具实现层（conan 系统名映射 × CMake 平台模块表不匹配），与具体库无关；第二次独立命中（首次 expat #1912，本条为 kcolorpicker 消费路线，非 Qt platform patch 路线）。
+rec_command:            tc.cache_variables["CMAKE_PLATFORM_NO_VERSIONED_SONAME"]="ON"; tc.cache_variables["CMAKE_SHARED_LIBRARY_SONAME_C_FLAG"]="-Wl,-soname,"; tc.cache_variables["CMAKE_SHARED_LIBRARY_SONAME_CXX_FLAG"]="-Wl,-soname,"; test_env.prepend_path("LD_LIBRARY_PATH", "<build_tree>/lib"); test_env.prepend_path("LD_LIBRARY_PATH", "<qtbase_package>/lib"); 复验: llvm-objdump -p <package>/lib/lib<name>.so | grep SONAME
+rec_auto_fix:           true
+rec_impl:               conan-recipe
+fallback_priority:      2
+fallback_approach:      remap-cmake-system-name-ohos
+fallback_description:   在 conan_toolchain 之后改设 CMAKE_SYSTEM_NAME=OHOS，命中设备 CMake 自带的 Platform/OHOS.cmake（include(Platform/Linux)），让 SONAME 标志与 rpath 规则按 Linux 语义原生加载。诚实权衡：未验证 conan_toolchain 对 CMAKE_SYSTEM_NAME 的覆盖顺序与 OHOS.cmake 语义完整性，采用前须先探针验证（configure 无 "System is unknown" 告警 + 产物 SONAME/rpath 复验）。
+fallback_command:       generate() 中 tc.generate() 后以自定义 toolchain/变量 set(CMAKE_SYSTEM_NAME OHOS) 重新 configure，llvm-objdump -p 产物复验 SONAME 与 DT_NEEDED
+fallback_auto_fix:      false
+fallback_impl:          manual-verify-program
+forbid_1_pattern:       CMAKE_SKIP_RPATH|NO_SONAME|去除 SONAME|SONAME.*FLAG.*空
+forbid_1_reason:        完全去除 SONAME 会使导出 target 带 IMPORTED_NO_SONAME，下游 DT_NEEDED 记录 Conan 包缓存绝对路径，缓存清理/revision 变更/换机即失败（expat #1912 实证）。
+forbid_1_consequence:   消费者不可重定位，运行期报 Error loading shared library + symbol not found。
+forbid_2_pattern:       rm .*lib.*\.so\.[0-9]+|package\(\).*手工删改版本软链
+forbid_2_reason:        SONAME/版本软链问题在 build 期或 CI 门禁期已失败，package() 手工删改是治标，recipe 保持 flaky。
+forbid_2_consequence:   门禁仍拦截，构建产物不可信。
+principles:             P010,P012
+causes:                 []
+caused_by:              []
+similar_to:             [DRAFT-expat-cmake-soname-1912,DRAFT-openjpeg2-hmdfs-versioned-soname,E135]
+conflicts_with:         []
+prerequisite_of:        []
+doc_file:               knowledge/drafts/DRAFT-cmake-harmonyos-system-name-soname.md
+last_updated:           2026-09-19
+source_event:           kcolorpicker/0.3.1 HarmonyOS PC 适配（conan os=OHOS CMake 共享库消费路线，第二次独立命中；首次为 expat #1912）
+authors:                GoliWie
+source_pr:
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-19

@@ -1,0 +1,89 @@
+# ═══ Draft knowledge entry — OHOS 工具链全局注入 -Wl,--code-sign × 上游强制 -Werror ⇒ 编译期 unused 告警升级为硬错误 ═══
+# Timestamp: 2026-09-24
+# Software: unittest-cpp 2.0.0（通用：任何编译选项被硬编码进自身规则、无 CFLAGS 注入缝、
+#           且强制 -Wall/-Wextra/-Werror 的上游工程——CMake option 类、Makefile 写死类）
+# Gate: 本地真机构建实测（未降级首错逐字留证 → 官方开关降级后构建+268 例测试全绿）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-unittest-cpp-2.0.0-ohos-codesign-injection-werror-compile-failure
+trigger_tool:           clang|cmake|make
+phase:                  compilation
+error_signature:        error: -Wl,--code-sign: 'linker' input unused \[-Werror,-Wunused-command-line-argument\]|argument unused during compilation: '-Wl,--code-sign'
+severity:               2
+category:               compat, compiler, warnings, ohos, toolchain
+match_keywords:         code-sign, code_sign, --code-sign, unused-command-line-argument, linker input unused, -Werror, UTPP_AMPLIFY_WARNINGS, 签名参数, OHOS 工具链注入, clang-15
+
+title:                  OHOS 工具链全局注入的 -Wl,--code-sign 在编译阶段被 clang 判为 unused 告警，上游强制 -Werror 的工程把它升级成硬 error（每个源文件首行即炸）——首选上游自带的 warnings 降级 option，其次显式 -Wno-error=unused-command-line-argument；与 E063（源码告警×-Werror）签名与解法均不同
+
+root_cause: HarmonyOS PC 的编译 wrapper 为产物签名要求全局注入 -Wl,--code-sign（链接期必需，不能删）。
+  clang 在**编译**（非链接）阶段看到 -Wl, 参数会报 unused-command-line-argument 告警；
+  上游若把 -Wall -Wextra -Werror 硬编码进自身编译规则（CMake add_definitions/
+  target_compile_options 或 Makefile 写死 CFLAGS），该告警即升级为 error，**全部源文件
+  编译失败**。这与 E063 家族不同：E063 的触发面是"musl/clang 对**源码**产生的新告警
+  类别（int-conversion/implicit-function 等）被 -Werror 放大"，本条的触发面是
+  "**平台工具链自己注入的 flag** 被 -Werror 放大"——错误类别（unused-command-line-argument）、
+  告警来源（工具链注入 vs 源码语义）、修法优先级（先关上游警告放大开关 vs 按类别
+  -Wno-error=X 追加进 CFLAGS）三个维度均不同；且本类工程往往**没有 CFLAGS 注入缝**
+  （flags 被硬编码），E063 的 rec_command 形态不可达。
+affected_scope: 所有满足「OHOS 交叉/原生构建 + 上游硬编码 -Werror + 无外部 CFLAGS 覆盖点」
+  的工程；实测复现于 unittest-cpp 2.0.0（UTPP_AMPLIFY_WARNINGS 默认 ON，
+  set(CMAKE_CXX_FLAGS "... -Wall -Wextra -Werror")）。
+verification_cmd: cmake --build . 2>&1 | grep -m1 "code-sign.*unused\|linker' input unused"
+
+rec_priority:           1
+rec_approach:           use-upstream-warnings-off-option
+rec_description:        优先查找并使用上游自带的警告降级开关（本工程为 option(UTPP_AMPLIFY_WARNINGS)；
+  其他工程常见 NO-WERROR/BUILD_WARNINGS/PEDANTIC 类 option），经 CMakeToolchain
+  cache_variables 传入；这是零补丁路径，评审面最小。
+rec_command:            cmake -DUTPP_AMPLIFY_WARNINGS=OFF ..（conan 内：tc.cache_variables["UTPP_AMPLIFY_WARNINGS"]="OFF"）
+rec_auto_fix:           false
+
+fallback_priority:      2
+fallback_approach:      append-wno-error-unused-command-line
+fallback_description:   上游无开关可关时，向编译参数显式追加 -Wno-error=unused-command-line-argument
+  （CMake: add_compile_options / target_compile_options 或 tc.extra_cxxflags；
+  Makefile 硬编码工程经 make CFLAGS+="..." / CXXFLAGS+="..." 注入缝），只降级该类别、
+  保留其余 -Werror 语义。禁止全量删 -Werror（掩盖真实源码告警）。
+fallback_command:       tc.extra_cxxflags.append("-Wno-error=unused-command-line-argument")
+fallback_auto_fix:      false
+
+forbid_1_pattern:       删除|移除.*--code-sign|filter-out.*code-sign
+forbid_1_reason:        -Wl,--code-sign 是 HarmonyOS 产物签名的链接期必需参数，删掉后链接虽然干净
+  但产物不可执行/签名门禁失败——把编译期噪音换成运行期黑洞。
+forbid_1_consequence:   本地构建"变绿"但 ELF 无 .codesign 段，设备拒载或 CI L5/签名步骤红，
+  排查成本远高于正确修法。
+forbid_2_pattern:       -Wno-error$|-Wno-error\*=|-fno-warnings
+forbid_2_reason:        为一条注入告警关掉全部或过宽的警告升级，掩盖真实源码缺陷。
+forbid_2_consequence:   评审打回（警告策略变更需逐项说明），且可能放过真 bug。
+
+principles:             P002, P003, P006
+
+causes:                 []
+caused_by:              []
+similar_to:             E063
+conflicts_with:         []
+prerequisite_of:        []
+
+# safety_boundary（适用边界/反例）：
+#   - 仅当日志含 `--code-sign ... unused` + `[-Werror,-Wunused-command-line-argument]` 组合签名时适用；
+#   - 若告警类别是源码语义类（int-conversion 等），走 E063 既有解法，不属本条；
+#   - 若工程有 CFLAGS 注入缝且非 -Werror 硬编码，通常根本不会触发（注入参数进不了编译行或
+#     不进 error 升级），也不属本条；
+#   - 推荐顺序固定：上游官方开关 > 精确类别 -Wno-error=X > （禁止）动签名参数。
+doc_file:
+last_updated:           2026-09-24
+source_event:           unittest-cpp 2.0.0 适配（任务 11521，feat/unittest-cpp-2.0.0）
+authors:                hw-4 <hw-4@local>
+source_pr:
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:

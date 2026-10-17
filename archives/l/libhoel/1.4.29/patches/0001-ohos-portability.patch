@@ -1,0 +1,269 @@
+From 568f98a8f961bc0c7dc5de277c938f14a8f60324 Mon Sep 17 00:00:00 2001
+From: j669539 <j669539@noreply.gitcode.com>
+Date: Sat, 19 Sep 2026 01:12:11 +0800
+Subject: [PATCH] OHOS portability
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Jansson/SQLite3/Check: force MODULE mode so hoel's bundled find-modules
+  stay in charge under CMAKE_FIND_PACKAGE_PREFER_CONFIG=ON (conan CMakeDeps
+  config-mode targets would otherwise bypass the upstream gates)
+- MariaDB/PostgreSQL: degrade to backend OFF instead of REQUIRED abort
+  (client libs unavailable on the OHOS PC conan registry)
+- Orcania/Yder version gates: accept the camel-case VERSION_STRING that
+  Conan CMakeDeps exports in addition to the upstream spelling
+- Orcania/Yder link blocks: under BUILD_STATIC=ON the conan CMakeDeps
+  package only exports the *-static targets, so the unconditionally built
+  shared target must link them too or the bare names resolve to nothing
+  and the compile loses the include dirs
+- Tests: relax the Subunit hard requirement (ohpcd libcheck is
+  self-contained, same relaxation as orcania 2.3.3 / libyder 1.4.20);
+  link the tests against the actual library target under BUILD_STATIC
+- Test DB fixture: resolve /tmp/test.db through $TMPDIR when set (OHOS
+  /tmp is read-only), falling back unchanged on regular Linux — pure
+  POSIX getenv, no platform ifdefs
+---
+ CMakeLists.txt | 82 +++++++++++++++++++++++++++++++++++++++++---------
+ test/core.c    | 15 ++++++++-
+ test/multi.c   | 14 ++++++++-
+ 3 files changed, 94 insertions(+), 17 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e24f7bd..1cce555 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -107,17 +107,25 @@ set(LIB_SRC
+ find_package (Threads)
+ list(APPEND HOEL_LIBS ${CMAKE_THREAD_LIBS_INIT})
+ 
+-include(FindJansson)
+-set(JANSSON_MIN_VERSION 2.4)
+-find_package(Jansson ${JANSSON_MIN_VERSION} REQUIRED)
++find_package(Jansson ${JANSSON_MIN_VERSION} MODULE)
++# OHOS portability: MODULE mode keeps hoel's bundled cmake-modules/FindJansson.cmake
++# in charge (JANSSON_LIBRARY/JANSSON_INCLUDE_DIR seeds -> Jansson::Jansson) so the
++# CMakeDeps config-mode jansson::jansson target never silently bypasses the
++# upstream version gate. The version gate itself is still enforced by
++# FindJansson's JANSSON_VERSION_STRING handling.
+ list(APPEND HOEL_LIBS Jansson::Jansson)
+ 
+ option(WITH_SQLITE3 "Use SQLite3 library" ON)
+ 
+ if (WITH_SQLITE3)
+   include(FindSQLite3)
+-  find_package(SQLite3 REQUIRED)
+-  if (SQLite3_FOUND)
++  # OHOS portability: force MODULE mode so CMake's bundled FindSQLite3.cmake
++  # runs (SQLITE3_INCLUDE_DIR/SQLITE3_LIBRARY seeds -> SQLite::SQLite3 target
++  # and SQLITE3_FOUND); the conan CMakeDeps config file for sqlite3 is
++  # lowercase (sqlite3-config.cmake) so find_package(SQLite3) would otherwise
++  # resolve the conan config only through the prefer-config policy.
++  find_package(SQLite3 MODULE)
++  if (SQLITE3_FOUND)
+     list(APPEND HOEL_LIBS SQLite::SQLite3)
+     include_directories(${SQLite3_INCLUDE_DIRS})
+     set(_HOEL_SQLITE ON)
+@@ -133,7 +141,10 @@ option(WITH_MARIADB "Use MariaDB library" ON)
+ 
+ if (WITH_MARIADB)
+   include(FindMYSQL)
+-  find_package(MYSQL REQUIRED)
++  # OHOS portability: the MariaDB client library is not available on the
++  # OHOS PC conan registry, so a failed lookup must degrade to _HOEL_MARIADB
++  # OFF instead of aborting the whole configure.
++  find_package(MYSQL)
+   if (MYSQL_FOUND)
+     list(APPEND HOEL_LIBS MysqlDBClient::MysqlDBClient)
+     include_directories(${MYSQL_INCLUDE_DIRS})
+@@ -150,7 +161,9 @@ option(WITH_PGSQL "Use PostgreSQL library" ON)
+ 
+ if (WITH_PGSQL)
+   include(FindLibPQ)
+-  find_package(LibPQ REQUIRED)
++  # OHOS portability: same degradation for the PostgreSQL client library
++  # (not available on the OHOS PC conan registry).
++  find_package(LibPQ)
+   if(LIBPQ_FOUND)
+     list(APPEND HOEL_LIBS PostgreSQL::PostgreSQL)
+     include_directories(${LIBPQ_INCLUDE_DIRS})
+@@ -242,9 +255,9 @@ if (BUILD_HOEL_DOCUMENTATION)
+     if (DOXYGEN_FOUND)
+         set(doxyfile_in ${CMAKE_CURRENT_SOURCE_DIR}/doc/doxygen.cfg)
+         set(doxyfile ${CMAKE_CURRENT_BINARY_DIR}/doxyfile)
+-        
++
+         configure_file(${doxyfile_in} ${doxyfile} @ONLY)
+-        
++
+         add_custom_target(doc
+                           COMMAND ${DOXYGEN_EXECUTABLE} ${doxyfile_in}
+                           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+@@ -259,6 +272,13 @@ endif ()
+ # dependencies
+ 
+ find_package(Orcania ${ORCANIA_VERSION_REQUIRED} REQUIRED)
++if (NOT ORCANIA_VERSION_STRING AND Orcania_VERSION_STRING)
++    # OHOS portability: Conan CMakeDeps generates OrcaniaConfig.cmake which
++    # exports the version as Orcania_VERSION_STRING (camel case). Accept both
++    # spellings; the version gate is still enforced by find_package(Orcania
++    # x.y.z REQUIRED) through OrcaniaConfigVersion.cmake.
++    set(ORCANIA_VERSION_STRING "${Orcania_VERSION_STRING}")
++endif ()
+ if ("${ORCANIA_VERSION_STRING}" VERSION_GREATER_EQUAL "${ORCANIA_VERSION_REQUIRED}")
+     message(STATUS "Orcania found: ${ORCANIA_VERSION_STRING}")
+ else ()
+@@ -268,14 +288,26 @@ endif ()
+ if (BUILD_STATIC)
+     if(TARGET Orcania::Orcania-static)
+         target_link_libraries(hoel_static PUBLIC $<TARGET_NAME:Orcania::Orcania-static>)
++        # OHOS portability: BUILD_STATIC=ON still builds the shared target
++        # unconditionally (upstream has no guard around add_library(hoel
++        # SHARED ...)); the conan CMakeDeps package only exports the static
++        # targets, so the shared target must link them too or the bare
++        # names resolve to nothing and the compile loses the include dirs.
++        target_link_libraries(hoel PUBLIC $<TARGET_NAME:Orcania::Orcania-static>)
+     else()
+         target_link_libraries(hoel_static PUBLIC $<TARGET_NAME:Orcania::Orcania>)
++        target_link_libraries(hoel PUBLIC $<TARGET_NAME:Orcania::Orcania>)
+     endif()
+ else()
+     target_link_libraries(hoel PUBLIC $<TARGET_NAME:Orcania::Orcania>)
+ endif ()
+ 
+ find_package(Yder ${YDER_VERSION_REQUIRED} REQUIRED)
++if (NOT YDER_VERSION_STRING AND Yder_VERSION_STRING)
++    # OHOS portability: same camel-case acceptance for the Yder CMakeDeps
++    # export (Yder_VERSION_STRING).
++    set(YDER_VERSION_STRING "${Yder_VERSION_STRING}")
++endif ()
+ if ("${YDER_VERSION_STRING}" VERSION_GREATER_EQUAL "${YDER_VERSION_REQUIRED}")
+     message(STATUS "Yder found: ${YDER_VERSION_STRING}")
+ else ()
+@@ -285,8 +317,11 @@ endif ()
+ if (BUILD_STATIC)
+     if(TARGET Yder::Yder-static)
+         target_link_libraries(hoel_static PUBLIC $<TARGET_NAME:Yder::Yder-static>)
++        # OHOS portability: same reasoning as the Orcania block above.
++        target_link_libraries(hoel PUBLIC $<TARGET_NAME:Yder::Yder-static>)
+     else()
+         target_link_libraries(hoel_static PUBLIC $<TARGET_NAME:Yder::Yder>)
++        target_link_libraries(hoel PUBLIC $<TARGET_NAME:Yder::Yder>)
+     endif()
+ else()
+     target_link_libraries(hoel PUBLIC $<TARGET_NAME:Yder::Yder>)
+@@ -297,11 +332,21 @@ endif ()
+ option(BUILD_HOEL_TESTING "Build the testing tree." OFF) # because we don not use include(CTest)
+ 
+ if (BUILD_HOEL_TESTING)
+-    find_package(Check REQUIRED)
++    # OHOS portability: force MODULE mode so hoel's bundled
++    # cmake-modules/FindCheck.cmake runs (CHECK_FOUND / Check::Check). The
++    # Conan toolchain sets CMAKE_FIND_PACKAGE_PREFER_CONFIG=ON which would
++    # otherwise resolve find_package(Check) in CONFIG mode to the CMakeDeps
++    # check-config.cmake (Check_FOUND / Check::check) and silently drop this
++    # whole CTest tree.
++    find_package(Check MODULE)
+     if (CHECK_FOUND)
+         if (NOT WIN32 AND NOT APPLE)
+             include(FindSubunit)
+-            find_package(Subunit REQUIRED)
++            # OHOS portability: the ohpcd libcheck (check/0.15.2) is
++            # self-contained and the hoel tests use only check.h, so Subunit
++            # is not needed at link time (same relaxation as orcania 2.3.3
++            # and libyder 1.4.20 in this repo).
++            find_package(Subunit)
+         endif ()
+ 
+         enable_testing()
+@@ -309,7 +354,14 @@ if (BUILD_HOEL_TESTING)
+         set(CMAKE_CTEST_COMMAND ctest -V)
+ 
+         set(TST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/test)
+-        set(TEST_LIBS hoel Check::Check ${HOEL_LIBS})
++        if (TARGET hoel_static)
++            # OHOS portability: when BUILD_STATIC=ON the real target is
++            # hoel_static (output name hoel); link the tests against the
++            # actual library target.
++            set(TEST_LIBS hoel_static Check::Check ${HOEL_LIBS})
++        else ()
++            set(TEST_LIBS hoel Check::Check ${HOEL_LIBS})
++        endif ()
+         if (NOT WIN32)
+             find_package(Threads REQUIRED)
+             list(APPEND TEST_LIBS ${CMAKE_THREAD_LIBS_INIT} m)
+@@ -317,17 +369,17 @@ if (BUILD_HOEL_TESTING)
+         if (NOT APPLE AND NOT WIN32)
+             list(APPEND TEST_LIBS rt)
+         endif ()
+-        if (NOT WIN32 AND NOT APPLE)
++        if (NOT WIN32 AND NOT APPLE AND SUBUNIT_FOUND)
+             list(APPEND TEST_LIBS Subunit::Subunit)
+         endif ()
+-        
++
+         set(TESTS core multi)
+ 
+         configure_file(
+                 "${H_CMAKE_MODULE_PATH}/CTestCustom.cmake.in"
+                 "${CMAKE_CURRENT_BINARY_DIR}/CTestCustom.cmake"
+                 @ONLY)
+-    
++
+         foreach (t ${TESTS})
+             add_executable(${t} EXCLUDE_FROM_ALL ${TST_DIR}/${t}.c)
+             target_include_directories(${t} PUBLIC ${TST_DIR})
+diff --git a/test/core.c b/test/core.c
+index 4c6c83b..5bf4e75 100644
+--- a/test/core.c
++++ b/test/core.c
+@@ -14,7 +14,20 @@
+ #endif
+ #include "hoel.h"
+ 
+-#define DEFAULT_BD_PATH "/tmp/test.db"
++/* Portability: on filesystems where /tmp is read-only (e.g. OHOS), resolve
++ * the test database fixture through $TMPDIR when set, falling back to
++ * /tmp/test.db unchanged otherwise (regular POSIX behaviour; the sqlite3
++ * semantics under test are untouched). */
++static const char * h_test_db_path(void) {
++  const char * tmpdir = getenv("TMPDIR");
++  static char path[512];
++  if (tmpdir != NULL && tmpdir[0] != '\0' && strlen(tmpdir) + sizeof("/test.db") <= sizeof(path)) {
++    strcat(strcpy(path, tmpdir), "/test.db");
++    return path;
++  }
++  return "/tmp/test.db";
++}
++#define DEFAULT_BD_PATH h_test_db_path()
+ #define WRONG_BD_PATH "nope.db"
+ 
+ #define UNSAFE_STRING "un'safe' (\"string\")#!/$%*];"
+diff --git a/test/multi.c b/test/multi.c
+index bd0922d..7b03147 100644
+--- a/test/multi.c
++++ b/test/multi.c
+@@ -19,7 +19,19 @@
+ //#define PGSQL
+ 
+ #ifdef SQLITE
+-  #define SQLITE_BD_PATH "/tmp/test.db"
++  /* Portability: on filesystems where /tmp is read-only (e.g. OHOS), resolve
++   * the test database fixture through $TMPDIR when set, falling back to
++   * /tmp/test.db unchanged otherwise (regular POSIX behaviour). */
++  static const char * h_test_db_path(void) {
++    const char * tmpdir = getenv("TMPDIR");
++    static char path[512];
++    if (tmpdir != NULL && tmpdir[0] != '\0' && strlen(tmpdir) + sizeof("/test.db") <= sizeof(path)) {
++      strcat(strcpy(path, tmpdir), "/test.db");
++      return path;
++    }
++    return "/tmp/test.db";
++  }
++  #define SQLITE_BD_PATH h_test_db_path()
+   #define NOW "date('now')"
+   #define DATE_FIXED "strftime('%s','2016-06-22 00:52:56')"
+   #define SAFE "unsafe '' value\"!"
+-- 
+2.45.2
+

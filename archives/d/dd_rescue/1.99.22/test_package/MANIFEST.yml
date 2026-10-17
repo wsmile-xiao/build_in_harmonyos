@@ -1,0 +1,70 @@
+# test_package/MANIFEST.yml
+# 上游官方测试声明文件
+# CI 脚本 (build_and_test.sh L0e) 强制要求此文件存在
+
+package: dd_rescue/1.99.22
+homepage: "https://www.garloff.de/kurt/linux/ddrescue/"
+
+# 上游测试命令（make check）
+upstream_check_command: "make check"
+
+# conanfile.py build() 方法中是否已集成上游测试
+#   是：门控 option run_upstream_tests（默认 False）开启时，build() 追加 `make check`
+upstream_test_in_build: true
+upstream_test_command: "make -j1 CC=<clang> OS=Linux check   # 经 -o dd_rescue/*:run_upstream_tests=True 触发"
+
+# 上游实际运行的测试（make check 为复合目标，共 10 个子套件）
+# 实测：10/10 通过，Error 数 0（命令见下方 reproduction）
+upstream_tests:
+  - name: "find_nonzero tests"
+    command: "./find_nonzero 2"
+  - name: "fmt_no tests"
+    command: "./fmt_no 1024200"
+  - name: "dd_rescue tests"
+    description: "--version + 4 组真实复制比对（-apP / -b16k -B16k / -r / -x，均接 cmp）"
+    command: "./dd_rescue <opts> dd_rescue dd_rescue.copy && cmp dd_rescue dd_rescue.copy"
+  - name: "dd_rescue sparse tests"
+    command: "make -f Makefile check_sparse 前段（稀疏文件）"
+  - name: "dd_rescue RND overwrite tests"
+    description: "随机覆盖写"
+  - name: "dd_rescue ratecontrol test"
+    description: "速率控制"
+  - name: "dd_rescue MD5 plugin tests"
+    description: "插件 + 校验和"
+  - name: "check_fault"
+    description: "故障注入（坏块跳过）"
+    command: "make -f Makefile check_fault"
+  - name: "check_crypt"
+    description: "AES 全算法矩阵 + 插件链"
+    command: "make -f Makefile check_crypt"
+  - name: "check_sparse"
+    description: "稀疏 + 插件"
+    command: "make -f Makefile check_sparse"
+
+reproduction: |
+  # 门控开启后，build() 会自动修好两个上游可移植性问题并实跑 make check
+  conan create archives/d/dd_rescue/1.99.22 \
+    -o 'dd_rescue/*:run_upstream_tests=True' --build=missing \
+    -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+
+upstream_test_note: |
+  ⚠️ 实跑上游 `make check` 前必须修掉两个**上游自身**的问题（配方在门控开启时自动处理）：
+
+  ① **6 个 test_*.sh 的 shebang 为 `#!/bin/bash`**，而 OHOS 无 `/bin/bash`
+     → `bad interpreter: No such file or directory`（实测 Error 126，停在 check_crypt）。
+     配方改为 `#!/usr/bin/env bash`（亦可经 CONFIG_SHELL 指定绝对路径）。
+
+  ② **test_crypt.sh:128/150 的守卫写法有 bug**：Makefile:828 以
+     `HAVE_LZO=$(HAVE_LZO) ./test_crypt.sh` 传入的是**字符串 "0"**，而脚本写
+     `if test -n "$HAVE_LZO"; then` —— "0" 非空 ⇒ test -n 为**真** ⇒ 即使未启用 LZO
+     也会进入插件链分支、去加载不存在的 ./libddr_lzo.so：
+       dd_rescue: (fatal): Could not load plugin ./libddr_lzo.so
+       make[1]: *** [Makefile:828: check_crypt] Error 1
+     改为 `test "$HAVE_LZO" = "1"` 后通过。
+
+  ⚠️ 不可误改：test_crypt.sh:286/289 的 `test -n "$HAVE_AESNI"` / `"$HAVE_AESARM"`
+     看似同类，但二者来自 `grep /proc/cpuinfo`、非 Makefile 传入，空值即"不适用"，
+     `test -n` 语义正确。
+
+  门控默认关闭：上游 check 会额外构建 6 个辅助程序（find_nonzero/fmt_no/md5/sha256…）
+  并做大量磁盘 IO，不适合作为出包默认行为。

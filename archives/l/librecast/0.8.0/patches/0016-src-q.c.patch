@@ -1,0 +1,66 @@
+--- a/src/q.c
++++ b/src/q.c
+@@ -54,22 +54,25 @@
+ 	job->f = q->job[ridx].f;
+ 	job->arg = q->job[ridx].arg;
+ 	return sem_post(&q->wlock);
+ }
+ 
+ void *q_job_seek(void *arg)
+ {
+ 	q_t *q = (q_t *)arg;
+ 	q_job_t job = {0};
+ 	while (1) {
++#if !(defined(__linux__) && !defined(__GLIBC__))
+ 		pthread_testcancel();
++#endif
+ 		if (q_wait(q, &job) == -1) continue;
++		if (job.f == NULL) return NULL; /* stop sentinel */
+ 		job.f(job.arg);
+ 	}
+ 	return arg;
+ }
+ 
+ int q_search(q_t *q, void *(*f)(void *), void *restrict arg)
+ {
+ 	/* No locks, so readers may read while we're searching, and writers may write.
+ 	 * If something is read while we search, we will still return a positive
+ 	 * match for that item, even though it is no longer in the queue.
+@@ -89,17 +92,37 @@
+ {
+ 	for (int z = 0; nthreads; z++) {
+ 		if (pthread_create(&tid[z], NULL, f, arg)) break;
+ 		nthreads--;
+ 	}
+ 	return nthreads;
+ }
+ 
+ int q_pool_destroy(pthread_t tid[], int nthreads)
+ {
++#if defined(__linux__) && !defined(__GLIBC__)
++	/* OHOS/musl has no pthread_cancel(); callers must use
++	 * q_pool_destroy_q() so workers are released by a stop sentinel. */
++	(void)tid;
++	return nthreads;
++#else
+ 	for (int z = 0; nthreads; z++) {
+ 		if (pthread_cancel(tid[z]) || pthread_join(tid[z], NULL))
+ 			break;
+ 		nthreads--;
+ 	}
+ 	return nthreads;
++#endif
+ }
++
++int q_pool_destroy_q(pthread_t tid[], int nthreads, q_t *q)
++{
++	/* OHOS/musl has no working pthread_cancel(); wake every worker with a
++	 * NULL-function stop sentinel (handled in q_job_seek()) and join. */
++	for (int z = 0; z < nthreads; z++) {
++		if (q_push(q, NULL, NULL) == -1) return -1;
++	}
++	for (int z = 0; z < nthreads; z++) {
++		if (pthread_join(tid[z], NULL)) return -1;
++	}
++	return 0;
++}

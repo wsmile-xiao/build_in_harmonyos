@@ -1,4 +1,4 @@
-"""Build driver — 13-step compilation pipeline.
+"""Build driver — 14-step compilation pipeline (Step0-13).
 
 Usage:
     python3 ohc-run.py build <software> [<version>] [--skip-check] [--force] [--resume-from=StepN]
@@ -19,6 +19,7 @@ from typing import Optional
 from .utils import find_project_dir, log_info, log_ok, log_warn, log_fail
 from .models import parse_kv_file, parse_build_context
 from .engine import engine_cli, run_engine
+from .utils import ccache_build_env
 from .handoff import handoff_cli, emit_handoff, HandoffData
 from .init_build import init_build
 
@@ -32,8 +33,7 @@ from .dependency_resolver import (
 
 # ── Constants ──
 MAKE_JOBS = 2  # HarmonyOS sandbox limit
-CHECK_TIMEOUT = 600  # 10 min total
-CHECK_STUCK_THRESHOLD = 120  # 2 min no output
+CHECK_TIMEOUT = int(os.environ.get("OHC_CHECK_TIMEOUT", "600"))  # make check 超时（可用环境变量扩展）
 
 # Shell for subprocess — HarmonyOS restricts fork+exec to signed binaries
 _SHELL = shutil.which("zsh") or shutil.which("sh") or "/system/bin/sh"
@@ -45,7 +45,7 @@ _STEP_MAP = {
 
 
 class BuildDriver:
-    """13-step compilation driver."""
+    """14-step compilation driver (Step0-13, 含半步 1.5/2.5/11.5)."""
 
     def __init__(self, software: str, version: str = "",
                  skip_check: bool = False, force: bool = False,
@@ -322,7 +322,29 @@ class BuildDriver:
         self.ep_fix_cmd = result.entry.rec_command or ""
         self.ep_auto_retry = result.entry.rec_auto_fix
 
+        # v12.6 L4: 完整处方注入（命中知识不用尽=浪费）
+        self.ep_prescription = self._build_prescription(result.entry)
+
         return bool(self.ep_match_id)
+
+    def _build_prescription(self, entry) -> list[str]:
+        """把命中条目的完整处方转成 HANDOFF action 行（v12.6 L4）。"""
+        lines = [f"🎯 知识命中 {entry.id}，完整处方（按顺序尝试，auto 标记项可自动重试）:"]
+        if entry.rec_approach:
+            lines.append(f"  方案: {entry.rec_approach[:200]}")
+        if entry.rec_description:
+            lines.append(f"  说明: {entry.rec_description[:200]}")
+        if entry.rec_command:
+            auto_mark = " [auto]" if entry.rec_auto_fix else ""
+            lines.append(f"  命令{auto_mark}: {entry.rec_command}")
+        if entry.verification_cmd:
+            lines.append(f"  验证: {entry.verification_cmd}")
+        if getattr(entry, "fallback", None) and entry.fallback:
+            fb_desc = getattr(entry.fallback, "description", "") or ""
+            if fb_desc:
+                lines.append(f"  兜底: {fb_desc[:150]}")
+        lines.append(f"  详见: knowledge/graph/{entry.id}.kv / {entry.id}.md")
+        return lines
 
     def _emit_handoff(self, reason: str, exit_code: int, step: str,
                       ep_id: str = "none", gap: bool = False,
@@ -344,6 +366,10 @@ class BuildDriver:
             f"python3 {self.script_dir}/ohc-run.py track-edit add {self.software} {self.version} <修改的文件路径>"
         )
         final_actions.insert(0, track_reminder)
+
+        # v12.6 L4: 知识处方注入（若有命中）
+        if getattr(self, "ep_prescription", None) and ep_id not in ("none", ""):
+            final_actions[1:1] = self.ep_prescription
 
         # ⭐ 新增：依赖缺失时的专用 actions
         if reason in ("dependency_missing", "build_tool_missing", "command_mismatch"):
@@ -389,6 +415,13 @@ class BuildDriver:
             precompiled_available=prebuilt,
         )
         emit_handoff(data)
+        # v12.20: 失败终局 —— pending 命中条目按失败结算（幂等）
+        try:
+            from .engine import settle_pending_outcomes
+            from .utils import graph_dir as _graph_dir
+            settle_pending_outcomes(_graph_dir(str(self.pdir)), success=False)
+        except Exception:
+            pass
         sys.exit(exit_code)
 
     def _error_recovery(self, step_name: str, step_num: float,
@@ -447,20 +480,22 @@ class BuildDriver:
             rc2 = retry_fn(self.ep_fix_cmd)
             if rc2 == 0:
                 self._log(f"✅ Auto-retry succeeded")
-                # 方案 D: 记录修复结果用于质量度量
+                # v12.20: 记录修复结果到 sidecar（不写共享 .kv，防 PR 污染）
                 try:
-                    from .kb_metrics import record_result
+                    from .engine import _record_outcome
                     from .utils import graph_dir as _graph_dir
-                    record_result(_graph_dir(str(self.pdir)), self.ep_match_id, success=True)
+                    _record_outcome(self.ep_match_id,
+                                    _graph_dir(str(self.pdir)), success=True)
                 except Exception:
                     pass  # 不阻塞主流程
                 return 0
             self._log(f"❌ Auto-retry also failed")
-            # 方案 D: 记录修复结果用于质量度量
+            # v12.20: 记录修复结果到 sidecar（不写共享 .kv，防 PR 污染）
             try:
-                from .kb_metrics import record_result
+                from .engine import _record_outcome
                 from .utils import graph_dir as _graph_dir
-                record_result(_graph_dir(str(self.pdir)), self.ep_match_id, success=False)
+                _record_outcome(self.ep_match_id,
+                                _graph_dir(str(self.pdir)), success=False)
             except Exception:
                 pass  # 不阻塞主流程
 
@@ -642,7 +677,8 @@ class BuildDriver:
         try:
             from .pre_scan import PreScanner
             scanner = PreScanner(str(self.build_src_dir),
-                                 rules_path=str(rules_path) if rules_path.exists() else None)
+                                 rules_path=str(rules_path) if rules_path.exists() else None,
+                                 writeback=False)  # 管线内只读：hit_count 回填仅限显式 prescan 命令（防框架文件污染包 PR）
             report = scanner.save_report(str(report_path))
         except Exception as e:
             self._log(f"⚠️ pre-scan 异常（非阻塞）: {e}")
@@ -801,6 +837,8 @@ class BuildDriver:
                 "PKG_CONFIG_PATH": f"{self.default_prefix}/lib/pkgconfig",
                 "TMPDIR": str(Path(self.tmpdir)),
             }
+            # v12.6 L2: OHC_CCACHE=1 时本地迭代加速（隔离目录，验证期自动禁用）
+            _env_extra.update(ccache_build_env())
 
             def do_configure():
                 return self._run(_configure_cmd, cwd=str(vpath_dir), env_extra=_env_extra)
@@ -813,7 +851,12 @@ class BuildDriver:
             self._error_recovery("configure", 3, do_configure, do_retry)
 
         elif self.build_system == "cmake":
-            _configure_cmd = f"cmake -DCMAKE_INSTALL_PREFIX={self.default_prefix} -DCMAKE_BUILD_TYPE=Release {extra_str} ..".strip()
+            _cc = ccache_build_env()
+            _launcher = ""
+            if _cc:
+                _launcher = "-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
+                _log(f"  ⚡ ccache 已启用（隔离目录 {_cc.get('CCACHE_DIR')}，验证阶段自动禁用）")
+            _configure_cmd = f"cmake -DCMAKE_INSTALL_PREFIX={self.default_prefix} -DCMAKE_BUILD_TYPE=Release {_launcher} {extra_str} ..".strip()
             self._actual_configure_cmd = _configure_cmd
             self._run("mkdir -p build")
             rc = self._run(_configure_cmd,
@@ -988,6 +1031,7 @@ class BuildDriver:
 
         # Run with timeout (simplified from bash's complex monitoring)
         start_time = time.time()
+        timed_out = False
         proc = subprocess.Popen(
             [_SHELL, "-c", check_cmd],
             cwd=str(self.build_src_dir),
@@ -1000,16 +1044,25 @@ class BuildDriver:
             elapsed = time.time() - start_time
             if elapsed > CHECK_TIMEOUT:
                 proc.terminate()
+                timed_out = True
                 self._log(f"⚠️ make check 超时 ({CHECK_TIMEOUT}s)")
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
                 break
             time.sleep(15)
 
-        rc = proc.returncode or 0
+        rc = proc.returncode
+        # None/negative = 被信号杀死（超时终止），不能当 PASS
+        if rc is None or rc < 0:
+            rc = 124
 
         # Generate report
         report = self.archive_dir / "reports" / "test-report.md"
         report.parent.mkdir(parents=True, exist_ok=True)
-        status = "PASS" if rc == 0 else "FAIL"
+        status = "TIMEOUT" if (timed_out and rc == 124) else ("PASS" if rc == 0 else "FAIL")
         report.write_text(
             f"# Test Report\n\nStatus: {status}\nRC: {rc}\n"
             f"Duration: {int(time.time() - start_time)}s\n"
@@ -1290,6 +1343,14 @@ class BuildDriver:
         self._step12_calibrate()
         self._step13_cleanup()
 
+        # v12.20: 全绿终局 —— 本会话 pending 命中条目按成功结算
+        try:
+            from .engine import settle_pending_outcomes
+            from .utils import graph_dir as _graph_dir
+            settle_pending_outcomes(_graph_dir(str(self.pdir)), success=True)
+        except Exception:
+            pass
+
         self._log(f"🎉 编译完成: {self.software} {self.version}")
         return 0
 
@@ -1302,7 +1363,7 @@ def build_cli(argv: list[str] | None = None) -> int:
     import argparse
     parser = argparse.ArgumentParser(
         prog="ohc build",
-        description="13步编译驱动管线",
+        description="14 步编译驱动管线（Step0-13）",
     )
     parser.add_argument("software", help="软件名称")
     parser.add_argument("version", nargs="?", default="", help="版本号")
@@ -1323,7 +1384,11 @@ def build_cli(argv: list[str] | None = None) -> int:
         return driver.run()
     except RuntimeError as e:
         log_fail(str(e))
+        # v12.20: 失败终局结算（_emit_handoff 已覆盖多数路径，此处兜底）
+        try:
+            from .engine import settle_pending_outcomes
+            from .utils import graph_dir as _graph_dir
+            settle_pending_outcomes(_graph_dir(str(Path.cwd())), success=False)
+        except Exception:
+            pass
         return 1
-
-1
-

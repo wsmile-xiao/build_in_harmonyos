@@ -1,0 +1,68 @@
+#====================================================================
+# E999-draft-351D —— 「抽取式」包（上游语言 ≠ 交付物语言）的 lang-preflight 口径：
+#   默认 cpp 口径必然 exit 2 并落 env_unsupported 终态，须按检测器判定的上游语言
+#   显式 --lang 重跑、保留双份证据后继续，而不是放弃适配或伪报 cpp
+#
+# 对应文档: knowledge/drafts/E999-draft-351D.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E999-draft-351D
+source_lib:             cargo-bash-completions 1.97.0
+trigger_tool:           lang-preflight|ohc-run|python
+phase:                  configuration
+error_signature:        语言不匹配: task=cpp, detected=(rust|go|nodejs|java|python|perl|lua)|env_unsupported.*detected_language|任务标记 cpp，实测源码为 [a-z]+|按协议 v0\.8 §7\.2 交平台语言迁移|"build_system": "(cargo|go|gradle/maven|npm|setuptools)"
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               detection, build-system, limitation
+match_keywords:         lang-preflight, detected_language, language_evidence, env_unsupported, R47, 语言预检, Cargo.toml, go.mod, package.json, 补全脚本, completion, 数据包, 脚本包, 抽取, --lang, 无构建族, exit 2
+title:                  从非 C/C++ 大型上游仓库「抽取单个脚本/数据文件」成包时，lang-preflight 默认 cpp 口径必然判为上游语言并自动落 env_unsupported 终态——正确处置是按检测器判定的上游语言显式 --lang 重跑并保留两轮证据，而非放弃适配（也绝不能伪报 cpp）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             lang_detect.py 的判定对象是「源码树整体」（manifest > 构建系统 > 源文件统计），而这类包的适配对象是源码树里的**一个**非主体语言文件（如 rust-lang/cargo 的 src/etc/cargo.bashcomp.sh、docker/cli 的 contrib/completion/bash/docker）。只要仓库里存在 Cargo.toml / go.mod / package.json，manifest 层就直接判定为 rust/go/nodejs；又因规则 D.4 规定 bash 文件不参与主体占比，交付物自身对判定毫无贡献。于是默认任务语言 cpp 与 detected 必然不匹配，lang_preflight_cli 走 mismatch 分支：自动调 result_cli 写 status=env_unsupported 终态回执（draft:false）并 exit 2。此时若按 R47 字面「非 C/C++ 立即终止」处理，会把一个**完全不需要该语言工具链**的纯数据包误判为环境不支持——真正需要终止的是"必须用该语言工具链构建"的包（CI 能力矩阵 Rust ❌ 那一类），两者判据不同：前者看交付物是否需要编译，后者看构建是否需要工具链。
+affected_scope:         所有「上游语言 ≠ 交付物语言」的抽取式包：*-completion / *-bash-completions（cargo=Rust 仓库、docker=Go 仓库、bundler=Ruby 仓库）、从大型仓库抽取 man page / 图标 / 数据表的资源包，以及 SKILL v12.21 普查中占 26% 的「无构建/打包族」里所有寄生在非 C/C++ 仓库中的成员。
+verification_cmd:       python3 $SKILL_ROOT/scripts/ohc-run.py lang-preflight <pkg> <ver> --src $BUILD_SRC_DIR; echo "default rc=$?"; python3 $SKILL_ROOT/scripts/ohc-run.py lang-preflight <pkg> <ver> --src $BUILD_SRC_DIR --lang <detected_language>; echo "honest rc=$?"  # 期望 default rc=2（留证）、honest rc=0（继续）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           declare-upstream-language-explicitly-with-dual-evidence
+rec_description:        先跑默认口径并把 stdout 存进 archives/<...>/reports/lang-preflight-default.log（rc=2 与 detected_language 都是证据，不要抹掉）；再用检测器给出的上游语言显式 --lang 重跑，rc=0 后继续主流程。配方必须同时满足三条自证：不声明该语言的 requires/tool_requires、build() 不调用该语言工具链、notes.md 与 PR 正文写明「CI 无需该工具链」。默认口径写出的 env_unsupported 终态回执，最后用 result --force 覆盖为真实终态。
+rec_command:            python3 $SKILL_ROOT/scripts/ohc-run.py lang-preflight <软件> <版本> --src $BUILD_SRC_DIR --lang <detected_language 原值>
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      report-env-unsupported-honestly
+fallback_description:   若交付物**确实**需要该语言工具链参与构建（真 Rust/Go 应用，而非抽取数据文件），则默认口径的判定是对的：按 R47 与 W0b CI 能力矩阵如实上报 env_unsupported + detected_language + language_evidence 三项，不要硬着头皮适配。
+fallback_command:       python3 $SKILL_ROOT/scripts/ohc-run.py result <软件> <版本> --status env_unsupported --detected-language <lang> --ev-build-system <bs> --ev-manifest <mf> --ev-source-stats <stats> --failed-reason "..."
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       --lang\s+(c|cpp)\b(?!.*C/C\+\+)|把包伪判为 cpp|凑过预检
+forbid_1_reason:        用 --lang cpp/c 去"凑"过一个明显非 C/C++ 的上游，是伪造判定证据；协议 §4.6 的 detected_language 是平台做语言迁移决策的输入，谎报会污染整个调度链。
+forbid_1_consequence:   W4 审计/主编按"审计失真"一票否决（R52）；平台失去 lang_hold 挂起信息，同类包持续被误派发。
+
+forbid_2_pattern:       tool_requires\s*\(\s*["'](rust|go|nodejs|jdk)|requires.*rust-toolchain
+forbid_2_reason:        抽取式数据包不需要上游语言工具链；为"让语言一致"而引入 tool_requires 会把一个零依赖包变成重型依赖包，并触发 PF4 依赖闸。
+forbid_2_consequence:   CI 构建时间暴涨甚至直接失败；依赖未发布时建 PR 都建不出来。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P003
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E172]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E999-draft-351D.md
+last_updated:           2026-09-21
+source_event:           cargo-bash-completions 1.97.0 HarmonyOS PC 适配（R47 语言预检两轮实测）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                nyaco3 <aqjCItYW1QmEJQuF.gcw_XDpqZ8sO@noreply.gitcode.com>

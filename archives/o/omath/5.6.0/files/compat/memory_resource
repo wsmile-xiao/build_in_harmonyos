@@ -1,0 +1,325 @@
+// OHOS PC 工具链兼容垫片：libc++ 15（clang 15.0.4 / ohos-sdk_26.0.0.18，_LIBCPP_VERSION 15004）
+// 没有 <memory_resource>（libc++ 直到 LLVM 19 才提供 std::pmr）。本文件以「同名头文件」形式挂进
+// -I 搜索路径（用户 -I 先于系统头搜索），使 omath 上游的 #include <memory_resource>
+// 落到本实现，无需改动上游任何一行源码。
+//
+// 实现范围：omath 5.6.0 实际用到的 std::pmr 面——memory_resource / new_delete_resource /
+// null_memory_resource / get_default_resource / set_default_resource / monotonic_buffer_resource /
+// polymorphic_allocator 与 vector、unordered_map 别名。语义按 [mem.res] 最小完备实现：
+// monotonic 只 bump 分配、单块不回收、release() 整体回收；上游资源耗尽时抛 bad_alloc。
+// 若目标平台的 libc++ 已原生提供 <memory_resource>，请勿再使用本垫片。
+#pragma once
+
+#include <cstddef>
+#include <cstdlib>
+#include <functional>
+#include <memory>
+#include <new>
+#include <string>
+#include <type_traits>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+namespace std
+{
+inline namespace omath_compat
+{
+namespace pmr
+{
+
+class memory_resource
+{
+public:
+    void* allocate(size_t bytes, size_t alignment = alignof(std::max_align_t))
+    {
+        if (bytes == 0)
+            return nullptr;
+        void* result = do_allocate(bytes, alignment);
+        if (result == nullptr)
+            throw std::bad_alloc();
+        return result;
+    }
+    void deallocate(void* ptr, size_t bytes, size_t alignment = alignof(std::max_align_t)) noexcept
+    {
+        if (ptr != nullptr)
+            do_deallocate(ptr, bytes, alignment);
+    }
+    [[nodiscard]] bool is_equal(const memory_resource& other) const noexcept
+    {
+        return this == &other || do_is_equal(other);
+    }
+
+    virtual ~memory_resource() = default;
+
+protected:
+    virtual void* do_allocate(size_t bytes, size_t alignment) = 0;
+    virtual void do_deallocate(void* ptr, size_t bytes, size_t alignment) noexcept = 0;
+    virtual bool do_is_equal(const memory_resource& other) const noexcept = 0;
+};
+
+inline void* aligned_bytes_allocate(size_t bytes, size_t alignment)
+{
+    if (alignment < alignof(std::max_align_t))
+        alignment = alignof(std::max_align_t);
+    const size_t rounded = ((bytes + alignment - 1) / alignment) * alignment;
+    return std::aligned_alloc(alignment, rounded);
+}
+
+class new_delete_resource_t final : public memory_resource
+{
+protected:
+    void* do_allocate(size_t bytes, size_t alignment) override { return aligned_bytes_allocate(bytes, alignment); }
+    void do_deallocate(void* ptr, size_t, size_t) noexcept override { std::free(ptr); }
+    bool do_is_equal(const memory_resource& other) const noexcept override { return this == &other; }
+};
+
+class null_memory_resource_t final : public memory_resource
+{
+protected:
+    void* do_allocate(size_t, size_t) override { return nullptr; }
+    void do_deallocate(void*, size_t, size_t) noexcept override {}
+    bool do_is_equal(const memory_resource& other) const noexcept override { return this == &other; }
+};
+
+[[nodiscard]] inline memory_resource* new_delete_resource() noexcept
+{
+    static new_delete_resource_t resource;
+    return &resource;
+}
+
+[[nodiscard]] inline memory_resource* null_memory_resource() noexcept
+{
+    static null_memory_resource_t resource;
+    return &resource;
+}
+
+namespace detail
+{
+inline memory_resource*& default_resource_slot() noexcept
+{
+    static memory_resource* resource = new_delete_resource();
+    return resource;
+}
+}  // namespace detail
+
+[[nodiscard]] inline memory_resource* get_default_resource() noexcept
+{
+    return detail::default_resource_slot();
+}
+
+inline memory_resource* set_default_resource(memory_resource* resource) noexcept
+{
+    memory_resource*& slot = detail::default_resource_slot();
+    memory_resource* previous = slot;
+    slot = (resource != nullptr) ? resource : new_delete_resource();
+    return previous;
+}
+
+class monotonic_buffer_resource : public memory_resource
+{
+public:
+    explicit monotonic_buffer_resource(size_t initial_buffer_size = 0,
+                                       memory_resource* upstream = get_default_resource()) noexcept
+        : m_upstream(upstream), m_initial_size(initial_buffer_size)
+    {
+    }
+
+    monotonic_buffer_resource(void* buffer, size_t buffer_size,
+                              memory_resource* upstream = get_default_resource()) noexcept
+        : m_upstream(upstream),
+          m_buffer(static_cast<char*>(buffer)),
+          m_capacity(buffer_size),
+          m_initial_buffer(static_cast<char*>(buffer)),
+          m_initial_capacity(buffer_size)
+    {
+    }
+
+    monotonic_buffer_resource(const monotonic_buffer_resource&) = delete;
+    monotonic_buffer_resource& operator=(const monotonic_buffer_resource&) = delete;
+
+    ~monotonic_buffer_resource() override { release(); }
+
+    void release() noexcept
+    {
+        Chunk* chunk = m_chunks;
+        while (chunk != nullptr)
+        {
+            Chunk* next = chunk->next;
+            if (m_upstream != nullptr)
+                m_upstream->deallocate(chunk, sizeof(Chunk) + chunk->size, alignof(std::max_align_t));
+            chunk = next;
+        }
+        m_chunks = nullptr;
+        m_cursor = nullptr;
+        m_end = nullptr;
+        // [mem.res.pool] release() 释放的是「向上游要来的」内存；构造时传入的调用方缓冲
+        // 不归本对象所有，不能释放，且下一轮分配要从它重新开始（否则 upstream=null_memory_resource()
+        // 的调用方缓冲用例会在第二次 release() 后 bad_alloc）。
+        m_buffer = m_initial_buffer;
+        m_capacity = m_initial_capacity;
+    }
+
+protected:
+    void* do_allocate(size_t bytes, size_t alignment) override
+    {
+        if (alignment < alignof(std::max_align_t))
+            alignment = alignof(std::max_align_t);
+
+        if (m_cursor != nullptr)
+        {
+            uintptr_t current = reinterpret_cast<uintptr_t>(m_cursor);
+            uintptr_t aligned = (current + alignment - 1) & ~(static_cast<uintptr_t>(alignment) - 1);
+            char* result = reinterpret_cast<char*>(aligned);
+            if (result + bytes <= m_end)
+            {
+                m_cursor = result + bytes;
+                return result;
+            }
+        }
+
+        // 当前块放不下：调用方给的一次性缓冲（m_buffer）用尽后按需向 upstream 要新块。
+        if (m_cursor == nullptr && m_buffer != nullptr && bytes + alignment <= m_capacity)
+        {
+            uintptr_t current = reinterpret_cast<uintptr_t>(m_buffer);
+            uintptr_t aligned = (current + alignment - 1) & ~(static_cast<uintptr_t>(alignment) - 1);
+            char* result = reinterpret_cast<char*>(aligned);
+            if (result + bytes <= m_buffer + m_capacity)
+            {
+                m_cursor = result + bytes;
+                m_end = m_buffer + m_capacity;
+                return result;
+            }
+        }
+
+        if (m_upstream == nullptr)
+            return nullptr;
+
+        size_t chunk_size = bytes + alignment;
+        if (m_initial_size > chunk_size)
+            chunk_size = m_initial_size;
+        if (m_buffer != nullptr && m_capacity > chunk_size)
+            chunk_size = m_capacity;
+
+        void* raw = m_upstream->allocate(sizeof(Chunk) + chunk_size, alignof(std::max_align_t));
+        if (raw == nullptr)
+            return nullptr;
+        auto* chunk = static_cast<Chunk*>(raw);
+        chunk->size = chunk_size;
+        chunk->next = m_chunks;
+        m_chunks = chunk;
+
+        char* base = reinterpret_cast<char*>(chunk) + sizeof(Chunk);
+        uintptr_t current = reinterpret_cast<uintptr_t>(base);
+        uintptr_t aligned = (current + alignment - 1) & ~(static_cast<uintptr_t>(alignment) - 1);
+        char* result = reinterpret_cast<char*>(aligned);
+        m_cursor = result + bytes;
+        m_end = base + chunk_size;
+        return result;
+    }
+
+    void do_deallocate(void*, size_t, size_t) noexcept override {}
+
+    bool do_is_equal(const memory_resource& other) const noexcept override { return this == &other; }
+
+private:
+    struct Chunk
+    {
+        Chunk* next;
+        size_t size;
+    };
+
+    memory_resource* m_upstream;
+    Chunk* m_chunks = nullptr;
+    char* m_buffer = nullptr;
+    char* m_cursor = nullptr;
+    char* m_end = nullptr;
+    size_t m_capacity = 0;
+    size_t m_initial_size = 0;
+    // 构造时传入的调用方缓冲：release() 不释放、下一轮复用（标准语义）
+    char* m_initial_buffer = nullptr;
+    size_t m_initial_capacity = 0;
+};
+
+template<class T>
+class polymorphic_allocator
+{
+public:
+    using value_type = T;
+
+    polymorphic_allocator() noexcept : m_resource(get_default_resource()) {}
+    polymorphic_allocator(memory_resource* resource) noexcept : m_resource(resource) {}
+    polymorphic_allocator(nullptr_t) = delete;
+
+    template<class U>
+    polymorphic_allocator(const polymorphic_allocator<U>& other) noexcept : m_resource(other.resource())
+    {
+    }
+
+    [[nodiscard]] T* allocate(size_t n)
+    {
+        if (n > (static_cast<size_t>(-1) / sizeof(T)))
+            throw std::bad_array_new_length();
+        return static_cast<T*>(m_resource->allocate(n * sizeof(T), alignof(T)));
+    }
+
+    void deallocate(T* ptr, size_t n) noexcept { m_resource->deallocate(ptr, n * sizeof(T), alignof(T)); }
+
+    template<class U, class... Args>
+    void construct(U* ptr, Args&&... args)
+    {
+        ::new (static_cast<void*>(ptr)) U(std::forward<Args>(args)...);
+    }
+
+    template<class U>
+    void destroy(U* ptr)
+    {
+        ptr->~U();
+    }
+
+    [[nodiscard]] memory_resource* resource() const noexcept { return m_resource; }
+    [[nodiscard]] polymorphic_allocator select_on_container_copy_construction() const noexcept { return *this; }
+
+    using propagate_on_container_copy_assignment = false_type;
+    using propagate_on_container_move_assignment = false_type;
+    using propagate_on_container_swap = false_type;
+    using is_always_equal = false_type;
+
+    template<class U>
+    struct rebind
+    {
+        using other = polymorphic_allocator<U>;
+    };
+
+private:
+    memory_resource* m_resource;
+};
+
+template<class T, class U>
+[[nodiscard]] inline bool operator==(const polymorphic_allocator<T>& lhs,
+                                     const polymorphic_allocator<U>& rhs) noexcept
+{
+    return lhs.resource()->is_equal(*rhs.resource());
+}
+
+template<class T, class U>
+[[nodiscard]] inline bool operator!=(const polymorphic_allocator<T>& lhs,
+                                     const polymorphic_allocator<U>& rhs) noexcept
+{
+    return !(lhs == rhs);
+}
+
+template<class T>
+using vector = std::vector<T, polymorphic_allocator<T>>;
+
+template<class K, class V, class Hash = hash<K>, class KeyEqual = equal_to<K>>
+using unordered_map = std::unordered_map<K, V, Hash, KeyEqual, polymorphic_allocator<pair<const K, V>>>;
+
+template<class CharT, class Traits = char_traits<CharT>>
+using basic_string = std::basic_string<CharT, Traits, polymorphic_allocator<CharT>>;
+
+using string = basic_string<char>;
+
+}  // namespace pmr
+}  // namespace omath_compat
+}  // namespace std

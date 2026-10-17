@@ -34,11 +34,8 @@ mkvalidator 是 Matroska 容器格式验证工具，用于检查 MKV/WebM 文件
 ## 安装与使用
 
 ```bash
-# 解压安装包
-tar xzf mkvalidator-0.6.0-ohos-aarch64.tar.gz
-
-# 安装到系统
-cp usr/local/bin/mkvalidator /usr/local/bin/
+# 通过 Conan 安装
+conan install --requires=mkvalidator/0.6.0 -r=ohpcd
 
 # 基本使用
 mkvalidator --version          # 查看版本

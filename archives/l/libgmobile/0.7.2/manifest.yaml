@@ -1,0 +1,100 @@
+package: libgmobile
+version: "0.7.2"
+homepage: "https://gitlab.gnome.org/World/Phosh/gmobile"
+license: LGPL-2.1-or-later
+status: built
+build_system: meson
+build_date: "2026-09-20"
+
+source:
+  url: "https://gitlab.gnome.org/World/Phosh/gmobile/-/archive/v0.7.2/gmobile-v0.7.2.tar.gz"
+  sha256: "2566187fbd0974d1b1e8ee417935db526c8f65dad28807ab3a5244a5fa757c92"
+  tar_format: tar.gz
+  notes: >-
+    上游为 GNOME GitLab 项目（非 GitHub），默认分支 main。v0.7.2 tag 的
+    归档解出目录 gmobile-v0.7.2/，配方用 strip_root=True 拉平。上游发布物
+    不含 configure 之类的生成文件（meson 项目），tarball 里 subprojects/
+    只有 json-glib.wrap 与 gi-docgen.wrap，配方设 wrap_mode=nodownload 且
+    json-glib 由 conan 提供，因此不会联网拉子项目。
+
+build:
+  system: meson
+  configure_options:
+    - "default_library=shared"
+    - "wrap_mode=nodownload"
+    - "introspection=false"
+    - "vapi=false"
+    - "gtk_doc=false"
+    - "man=false"
+    - "tests=true"
+    - "examples=false"
+    - "hwdb=true"
+  dependencies:
+    - glib/2.84.0.1
+    - json-glib/1.10.6
+  tool_requires:
+    - meson/1.11.0
+
+patches_applied:
+  - patches/0001-gmobile-gresources-drop-json-stripblanks.patch
+
+notes: |
+  上游源码在 OHOS 上原样可编译；一处 portability 补丁 + 两处配方侧适配：
+
+  1) **补丁** patches/0001-gmobile-gresources-drop-json-stripblanks.patch：
+     data/gmobile.gresources.xml 里 34 个 JSON 文件全部带
+     preprocess="json-stripblanks"。glib 的 glib-compile-resources 并不链接
+     libjson-glib（DT_NEEDED 只有 libc/libgio/libglib/libgobject/libintl），
+     而是把 json-glib-format 当**子进程**执行（g_spawn_sync，不经 shell；
+     PATH 查找，可用环境变量 JSON_GLIB_FORMAT 覆盖）。
+
+     这条子进程通道在本平台修不好：json-glib 包缓存里的 json-glib-format
+     是 OHOS ELF，HMFS 拒绝 exec（glib 自己报 `Failed to execute child
+     process ".../bin/json-glib-format" (Operation not permitted)`，外层
+     退化成 `[code=1]`）；把它拷出来重签名、用 JSON_GLIB_FORMAT 指过去，
+     EPERM 消失，但接着死在子进程自己的装载期——
+     `Error loading shared library libjson-glib-1.0.so.0: (needed by
+     .../json-glib-format)` / `Error relocating ...: json_generator_new:
+     symbol not found` / `Child process exited with code 127`，且派生方是
+     glib 内部 helper，包装脚本与 LD_LIBRARY_PATH 都够不到。
+
+     因此改为**取消需求**：补丁删掉全部 34 处 preprocess 属性。
+     gmobile 在运行期用 JsonParser 解析这些 JSON，空白无语义，该预处理
+     只是体积优化，去掉属行为等价的取舍。
+
+     保留的配方侧配套：glib-compile-resources 本身也是 OHOS ELF，HMFS
+     拒绝从包缓存 exec（`[code=126] Operation not permitted`），且它链接
+     conan glib 的 .so。配方把它 staging 到 build 目录 + 重签名，再用
+     `sh` 包装脚本注入 LD_LIBRARY_PATH（导出全部 host 依赖的 lib），
+     并把包装脚本路径写进 gio-2.0.pc 的 glib_compile_resources 变量——
+     meson 的 gnome 模块正是从该变量取命令，指向包缓存原 ELF 时
+     configure 能过、build 期照样 EPERM。
+
+  2) glib 在 OHOS 上与它的 proxy-libintl 子项目一起构建，glib 配方的
+     package_info 未声明 intl 系统库，因此 PkgConfigDeps 生成的 .pc 里
+     没有 -lintl（PkgConfigDeps 也不写 glib_mkenums 等工具变量）。配方
+     按 json-glib 的做法就地增补生成的 .pc：补 -lintl 与 glib 工具变量。
+
+  上游测试：tests/meson.build 注册 7 个测试程序（cutout / display-panel /
+  mcc-mnc / svg-path / timeout / utils / device-tree），共 14 个
+  g_test_add_func 用例。配方在 build() 内跑 meson test，并**回读**
+  meson-logs/testlog.txt 的汇总块做硬断言（Ok >= 7，Fail/Timeout/
+  Unexpected Pass 必须为 0）——不吃退出码，因为 SKIP 与"用例根本没注册"
+  同样会以退出码 0 结束。device-tree 用例在上游属 not_installed（只跳过
+  安装其 .test 元数据），仍会被构建并执行。
+
+  3) 依赖包里的 SONAME 是符号链接（E073）。CI 上 7 个 meson 测试全部 exit 127，
+     报 "Error loading shared library libjson-glib-1.0.so.0: (needed by
+     .../src/libgmobile.so.0)" + 十几条 json_* symbol not found——而
+     LD_LIBRARY_PATH 里**已经有** json-glib 的 lib/，所以不是"找不到"而是"找到了
+     加载不了"：冒号后 strerror 为空正是符号链接解析失败的特征（找不到会写
+     No such file or directory，ELF 未签名会写 Permission denied，E077）。
+     判据是 conanmanifest.txt 的 md5（Conan 对符号链接记的是**目标字符串**的 md5）：
+       lib/libjson-glib-1.0.so.0: 3fb7976d243736fd69a6c01702d8505a
+                                 == md5("libjson-glib-1.0.so.0.1000.6")
+     即 libjson-glib-1.0.so.0 是符号链接，而 libgmobile.so.0 的 DT_NEEDED 用的
+     正是该链接名。修法：_stage_symlinked_sonames() 把各依赖 libdir 顶层的符号
+     链接展开成真文件副本放进 <build>/conan-staged-soname-libs/，prepend 到
+     LD_LIBRARY_PATH 最前（副本按字节复制，自带原签名）。依赖包在缓存里只读且被
+     其它包引用，改不得，只能在消费侧补——与 libsigc/2.12.1、fluidsynth/2.5.7、
+     libxft/2.3.8 同属 E073；同一依赖图里 libgsystemservice 的 polkit 亦然。

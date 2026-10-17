@@ -1,0 +1,172 @@
+--- a/src/libtools/threads.c
++++ b/src/libtools/threads.c
+@@ -29,34 +29,116 @@
+ #ifdef DYNAREC
+ #include "dynablock.h"
+ #include "dynarec/native_lock.h"
+ #endif
+ #ifdef BOX32
+ #include "box32.h"
+ #include "threads32.h"
+ #endif
+ #include <stdatomic.h>
+ 
++#if defined(__OHOS__)
++// OHOS: the SDK sysroot import library (libc.so) does not export these GNU
++// pthread extensions, although the device runtime (/lib/ld-musl-aarch64.so.1)
++// exports some of them.  Provide thin local wrappers that resolve the real
++// symbols lazily with dlsym(RTLD_NEXT), returning ENOSYS when unavailable.
++#include <dlfcn.h>
++
++int pthread_attr_getaffinity_np(pthread_attr_t* attr, size_t cpusize, void* cpuset)
++{
++    static int (*real)(pthread_attr_t*, size_t, void*) = NULL;
++    if(!real) real = (int (*)(pthread_attr_t*, size_t, void*))dlsym(RTLD_NEXT, "pthread_attr_getaffinity_np");
++    if(!real) return ENOSYS;
++    return real(attr, cpusize, cpuset);
++}
++
++int pthread_attr_setaffinity_np(pthread_attr_t* attr, size_t cpusize, const void* cpuset)
++{
++    static int (*real)(pthread_attr_t*, size_t, const void*) = NULL;
++    if(!real) real = (int (*)(pthread_attr_t*, size_t, const void*))dlsym(RTLD_NEXT, "pthread_attr_setaffinity_np");
++    if(!real) return ENOSYS;
++    return real(attr, cpusize, cpuset);
++}
++
++int pthread_getaffinity_np(pthread_t thread, size_t cpusize, void* cpuset)
++{
++    static int (*real)(pthread_t, size_t, void*) = NULL;
++    if(!real) real = (int (*)(pthread_t, size_t, void*))dlsym(RTLD_NEXT, "pthread_getaffinity_np");
++    if(!real) return ENOSYS;
++    return real(thread, cpusize, cpuset);
++}
++
++int pthread_setaffinity_np(pthread_t thread, size_t cpusize, const void* cpuset)
++{
++    static int (*real)(pthread_t, size_t, const void*) = NULL;
++    if(!real) real = (int (*)(pthread_t, size_t, const void*))dlsym(RTLD_NEXT, "pthread_setaffinity_np");
++    if(!real) return ENOSYS;
++    return real(thread, cpusize, cpuset);
++}
++
++int pthread_getattr_default_np(pthread_attr_t* attr)
++{
++    static int (*real)(pthread_attr_t*) = NULL;
++    if(!real) real = (int (*)(pthread_attr_t*))dlsym(RTLD_NEXT, "pthread_getattr_default_np");
++    if(!real) return ENOSYS;
++    return real(attr);
++}
++
++int pthread_setattr_default_np(const pthread_attr_t* attr)
++{
++    static int (*real)(const pthread_attr_t*) = NULL;
++    if(!real) real = (int (*)(const pthread_attr_t*))dlsym(RTLD_NEXT, "pthread_setattr_default_np");
++    if(!real) return ENOSYS;
++    return real(attr);
++}
++
++int pthread_mutexattr_getrobust(const pthread_mutexattr_t* attr, int* robust)
++{
++    static int (*real)(const pthread_mutexattr_t*, int*) = NULL;
++    if(!real) real = (int (*)(const pthread_mutexattr_t*, int*))dlsym(RTLD_NEXT, "pthread_mutexattr_getrobust");
++    if(!real) return ENOSYS;
++    return real(attr, robust);
++}
++
++int pthread_mutexattr_setrobust(pthread_mutexattr_t* attr, int robust)
++{
++    static int (*real)(pthread_mutexattr_t*, int) = NULL;
++    if(!real) real = (int (*)(pthread_mutexattr_t*, int))dlsym(RTLD_NEXT, "pthread_mutexattr_setrobust");
++    if(!real) return ENOSYS;
++    return real(attr, robust);
++}
++
++int pthread_mutexattr_setprioceiling(pthread_mutexattr_t* attr, int prioceiling)
++{
++    static int (*real)(pthread_mutexattr_t*, int) = NULL;
++    if(!real) real = (int (*)(pthread_mutexattr_t*, int))dlsym(RTLD_NEXT, "pthread_mutexattr_setprioceiling");
++    if(!real) return ENOSYS;
++    return real(attr, prioceiling);
++}
++#endif
++
+ static _Atomic int g_active_emu_workers = 0;
+ //void _pthread_cleanup_push_defer(void* buffer, void* routine, void* arg);	// declare hidden functions
+ //void _pthread_cleanup_pop_restore(void* buffer, int exec);
+ typedef void (*vFppp_t)(void*, void*, void*);
+ typedef void (*vFpi_t)(void*, int);
+ typedef int (*iFppip_t)(void*, void*, int, void*);
+-typedef int (*iFli_t)(long unsigned int, int);
++typedef int (*iFli_t)(pthread_t, int);
+ typedef struct emuthread_s emuthread_t;
+ 
+ static vFppp_t real_pthread_cleanup_push_defer = NULL;
+ static vFpi_t real_pthread_cleanup_pop_restore = NULL;
+ static iFppip_t real_pthread_cond_clockwait = NULL;
++#if !defined(__OHOS__)
+ void _pthread_cleanup_push(void* buffer, void* routine, void* arg);	// declare hidden functions
+ void _pthread_cleanup_pop(void* buffer, int exec);
++#endif
+ // with glibc 2.34+, pthread_kill changed behaviour and might break some program, so using old version if possible
+ // it will be pthread_kill@GLIBC_2.17 on aarch64, but it's GLIBC_2.2.5 on x86_64
+ static iFli_t real_phtread_kill_old = NULL;
+ 
+ typedef struct threadstack_s {
+ 	void* 	stack;
+ 	size_t 	stacksize;
+ } threadstack_t;
+ 
+ typedef struct x64_unwind_buff_s {
+@@ -889,39 +971,49 @@
+ 		errno = EINVAL;
+ 		ret = -1;
+ 	}
+ 	return ret;
+ }
+ 
+ #ifndef ANDROID
+ EXPORT void my__pthread_cleanup_push_defer(x64emu_t* emu, void* buffer, void* routine, void* arg)
+ {
+     (void)emu;
+-	real_pthread_cleanup_push_defer(buffer, findcleanup_routineFct(routine), arg);
++	if(real_pthread_cleanup_push_defer)
++		real_pthread_cleanup_push_defer(buffer, findcleanup_routineFct(routine), arg);
+ }
+ 
+ EXPORT void my__pthread_cleanup_push(x64emu_t* emu, void* buffer, void* routine, void* arg)
+ {
+     (void)emu;
++	#if defined(__OHOS__)
++	_pthread_cleanup_push((struct __ptcb*)buffer, (void (*)(void*))findcleanup_routineFct(routine), arg);
++#else
+ 	_pthread_cleanup_push(buffer, findcleanup_routineFct(routine), arg);
++#endif
+ }
+ 
+ EXPORT void my__pthread_cleanup_pop_restore(x64emu_t* emu, void* buffer, int exec)
+ {
+     (void)emu;
+-	real_pthread_cleanup_pop_restore(buffer, exec);
++	if(real_pthread_cleanup_pop_restore)
++		real_pthread_cleanup_pop_restore(buffer, exec);
+ }
+ 
+ EXPORT void my__pthread_cleanup_pop(x64emu_t* emu, void* buffer, int exec)
+ {
+     (void)emu;
++	#if defined(__OHOS__)
++	_pthread_cleanup_pop((struct __ptcb*)buffer, exec);
++#else
+ 	_pthread_cleanup_pop(buffer, exec);
++#endif
+ }
+ 
+ EXPORT int my_pthread_getaffinity_np(x64emu_t* emu, pthread_t thread, size_t cpusetsize, void* cpuset)
+ {
+ 	(void)emu;
+ 	int ret = pthread_getaffinity_np(thread, cpusetsize, cpuset);
+ 	if(ret<0) {
+ 		printf_log(LOG_INFO, "Warning, pthread_getaffinity_np(%p, %zd, %p) errored, with errno=%d\n", (void*)thread, cpusetsize, cpuset, errno);
+ 	} else {
+ 		if(BOX64ENV(skipcpu)) {

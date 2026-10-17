@@ -1,0 +1,66 @@
+# ═══ Draft knowledge entry — OHOS 上 npm/Node CLI 包必须用 --jitless 驱动（含 symlink 与 buildenv 两个附带坑）═══
+# Timestamp: 2026-09-29
+# Software: roblox-ts 3.0.0（npm / Node.js CLI，TypeScript → Luau 编译器）
+# Phase: build / test_package
+# Status: DRAFT — 同 stem 配对 knowledge/drafts/DRAFT-roblox-ts-3.0.0-ohos-node-jitless-npm-cli.md
+#
+# 关联既有知识：
+#   E400（Node.js CLI on HarmonyOS: JITless/WASM capability boundary）—— 本条补其
+#   「构建期 npm 与 conan 环境交互」的实操面，并给出三个可直接落地的配方侧动作。
+
+id: DRAFT-roblox-ts-3.0.0-ohos-node-jitless-npm-cli
+trigger_tool: conan|npm|node
+phase: build|testing|packaging
+error_signature: >-
+  Native stack trace|Signal 6 \(core dumped\)|Error 134 while executing|
+  Fatal error in , line 0|Check failed: 12 == \(\*__errno_location\(\)\)|
+  EACCES: permission denied, symlink.*node_modules/\.bin
+
+severity: 2
+category: ohos, conan, node-runtime, testing, package-building
+match_keywords: node, npm, jitless, E400, Signal 6, SIGABRT, rc=134, no-bin-links,
+                 symlink, EACCES, LD_LIBRARY_PATH, buildenv, env=None, npm-cli.js,
+                 npm 包装脚本, PATH 首位 node, roblox-ts, 前端 JS CLI
+
+title: OHOS 上 npm/Node CLI 类包在 conan 构建期必须用 `--jitless` 驱动 node 与 npm；
+       npm install 需 `--no-bin-links`（建 `.bin` 软链被拒 EACCES）；
+       且 node/npm 步骤应 `env=None` 不继承 C/C++ buildenv（LD_LIBRARY_PATH→SDK llvm/lib）
+
+root_cause: >
+  三个叠加因素（均已实测定位，非猜测）：
+  ① V8 JIT 崩溃（E400）：本机 OHOS 镜像上 node v24.13.0 一旦真正执行 JS 即
+  `Fatal error in , line 0 / Check failed: 12 == (*__errno_location())`（rc=133）；
+  `--jitless` 恢复（实测 `node -e` 正常 JIT 6/6 崩、`--jitless` 6/6 通过）。
+  npm 自身是 node 程序（npm-cli.js），故构建期 npm 与其派生的 node 子进程必须
+  同受 `NODE_OPTIONS=--jitless` 覆盖。
+  ② npm 的 bin 链接：`npm install` 在 `node_modules/.bin/` 建软链接时报
+  `EACCES: permission denied, symlink '../resolve/bin/resolve' -> .../node_modules/.bin/resolve`
+  → npm 退出；加 `--no-bin-links` 后 install 正常（本包运行期不需要 .bin）。
+  ③ node 不能继承 C/C++ 构建环境：conan 的 `env="conanbuild"` 会把
+  `LD_LIBRARY_PATH` 指到 OHOS SDK 的 `.../native/llvm/lib`，node 在该环境下异常
+  终止（`Native stack trace` / `Signal 6`）；同一条命令在 build() 里改为
+  `self.run(..., env=None)` 后正常执行。
+
+affected_scope: >
+  所有以 npm 发布包为 source、构建期需要 `npm install` 或运行 node 的 OHOS 适配
+  配方（npm CLI 工具 / 前端资产包 / Node 库）；以及 test_package 中直接执行 node
+  的消费者测试。
+
+approach: >
+  配方侧三件事：① 用真实 npm-cli.js 路径而非 PATH 上的 npm 包装脚本
+  （`os.path.realpath(node)` 同目录 `../lib/node_modules/npm/bin/npm-cli.js`；
+  PATH 首位可能是另一套 node 的 shell 包装脚本，交给本配方选定的 node 执行会
+  `EACCES lstat` 失败）；② 命令统一写成
+  `PATH="<node_dir>:/data/service/hnp/bin:/usr/bin:/bin" NODE_OPTIONS=--jitless "<node>" --jitless "<npm-cli.js>" install ...`
+  并 `self.run(..., env=None)`；③ npm install 加 `--no-bin-links`
+  （必要时另加 `--ignore-scripts/--no-save/--no-package-lock`）。
+  test_package 侧：node 可用性以 `--jitless` 探测为门槛，探测不过则该类断言
+  `[skip]`（与 archives/l/leaflet-markercluster 同款约定），结构性 OHOS 断言照常执行。
+
+verification_cmd: >-
+  node -e '1+1' ; node --jitless -e '1+1' ;
+  NODE_OPTIONS=--jitless <node> --jitless <npm-cli.js> install --omit=dev --ignore-scripts --no-bin-links
+
+rec_priority: 1
+rec_approach: jitless-for-npm-and-node-in-conan-build
+rec_auto_fix: false

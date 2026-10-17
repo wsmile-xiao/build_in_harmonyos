@@ -1,0 +1,37 @@
+---
+id: E544
+title: ohpcd 依赖包 .la 的 //lib 引用与 conan 包还原机制
+category: conan-ohos / 链接器 / libtool
+severity: P0
+last_updated: 2026-09-02
+prescan_pattern: "dependency_libs=.*//lib"
+---
+
+# E544: ohpcd 依赖包 .la 的 //lib 引用与 conan 包还原机制
+
+## error_signature
+```
+libtool: error: '//lib/libfoo.la' is not a valid libtool archive
+make[1]: *** [Makefile:###: libX.la] Error 1
+```
+
+## root_cause
+ohpcd 制品仓的二进制包以 `prefix=/` 构建，其 `.la` 文件携带 `libdir='//lib'` 与 `dependency_libs` 里的 `//lib/libfoo.la` 字面引用（跨包）。libtool 链接时递归解析依赖 .la，遇到不存在的 `//lib/` 路径中止。
+
+**关键陷阱（两层）**：
+1. **本地缓存修改会被还原**：conan 2 在 graph 重新解析（如 conan create 的 test_package 轮）时**重新解压包压缩档**，对 `~/.conan2/p/*/p/lib/*.la` 的任何改写被静默还原。本地一次性 create 全绿不代表 CI 干净环境绿——本地早前尝试的改写残留会让本地"看起来通过"。
+2. **替换必须按 basename 路由**：`//lib/libgpg-error.la` 的正确目标是**提供该 .la 的包目录**（如 libgpXXX/p/lib），不是当前处理的 .la 所在目录。单遍替换会把引用错误路由进错误包目录。
+
+## rec_approach
+**私有副本方案（唯一可靠）**：configure 之后 make 之前——
+1. 收集全依赖图（BFS 含传递依赖）所有 `.la` 的 basename→owner 目录映射
+2. 复制全部依赖 .la 到 `build/ohpcd-la/` 私有目录，改写**副本**（libdir 指向副本目录、`//lib/<name>.la` 按 basename 路由到 owner 包路径、`-L//lib`→`-L<副本>`、剥离 `-lpthread`）
+3. 生成的 Makefile/libtool 中所有依赖缓存 .la 引用重定向到副本
+
+不要在依赖包缓存上做手术（会被还原）；不要只做单遍替换（路由错误）。
+
+## affected_scope
+所有依赖 ohpcd 制品仓二进制包的 autotools/libtool 类配方（gnutls/libgcrypt/libgpg-error 链必现）。
+
+## auto
+1

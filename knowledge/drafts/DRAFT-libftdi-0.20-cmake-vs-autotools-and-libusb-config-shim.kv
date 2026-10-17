@@ -1,0 +1,94 @@
+# ══ Draft knowledge entry — 上游同时提供 autotools 与 CMake 时的 OHOS 构建路径选择 ══
+# Timestamp: 2026-09-18
+# Software: libftdi 0.20（FTDI USB 驱动库；tarball 自带 autotools + CMake 两套构建系统）
+# Gate: conan create（ohos-aarch64 profile，clang 15）rc=0；上游 examples/find_all 1/1（真机）、
+#       消费者断言 8/8（OHOS aarch64 真机实跑）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. 复核下方证据
+#   2. 重命名为 E0XX.kv 并移入 knowledge/graph/
+#   3. 在 knowledge/graph/index.tsv 增加一行
+id: draft-libftdi-0.20-cmake-vs-autotools-and-libusb-config-shim
+title: 上游自带 autotools+CMake 两套构建系统时优先选 CMake（libftdi 0.20）：autotools 侧的 *-config 工具缺失、native conftest 运行失败与 libtool 2.2.6 转义/ECHO 三坑
+trigger_tool: conan|configure|cmake|libtool|libusb-config
+phase: configuration|linking|installation
+error_signature: libusb-config not found|cannot run C compiled programs|print: command not found|an archive name must be specified|include could not find requested file|cmake_minimum_required|not found in package|lib64
+severity: 3
+category: conan|cmake|autotools|build-system|portability
+match_keywords: libusb-config, AC_CHECK_TOOL, HAVELIBUSB, cross mode tool prefix, conftest,
+  cannot run C compiled programs, libusb-1.0.so.0, libtool, ECHO, print -r --, ksh builtin,
+  old_archive_cmds, ltmain.sh, autoconf 2.68, CONFIG_SHELL, .la was moved, pkg-config prefix,
+  CMAKE_POLICY_VERSION_MINIMUM, include_directories, UNIX variable, LIB_SUFFIX, lib64,
+  relative DT_NEEDED, transitive_headers, usb.h
+keywords: libftdi, libusb-compat, libusb-config shim, AC_CHECK_TOOL 前缀, native conftest,
+  libtool 2.2.6, ECHO=print -r --, ksh print, old_archive_cmds 转义, CONFIG_SHELL, FindUSB,
+  pkg-config prefix 失真, CMAKE_POLICY_VERSION_MINIMUM, include() 误用, UNIX 未定义,
+  LIB_SUFFIX=64, 相对 DT_NEEDED, transitive_headers/transitive_libs
+root_cause: >
+  libftdi 0.20 的 tarball 同时提供 autotools 与 CMake。autotools 路径在 OHOS 上需要三处绕行：
+  (1) configure.in 用 `AC_CHECK_TOOL(HAVELIBUSB, libusb-config)` 并调用其
+  `--cflags/--libs/--version`，而制品仓 libusb-compat/0.1.7 包只装 include/lib/pkgconfig，
+  不含 `libusb-config` ⇒ 必须自写最小等价 shim；且交叉模式下 AC_CHECK_TOOL 查找
+  `<host>-libusb-config`，shim 需同时提供带前缀名。
+  (2) native 模式下 autoconf 会运行 conftest，而 AutotoolsDeps 把 `-lusb -lusb-1.0` 放进 LIBS，
+  conftest 因此动态依赖 `libusb-1.0.so.0`（configure 阶段不在加载器路径）⇒
+  `cannot run C compiled programs`，必须改用交叉模式。
+  (3) 内置 libtool 2.2.6 在本环境把 ksh 专用 `ECHO="print -r --"` 写进生成的 libtool
+  （构建走 bash ⇒ `print: command not found`），并且 old_archive_cmds 丢失 `$oldlib$oldobjs`
+  转义 ⇒ `llvm-ar: error: an archive name must be specified`（ltmain.sh 2011 + autoconf 2.68
+  的转义丢失，参见 DRAFT-E551 与已合入 classads 的 CONFIG_SHELL=/bin/sh 修法）。
+  改走上游 CMake 后不经过 libtool 也不做运行探测，但仍有 5 个上游假设需要处理：
+  依赖 .pc 前缀失真（FindUSB 走 pkg-config 会拿到发布机路径）、CMake 4 拒绝
+  `cmake_minimum_required(2.6)`、examples 把 `include()` 当 `include_directories()` 用、
+  CMake 不认识 HarmonyOS 平台导致 `UNIX` 未定义（install 规则全被跳过 ⇒ 包里没有库和头）、
+  以及 64 位目标强制 `LIB_SUFFIX=64`（装到 lib64/，与 cpp_info.libdirs=lib 不一致）。
+approach: >
+  优先选 CMake：用缓存变量短路 FindUSB（LIBUSB_INCLUDE_DIR/LIBUSB_LIBRARIES 取 Conan 依赖路径），
+  `CMAKE_POLICY_VERSION_MINIMUM=3.5`、`UNIX=TRUE`、小补丁修 `include_directories()` 与
+  `LIB_SUFFIX`；示例程序在其目录内以 LD_LIBRARY_PATH=<build>/src:<libusb>/lib 运行作为上游证据。
+  若上游只有 autotools，则：写同时覆盖带/不带主机前缀的最小 `*-config` shim 并 prepend PATH；
+  用交叉模式（--build≠--host）避免运行 conftest；configure 后用
+  `print -rn -- → printf %s`、`print -r -- → printf %s\n` 修 libtool 的 ECHO；删除依赖包
+  `lib/*.la`；公开头依赖用 transitive_headers/transitive_libs 传播。
+rec_command: |
+  # CMake 路径（采用）
+  tc.cache_variables["LIBUSB_INCLUDE_DIR"]  = "<libusb-compat>/include"
+  tc.cache_variables["LIBUSB_LIBRARIES"]    = "<libusb-compat>/lib/libusb.a;<libusb>/lib/libusb-1.0.so"
+  tc.cache_variables["CMAKE_POLICY_VERSION_MINIMUM"] = "3.5"
+  tc.cache_variables["UNIX"] = "TRUE"          # 否则所有 install 规则被跳过
+  tc.cache_variables["DOCUMENTATION"] = "OFF"; tc.cache_variables["FTDIPP"] = "OFF"
+  # patches: examples/CMakeLists.txt include( → include_directories( ; LIB_SUFFIX 固定为空
+
+  # autotools 路径（备选，仅供只有 autotools 的工程参考）
+  # shim: <dir>/libusb-config 与 <dir>/aarch64-linux-ohos-libusb-config
+  #   --version → "libusb 0.1.7"; --cflags → -I<pkg>/include; --libs → -L<pkg>/lib -lusb
+  # configure_args += ["--build=aarch64-unknown-linux-gnu", "--host=aarch64-linux-ohos"]
+  # configure 后: libtool 内 print -rn -- → printf %s; print -r -- → printf %s\n
+  # 构建前删除依赖 lib/*.la；requirements 用 transitive_headers=True, transitive_libs=True
+verification_cmd: >
+  conan create archives/l/libftdi/0.20 --build=missing \
+    -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+  # rc=0；上游 examples/find_all（真机）exit 0 —— "Number of FTDI devices found: 0"
+  # 消费者 8/8 断言
+  # 快速判断 libtool 产物是否损坏：
+  #   grep -m1 '^ECHO=' libtool            # 出现 print -r -- 即需修
+  #   grep -m1 'old_archive_cmds=' libtool # 出现空的 $oldlib$oldobjs 即需修
+affected_scope: >
+  所有 tarball 同时提供 autotools 与 CMake 的第三方库（选择构建系统直接影响适配成本）；
+  所有 configure 期依赖 `*-config` 工具的 autotools 老工程（libusb 0.1 系、libftdi 0.x、
+  gtk-config/glib-config 时代工程）；所有在 OHOS 上用内置 libtool 2.2.x 的工程；
+  所有把 CMake 安装规则包在 `if(${UNIX})` 里的老 CMake 工程（OHOS 上 UNIX 未定义）。
+related: >
+  与 DRAFT-E551（CONFIG_SHELL=bash 时 ltmain.sh 丢引号转义）同源；与"Conan --prefix=/ +
+  DESTDIR 导致 .pc/.la 前缀失真"同源（本条给出依赖 .pc 的短路方式与 .la 的处置）；
+  已合入先例 mecab-ko/openconnect（libtool ECHO）、bookloupe（删除依赖 .la）、
+  classads（CONFIG_SHELL=/bin/sh）。
+pr_size_lesson: >
+  上游 autotools PR 不要携带 config.sub/config.guess 全文（各上千行）：平台 AI 检视会因
+  "变更过大"直接跳过，rule6 拿不到结论。改用 16 行最小早退补丁 + 显式 --build/--host。
+authors:
+  - "frj__ <241250055@smail.nju.edu.cn>"
+source_pr: pending
+source_commit: pending
+draft_date: 2026-09-18

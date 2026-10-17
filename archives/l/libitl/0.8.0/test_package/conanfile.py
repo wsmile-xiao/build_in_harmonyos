@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+"""Conan L1 test_package for libitl."""
+import os
+
+from conan import ConanFile
+from conan.tools.build import can_run
+from conan.tools.cmake import CMake, cmake_layout
+
+
+class LibitlTestConan(ConanFile):
+    settings = "os", "compiler", "build_type", "arch"
+    generators = "CMakeDeps", "CMakeToolchain"
+
+    def requirements(self):
+        self.requires(self.tested_reference_str)
+
+    def layout(self):
+        cmake_layout(self)
+
+    def build(self):
+        cmake = CMake(self)
+        cmake.configure()
+        cmake.build()
+
+    def test(self):
+        if not can_run(self):
+            return
+        # L0d: must call self.run() so the consumer binary is actually executed.
+        bin_path = os.path.join(self.cpp.build.bindirs[0], "test_libitl")
+        self.run(bin_path, env="conanrun")

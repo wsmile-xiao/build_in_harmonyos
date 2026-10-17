@@ -1,0 +1,76 @@
+#====================================================================
+# DRAFT-libsavitar-4.4.1-vendored-subproject-forced-shared — CMake add_subdirectory 内嵌子工程被 Conan shared 强制共享化导致父库 NEEDED 相对路径断链
+# 触发事件: libsavitar 4.4.1 适配（pugixml 内嵌子目录被 Conan toolchain 强制 BUILD_SHARED_LIBS=ON）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+draft: DRAFT-libsavitar-4.4.1-vendored-subproject-forced-shared
+status: pending-editor-review
+title: CMake add_subdirectory 内嵌 vendored 子工程在 Conan shared=True 配方下被 toolchain 强制 BUILD_SHARED_LIBS=ON 建成共享库，父共享库 NEEDED 记录成 "子目录/子库.so" 相对路径且子库不随父库 install 规则安装 → 运行时断链；修复为子工程作用域补丁强制静态内嵌
+category: cmake, conan, shared-library, ohos-platform, vendored
+severity: 3
+
+error_signature: >
+  Error loading shared library [a-z_]+/lib[a-z_]+\.so|
+  Error relocating .*symbol not found|
+  NEEDED.*pugixml/libpugixml\.so|
+  Conan toolchain: Setting BUILD_SHARED_LIBS = ON
+
+match_keywords: >
+  add_subdirectory, vendored, 内嵌子工程, BUILD_SHARED_LIBS,
+  CMakeToolchain, shared option, NEEDED 相对路径, 子目录 lib,
+  pugixml, 静态内嵌, 运行时找不到, conan create, test_package
+
+trigger_tool: cmake|conan|readelf|ld
+phase: build|package|testing
+
+root_cause: >
+  1. 父库配方声明 shared=True 时，Conan CMakeToolchain 会在 toolchain 中
+     强制写入 BUILD_SHARED_LIBS=ON（日志 "Conan toolchain: Setting
+     BUILD_SHARED_LIBS = ON"）。
+  2. 上游用 add_subdirectory(vendored) 内嵌的子工程（如 libSavitar 的
+     pugixml）默认按 BUILD_SHARED_LIBS 决定动/静态；被 Conan 强制为 ON
+     后子工程也建成共享库。
+  3. 父共享库链接子共享库时，OHOS 上 CMake/链接器把 NEEDED 记录为
+     带子目录的相对路径（如 "pugixml/libpugixml.so"），而非标准 SONAME。
+  4. 父库 install 规则（install(TARGETS ... EXPORT ...)）只安装父目标，
+     不会带出子工程的共享库；test_package 运行时加载父库 → 找不到
+     子目录相对路径的 NEEDED → 断链。即使手工复制实体文件到任意目录
+     也无法命中（NEEDED 带子目录前缀）。
+
+solution: |
+  在配方 generate() 里用 tc.variables 设 BUILD_SHARED_LIBS=OFF 无效
+  （Conan 按 shared 选项覆盖）。可靠修复是补丁在**子工程 CMakeLists 作用域**
+  强制静态：
+
+  ```diff
+  --- a/pugixml/CMakeLists.txt
+  +++ b/pugixml/CMakeLists.txt
+  @@ -1,5 +1,6 @@
+   project(pugixml)
+   cmake_minimum_required(VERSION 2.6)
+  +set(BUILD_SHARED_LIBS OFF)
+   option(BUILD_SHARED_LIBS "Build shared instead of static library" OFF)
+  ```
+
+  普通变量在子目录作用域遮蔽 cache 值，子工程退回静态库；父共享库链接
+  静态子库时符号内嵌进父 .so，NEEDED 不再记录子库路径，运行时无需
+  子库实体。conandata.yml 登记该补丁（patch_type: portability）。
+
+verification: |
+  1. conan create 后 readelf -d 父 .so：NEEDED 不再含 "pugixml/libpugixml.so"；
+  2. 包内 lib/ 不再出现子库 .so（仅静态 .a 或不打包）；
+  3. test_package 消费者二进制正常运行（无 Error loading shared library）。
+
+applicability: >
+  所有"父库为共享库 + add_subdirectory 内嵌 vendored 子工程 + 配方
+  shared=True"的 CMake 库，在 OHOS/HarmonyOS PC Conan 2 下适配时适用。
+  父库是静态库、子工程本就共享并由父库 install 带出时不需要。
+
+counterexample: >
+  若子工程是真正的独立共享库且父库 install(EXPORT) 带出并安装，则不应
+  强制静态，应保持共享并确保运行时路径可解析。
+
+limitations: >
+  补丁修改的是子工程构建方式（静态内嵌），会改变包内产物布局（无子库
+  独立 .so）；若下游消费者需要独立链接子库 ABI，则不适合本方案。

@@ -1,0 +1,93 @@
+# ═══ Draft knowledge entry — vendored py2-era protobuf pb2 modules on Python 3. five-patch migration recipe + protobuf version decision tree
+# Software: keepkey-agent 0.9.0 (keepkeylib 0.7.3 / libagent 0.9.0 vendored closure)
+# Gate: conan create (ohos-aarch64, OHOS Python 3.12.9) + build functional checks 7/7 + test_package 4/4
+# Status: DRAFT
+
+id: DRAFT-12801-keepkey-agent-0.9.0-py2-protobuf-pb2-py3-migration
+title: vendored py2 时代 protobuf pb2 模块在 Python 3 的五处断裂迁移配方（unicode 调用形态/serialized_pb/_ParseOptions bytes 字面量/裸 import/六参数元类）+ protobuf 版本决策树（3.15.4 唯一可用带）
+status: pending-editor-review
+severity: 2
+category: compat|python|runtime
+trigger_tool: python|conan|create
+phase: runtime
+
+keywords: protobuf, pb2, py2, py3, unicode, serialized_pb, metaclass, RegisterExtension, descriptor pool, wire_in, MutableMapping, vendor, python package, noarch
+error_signature: name 'unicode' is not defined|TypeError: decoding str is not supported|memoryview: a bytes-like object is required, not 'str'|Extensions "wire_in" and "wire_in" both try to extend|module 'collections' has no attribute 'MutableMapping'|TypeError: Ping\(\) takes no arguments|NotImplementedError on SerializeToString
+match_keywords: pb2, protobuf, py2, py3, unicode, serialized_pb, metaclass, RegisterExtension, descriptor pool, MutableMapping, collections, GeneratedProtocolMessageType, vendored, keepkey, trezor
+
+root_cause: |
+  Python packages from the 2016-2017 era (keepkey/trezor/bitcoin toolchain generation)
+  ship protoc-generated *_pb2.py modules written for Python 2, which break on Python 3
+  in five distinct ways, all of which must be fixed before the vendored closure imports:
+  (1) `unicode("x", "utf-8")` default-value literals — py3 has no `unicode` builtin; a
+      naive `unicode = str` shim is NOT enough because str("x", "utf-8") raises
+      TypeError("decoding str is not supported") — the call form itself must be replaced
+      with the plain literal "x".
+  (2) `serialized_pb='...'` module-level FileDescriptor payload — py2 str literals carry
+      bytes semantics; py3 requires an explicit b-prefix or protobuf raises
+      "memoryview: a bytes-like object is required, not 'str'" at descriptor parsing.
+  (3) `_ParseOptions(descriptor_pb2.XxxOptions(), '...')` second argument — same bytes
+      literal issue, one call per message/enum/field option (115+ occurrences in keepkey).
+  (4) Bare `import types_pb2` inside a package (py2 allowed package-internal absolute
+      imports) — on py3 the bare name and the package-qualified name
+      (`keepkeylib.types_pb2`) resolve to TWO separate module instances; each executes
+      `RegisterExtension(wire_in)` against the GLOBAL descriptor pool and the second one
+      dies with AssertionError: Extensions "wire_in" and "wire_in" both try to extend
+      message type "google.protobuf.EnumValueOptions" with field number 60002.
+  (5) `class Ping(_message.Message): __metaclass__ = ...` — py2 class-attribute
+      metaclass declaration is silently ignored on py3, so message classes are never
+      protocol-ized by GeneratedProtocolMessageType: instantiation accepts nothing
+      (TypeError: Ping() takes no arguments) and SerializeToString raises bare
+      NotImplementedError.
+  Separately, the protobuf RUNTIME version must be chosen deliberately for old pb2 code:
+  7.x removed the legacy descriptor-construction API (AttributeError on _AddSerializedProto
+  and friends); 3.0.0 runtime uses collections.MutableMapping (removed in Python 3.10+);
+  3.15.4 is the last py2.py3-none-any pure wheel line that still supports legacy
+  descriptor construction AND runs on Python 3.12.
+
+rec_approach: vendored-pb2-five-patch-plus-protobuf-3154
+
+solution: |
+  In the conanfile build()/package() path, after vendoring the py2-era sdist, apply five
+  idempotent text patches to every *_pb2.py (regex, deterministic):
+
+  ```python
+  import re
+  # 1. unicode("x", "utf-8") -> "x"   (do NOT use unicode=str shim)
+  src = re.sub(r'unicode\("((?:[^"\\]|\\.)*)", "utf-8"\)', r'"\1"', src)
+  # 2. serialized_pb='...' -> serialized_pb=b'...'
+  src = src.replace("serialized_pb='", "serialized_pb=b'")
+  # 3. _ParseOptions(xxx(), '...') 2nd arg -> b'...'
+  src = re.sub(r"(_ParseOptions\(\s*\w+\.\w+\(\),\s*)'", r"\1b'", src)
+  # 4. bare `import types_pb2` -> package-relative try/except
+  #    "import types_pb2\n" -> "try:\n    from . import types_pb2\nexcept ImportError:\n    import types_pb2\n"
+  # 5. py2 metaclass -> py3 six-arg form (per message class)
+  src = re.sub(
+      r"class (\w+)\(_message\.Message\):\n"
+      r"  __metaclass__ = _reflection\.GeneratedProtocolMessageType",
+      r"class \1(_message.Message,\n"
+      r"             metaclass=_reflection.GeneratedProtocolMessageType):",
+      src)
+  ```
+
+  Vendor protobuf==3.15.4 (py2.py3-none-any pure wheel) as the runtime for legacy pb2
+  modules — NOT 7.x (legacy descriptor API removed) and NOT 3.0.0
+  (collections.MutableMapping dies on py3.10+). Version decision tree:
+  - pb2 generated by protoc <3.5 with serialized_pb str literals → 3.15.4 + five patches
+  - pb2 already py3-native (b'' literals present) → any modern protobuf
+  - if only import is needed (no serialization) → patches 1-4 suffice; patch 5 is
+    required the moment any message is instantiated or serialized
+
+  Functional verification of the migrated closure (all device-independent):
+  import chain -> CLI argparse entry -> protobuf message wire round-trip (Ping) ->
+  NIST256p + ED25519 sign/verify closed loops via libagent.formats.parse_pubkey.
+
+fallback: |
+  If patching the pb2 modules is not acceptable (e.g. many files or legally frozen
+  vendor trees), regenerate the pb2 modules from the .proto sources with a modern
+  protoc instead of vendoring the pre-generated files (requires the upstream .proto
+  definitions, which keepkey ships inside its repo).
+
+verify_builds: keepkey-agent/0.9.0 conan create (ohos-aarch64) — build functional checks 7/7 PASS + test_package 4/4 PASS（含 protobuf Ping wire 往返与双曲线签名验证闭环）；PR CI 构建号见关联 issue
+
+related: E143, E219, E269, E319, E226

@@ -14,7 +14,9 @@ pkg-config 是一个辅助工具，用于查询已安装库的编译标志（CFL
 | 构建系统 | autotools（内嵌 glib 2.56.0） |
 | 编译器 | clang + musl libc |
 | 目标 triplet | `aarch64-unknown-linux-ohos` |
-| 补丁数 | 6 个 |
+| 补丁数 | 10 个 |
+| 配置参数 | `--with-internal-glib` |
+| 上游测试 | `make check` → 30/30 通过 |
 | 质量门禁 | 见 RELEASENOTE |
 
 ## 平台适配原因
@@ -27,20 +29,23 @@ pkg-config 内嵌了一个完整的 glib 2.56.0 子目录，因此需要同时�
 |---|------|------|------|
 | 1 | `config.guess` | 标准 GNU config.guess 不识别 HarmonyOS 平台 | 新增 `*:HarmonyOS:*:*)` 分支，映射到 `aarch64-unknown-linux-ohos` |
 | 2 | `config.sub` | 同上，新增 ohos OS 条目 | 新增 `ohos* \| linux-ohos*` OS 匹配 |
-| 3 | `glib/config.guess` | glib 子目录有独立的 config.guess 副本 | 与 #1 相同修改 |
-| 4 | `glib/config.sub` | glib 子目录有独立的 config.sub 副本 | 与 #2 相同修改 |
-| 5 | `configure` (glib) | conftest pipe 兼容 musl libc | 修复 `\| cat` 被 shell 管道截断的问题 |
-| 6 | `glib/glib/Makefile` | gatomic.c 类型警告被 -Werror 升级为错误 | 追加 `-Wno-error=int-conversion -Wno-error=incompatible-pointer-types` |
+| 3 | `configure` | conftest 执行在 musl 下需兜底 | `./conftest$ac_exeext` 改为 `./conftest$ac_exeext \| cat` |
+| 4 | `glib/config.guess` | glib 子目录有独立的 config.guess 副本 | 与 #1 相同修改 |
+| 5 | `glib/config.sub` | glib 子目录有独立的 config.sub 副本 | 与 #2 相同修改 |
+| 6 | `glib/configure` | glib 子目录的 conftest 执行 | 与 #3 相同修改 |
+| 7 | `configure` | **HMDFS 文件系统限制**：configure 生成的 config.status 用 `umask 077` 创建临时目录，产生的 `drwx--S---` 权限在 HMDFS 下连属主都不可写，报 `can't create ./confXXX/subs1.awk: Permission denied` | `umask 077` → `umask 022` |
+| 8 | `glib/configure` | 同 #7（glib 子目录独立副本） | `umask 077` → `umask 022` |
+| 9 | `glib/configure` | 旧版 glib 2.56.0 的 `gatomic.c` 在 aarch64+clang 下把 `gsize` 传给指针参数，4 处 `-Wint-conversion` 被 `-Werror` 升级为错误 | 在探测的编译警告列表追加 `-Wno-error=int-conversion -Wno-error=incompatible-pointer-types` |
+| 10 | `Makefile.in` | **HMDFS 文件系统限制**：`install-exec-hook` 用 `ln -f` 创建 triplet 前缀硬链接，HMDFS 不允许，报 `ln: cannot create hard link ...: Operation not permitted` | 改用 wrapper 脚本（`exec pkg-config "$@"`）替代硬链接 |
 
 ### 技术债务
 
-- **P3 的 Makefile 修改** 是技术债务（vendor 代码不应修改），但旧版 glib 2.56.0 在 aarch64+clang 下必须如此。升级 pkg-config 到更新版本（使用系统 glib）可消除此债务。
+- **#9 的警告抑制** 是技术债务（vendor 代码不应修改，且只是掩盖而非修复类型问题），但旧版 glib 2.56.0 在 aarch64+clang 下必须如此。升级 pkg-config 到使用系统 glib 的更新版本可消除。
 
 ## 已知限制
 
-1. **无 .pc 文件**：当前安装不含 .pc 文件（pkg-config 自身不需要，依赖它的软件需要时自行生成）
-2. **HMDFS 软链接限制**：triplet wrapper (`aarch64-unknown-linux-ohos-pkg-config`) 使用脚本而非软链接
-3. **内嵌 glib**：pkg-config 0.29.2 内嵌了完整 glib 2.56.0，体积较大（674KB）
+1. **HMDFS 限制**：triplet wrapper (`aarch64-unknown-linux-ohos-pkg-config`) 使用脚本而非硬链接/软链接
+2. **内嵌 glib**：pkg-config 0.29.2 内嵌了完整 glib 2.56.0，体积较大（约 654KB）
 
 ## 验证方法
 

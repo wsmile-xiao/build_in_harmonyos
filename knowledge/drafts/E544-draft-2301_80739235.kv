@@ -1,0 +1,74 @@
+id: E544
+draft: true
+title: "Conan 消费者必须对完整依赖闭包执行二进制目录与元数据 fail-closed 校验"
+category: conan, dependency-graph, consumer, fail-closed
+match_keywords: >
+  consumer dependency contract, package_folder is None, missing binary package,
+  Conan dependency closure, cpp_info.includedirs, cpp_info.libdirs,
+  --build=never, package metadata validation, fail-closed consumer
+root_cause: >
+  只校验少数关键依赖的版本或仅判断依赖对象存在，无法证明完整 Conan
+  依赖闭包已经解析到可消费的二进制包。被省略的依赖可能仍让编译器拿到
+  部分头文件或缓存路径，消费者探针因此在本地或某个配置下假绿；旧的图
+  验证器还可能把正常的根包待构建状态误报为 root_count=0。版本、实际
+  package_folder、include 元数据和 lib 元数据必须作为同一个消费者契约检查。
+  在 LLVM-only 交叉工具闭包中，只有 ld.lld/llvm-ar/llvm-ranlib 时，传统工具变量
+  未绑定会分别触发 `no acceptable ld found` 或 Libtool 的 `false cru`；LD、AR、
+  RANLIB 必须绑定到任务可见的绝对工具路径。目标 libxml2/zlib 压缩实现对
+  books.xml/opera.xml/movies.xml 观测到 433/427/557，不能把上游主机的
+  432/425/577 固定值直接当作跨平台契约；修复后的平台无关校验分别允许
+  432 或 433、425/426/427、577 或 557，并在错误信息中列出完整集合。
+  共享库测试图还可能把仅由被测 ELF 的 NEEDED 使用、而消费者源码不直接调用的
+  zlib 标为 `Skipped binaries`；此时保留精确版本检查，只有实际参与消费者编译
+  或链接的依赖才要求独立 package_folder。
+error_signature: >
+  consumer dependency graph is missing; consumer dependency .* has no binary
+  package folder; has no include metadata; has no library metadata;
+  --build=never; root_count=0; no acceptable ld found in $PATH; libtool: link:
+  false cru; books.xml compressed size 433; opera.xml compressed size 427;
+  movies.xml compressed size 557; L0j version_not_incremented; already published
+  with different recipe; version collision; 409 Conflict
+trigger_tool: conan, autotools, libtool, consumer
+phase: graph|build|test_package
+severity: 2
+rec_approach: >
+  在 test_package 的唯一入口中声明所有直接或运行时必需依赖的精确版本，
+  逐项读取 self.dependencies；检查 ref.version、package_folder 是真实目录，
+  并检查 cpp_info.includedirs/libdirs 非空，再生成编译与链接命令。根包在
+  conan graph info 阶段允许没有 binary/prev；只有消费者构建阶段才要求根包
+  package_folder 存在。对于 OHOS Autotools/Libtool，按编译器目录解析并绑定
+  LD、AR、RANLIB，拒绝回退到 `false` 或共享目录别名；对压缩长度等上游主机
+  固定值，使用平台无关的当前目标实测集合并在失败信息中列出完整允许值。这样可区分“根包待构建”
+  的正常图状态、依赖二进制缺失、交叉工具闭包不完整与真实平台实现差异。若 PR 后的
+  L0j 版本门禁发现同一 name/version 已被不同 recipe 发布，必须把版本递增为新的
+  recipe identity，迁移 archive/branch/Issue/PR 合同并保留旧候选的不可变证据。
+rec_description: >
+  通用适用范围：Conan recipe 通过 transitive requires 暴露多个 ABI 依赖，且
+  test_package 手工编译、交叉编译或使用 --build=never 解析时。先用 conan
+  download/graph info 绑定依赖 RREV/PID/PREV，再在消费者中执行完整闭包检查；
+  不要用 conan list 判断远端 binary，也不要把任一旧快照的根节点字段拼接到新候选。对
+  registry identity collision，按 name/version 递增规则创建 successor，不要覆盖已发布
+  recipe 或复用旧 PR 的版本绑定。
+verification_cmd: >
+  在隔离 Conan Home 中使用 OHOS profile 执行 conan graph info --build=never，
+  确认所有依赖均为 Download/Cache 且 info_invalid 为空；随后运行真实
+  test_package，故意移除一个依赖 package_folder，验证入口以明确错误退出；
+  在目标机真实 conan create 中确认 ld.lld/llvm-ar/llvm-ranlib 被绑定，日志无
+  `no acceptable ld` 与 `false cru`，并确认三个 XML fixture 的目标尺寸分别为
+  433、427、557（非 OHOS 仍为 432、425、577），然后完成全量上游与消费者分母；若 CI
+  L0j 返回 version_not_incremented，确认 registry 中已有不同 recipe 后，在新版本候选
+  上重新执行合同、W3、CI，并验证旧候选的 HEAD/tree/证据未被改写。
+affected_scope: >
+  具有手工消费者编译、传递依赖或目标平台二进制包的 Conan C/C++ 配方，以及
+  使用 LLVM-only 交叉工具闭包的 OHOS Autotools/Libtool 配方；不适用于纯
+  header-only 且没有 libdirs 的包（应按其 package_type 单独定义契约）。版本碰撞处置适用于
+  所有 Conan recipe，不限于本库或 Autotools。
+safety_boundary: >
+  校验不得下载、构建或覆盖依赖，也不得把根包在 graph 阶段的空 binary
+  字段当成失败；工具解析不得修改共享系统目录或导入其他任务文件。registry 碰撞时不得
+  覆盖旧版本或伪造新版本的 W3/CI 结果，只能在全新版本 identity 上重建证据。只有当前
+  候选、当前依赖版本、工具绝对路径和当前 package_folder 身份都匹配时，才能
+  把消费者结果计为通过。
+doc_file: knowledge/drafts/E544-draft-2301_80739235.md
+last_updated: 2026-09-03
+authors: 2301_80739235

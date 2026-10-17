@@ -1,32 +1,26 @@
-# opus
+# Opus
 
-高质量音频编解码库，支持语音和音乐，低延迟、高保真。
+Opus is a low-latency, royalty-free audio codec for speech and music.
 
-## 版本
-- 1.4 (2026-05-19)
+## Versions
 
-## 特点
-- 低延迟（5-66.5ms）
-- 高保真音频
-- 自适应比特率
-- WebRTC/VoIP 标准
+### 1.4
 
-## 库文件
-- libopus.a (2.3 MB) - 静态库（推荐）
-- libopus.so (1.2 MB) - 动态库
+- Build system: Meson
+- Libraries: `libopus.so` when shared, `libopus.a` when static
+- Public headers: `opus.h`, `opus_defines.h`, `opus_types.h`,
+  `opus_multistream.h`, and `opus_projection.h`
+- Conan CMake target: `Opus::opus`
+- pkg-config module: `opus`
 
-## 头文件
-- opus.h, opus_defines.h, opus_types.h
-- opus_multistream.h, opus_projection.h
+The shared package uses one unversioned `libopus.so` on OpenHarmony PC.
 
-## 安装
-curl install.sh | sh -s -- opus 1.4
+### 1.5.2
 
-## 验证
-```c
-#include <opus/opus.h>
-printf("%s\n", opus_get_version_string());
-```
+- Build system: CMake
+- Pure audio codec library with no external Conan dependencies
+- Enables `OPUS_BUILD_SHARED_LIBRARY` for the shared variant
 
-## 注意
-推荐使用静态库链接，避免动态库加载问题。
+## Reference
+
+- https://opus-codec.org/

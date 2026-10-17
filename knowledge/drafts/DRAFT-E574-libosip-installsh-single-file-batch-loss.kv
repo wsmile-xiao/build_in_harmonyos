@@ -1,0 +1,45 @@
+# ═══ Draft knowledge entry — 老版 install-sh 单文件限制 + automake 批量调用：make install rc=0 但批量安装静默丢文件 ═══
+# Timestamp: 2026-09-11
+# Software: libosip/5.3.2 (autotools)
+# Gate: conan create 三轮真机迭代 + .tmp-installsh-repro/ 最小复现矩阵
+# Status: DRAFT — 同 stem 配对 knowledge/drafts/DRAFT-E574-libosip-installsh-single-file-batch-loss.md
+# 适用条件/反例/验证/限制/恢复条件见配对 .md；本 .kv 与 .md 字段相互对应
+
+id: DRAFT-E574
+severity: 2
+category: platform|toolchain|install|autotools|ohos-platform
+trigger_tool: make|install|install-sh|conan
+phase: package
+error_signature: install-sh.*-c -m 644.*\.\.\.|make install.*exit 0|安装后头文件数与 install 日志不符|silently dropped|install-sh rc=0.*missing files
+match_keywords: install-sh, 单文件限制, 批量安装, am__base_list, 静默丢文件, rc=0, make install, automake-1.16, 1991, one file at a time, /usr/bin/install, configure fallback, scriptversion, headers missing, install count mismatch
+
+title: 老版 install-sh（1991 X11R5）仅支持单文件安装，automake 批量调用下 make install rc=0 但每批仅第 1 个文件落盘
+
+root_cause: OHOS PC 上 PATH 无 /usr/bin/install（精简 userland 不带 coreutils install），configure 探测失败后回退到 tarball 自带的老版 install-sh。libosip2-5.3.2 tarball 内 scripts/install-sh 为 1991 X11R5 时代版本（无 scriptversion 行），其参数处理循环注释明说 "can only install one file at a time"：src 只取第一个文件参数、其余全部静默丢弃、退出码仍为 0。automake-1.16 生成的 Makefile 用 am__base_list 每批最多 64 个文件一次调用 install-sh，于是每批只有第 1 个文件落盘。libosip 3 个头文件目录各 1 批 = 恰好 3 个头文件，其余 28 个静默丢失，无任何错误输出。与 hmdfs/hmfs 文件系统无关（tmpfs 上同样复现），目录覆盖说法不成立（单文件重复安装与批量安装下目标目录均完好）。
+
+affected_scope: >
+  所有在无 /usr/bin/install 的环境（OHOS PC）构建、且 tarball 内置老版
+  install-sh（约 2010 年代中期以前的 GNU 软件发布包）的 autotools 项目；
+  任何 make install 后未逐产物断言的打包流程。
+
+verification_cmd: >
+  1) which install 或 ls /usr/bin/install 确认缺失；
+  2) grep -c scriptversion scripts/install-sh（0 = 1991 版）；
+  3) make install DESTDIR=$PKGROOT; find $PKGROOT -name '*.h' | wc -l 与
+  install 日志行数对比（3 vs 31 即中招）；
+  4) 最小复现：mkdir d; ./install-sh -c -m 644 a.h b.h c.h d.h d/; ls d/ | wc -l
+  （结果 1 即为单文件限制实锤）
+
+rec_priority: 1
+rec_approach: replace-with-host-automake-installsh
+rec_command: >
+  ①配方 _patch_source_tree() 中把 tarball 的 scripts/install-sh 替换为主机
+  automake-1.16 版本（连带 config.guess/config.sub/missing/compile/depcomp 同
+  vintage 替换，它们同样因 E007 需要更新）；
+  ②防护：package() 后断言关键产物数量（头文件数、库名、SONAME），不要信任
+  make install 的退出码。
+  示例（libosip conanfile.py）：am_dir = glob(clang_dir/../share/automake-*)；
+  for name in ("install-sh","config.guess","config.sub","missing","compile","depcomp"):
+  shutil.copy2(am_dir/name, src/scripts/name); os.chmod(dst, 0o755)
+
+forbid_1: 把症状归因于 hmdfs/hmfs uid 映射或"目录被覆盖为文件"（实测目录完好，tmpfs 上同样复现）；不替换 install-sh 而试图用 ln/cp 手工补装文件；信任 make install 的 rc=0 而不校验产物数量

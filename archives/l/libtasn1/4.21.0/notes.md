@@ -1,28 +1,41 @@
-# libtasn1 4.21.0 编译进度
+# libtasn1 4.21.0 适配笔记
 
-**日期**: 2026-04-17
-**状态**: 🔄 编译中
+**日期**: 2026-07-15
+**状态**: ✅ 适配完成
 
-## 步骤记录
+## 编译环境
 
-| 步骤 | 状态 | 备注 |
-|------|------|------|
-| Step 1 init | ⏳ | |
-| Step 2 patches | ⏳ | |
-| Step 3 configure | ⏳ | |
-| Step 4 make | ⏳ | |
-| Step 5 install | ⏳ | |
-| Step 6 safety | ⏳ | |
-| Step 7 check | ⏳ | |
-| Step 8 staging | ⏳ | |
-| Step 9 package | ⏳ | |
-| Step 10 deploy | ⏳ | |
-| Step 11 finish | ⏳ | |
+- 平台: HarmonyOS (aarch64)
+- 编译器: clang 15.0.4
+- 构建系统: autotools (configure + make)
 
-## 发现与知识
+## 适配修改
 
-<!-- 编译过程中发现的问题和解决方案 -->
----
+### 1. config.guess 平台检测 (0001)
 
-**编译结束**: 2026-04-26 01:52
-**最终状态**: partial
+config.guess 不识别 HarmonyOS 平台。添加 `aarch64:HarmonyOS:*:*` case，映射到 `aarch64-unknown-linux-ohos`。
+
+### 2. configure umask 修复 (0002)
+
+HMDFS 文件系统上，`umask 077` 创建的临时目录会继承父目录的 setgid 位，导致权限为 `drwx--S---`，文件写入失败 (Permission denied)。
+
+将 `umask 077` 改为 `umask 007`，使目录权限为 `drwxrws---`，group 有写权限，文件可正常创建。
+
+影响位置: configure 脚本的 `mktemp -d "./confXXXXXX"` 和 fallback `mkdir "$tmp"` 两处。
+
+### 3. --disable-doc
+
+系统缺少 texinfo (makeinfo)，使用 `--disable-doc` 跳过文档构建。
+
+## 编译结果
+
+- make: ✅ 成功 (仅 1 个 warning: pkix_asn1_tab 缺少 extern 声明)
+- make check: ✅ 31/31 测试通过
+- make install: ✅ 成功 (lib + src，跳过 doc)
+
+## 产物
+
+- libtasn1.a / libtasn1.so (库)
+- libtasn1.h (头文件)
+- asn1Parser / asn1Coding / asn1Decoding (命令行工具)
+- libtasn1.pc (pkg-config)

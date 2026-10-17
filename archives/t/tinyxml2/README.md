@@ -5,6 +5,8 @@ A simple, small, efficient, C++ XML parser that can be easily integrated into ot
 ## 版本
 
 - 10.0.0 (2026-05-21) — published ✅
+- 10.1.0 (2026-09-07) — built ✅
+- 11.0.0 (2026-07-29) — built ✅
 
 ## 描述
 
@@ -14,7 +16,7 @@ tinyxml2 is a compact XML parsing library for C++ that provides a simple API for
 
 - 构建系统: cmake
 - 编译器: clang 15.0.4 / clang++ 15.0.4
-- 安装产物: 静态库 libtinyxml2.a + 头文件 tinyxml2.h + cmake config + pkg-config
+- 安装产物: 动态库 libtinyxml2.so（默认）或静态库 libtinyxml2.a + 头文件 tinyxml2.h + cmake config + pkg-config
 
 ## 使用
 

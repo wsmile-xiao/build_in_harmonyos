@@ -1,0 +1,107 @@
+#====================================================================
+# E575.kv — make 命令行变量传字符串宏需两级反斜杠转义，否则静默退化成数值常量
+#====================================================================
+# 编号说明: E543–E574 已全部占用（跨 worktree 文件形态扫描 ∪ 主线文本引用整词扫描，
+#   最小空号 = E575；E574 为本任务同批草稿）。创建后已回查同 ID 无并发草稿。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 字面子串（engine 只做字面包含，不解析正则），| 分隔，忽略大小写
+id:                     E575
+trigger_tool:           make|clang|gcc
+phase:                  compilation
+error_signature:        format specifies type 'char *' but the argument has type 'double'|format '%s' expects argument of type 'char *', but argument|format specifies type 'char*' but the argument has type 'double'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+prescan_pattern:        -D[A-Za-z_][A-Za-z_0-9]*=\\\\"
+prescan_globs:          conanfile.py, Makefile*, *.mk, *.sh
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: conan, toolchain, make, build-system
+match_keywords: make 命令行变量, CFLAGS, 反斜杠转义, -D 字符串宏, format specifies type, double, raw Makefile, 静默退化
+title: raw Makefile 配方用 make 命令行变量传 CFLAGS 时，字符串宏必须两级反斜杠转义，否则宏静默从字符串退化成浮点常量（唯一信号是 -Wformat 告警）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: 传给 make 的命令行变量值会被解析两次：make 先把它展开进 recipe 文本（原样拼接），执行 recipe 的 shell 再解析一次。上游 Makefile 里写 CFLAGS = -DVERSION=\"1.2\" 是正确的，因为 make 把带反斜杠的文本交给 recipe shell、由第二层把 \" 变成给编译器的字面引号；但当配方用命令行变量覆盖 CFLAGS 时，这层反斜杠必须由配方自己写出来——若配方里写成 shell 双引号包裹的 "-DVERSION=\"1.2\""，反斜杠在调用 make 的那个 shell 就被吃掉（第一层），make 变量里只剩 -DVERSION="1.2"，recipe shell 再把双引号剥掉（第二层），编译器最终收到 -DVERSION=1.2，宏从字符串常量变成浮点常量
+affected_scope: 所有用 make 命令行变量（make CFLAGS=... / make LDFLAGS=... / make CPPFLAGS=...）覆盖上游手写 Makefile 赋值的 Conan 配方，且被覆盖的 flags 里含 -D<NAME>=\"<字符串>\" 形态的字符串宏（版本号/构建号/日期等）。上游 Makefile 用 `=` 而非 `?=` 赋值时必须走命令行变量（同名环境变量会被 makefile 赋值覆盖），因此这类工程天然落入本模式
+verification_cmd: grep -n "format specifies type 'char \*' but the argument has type 'double'" <build log>；同时核对 make 回显行：make 打印的是 -DNAME="x.y"（已被剥一层）还是 -DNAME=\"x.y\"（正确形态）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority:           1
+rec_approach:           double-escape-in-recipe
+rec_description:        在配方里构造 flags 字符串时，让反斜杠活到 make 的变量里：Python 侧写 '-D%s=\\"%s\\"'（源码里反斜杠加引号两个字符），并把这个值放进 shell 单引号参数（make CFLAGS='... -DNAME=\"x.y\"'），使 make 变量内容含 \"、recipe shell 再还原成 "。自检判据是编译日志里宏展开行应显示 #define NAME "x.y"（带引号）
+rec_command:            self.run("make -j1 CC='%s' CFLAGS='%s'" % (cc, " ".join(cflags + ['-DNAME=\\"%s\\"' % ver])), cwd=self.source_folder)
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:      patch-makefile-instead
+fallback_description:   放弃命令行变量覆盖，改为给上游 Makefile 打补丁引入追加式变量（CFLAGS += $(EXTRA_CFLAGS)）并把字符串宏留在 Makefile 内原有的 \" 形态中；代价是引入补丁与维护成本，仅在配方无法控制调用 shell 引号时使用
+fallback_command:       self.run("make -j1 EXTRA_CFLAGS='%s'" % extra, cwd=self.source_folder)
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:       CFLAGS="[^"]*-D[A-Za-z_]+=\\"[^"]*"
+forbid_1_reason:        shell 双引号层里只写一级 \" 会让反斜杠在第一层被吃掉，宏在第二层被剥引号后退化成数值；若编译器恰好没开 -Wformat，则编译零告警通过
+forbid_1_consequence:   产物编译成功、退出码 0，但版本/标识字符串打印为内存垃圾（实测 printf("%s", PROBE_VERSION) 输出 "version o<替换字符>"），只有断言自报版本号的功能测试才能发现；定位成本远高于写对转义
+forbid_2_pattern:       echo .* > .*Makefile|sed -i .*Makefile.*CFLAGS
+forbid_2_reason:        为绕开引号问题去改写/覆盖上游 Makefile 属改动生成物或伪造修复（workflow 第 5.2 节）；正确做法是打正式补丁修正源模板或按推荐方案传参
+forbid_2_consequence:   变更不可审计、下轮构建被上游文件覆盖，评审直接打回
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# 说明: 与 E573（GnuToolchain.defines 裸宏名缺 -D 前缀）同属「raw Makefile 配方拼 CFLAGS」
+#   家族但不是同一模式：E573 的报错是 clang 把宏名当输入文件（no such file or directory），
+#   本条是编译零错误、运行期输出垃圾；修复点也不同（补 -D 前缀 vs 补转义层级）。
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E575.md
+last_updated: 2026-09-11
+source_event:           cycfx2prog 0.47 适配：原生 make 首轮把 -DCYCFX2PROG_VERSION=\"0.47\" 写成单级转义，宏退化为 double（-Wformat 告警 2 条，--version 输出不可用），改为两级转义后输出 "cycfx2prog version 0.47"
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:                Awstme <awstme@qq.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-11
+
+draft: true
+contributor_id: D9DF

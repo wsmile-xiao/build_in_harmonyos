@@ -1,81 +1,50 @@
-# ninja 1.12.1 — 编译进度
+# ninja 1.12.1 — 适配笔记
 
 > 档案创建时间: 2026-04-25 00:00:00
-> 最后更新: 2026-04-25 (当前状态)
-> 当前会话 ID: (可选，用于多轮对话追踪)
+> 最后更新: 2026-08-07
+> Conan 适配: 2026-08-07
 
 ## 一、基本信息
 | 项目 | 值 |
 |------|-----|
 | 软件 | ninja |
 | 版本 | 1.12.1 |
-| 状态 | 🔵 进行中 / ✅ success / ⚠️ partial / ❌ failed |
-| 构建系统 | autotools/cmake/meson/... |
-| 源码路径 | URL |
+| 状态 | ✅ built (conan-verify PASS) |
+| 构建系统 | cmake |
+| 源码路径 | https://github.com/ninja-build/ninja/archive/refs/tags/v1.12.1.tar.gz |
+| 补丁数 | 1 |
 
-## 二、编译阶段（checkbox 实时更新）
+## 二、编译阶段
 
 ### Phase 1: 环境准备
-- [ ] ohc-run.py init-build 完成 / 源码下载解压
+- [x] ohc-run.py init-build 完成
+- [x] 源码下载解压 (git clone from GitHub)
 
-### Phase 2: 编译（configure + make + make install）
-- [ ] configure 完成（记录参数和耗时）
-- [ ] make 编译完成（记录错误和修复）
-- [ ] make install 完成
-
-### Phase 2.5: 独立目录安装验证（⭐ 必须做）
-- [ ] 干净源码 + 补丁应用
-- [ ] 独立 TEST_PREFIX configure + make install
-- [ ] 功能回归测试结果
+### Phase 2: 编译 (CMake)
+- [x] cmake 配置完成 (-DBUILD_TESTING=OFF)
+- [x] make 编译完成 (ninja binary)
+- [x] make install 完成 (staging dir)
+- [x] ninja --version 返回 1.12.1
 
 ### Phase 3: 测试验证
-- [ ] make check / make test 结果
-- [ ] 安全弹窗触发确认
+- [x] ninja_syntax_test.py: 21 tests PASS
+- [x] smoke test: ninja --version OK
 
-### Phase 4: 预编译包制作（⭐ verify PASS 后必须）
-- [ ] Step 1-10 打包流程（见 packaging.md）
+### Phase 4: Conan 配方
+- [x] conan-init 生成 conanfile.py + conandata.yml + test_package/
+- [x] conan-verify G1-G4 + L2/L4/L5 全部 PASS
+- [x] W3 本地 CI 模拟 PASS
 
-### Phase 5: 归档收尾
-- [ ] 补丁生成（ohc-run.py refresh-patch --auto）
-- [ ] manifest.yaml / README.md / PROGRESS.md 更新
-- [ ] ohc-run.py verify-build 质量门禁
-
-## 三、对话记录（⭐ 断点续传核心）
-
-> **每轮对话结束时必须更新此节。新 AI 会从这里恢复上下文。**
-
-### 对话 #N — 2026-04-25 HH:MM
-**操作**: （做了什么，如"执行 configure"、"修复 xxx bug"、"制作预编译包"）
-**结果**: （成功/失败/部分成功，附关键输出摘要）
-**发现的问题**: （遇到的坑、错误信息、根因分析）
-**当前状态**: （精确到哪个步骤，下一步该做什么）
-**遗留问题**: （未解决的、需要下轮继续的）
-
----
-
-### 对话 #1 — 2026-04-25 00:00
-**操作**: 执行 ./configure --prefix=$DEFAULT_PREFIX
-**结果**: （待填写）
-**发现的问题**: （待填写）
-**当前状态**: Phase 2 configure 进行中
-**遗留问题**: 无
-
-（后续每轮对话追加...）
-
-## 四、源码修改清单
+## 三、源码修改清单
 | 文件 | 原因 | 方式 | 补丁状态 |
 |------|------|------|---------|
-| ... | ... | ... | ... |
+| src/inline.sh | shebang #!/bin/sh → #!/data/service/hnp/bin/bash | patch | 0001-src-inline.sh.patch |
 
-## 五、预编译包交付物
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| ... | ... | ... |
+## 四、Conan 配方要点
+- package_type = "application" (ninja 是命令行工具)
+- BUILD_TESTING=OFF 避免 CMake FetchContent 下载 Google Test (GitHub 不可达)
+- test_package 使用完整路径调用 ninja 二进制 (R34 合规)
 
-## 六、结束记录
-- **最终状态**: ...
-- **结束时间**: ...
----
-
-**编译结束**: 2026-04-29 20:45
-**最终状态**: built
+## 五、结束记录
+- **最终状态**: built (conan-verify PASS, W3 CI PASS)
+- **结束时间**: 2026-08-07 05:48

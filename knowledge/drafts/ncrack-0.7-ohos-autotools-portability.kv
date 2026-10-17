@@ -1,0 +1,61 @@
+# ═══ Draft knowledge entry — OHOS autotools 适配三要点：configure 的 fd 保存、hmdfs 目录通行、双 TU tentative definition ═══
+# Software: ncrack 0.7（nmap/ncrack，手写 autotools，内置 nbase/nsock/opensshlib 子项目）
+# Gate: conan-verify G0-G4 + L2/L4/L5 全 PASS（VERIFY_RC=0）；conan create 设备实机 test_package PASS
+# Status: DRAFT — path B candidate, same-stem .md/.kv pair
+
+id: ncrack-0.7-ohos-autotools-portability
+severity: 3
+category: autotools|ohos|build-system
+trigger_tool: autoconf|make|conan
+phase: configure|link
+
+keywords: autoconf 2.69, exec 7<&0, bad file descriptor, CONFIG_SHELL, zsh, /system/bin/sh, toybox, hmdfs, umask 077, mktemp -d, permissions, drwx--S---, 2700, group traverse, chmod no-op, duplicate symbol, -fcommon, -fno-common, tentative definition, umac_ctx, ld.lld, CI vs device flag propagation
+
+error_signature: [0-9]+<&0 : bad file descriptor|0: bad file descriptor|permission denied: \./conf[A-Za-z0-9]+/subs1\.awk|could not setup config files machinery|configure: error: \./configure failed for nbase|ld\.lld: error: duplicate symbol: umac_ctx
+
+match_keywords: bad file descriptor, CONFIG_SHELL, hmdfs, umask 077, mktemp, subs1.awk, could not setup config files machinery, duplicate symbol, -fcommon, tentative definition, ld.lld
+
+root_cause: |
+  (1) autoconf 2.69 生成的 configure 用 `exec 7<&0` 保存 stdin：OHOS 的 /system/bin/sh（toybox）
+  不支持多位数 fd 重定向（报 "7<&0 : bad file descriptor"）；换 zsh 后仍可能报 "0: bad file descriptor"，
+  因为 worker/CI 执行 job 时 fd 0 是关闭的。
+  (2) hmdfs（OHOS 家目录文件系统）按**组**判目录通行（目录皆 drwxrws--x）；configure/config.status 用
+  `(umask 077 && mktemp -d "./confXXXXXX")` 建临时目录会得到 2700（drwx--S---），组无 x → 目录不可穿越，
+  其内一切读写全部 EACCES（"permission denied: ./confXXXXXX/subs1.awk" → "could not setup config files
+  machinery"）。chmod 在 hmdfs 上是空操作，只能改 umask。
+  (3) 同一份源码被编成两个 TU（opensshlib 用 umac.c 加 -DUMAC_128 再编出 umac128.o），每个 TU 各定义一次
+  同名文件作用域全局（`struct umac_ctx { ... } umac_ctx;` 无初值 = C tentative definition）→ clang≥11 默认
+  -fno-common 下两强定义 → `ld.lld: error: duplicate symbol`。**关键陷阱**：加 -fcommon 可在设备侧通过，
+  但同一配方在 CI worker 上仍复现（编译标志传播路径不同），故可靠做法是结构性消除而非依赖编译标志。
+
+rec_approach: ohos-autoconf-configshell-and-umask + drop-duplicate-tentative-definition
+rec_description: |
+  (1) 用 CONFIG_SHELL/SHELL 指向 /usr/bin/zsh（OHOS 系统镜像自带、支持 fd>9；autoconf 自举块在 fd-7 行之前，
+  会自动 re-exec），并把 configure 的 stdin 显式接 /dev/null（`< /dev/null`）。
+  (2) 把**所有** configure（顶层 + 每个 AC_CONFIG_SUBDIRS 子目录）里的 `umask 077` 改写为 `umask 022`
+  （022 下 mktemp 建出 drwxr-s--x，可穿越）；只改顶层不够，子目录会报 "configure failed for <subdir>"。
+  以「每份 configure 恰含 N 处 umask 077」作为契约断言，防上游改版后静默失效。
+  (3) 重复符号：优先**结构性消除**——删掉那个从未被使用的全局变量（用 grep 区分「类型使用」与「变量定义」，
+  本例其余 umac_ctx 全是 `struct umac_ctx` 类型），做成补丁；`-fcommon` 只作为年代语义兜底，不作为主修法。
+rec_command: |
+  # (1)(2) 在 recipe 的 build() 内、跑 configure 之前：
+  #   for f in configure nbase/configure nsock/src/configure opensshlib/configure; do
+  #     assert content.count("umask 077") == 2      # 契约
+  #     rewrite umask 077 -> umask 022
+  #   done
+  #   export SHELL=/usr/bin/zsh CONFIG_SHELL=/usr/bin/zsh
+  #   /usr/bin/zsh ./configure ... < /dev/null
+  # (3) patches/0001-<pkg>-drop-unused-global.patch:
+  #   -} umac_ctx;
+  #   +};
+rec_auto_fix: false
+
+affected_scope: 在 OHOS 设备/CI 上用 autotools（尤其老 autoconf ≤2.69 生成的 configure、含 AC_CONFIG_SUBDIRS 递归、或同一源码多 TU 编译）构建的项目。
+
+verification_cmd: conan create . -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 && python3 scripts/ohc-run.py conan-verify <pkg> <ver>
+
+authors:
+  - Ember5843
+source_pr: 9808
+source_commit: be72e16c0
+draft_date: 2026-09-13

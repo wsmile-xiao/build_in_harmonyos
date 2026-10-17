@@ -1,0 +1,247 @@
+--- a/mars/comm/debugger/debugger_utils.c
++++ b/mars/comm/debugger/debugger_utils.c
+@@ -18,8 +18,43 @@
+ //
+ 
+ #include <unistd.h>
+-#include <sys/sysctl.h>
+ 
++/*
++ * Feature-detect the BSD sysctl debugger probe instead of branching on a
++ * platform macro: glibc/musl do not provide <sys/sysctl.h> at all, so on
++ * those libcs (Linux incl. OHOS) the probe falls back to the Linux
++ * standard /proc/self/status TracerPid indicator — same debugger-attach
++ * semantics as the BSD P_TRACED flag check below.
++ */
++#if defined(__has_include)
++#  if __has_include(<sys/sysctl.h>)
++#    include <sys/sysctl.h>
++#    define MARSCOMM_HAVE_BSD_SYSCTL 1
++#  endif
++#endif
++
++#ifndef MARSCOMM_HAVE_BSD_SYSCTL
++#  include <stdio.h>
++#  include <stdlib.h>
++#  include <string.h>
++
++int isDebuggerPerforming() {
++    FILE* f = fopen("/proc/self/status", "r");
++    if (!f) return 0;
++
++    char line[256];
++    int traced = 0;
++    while (fgets(line, sizeof(line), f)) {
++        if (0 == strncmp(line, "TracerPid:", 10)) {
++            traced = (strtol(line + 10, NULL, 10) != 0);
++            break;
++        }
++    }
++    fclose(f);
++    return traced;
++}
++
++#else /* MARSCOMM_HAVE_BSD_SYSCTL */
+ 
+ int isDebuggerPerforming() {
+     struct kinfo_proc infos_process;
+@@ -39,3 +74,5 @@ int isDebuggerPerforming() {
+     int flags = process.p_flag;
+     return flags & P_TRACED;       // value of the debug flag
+ }
++
++#endif /* MARSCOMM_HAVE_BSD_SYSCTL */
+diff --git a/mars/comm/ohos/platform_comm_ohos.cc b/mars/comm/ohos/platform_comm_ohos.cc
+new file mode 100644
+index 0000000..663c8f5
+--- /dev/null
++++ b/mars/comm/ohos/platform_comm_ohos.cc
+@@ -0,0 +1,99 @@
++// Tencent is pleased to support the open source community by making Mars available.
++// Copyright (C) 2016 THL A29 Limited, a Tencent company. All rights reserved.
++
++// Licensed under the MIT License (the "License"); you may not use this file except in
++// compliance with the License. You may obtain a copy of the License at
++// http://opensource.org/licenses/MIT
++
++// Unless required by applicable law or agreed to in writing, software distributed under the License is
++// distributed on an "AS IS" basis, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and limitations under the License.
++
++/*
++ * platform_comm_ohos.cc
++ *
++ * HarmonyOS (OHOS) implementation of the platform abstraction layer that
++ * upstream mars provides through comm/jni/platform_comm.cc (Android, backed
++ * by Java callbacks over JNI).  OHOS native consumers have no Java bridge
++ * inside the library, so the network-state queries fall back to link-level
++ * detection (equivalent to what a headless Linux build would do) and the
++ * alarm/wakelock entry points become no-ops: the Timer driver of mars's
++ * MessageQueue already delivers the Alarm callback without the Android
++ * kernel alarm device, and OHOS PCs have no suspend wakelock concept.
++ */
++
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++
++#include "comm/platform_comm.h"
++#include "comm/socket/local_ipstack.h"
++#include "comm/xlogger/xlogger.h"
++#include "comm/xlogger/loginfo_extract.h"
++
++void ConsoleLog(const XLoggerInfo* _info, const char* _log) {
++    /*
++     * Upstream semantics: the console sink is an *output* of the xlogger
++     * pipeline, next to the file appender — Android routes it to
++     * __android_log_write (logcat), Windows to the debug console. Neither
++     * feeds back into xlogger_Write: doing so would recurse
++     * (ConsoleLog -> xlogger_Write -> appender -> ConsoleLog ...) up to the
++     * recursion guard. OHOS native has no logcat; write to stderr, which
++     * hilogd/hilog buffers pick up for native processes.
++     */
++    char result_log[2048] = {0};
++    if (_info) {
++        const char* filename = ExtractFileName(_info->filename);
++        char strFuncName[128] = {0};
++        ExtractFunctionName(_info->func_name, strFuncName, sizeof(strFuncName));
++        static const char* levelStrings[] = {
++            "V", "D", "I", "W", "E", "F"
++        };
++        const char* level = (_info->level >= 0 && _info->level <= 5)
++                            ? levelStrings[_info->level] : "?";
++        snprintf(result_log, sizeof(result_log), "[%s][%s][%s, %s, %d]:%s",
++                 level, _info->tag ? _info->tag : "", filename, strFuncName,
++                 _info->line, _log ? _log : "NULL==log!!!");
++    } else {
++        snprintf(result_log, sizeof(result_log), "%s", _log ? _log : "NULL==log!!!");
++    }
++    fputs(result_log, stderr);
++    fputc('\n', stderr);
++}
++
++int getNetInfo() {
++    // No Java-side NetworkCallback on OHOS; infer connectivity from the
++    // local IP stack (UDP-connect probe, same technique comm already uses
++    // for AI_ADDRCONFIG detection).
++    TLocalIPStack stack = local_ipstack_detect();
++    if (ELocalIPStack_IPv4 == stack || ELocalIPStack_IPv6 == stack || ELocalIPStack_Dual == stack) {
++        return kOtherNet;
++    }
++    return kNoNet;
++}
++
++bool getCurRadioAccessNetworkInfo(RadioAccessNetworkInfo& _raninfo) {
++    // OHOS PCs are not cellular; no RAN info available.
++    return false;
++}
++
++bool getCurWifiInfo(WifiInfo& _wifi_info) {
++    // SSID/BSSID require the Wi-Fi Kit (ArkTS); native layer cannot query.
++    return false;
++}
++
++bool getCurSIMInfo(SIMInfo& _sim_info) {
++    return false;
++}
++
++bool getAPNInfo(APNInfo& _info) {
++    return false;
++}
++
++bool isNetworkConnected() {
++    return kNoNet != getNetInfo();
++}
++
++bool getProxyInfo(int& _port, std::string& _strProxy, const std::string& _host) {
++    return false;
++}
+diff --git a/mars/comm/ohos/xlogger_threadinfo_ohos.cc b/mars/comm/ohos/xlogger_threadinfo_ohos.cc
+new file mode 100644
+index 0000000..7012f85
+--- /dev/null
++++ b/mars/comm/ohos/xlogger_threadinfo_ohos.cc
+@@ -0,0 +1,44 @@
++// Tencent is pleased to support the open source community by making Mars available.
++// Copyright (C) 2016 THL A29 Limited, a Tencent company. All rights reserved.
++
++// Licensed under the MIT License (the "License"); you may not use this file except in
++// compliance with the License. You may obtain a copy of the License at
++// http://opensource.org/licenses/MIT
++
++// Unless required by applicable law or agreed to in writing, software distributed under the License is
++// distributed on an "AS IS" basis, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and limitations under the License.
++
++/*
++ * xlogger_threadinfo_ohos.cc
++ *
++ * OHOS counterpart of comm/jni/xlogger_threadinfo.cc (Android) and
++ * comm/objc/xlogger_threadinfo.mm (iOS): supplies pid/tid for the log
++ * formatter.  musl's unistd.h only declares gettid() under _GNU_SOURCE,
++ * which the build enables for the whole library.
++ */
++
++#include <unistd.h>
++#include <sys/syscall.h>
++#include <stdint.h>
++#include "comm/compiler_util.h"
++
++extern "C"
++{
++EXPORT_FUNC intmax_t xlogger_pid()
++{
++    static intmax_t pid = getpid();
++    return pid;
++}
++
++EXPORT_FUNC intmax_t xlogger_tid()
++{
++    return (intmax_t)gettid();
++}
++
++EXPORT_FUNC intmax_t xlogger_maintid()
++{
++    static intmax_t pid = getpid();
++    return pid;
++}
++}
+diff --git a/mars/comm/unix/thread/thread.h b/mars/comm/unix/thread/thread.h
+index 18293ad..649f938 100644
+--- a/mars/comm/unix/thread/thread.h
++++ b/mars/comm/unix/thread/thread.h
+@@ -314,14 +314,23 @@ class Thread {
+     }
+ 
+     int unsafe_exit() const {
+-#ifdef ANDROID
++#if defined(ANDROID) || (defined(__linux__) && !defined(__GLIBC__))
++        /*
++         * Android bionic and Linux musl (e.g. OHOS) do not provide
++         * pthread_cancel(). Mirror the delivery the ANDROID branch uses:
++         * install a SIGUSR2 handler that ends the calling thread via
++         * pthread_exit(0) — without an explicit handler the signal's
++         * default disposition would terminate the whole process — then
++         * deliver SIGUSR2 to the target thread.
++         * (glibc keeps the plain pthread_cancel path below.)
++         */
+         struct sigaction actions;
+         memset(&actions, 0, sizeof(actions));
+         sigemptyset(&actions.sa_mask);
+         actions.sa_flags = 0;
+         actions.sa_handler = &exit_handler;
+         sigaction(SIGUSR2, &actions, NULL);
+-        ASSERT2(false, "In Android, use SIGUSR2(handler call pthread_exit) to pthread_cancel");
++        ASSERT2(false, "use SIGUSR2(handler call pthread_exit) to pthread_cancel");
+         return kill(SIGUSR2);
+ #else
+         return pthread_cancel(tid());
+@@ -356,7 +365,7 @@ class Thread {
+ 
+   private:
+ 
+-#ifdef ANDROID
++#if defined(ANDROID) || (defined(__linux__) && !defined(__GLIBC__))
+     static void exit_handler(int _sig) {
+         pthread_exit(0);
+     }

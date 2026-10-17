@@ -1,0 +1,74 @@
+# ═══ Draft knowledge entry — autoconf 2.69 configure 按 $CONFIG_SHELL 重 exec：坏 bash + HMDFS getcwd → 须强制 /bin/sh ═══
+# Software: libfec 1.0-26-gc5d935f
+# Gate: shadow conan create on 10.62.178.77 (ci/conan/profiles/ohos-aarch64)
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: libfec-1.0-26-gc5d935f-configshell-bash-getcwd-hmdfs
+severity: 2
+category: environment|build-system
+trigger_tool: conan
+phase: configure
+
+keywords: CONFIG_SHELL, SHELL, autoconf re-exec, getcwd, shell-init, working directory cannot be determined, HMDFS, mksh, bash, configure, pwd
+
+error_signature: "shell-init: error retrieving current directory: getcwd: cannot access parent directories|configure: error: working directory cannot be determined"
+
+match_keywords: configure working directory cannot be determined, shell-init getcwd error, configshell bash hmdfs, autoconf re-exec config_shell, mksh configure ohos
+
+root_cause: |
+  两层叠加：
+  1) 部分 OHOS 设备的工具链 bash（/data/service/hnp/bin/bash，ci profile 的
+     CONFIG_SHELL/SHELL 指向它）在 HMDFS 目录下 getcwd() 失败（PWD 为空，
+     errno 五花八门：Not a tty / Invalid argument / Bad address / Bad file
+     descriptor）——/bin/sh(mksh) 同目录正常。用户级 bash（~/usr/local/bin/bash）
+     也正常，所以有的设备（frp）不复现。
+  2) autoconf 2.69 的 configure 前奏会**按 $CONFIG_SHELL 重 exec 自身**：即使
+     配方显式用 `sh configure` 调用，只要环境里有 CONFIG_SHELL=<坏 bash>，
+     configure 仍会切到坏 bash 上跑，随后 pwd 检查失败报
+     "configure: error: working directory cannot be determined"。
+  另外 conan 的 self.run(env="conanbuild") 会 source profile [buildenv] 导出
+  的 CONFIG_SHELL/SHELL，配方进程里的 os.environ 改动会被覆盖——必须在
+  命令行上以 VAR=val 前缀压过去。
+
+rec_approach: force-bin-sh-configshell-prefix
+rec_description: |
+  1) configure 调用带变量前缀（对子进程生效，且 configure 会把它记录进
+     config.status 的 SHELL）：
+       self.run('CONFIG_SHELL=/bin/sh SHELL=/bin/sh sh "{configure}" {args}',
+                env="conanbuild")
+  2) make 侧同样防：make 变量覆盖 SHELL=/bin/sh（配方规则是 POSIX 简单命令，
+     mksh 兼容）：
+       autotools.make(target=..., args=["SHELL=/bin/sh"])
+  3) 诊断探针（定位哪只 shell 坏）：
+       cd <HMDFS 构建目录> && for sh in /bin/sh <hnp bash> <usr bash>; do
+         $sh -c 'echo PWD=$PWD'; done
+  4) 与 libdisasm 的"configure 走 sh"互补：那一条只解决脚本直 exec 拒绝；
+     本条解决 $CONFIG_SHELL 重 exec 被坏 bash 劫持。
+rec_command: |
+  grep -E "shell-init|working directory cannot be determined" <conan create log>
+  # 修复后：日志无 shell-init/getcwd 行，configure 正常生成 makefile
+rec_auto_fix: false
+
+affected_scope: |
+  HMDFS 上构建 + CONFIG_SHELL 指向工具链 bash 的所有 autoconf 项目（真机
+  隔离作业常见）；conan-home 在 /storage 且工具链在 /data/service 的布局最易触发。
+
+verification_cmd: |
+  grep -c "getcwd" <conan create log>   # 修复后为 0
+
+evidence: |
+  libfec 1.0-26-gc5d935f 影子验证（10.62.178.77，ci/conan/profiles/ohos-aarch64）：
+  - bash 调用 configure：shell-init/getcwd 刷屏 + "working directory cannot be
+    determined" 失败（diag4）。
+  - 改 `sh configure` 仍失败（diag6）：autoconf 2.69 前奏按 $CONFIG_SHELL
+    （hnp bash）重 exec。
+  - 探针：/data/service/hnp/bin/bash 在 HMDFS 目录 PWD 为空；/bin/sh 正常。
+  - CONFIG_SHELL=/bin/sh SHELL=/bin/sh 前缀 + make SHELL=/bin/sh 后（diag7）：
+    0 条 getcwd，configure/make/上游 7 项正确性测试/test_package 24/24 全绿，
+    package '21b17f8b2bc0e9511e276e3d57a23893067cefe5' created。
+
+authors:
+  - gcw_6YxinkyD
+source_pr:
+source_commit: pending
+draft_date: 2026-09-19

@@ -27,6 +27,22 @@ pkg-config --modversion xproto
 pkg-config --cflags xproto
 ```
 
+## 2025.1 Conan dependency recipe
+
+- Dependency Issue: #1280.
+- Packages 156 public headers, including compiler-probed `X11/Xpoll.h`, 29
+  non-legacy pkg-config modules, and 11 protocol specification documents.
+- Compiles 83 independent public-header consumer tests and runs one
+  package-metadata workflow covering all installed pkg-config modules.
+- Keeps the single upstream keysym verification entry separate and reports its
+  explicit exit-77 result as SKIP when Python `libevdev` is unavailable.
+- Submits knowledge draft E229 to run compile-only Conan consumer tests directly
+  with the profile compiler when CMake is unavailable on the target PC.
+- Submits knowledge draft E230 to keep the generated C template visible to CI's
+  L0c test-source suffix gate without adding an empty marker file.
+- Submits knowledge draft E231 to reproduce target-sensitive public headers that
+  are installed by upstream build definitions but absent from the source tree.
+
 ## 依赖
 - 无外部依赖（纯头文件包）
 

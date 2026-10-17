@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_fsm_variant LANGUAGES CXX)
+find_package(fsm CONFIG REQUIRED)
+add_executable(test_fsm sample.cpp)
+target_compile_features(test_fsm PRIVATE cxx_std_17)
+target_link_libraries(test_fsm PRIVATE mp::fsm)
+enable_testing()
+add_test(NAME fsm_consumer COMMAND test_fsm)

@@ -1,0 +1,75 @@
+#====================================================================
+# E707-draft-cmake-configure-wrapper-misdetected-autotools.kv
+#   — init-build 把 CMake 便捷包装 ./configure 误判成 autotools
+#====================================================================
+# 来源: paraglob 0.6.0（Zeek 子组件）OHOS aarch64 适配, 2026-09-24
+#       同型先例: zint 2.16.0 notes 问题表 #2「manifest.yaml build_system
+#                 错误 —— init-build 自动检测为 autotools」
+# 状态: 草稿（待人工审核后 promote 为正式条目）
+
+id:                     E707-draft-cmake-configure-wrapper-misdetected-autotools
+trigger_tool:           init-build|conan-init
+phase:                  adaptation
+error_signature:        'conanfile\.py 模板不可用（autotools）|test_package-conanfile-autotools\.py.*不可用|BUILD_SYSTEM="autotools"|build_system: autotools'
+
+severity:               2
+category:               build-system, detection, conan-init, cmake, manifest
+match_keywords:         init-build, conan-init, BUILD_SYSTEM, build.system, autotools, cmake, configure wrapper, Convenience wrapper, _detect_build_system, manifest, 模板不可用
+title:                  上游根目录的 CMake 便捷包装 ./configure 让 init-build 误判成 autotools（且被 env 优先级固化）
+
+root_cause: |
+  ①上游用「CMake 便捷包装脚本」当 `./configure`（paraglob 版首行即
+  `# Convenience wrapper for easily viewing/setting options that the project's
+  CMake scripts will recognize`，内部只做 mkdir build + 调 cmake），而
+  init-build 的构建系统探测**见 `configure` 即判 autotools**。
+  ②更关键：`scripts/ohc/conan_recipe.py::_detect_build_system()` 的优先级是
+  **`BUILD_SYSTEM` env（init-build 写进 `.build-context-*`）> manifest.build.system
+  > top-level build_system > 源码扫描**——所以即使把 manifest 手改成 cmake，
+  只要 source 过 `.build-context` 或 env 里带着旧值，conan-init 仍会选
+  `conanfile-autotools.py.tmpl`，并报
+  `conanfile.py 模板不可用（autotools）` / `test_package-conanfile-autotools.py 模板不可用`，
+  产出 `manifest.build_system = "autotools"`、`.build-context` 里 `BUILD_SYSTEM="autotools"`。
+  ③随后 CMake 包被当 autotools 包走 configure/make 链，形态像「上游构建系统坏了」。
+
+affected_scope:         所有根目录带 `./configure` 包装脚本的 CMake 工程（Bro/Zeek 系
+                        与任何抄 Bro wrapper 的项目），以及任何 init-build 判定值需要
+                        人工改判的包；zint 2.16.0 已有同型记录。
+
+verification_cmd:       grep -n "^#" "$HOME/ws/tmp/builds/paraglob-0.6.0.work/configure" | head -5; grep -n "BUILD_SYSTEM" "$HOME/ws/worktrees/paraglob-0.6.0/scripts/ohc/conan_recipe.py"
+rec_priority:           1
+rec_approach:           force-build-system-cmake
+rec_description: |
+  两处一起改，缺一不可：
+  ①manifest.yaml 同时把 `build_system:`（顶层）与 `build.system:` 改成 `cmake`；
+  ②跑 conan-init 时**显式 `export BUILD_SYSTEM=cmake` 且不要 source
+  `.build-context-<pkg>-<ver>`**（否则 env 优先级会再次把 autotools 盖回去）。
+  之后 conan-init 才会选 `conanfile-cmake.py.tmpl` 并生成 cmake 版
+  conanfile + test_package。改完以 `manifest.build.system == "cmake"` 且
+  conanfile 含 `cmake_layout` 为通过判据。
+rec_command: |
+  PKG="$HOME/ws/worktrees/<pkg>-<ver>/archives/<l>/<pkg>/<ver>"
+  # 1) manifest 两处改 cmake（yaml.safe_load 回读自检）
+  # 2) 显式 env 跑 conan-init：
+  cd "$HOME/ws/worktrees/<pkg>-<ver>"
+  export BUILD_SYSTEM=cmake
+  unset BUILD_SRC_DIR
+  python3 scripts/ohc-run.py conan-init <pkg> <ver>
+  # 3) 判据
+  grep -q "cmake_layout" "$PKG/conanfile.py" && echo OK
+rec_auto_fix:           true
+rec_impl:               recipe-option
+
+prescan_pattern:        BUILD_SYSTEM|build\.system|_detect_build_system|Convenience wrapper
+prescan_globs:          configure, configure.ac, manifest.yaml, .build-context-*
+
+forbid_1_pattern:       conanfile-autotools\.py\.tmpl.*直接手改|rm -f .*build-context
+forbid_1_reason:        手改仓库 templates/ 属框架改动（须单独 PR）；删 build-context 会丢 BASE_SHA/HEAD_SHA 等断点字段，改用显式 export BUILD_SYSTEM 覆盖即可
+forbid_2_pattern:       autotools.*模板不可用.*继续|build_system.*autotools.*不管
+forbid_2_reason:        带着错误 build.system 走完流程会让 manifest/conanfile/notes 三面互相矛盾，且 W3 用错构建链（形态像上游坏了）
+principles:             P002, P003, P011
+similar_to:
+caused_by:
+prerequisite_of:        E706
+conflicts_with:
+
+doc_file:               E707-draft-cmake-configure-wrapper-misdetected-autotools.md

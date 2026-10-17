@@ -1,0 +1,29 @@
+#====================================================================
+# Draft: musl-based libc (OHOS) has no pthread_getaffinity_np /
+#        pthread_setaffinity_np / pthread_yield, and gates cpu_set_t
+#        behind _GNU_SOURCE -- use POSIX sched_* instead
+#====================================================================
+
+id:                     DRAFT-MUSL-NO-PTHREAD-AFFINITY-NP
+trigger_tool:           conan|clang|gcc|make|aclocal
+phase:                  compilation
+error_signature:        call to undeclared function 'pthread_getaffinity_np'|call to undeclared function 'pthread_setaffinity_np'|call to undeclared function 'pthread_yield'|unknown type name 'cpu_set_t'
+
+severity:               1
+category:               portability|ohos-platform|libc
+match_keywords:         musl, ohos, openharmony, cpu_set_t, CPU_SET, CPU_ALLOC, pthread_getaffinity_np, pthread_setaffinity_np, pthread_yield, sched_getaffinity, sched_setaffinity, sched_yield, _GNU_SOURCE, sched.h, affinity, cpu pinning
+
+title:                  musl/OHOS 不提供 glibc 的 pthread_getaffinity_np/pthread_setaffinity_np/pthread_yield，且 cpu_set_t 被 #ifdef _GNU_SOURCE 圈住：一律改用 POSIX sched_* 并在每个编译单元定义 _GNU_SOURCE
+
+root_cause:             OHOS 的 C 库是 musl 血统，sysroot 里根本没有 pthread_getaffinity_np / pthread_setaffinity_np / pthread_yield 这三个 glibc GNU 扩展（grep sysroot/usr/include 全部落空），只有 POSIX 的 sched_getaffinity(0,…)/sched_setaffinity(0,…)/sched_yield()；另一方面 sched.h 把 cpu_set_t 与整个 CPU_* 宏族（第 51–141 行）包在 #ifdef _GNU_SOURCE 里，而 OHOS 的 pthread.h 只对 struct cpu_set_t 做前置声明、从不提供 typedef。于是源码里"靠 <pthread.h> 顺带拿到 cpu_set_t"（glibc 的传递包含习惯）和"直接用 pthread_*_np 设 CPU 亲和性"两种写法在 OHOS 上同时失效。另外 AC_CHECK_LIB 阶段报的只是 undefined reference warnings，clang 默认不报错，容易被忽略直到真正链接。
+affected_scope:         任何用 pthread_*_affinity_np / pthread_yield / cpu_set_t 做 CPU 绑核、亲和性或调度压测的包（rt-app、schedutils 类、实时压测/绑核工具），以及假定 <pthread.h> 会传递引入 cpu_set_t 的老代码；特别是"只做交叉编译能过就交付"的包会在这里漏掉。
+verification_cmd:       grep -rn "getaffinity_np\|setaffinity_np\|pthread_yield" $OHOS_SYSROOT/usr/include | wc -l   # 期望 0；再确认 sed -n '51,141p' $OHOS_SYSROOT/usr/include/sched.h 是 _GNU_SOURCE 守卫块
+rec_priority:           1
+rec_approach:           replace-gnu-affinity-np-with-posix-sched-and-define-gnu-source-per-tu
+rec_description:        (1) 把 pthread_getaffinity_np(pthread_self(),sz,mask) 换成 sched_getaffinity(0,sz,mask)、pthread_setaffinity_np(pthread_self(),sz,mask) 换成 sched_setaffinity(0,sz,mask)、pthread_yield() 换成 sched_yield()；Linux 上 pid=0 的语义就是"调用线程"，与 pthread_self() 完全等价，且这组替换在 glibc 上同样编译通过（不引入任何平台宏，符合补丁禁用 __OHOS__ 的口径）；顺手把 perror() 字符串改成新函数名；(2) 需要 cpu_set_t/CPU_* 的每个编译单元都要在包含系统头之前 #define _GNU_SOURCE——只改一个公共头往往太晚（features.h 已被前面的 <stdio.h> 处理过），正确做法是在缺 _GNU_SOURCE 的 .c 文件顶部按上游既有写法加一行；(3) 顺带检查该 .c 是否只包含了 <pthread.h> 而没包含 <sched.h>，musl 下没有传递关系；(4) 验收要在 test_package 里真跑一次绑核（sched_setaffinity 到 CPU0 再读回 CPU_COUNT/CPU_ISSET），不要只验证能链接。
+rec_command:            sed -i 's/pthread_getaffinity_np(pthread_self(),/sched_getaffinity(0,/; s/pthread_setaffinity_np(pthread_self(),/sched_setaffinity(0,/; s/pthread_yield()/sched_yield()/' src/*.c\nsed -i 's|#include <pthread.h>|#include <pthread.h>\\n#include <sched.h>|' src/*.c
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:
+source_commit:

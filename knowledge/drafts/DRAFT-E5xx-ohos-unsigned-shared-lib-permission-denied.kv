@@ -1,0 +1,73 @@
+id: DRAFT-E5xx-ohos-unsigned-shared-lib-permission-denied
+title: OHOS 动态加载器拒载未签名共享库（dlopen 报 Permission denied），构建目录件因带 RUNPATH 可加载而掩盖问题
+trigger_tool: runtime|meson|cmake
+phase: runtime
+category: ohos, platform, conan, runtime, linking
+severity: 2
+error_signature: "Error loading shared library .*: Permission denied|Signal 5 \\(core dumped\\)"
+match_keywords: Permission denied, Error loading shared library, dlopen, codesign, binary-sign-tool, 签名, 未签名, soname, RUNPATH, meson install, test_package, SIGTRAP
+error_excerpt: >
+  # 以下为改名前的真实报错原文（当时包名 gexiv2，后按官方分支改名为 libgexiv2）
+  gexiv2/0.14.6 (test package): RUN: /data/service/hnp/bin/bash -c "./test_gexiv2"
+  Error loading shared library libgexiv2.so.2: (needed by ./test_gexiv2)
+  Error relocating ./test_gexiv2: gexiv2_get_version: symbol not found
+  ERROR: gexiv2/0.14.6 (test package): ConanException: Error 127 while executing
+root_cause: >
+  OHOS 内核/加载器对 ELF（可执行文件与共享库）有签名门禁：meson install 落地后
+  未用 binary-sign-tool 签名的 libgexiv2.so.2.14.6 会被 dlopen 直接拒绝，报
+  "Error loading shared library <名>: Permission denied"（不是常见的
+  "No such file or directory"，极易误判为路径/LD_LIBRARY_PATH 问题）。
+  迷惑点：构建目录里的同一份库可正常 dlopen —— 因为 meson 构建件带 RUNPATH
+  指向依赖目录、且未被签名工具改写；install 时 meson 会重链接以剥离 build
+  rpath，两次产物除 .codesign/RUNPATH 外字节级仅有 ~230 字节差异，于是
+  "本地 meson test 全过、test_package 却加载失败"。
+  同理，test_package 自己编译出的测试二进制若未签名，执行时内核 exec 门禁直接
+  抛 SIGTRAP（signal 5 / exit 133）。
+rec_approach: >
+  在 conanfile.py 的 package() 内对安装后的 ELF 统一自签名，并把 soname 链接
+  落为真实文件副本；test_package 在 build() 里对自己编译出的测试二进制同样签名。
+  判据：dlopen 报 Permission denied（而非 not found）即指向签名，而非搜索路径。
+solution: |
+  # conanfile.py package()（OHOS 分支）
+  if self.settings.os == "OHOS":
+      self._create_shared_lib_aliases(os.path.join(self.package_folder, "lib"))
+      self._sign_installed_elfs()
+
+  def _sign_installed_elfs(self):
+      signer = "/data/service/hnp/bin/binary-sign-tool"
+      targets = []
+      for directory in ("lib", "bin"):
+          root = os.path.join(self.package_folder, directory)
+          if not os.path.isdir(root):
+              continue
+          for name in sorted(os.listdir(root)):
+              path = os.path.join(root, name)
+              if not os.path.isfile(path) or os.path.islink(path):
+                  continue
+              with open(path, "rb") as fh:
+                  if fh.read(4) != b"\x7fELF":
+                      continue
+              targets.append(path)
+      for path in targets:
+          self.run(shlex.join([signer, "sign", "-inFile", path,
+                               "-outFile", path, "-selfSign", "1"]))
+
+  # test_package：构建出的二进制同样签名（否则 SIGTRAP）
+  self.run(shlex.join([signer, "sign", "-inFile", binary,
+                       "-outFile", binary, "-selfSign", "1"]))
+
+  # 最小复现/验证（只加载，不依赖 test 框架）
+  #   LD_LIBRARY_PATH=<pkg>/lib python3 -c "import ctypes; ctypes.CDLL('libgexiv2.so.2')"
+  #   未签名 -> OSError: Error loading shared library ...: Permission denied
+  #   已签名 -> 正常返回
+fallback: >
+  若目标平台/工具链不提供 binary-sign-tool（非 OHOS），此问题不存在，无需处理。
+  若签名后仍报 Permission denied，再排查文件 mode（应为 o+x）、目录搜索权限与
+  LD_LIBRARY_PATH 顺序；本机 HMDFS 上 chmod 可能不生效，不要依赖 chmod 修复。
+affected_scope: >
+  任何在 OHOS 上产出共享库、且 test_package/消费端会在运行时 dlopen 或链接执行的
+  Conan 配方（尤其 meson 工程：meson install 必然重链接剥离 build rpath）。
+verify_builds: "libgexiv2 0.14.6（本机制首发实证）：签名前 test_package 报 Error 127/133，签名后 13 检查全过 + 上游 meson test 16/16 通过"
+prescan_pattern: "binary-sign-tool"
+kb_ref: ""
+last_updated: 2026-09-21

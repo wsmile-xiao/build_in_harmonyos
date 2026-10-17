@@ -1,0 +1,122 @@
+#====================================================================
+# DRAFT-ohos-static-test-framework-self-wrapped-by-alloc-mock -
+#   静态链入的测试框架，其自身 allocator 调用也被 --wrap 拦截 → 必崩
+#====================================================================
+# 与既有条目的关系（差异化定位，勿重复申报）:
+#
+#  与 DRAFT-ohos-fortify-source-defeats-libc-wrap-mock 同属「--wrap 打桩」家族，
+#  但根因不同：
+#    · 那条是 **编译期改写**（fortify 把 read→__read_chk）导致 --wrap 匹配不到；
+#    · 本条是 **链接期作用域** 问题——__wrap_calloc 会拦截**整个链接单元**内
+#      对它的一切引用，包括测试框架自身的簿记分配。
+#  两者的判别手段也不同：前者看 nm 是否出现 __*_chk；后者看框架是静态还是动态。
+#
+#  实测 knowledge/ 全库 "wrap=calloc" / "static.*calloc.*wrap" 命中 0，属空白。
+#====================================================================
+
+id:                     DRAFT-ohos-static-test-framework-self-wrapped-by-alloc-mock
+trigger_tool:           make|clang|ld|test
+phase:                  testing|linking
+error_signature:        __wrap_calloc|
+                         FAIL test/unit/\S+ \(exit status: 139\)|
+                         exit status: 139|
+                         Segmentation fault.*\n.*__wrap_(calloc|malloc|realloc)
+
+severity:               2
+category:               ohos, testing, linking, build-system, portability
+match_keywords:         wrap=calloc, wrap=malloc, static library, cmocka, exit status 139,
+                         SIGSEGV, __wrap_calloc, test framework, test_requires,
+                         shared variant, tpm2-tss
+title:                  测试框架若**静态**链入，其自身 calloc/malloc 也会被
+                         `-Wl,--wrap=calloc` 拦截 → 每个用例 SIGSEGV（exit 139）
+
+root_cause: |
+  `-Wl,--wrap=calloc` 的语义是：把本**链接单元**内对 `calloc` 的未定义引用
+  重定向到 `__wrap_calloc`。若被测试的代码与测试框架**一起静态链接进同一个
+  可执行文件**，那么框架自身的簿记分配（建测试链表、分配 fixture 等）也会走
+  `__wrap_calloc` —— 而该桩函数的设计意图是「从 mock 队列取出给**被测代码**的
+  预置返回值」。框架于是拿到不相干的指针 → 立刻 SIGSEGV。
+
+  典型误判：以为是测试逻辑 bug（因为失败信息指向 `__wrap_calloc`），
+  实则是链接形态问题。
+
+  实测（tpm2-tss 4.2.0 的 test/unit/tctildr-getinfo.c，用
+  `-Wl,--wrap=calloc` 给被测代码的 calloc 打桩）：
+    · cmocka 静态（libcmocka.a）→ **8/8 用例 rc=139**（连最平凡用例也崩）
+    · cmocka 动态（libcmocka.so）→ 12/12 PASSED
+  独立对照探针：同一测试程序，static 崩溃 / shared 正常。
+  ohpcd 上 cmocka/2.0.2 只有 `shared: False` 一个变体，故默认必命中此坑。
+
+affected_scope: >
+  任何「用 --wrap 打桩内存分配函数，且测试框架与被测代码静态同链」的测试套件。
+  使用 conan 时尤其隐蔽：多数配方的测试框架依赖（test_requires）默认取
+  shared=False 的变体，而该缺陷只在链接形态上体现，编译期无任何告警。
+
+verification_cmd: |
+  # 1) 确认测试用 --wrap 打桩分配函数
+  grep -oE '\-\-wrap=(calloc|malloc|realloc|free)' */Makefile*
+  # 2) 确认框架的链接形态（静态 .a / 动态 .so）
+  ls <framework_pkg>/lib | grep -E '\.a$|\.so'
+  # 3) 判别判据：静态框架时，连平凡用例也崩（看 exit status）
+  grep -E 'exit status: 139|__wrap_' test-suite.log
+
+rec_priority:           1
+rec_approach:           use-shared-variant-of-test-framework
+rec_description: >
+  让测试框架以**共享库**形态链入。这样框架内部的 calloc 等调用在编译进
+  .so 时已绑定，不会被可执行文件的 --wrap 重定向；而 --wrap 仍能正常拦截
+  被测代码（被静态链进可执行文件）的调用。
+rec_command: |
+  # conan：在消费者配方里为框架依赖指定 shared 变体
+  #   default_options = { ..., "cmocka/*:shared": True }
+  # 关掉 fortify（见同族另一条）后再跑：
+  make check -j1 CPPFLAGS="-DNDEBUG -U_FORTIFY_SOURCE"
+  # 共享框架让测试二进制运行期需要它的 .so：
+  #   ⚠ 必须把 LD_LIBRARY_PATH 作为 **make 命令行变量**传入
+  #   （self.run(env=...) 会被 conan 重新应用的 buildenv 覆盖）
+  make check -j1 LD_LIBRARY_PATH="<framework>/lib"
+rec_auto_fix:           false
+rec_impl:               dependency-variant-override
+
+fallback_priority:      2
+fallback_approach:      scope-the-wrap-to-tested-code-only
+fallback_description: >
+  若框架无法用共享形态（例如上游只发静态或链路要求），可改为**只对被测代码**
+  应用打桩：把被测代码单独编成一个静态库/lib 与测试框架分离，或用
+  `--wrap` 之外的注入方式（如把分配函数做成可注入的函数指针）。
+  代价通常大于直接换 shared 变体，故列为回退。
+fallback_command:       nm <framework>.a | grep -E 'U (calloc|malloc)'
+fallback_auto_fix:      false
+fallback_impl:          build-restructure
+
+forbid_1_pattern:       删除该用例|加 XFAIL|跳过整个测试文件
+forbid_1_reason:        缺陷来自链接形态与打桩机制的交互，用例本身有效；
+                        跳过会丢失覆盖且掩盖真实问题
+forbid_1_consequence:   R51 口径失真，评审拒绝
+
+forbid_2_pattern:       改 __wrap_calloc 直接转发到 __real_calloc 以"消除崩溃"
+forbid_2_reason:        该桩函数原本用于模拟分配失败分支，直接转发会让这些
+                        用例永远测不到失败路径（看似通过，实则失去语义）
+forbid_2_consequence:   测试形同虚设，属伪造通过
+
+principles:
+causes:                 []
+caused_by:              []
+similar_to:             [DRAFT-ohos-fortify-source-defeats-libc-wrap-mock]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-static-test-framework-self-wrapped-by-alloc-mock.md
+last_updated:           2026-09-19
+source_event:           archives/t/tpm2-tss/4.2.0：tctildr-getinfo 由 SIGSEGV
+                        （8/8 用例 rc=139）转为 12/12 PASSED；套件 47/47
+authors:                jumping_ggjjkk <jumping_ggjjkk@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-19
+
+draft:                  true

@@ -1,0 +1,156 @@
+id: DRAFT-E687-raw-makefile-cmdline-flag-pin-static-openblas-l2
+status: pending-editor-review
+title: "纯 make（无 configure）包适配四件套：make 命令行钉死 CFLAGS/CXXFLAGS/LIBS 防 CI 环境 flags 泄漏（coinor-cbc !11827 教训）、openblas 静态归档直链让 CLI 过 L2 裸跑门禁、5 个 CLI 补 --version/--help（上游把该参数当输入文件打开，theta 直接 fopen(NULL)）、上游 .correct 参考输出陈旧时按 Makefile 注释数值判据"
+category: makefile, no-configure, compile-flags, static-link, test-counting
+build_system: makefile
+phase: build
+trigger_tool: ohc-conan-verify
+severity: 2
+prescan_pattern: '^(export\s+)?(CFLAGS|CXXFLAGS|CPPFLAGS|LIBS|LDLIBS)\s*[+?:]?='
+prescan_globs: 'Makefile, makefile, */Makefile, */makefile, */*/Makefile, GNUmakefile'
+match_keywords: >
+  raw makefile, 纯 make, 无 configure, export CFLAGS, Makefile 写死 CFLAGS,
+  makefile export LIBS, 命令行变量覆盖, make 命令行变量 下传 子 make,
+  -march=native, -mtune=native, -fopenmp, USEOPENMP, -static 全静态链接,
+  CFLAGS/CXXFLAGS='-fPIC -O2', CI worker 环境泄漏 flags, R33 钉死 flags,
+  L2 smoke --version, <bin> --version, Error loading shared library libopenblas,
+  LD_LIBRARY_PATH 裸跑 127, libopenblas.a 直链, -lopenblas 动态, NEEDED 只剩 libc.so,
+  theta fopen(NULL), 上游没有 --version, g50.correct 陈旧, DIMACS < 1.0e-6,
+  test/Makefile 注释判据, six digits or more, binary-sign-tool 自签
+error_signature: >
+  Error loading shared library libopenblas\.so|
+  error while loading shared libraries: .*openblas|
+  Error relocating .*: symbol not found|
+  CFLAGS/CXXFLAGS='-fPIC -O2'|
+  warning: .*-march=native|
+  --version.*(Giving up|Usage:)|
+  segmentation fault.*fscanf|
+  .*\.correct.*[Tt]ime:.*\n?< 但目标值行不一致
+error_excerpt: >
+  ① 上游 Makefile 写死（coinor-csdp 6.2.0 实测，顶层 Makefile 6/11 行）：
+    export CFLAGS=-m64 -march=native -mtune=native -Ofast -fopenmp -ansi -Wall
+      -DBIT64 -DUSEOPENMP -DSETNUMTHREADS -DUSESIGTERM -DUSEGETTIME -I../include
+    export LIBS=-static -L../lib -lsdp -llapack -lblas -lm
+    makefile 定义**优先于环境** ⇒ 配方/环境两侧任一不钉都会漂移；CI worker
+    泄漏面（coinor-cbc !11827 当日实测）：环境里 CFLAGS/CXXFLAGS='-fPIC -O2'。
+  ② 动态链在 L2 门禁形态下必 127（e687-repro.sh [B] 段，2026-09-23 实测）：
+    $ clang t.c -L<openblas>/lib -lopenblas -o t_dyn
+    $ LD_LIBRARY_PATH= ./t_dyn
+    Error loading shared library libopenblas.so.0: No such file or directory
+    Error relocating ./t_dyn: ddot_: symbol not found
+    → 动态 rc=127｜静态 .a 直链 rc=0，readelf -d NEEDED=1（只剩 libc.so）
+  ③ L2 门禁源码（scripts/ohc/conan_verify.py gate_l2_smoke_test，裸跑无 conanrun）：
+    rc, out = self._run([str(bin_file), "--version"], timeout=10)
+    ... if failed and not tested: g.passed = False   # 全部 CLI 失败 ⇒ L2 FAIL
+  ④ 上游 5 个 CLI 无 --version 分支（实测）：
+    csdp --version → read_prob("--version") 失败 → "Giving up." exit(201)
+    theta --version → fopen(NULL) 后 fscanf(fid,…) 段错误（未判空）
+    complement/graphtoprob/rand_graph --version → usage exit(1)
+  ⑤ 钉死 flags 下传子 make 实测（e687-repro.sh [A] 段）：
+    编译/链接行携带 -DPROBE_E687 次数: 37（lib/solver/theta/example 四层全部取到）
+  ⑥ 上游参考输出陈旧实测：g50.out 多出第 2 行 `CSDP 6.2.0`（lib/sdp.c 在
+    printlevel>=1 打印，theta 与 csdp 同 easy_sdp→sdp 路径；theta1.correct 有该行），
+    但目标值行与 DIMACS 与 .correct 一致 ⇒ 整文件 diff 必假 FAIL。
+root_cause: >
+  三个互相独立的机制在"纯 make 包"上叠加：
+  ① **flags 所有权错位**——makefile 里 `export CFLAGS=...` 的定义优先于环境变量，
+     而环境里又有 CI worker 泄漏的 `CFLAGS/CXXFLAGS='-fPIC -O2'`；配方若既不读也不钉，
+     "设备验证的配置"与"worker 实际配置"就可能分叉（coinor-cbc 案例分叉点是 NDEBUG 编译期
+     行为，报错形态是测试段错误而非 flags 报错，极难归因）。唯一确定性解法是在 **make
+     命令行**上钉死（命令行变量优先级最高，且 GNU make 会把命令行变量导出给
+     `cd subdir; make` 形态的子 make——与 `$(MAKE) -C` 不同，这条依赖"导出到 recipe 环境"
+     而非 MAKEFLAGS 透传，实测 37 行全部取到）。
+  ② **动态 BLAS 与 L2 裸跑门禁冲突**——L2 以 `<bin> --version` 裸进程探测（不 source
+     conanrun），动态 `-lopenblas` 的产物没有 RPATH/conanrun 注入即 rc=127；而上游 LIBS
+     写死 `-static` 在 OHOS（无静态 libc）又必败。交集解法 = 只对依赖归档静态直链、
+     自身仍动态 libc：产物 NEEDED 只剩 libc.so，同时规避 P009 的 RPATH 覆盖问题与
+     `-static` 全静态必败。前提是该依赖的 .a 无 Fortran/OpenMP 运行时未决符号
+     （libopenblas.a 实测 10 个所需符号直链通过；.so 才带 flang 运行时内部解析）。
+  ③ **CLI 无版本分支**——平台 smoke 门禁约定 `<bin> --version` rc=0，而这类 2016 年前的
+     工具把 argv 当文件名；补丁必须插在 argc 检查**之前**（theta 的 argc 检查是 2..2，
+     `--version` 恰好通过检查走进 fopen(NULL)）。同时上游 `.correct` 参考输出会陈旧
+     （生成时的 printlevel/耗时与当前源码不一致），字节比对判据本身不可靠，
+     必须退回上游自己在 test/Makefile 注释里写明的数值口径。
+affected_scope: >
+  判定信号（满足 ①+② 任两条即适用）：① tarball 根目录只有 Makefile/makefile，
+  无 configure/CMakeLists.txt/meson.build；② 顶层 Makefile 出现 `export CFLAGS=` /
+  `export LIBS=` / `-march=native` / `-fopenmp` / `-static`；③ 交付含 CLI 且依赖
+  BLAS/LAPACK/OpenBLAS 类数学库；④ 上游测试用 `.correct`/golden 文件做期望输出。
+  同族：coinor 家族（cbc/clp/cgl/osi/csdp… 的手写/子包 make 层）、rtklib（E628）、
+  cronutils（raw-makefile + OHOS CLI 签名）、clthreads（DRAFT-8958 的 -march=native 坑）。
+rec_priority: 1
+rec_approach: cmdline-flag-pin-plus-static-archive-direct-link-plus-version-branch
+rec_description: >
+  四步：① 在 make **命令行**同时钉 CFLAGS/CXXFLAGS/LIBS/CC/CXX（值取本机验证值，
+  与 worker 泄漏值同向），剔除 -march=native/-mtune=native/-fopenmp(+USEOPENMP/
+  SETNUMTHREADS)/-m64/-ansi，保留与 .correct 输出形态相关的 -DBIT64/-DUSESIGTERM/
+  -DUSEGETTIME；② 依赖数学库用**静态归档绝对路径**直链（LIBS 里写
+  <dep>/lib/libX.a，不是 -lX），交付 ELF 的 NEEDED 收敛到 libc.so 后再走 L2 裸跑；
+  ③ 上游 CLI 补 --version/--help 分支（插在 argc 检查前，输出与 usage 横幅同源的
+  版本串），refresh-patch --auto 生成 per-file 补丁并在 conandata 登记；
+  ④ 上游测试判据按 test/Makefile 注释的**数值口径**（目标值 6 位一致 +
+  DIMACS < 1.0e-6）在 build() 内用 Python 断言，不做整文件字节比对。
+  附：OHOS 交付 ELF 跑测试前 binary-sign-tool 自签（P017，package() 幂等兜底）。
+rec_command: >
+  make CC='<clang>' CXX='<clang++>' CFLAGS='-O2 -fPIC <defines> -I../include'
+       CXXFLAGS='-O2 -fPIC' LIBS='-L../lib -lsdp <dep>/lib/libX.a -lm'
+       MAKEFLAGS= all
+rec_auto_fix: false
+rec_impl: makefile-cmdline-variable-pin
+fallback_priority: 2
+fallback_approach: patch-makefile-vars
+fallback_description: >
+  若上游把变量用于隐式规则/自动依赖生成导致命令行覆盖不生效（例如变量在 include
+  的子 makefile 里被 override 强制、或用了 immediate := 展开），退回 per-file 补丁把
+  顶层 Makefile 的 export 行改成 ?= 或删掉 -march=native/-fopenmp/-static 后
+  refresh-patch --auto 登记；补丁是上游可提交形态（P005）。
+fallback_command: "make -f Makefile patched; python3 scripts/ohc-run.py refresh-patch coinor-<sw> <ver> --auto"
+fallback_auto_fix: false
+fallback_impl: patch-makefile-vars
+forbid_1_pattern: (os\.environ\.get\(\s*["']CFLAGS|["']CFLAGS["']\s*%|CFLAGS=\$\{?CFLAGS)
+forbid_1_reason: >
+  配方读取/拼接环境 CFLAGS —— 环境 flags 随 worker 漂移（CI 泄漏面
+  CFLAGS/CXXFLAGS='-fPIC -O2' 实测存在），设备验证配置与 CI 构建配置会分叉。
+forbid_1_consequence: >
+  构建配置分叉在编译期按宏/优化级分叉（coinor-cbc !11827：#ifdef NDEBUG 行为不同），
+  报错形态是测试段错误/数值漂移，归因成本 75–100min 一轮。
+forbid_2_pattern: (LIBS=.*-lopenblas|LDFLAGS=.*-lopenblas|"-lopenblas")
+forbid_2_reason: >
+  动态 -lopenblas 的交付 CLI 在 L2 门禁（裸 <bin> --version、无 conanrun 的
+  LD_LIBRARY_PATH）下必 rc=127；上游 -static 全静态在 OHOS（无静态 libc）也必败。
+forbid_2_consequence: >
+  L2 `所有二进制文件均无法运行` ⇒ conan-verify FAIL ⇒ 采信轮 rc=1 不得进 finish；
+  或被误判为"配方链接错"去改依赖图。
+forbid_3_pattern: (diff\s+.*\.correct\s+.*\.out|整文件字节比对.*correct)
+forbid_3_reason: >
+  上游 .correct 参考输出会陈旧（g50.correct 缺当前源码必打的 `CSDP 6.2.0` 横幅）
+  且耗时行随机器浮动，字节比对判据与 test/Makefile 注释的数值口径不一致。
+forbid_3_consequence: >
+  必然假 FAIL，把人引向"改输出/改 .correct"的错误修复方向（对上游夹具的越权改动）。
+principles: P006, P009, P012, P017
+similar_to: >
+  E628（同为 raw makefile 家族，那条讲源码布局与 N 口径，本条讲 flags 所有权与
+  交付 ELF 形态）、DRAFT-8958-clthreads-makefile-stage-install-shadow（-march=native
+  交叉坑与配方侧打包，互补）、DRAFT-cronutils-1.1-raw-makefile-ohos-cli-signing
+  （同为 raw makefile + OHOS CLI 交付，那条讲签名，本条签名只作附带步骤）、
+  DRAFT-cnrbtree-0.3-makefile-recipe-gcc-hardcode / DRAFT-cohomcalg-0.32-makefile-gxx-override
+  （makefile 硬编码工具链变体）
+caused_by:
+conflicts_with:
+prerequisite_of:
+verification_cmd: >
+  sh $HOME/tmp/coinor-csdp-6.2.0/e687-repro.sh
+  # 期望三段全 PASS（rc=0）：
+  #   [A] 编译/链接行携带 -DPROBE_E687 次数 >0（命令行变量下传 lib/solver/theta/example 四层子 make）
+  #   [B] 动态 -lopenblas 裸跑 rc=127、静态 .a 直链裸跑 rc=0、readelf -d NEEDED=1（libc.so）
+  #   [C] 5 个 CLI --version rc=0 且输出恰为 "CSDP 6.2.0"
+doc_file: knowledge/drafts/DRAFT-E687-raw-makefile-cmdline-flag-pin-static-openblas-l2.md
+last_updated: 2026-09-23
+source_event: coinor-csdp 6.2.0 全新包适配（任务卡 6548·火种 10，分支 feat/coinor-csdp-6.2.0；同日 coinor-cbc !11827 的 CFLAGS 泄漏教训并入）
+authors: DD00
+source_pr:
+source_commit:
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.85
+metrics_last_used: 2026-09-23

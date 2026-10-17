@@ -1,0 +1,77 @@
+--- a/src/corelib/io/qfsfileengine_unix.cpp
++++ b/src/corelib/io/qfsfileengine_unix.cpp
+@@ -49,20 +49,26 @@
+
+ /*!
+     \internal
+ */
+ bool QFSFileEnginePrivate::nativeOpenImpl(QIODevice::OpenMode openMode, mode_t mode)
+ {
+     Q_Q(QFSFileEngine);
+
+     Q_ASSERT_X(openMode & QIODevice::Unbuffered, "QFSFileEngine::open",
+                "QFSFileEngine no longer supports buffered mode; upper layer must buffer");
++    // QFile never opens directories. Reject a directory-style path before
++    // O_CREAT reaches platforms that accept trailing slashes on regular files.
++    if (fileEntry.nativeFilePath().endsWith('/')) {
++        q->setError(QFile::OpenError, qt_error_string(EISDIR));
++        return false;
++    }
+     if (openMode & QIODevice::Unbuffered) {
+         int flags = openModeToOpenFlags(openMode);
+
+         // Try to open the file in unbuffered mode.
+         do {
+             fd = QT_OPEN(fileEntry.nativeFilePath().constData(), flags, mode);
+         } while (fd == -1 && errno == EINTR);
+
+         // On failure, return and report the error.
+         if (fd == -1) {
+@@ -149,38 +155,47 @@
+         size_t readBytes = 0;
+         int oldFlags = fcntl(QT_FILENO(fh), F_GETFL);
+         for (int i = 0; i < 2; ++i) {
+             // Unix: Make the underlying file descriptor non-blocking
+             if ((oldFlags & O_NONBLOCK) == 0)
+                 fcntl(QT_FILENO(fh), F_SETFL, oldFlags | O_NONBLOCK);
+
+             // Cross platform stdlib read
+             size_t read = 0;
+             do {
++                errno = 0;
+                 read = fread(data + readBytes, 1, size_t(len - readBytes), fh);
++                // A transient stdio error can also leave the EOF flag set.
++                // Reset both before retrying the same stream in blocking mode.
++                if (ferror(fh)
++                        && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
++                    clearerr(fh);
+             } while (read == 0 && !feof(fh) && errno == EINTR);
+             if (read > 0) {
+                 readBytes += read;
+                 break;
+             } else {
+                 if (readBytes)
+                     break;
+                 readBytes = read;
+             }
+
+             // Unix: Restore the blocking state of the underlying socket
+             if ((oldFlags & O_NONBLOCK) == 0) {
+                 fcntl(QT_FILENO(fh), F_SETFL, oldFlags);
+                 if (readBytes == 0) {
+                     int readByte = 0;
+                     do {
++                        errno = 0;
+                         readByte = fgetc(fh);
++                        if (readByte == -1 && ferror(fh) && errno == EINTR)
++                            clearerr(fh);
+                     } while (readByte == -1 && errno == EINTR);
+                     if (readByte != -1) {
+                         *data = uchar(readByte);
+                         readBytes += 1;
+                     } else {
+                         break;
+                     }
+                 }
+             }
+         }

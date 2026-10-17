@@ -1,0 +1,99 @@
+#====================================================================
+# Draft: ECM 6.26 KDEInstallDirs6 configure 期 qtpaths 运行失败
+#        （沙箱 libc++ 遮蔽 → /system/lib64 注入）
+# 先例配方: archives/k/kconfig/6.26.0、archives/k/bluez-qt/6.28.0、
+#           archives/k/kpackage/6.26.0（本条目交付实例，PR #8505）
+#====================================================================
+
+id:                     E543
+trigger_tool:           conan|cmake|configure
+phase:                  configuration
+
+error_signature:        Qt6 qtpaths call failed: 127|Error loading shared library libc\+\+_shared\.so.*qtpaths|ecm_query_qt.*QT_INSTALL_PREFIX|KDEInstallDirs6\.cmake.*\(ecm_query_qt\)|Error relocating .*qtpaths.*_ZdlPv
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               conan, cmake, toolchain
+match_keywords:         qtpaths, ECMQueryQt, ecm_query_qt, KDEInstallDirs6, KDEInstallDirs, libc++_shared.so, LD_LIBRARY_PATH, /system/lib64, ECM, kf6, qtbase, configure, execute_process, QT_INSTALL_PREFIX, test_package
+title:                  ECM 6.26 KDEInstallDirs6 在 configure 期运行 qtpaths 失败（exit 127）：沙箱 LD_LIBRARY_PATH 中不兼容 libc++_shared.so 遮蔽兼容版本，需注入 /system/lib64
+prescan_pattern:        KDEInstallDirs6|ecm_query_qt|find_package\(ECM
+prescan_globs:          CMakeLists.txt, *.cmake, *.in
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             ECM 6.26 的 KDEInstallDirs6.cmake 在 configure 阶段通过 execute_process 运行 qtbase 包导出的 qtpaths 二进制（ecm_query_qt -> QT_INSTALL_PREFIX）。qtpaths 是 musl OHOS ELF，动态链接 libc++_shared.so；沙箱环境默认 LD_LIBRARY_PATH 中 /data/storage/el1/bundle/libs/arm64 下存在一个不兼容的 libc++_shared.so，遮蔽了 /system/lib64 下的兼容版本，导致动态加载器加载失败（"Error loading shared library libc++_shared.so" + 大量 "Error relocating" 符号缺失），qtpaths exit 127，cmake configure 直接 FATAL_ERROR。
+affected_scope:         任何在 OHOS 上使用 ECM >= 6.26 的 KF6 系库（configure 期）以及消费 KF6 包导出 *Macros.cmake 的下游 test_package（消费者 configure 期同样 include KDEInstallDirs）。实证：kconfig 6.26.0、bluez-qt 6.28.0、kpackage 6.26.0 三例。
+verification_cmd:       conan create archives/k/kpackage/6.26.0 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=default --build=missing && echo OK
+
+# ═══ Layer 3: 方案层 ★ ═══
+rec_priority:           1
+rec_approach:           在 conanfile 的构建/测试环境里向 LD_LIBRARY_PATH 前置注入兼容库目录：① /system/lib64（兼容 libc++_shared.so 所在）；② ohos-sdk 的 native/llvm/lib（glob /data/service/hnp/ohos-sdk.org/ohos-sdk_*/ohos/native/llvm/lib）。用 conan Environment().prepend_path 注入；configure（cmake.configure）、ctest 测试运行都要用同一环境（.vars(self).apply() 包住）；test_package 的 conanfile 也必须注入同样环境（消费者 configure 会 include KDEInstallDirs）。
+rec_description:        LD_LIBRARY_PATH 前置 /system/lib64 + SDK llvm lib，让 qtpaths 解析到兼容 libc++
+rec_command:            export LD_LIBRARY_PATH=/system/lib64:$LD_LIBRARY_PATH
+rec_auto_fix:           true
+rec_impl:
+
+solution: |
+  # conanfile.py（主配方与 test_package 同款）
+  def _cmake_build_env(self):
+      build_env = Environment()
+      if self.settings.os == "OHOS":
+          for llvm_lib in sorted(glob.glob(
+                  "/data/service/hnp/ohos-sdk.org/ohos-sdk_*/ohos/native/llvm/lib")):
+              build_env.prepend_path("LD_LIBRARY_PATH", llvm_lib)
+          build_env.prepend_path("LD_LIBRARY_PATH", "/system/lib64")
+      for dep in self.dependencies.values():
+          if dep and dep.package_folder:
+              build_env.prepend_path("LD_LIBRARY_PATH",
+                                     os.path.join(dep.package_folder, "lib"))
+      return build_env
+
+  def build(self):
+      cmake = CMake(self)
+      with self._cmake_build_env().vars(self).apply():
+          cmake.configure()
+          cmake.build()
+
+fallback_priority:      2
+fallback_approach:      若 /system/lib64 注入不可用（如精简镜像），改从 conan 依赖图找兼容 libc++：把 qtbase 包自身的 lib 目录（内含其链接时使用的 libc++_shared.so 副本，若打包携带）前置；或 CMAKE_DISABLE_FIND_PACKAGE 掉拉入 KDEInstallDirs6 的宏模块（仅当该宏非必需时）。上游侧无绕过开关时不建议禁用 KDEInstallDirs（KF 安装布局依赖它）。
+fallback_description:   前置 qtbase 包内 libc++ 副本或禁用非必需宏模块
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       copy.*libc\+\+_shared\.so.*into.*/system|cp.*libc\+\+_shared\.so.*/lib64
+forbid_1_reason:        禁止把任意 libc++_shared.so 拷入系统目录覆盖——会破坏系统 ABI 且需 root
+forbid_1_consequence:   系统库污染，其他进程崩溃
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P003
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E475]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E543.md
+last_updated:           2026-09-05
+source_event:           kpackage 6.26.0 适配（PR #8505）conan create 第一次失败：CMake Error at ECMQueryQt.cmake:98 (message): Qt6 qtpaths call failed: 127
+
+# ═══ 知识协作 ═══
+authors:                2404_87638649 <2404_87638649@noreply.gitcode.com>
+source_pr:              8505
+source_commit:          3ef9e275b8
+
+verify_builds:          #40757
+reference_impl:         archives/k/kconfig/6.26.0/conanfile.py（_cmake_build_env）、archives/k/kpackage/6.26.0/conanfile.py、archives/k/kpackage/6.26.0/test_package/conanfile.py
+
+# ═══ 质量度量 ═══
+metrics_success_count:  3
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-05
+
+draft:                  E543-draft-F19E
+status:                 pending-editor-review
+contributor_id:         F19E

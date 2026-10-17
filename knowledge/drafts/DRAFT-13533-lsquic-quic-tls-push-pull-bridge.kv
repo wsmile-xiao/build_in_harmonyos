@@ -1,0 +1,79 @@
+id: DRAFT-13533-lsquic-quic-tls-push-pull-bridge
+title: "BoringSSL 推模式 QUIC TLS API 到 OpenSSL 3.5+ 拉模式的桥接模式"
+category: 平台API差异
+severity: major
+discovered_in: lsquic/4.9.4
+last_updated: 2026-09-17
+
+error_signature:
+  - "fatal error: 'openssl/aead.h' file not found"
+  - "fatal error: 'openssl/chacha.h' file not found"
+  - "fatal error: 'openssl/hkdf.h' file not found"
+  - "fatal error: 'openssl/nid.h' file not found"
+  - "unknown type name 'EVP_AEAD_CTX'"
+  - "use of undeclared identifier 'SSL_provide_quic_data'"
+  - "use of undeclared identifier 'SSL_set_quic_method'"
+  - "variable has incomplete type 'EVP_CIPHER_CTX'"
+  - "undefined symbol: HKDF_expand"
+  - "TLS library implementation contains no 3rd party quic api"
+
+match_keywords:
+  - BoringSSL
+  - OpenSSL QUIC
+  - SSL_provide_quic_data
+  - SSL_set_quic_method
+  - SSL_set_quic_tls_cbs
+  - OSSL_DISPATCH
+  - EVP_AEAD
+  - QUIC TLS
+  - 推模式
+  - 拉模式
+
+root_cause: |
+  QUIC 协议库（lsquic/msquic 之外的 BoringSSL 系实现）普遍按 BoringSSL 的
+  推模式第三方 QUIC TLS API 编写：
+  - SSL_provide_quic_data()（应用把握手数据推给 TLS 栈）
+  - SSL_set_quic_method(SSL*, SSL_QUIC_METHOD*)（TLS 栈经 5 回调推给应用：
+    set_read_secret/set_write_secret/add_handshake_data/flush_flight/send_alert）
+  - EVP_AEAD 家族（EVP_AEAD_CTX_seal/open，值语义 EVP_CIPHER_CTX 内嵌）
+  - 独立 HKDF_extract/HKDF_expand/CRYPTO_chacha_20 函数
+  而 OpenSSL 3.5+ 只提供拉模式 API：SSL_set_quic_tls_cbs(SSL*,
+  OSSL_DISPATCH*, arg) 注册 6 回调（crypto_send/crypto_recv_rcd/
+  crypto_release_rcd/yield_secret/got_transport_params/alert），
+  数据流方向全部反转，且 EVP_CIPHER_CTX 不透明（禁止栈上内嵌）。
+  这是 API 模型级差异，无法用零散 #ifdef 绕过，需要系统性兼容层。
+
+rec_approach: |
+  写 compat shim（lsquic_ossl_compat.h/.c，约 700 行），四要素：
+  1. 推拉翻转：SSL_provide_quic_data 改存 per-SSL rcd 队列（SSL ex_data），
+     OpenSSL 经 crypto_recv_rcd 回调拉取、crypto_release_rcd 报消耗
+     （未消耗尾部 memmove 回退）；send/alert 回调缺 level 参数，用最近
+     yield_secret 的 level 跟踪（per-SSL bridge 结构）
+  2. 回调转发：OSSL_DISPATCH 六回调转发到原 SSL_QUIC_METHOD 五回调；
+     protection level 用 OSSL_RECORD_PROTECTION_LEVEL_*(NONE/EARLY/
+     HANDSHAKE/APPLICATION) ↔ ssl_encryption_level_t(0/1/2/3) 映射
+  3. EVP_AEAD 重实现：AES-GCM/ChaCha20-Poly1305 在 EVP_CIPHER 上封装；
+     GCM 支持 8-16 可变 nonce（每次调用 SET_IVLEN）与 8-16 可变 tag
+     （GET_TAG/SET_TAG 用 ctx 存的 tag_len）；EVP_AEAD_CTX 含
+     EVP_CIPHER_CTX* 句柄（保持按值内嵌合法）
+  4. 散件：HKDF_extract=HMAC；HKDF_expand=EVP_PKEY_HKDF(EXPAND_ONLY)；
+     CRYPTO_chacha_20=EVP_chacha20(IV=counter||nonce)；会话票据
+     i2d/d2i_SSL_SESSION；0-RTT 降级（早数据 API 无拉模式等价物，
+     会话恢复正常、早数据不发送）
+  CMake 侧：LSQUIC_LIBSSL=OPENSSL 跳过交叉环境不可行的 check_symbol_exists
+  探测（需目标机编译+链接 TLS 库），直接定义 HAVE_OPENSSL。
+  标杆参照：ngtcp2 crypto/ossl/ossl.c（拉模式 API 的权威消费者）。
+
+fallback: |
+  无 fallback：BoringSSL 不在制品仓（其自身需要 Go 工具链构建），
+  OpenSSL 3.5.6+ 是仓内唯一可用 TLS 栈。若桥接不完整只能砍 QUIC
+  TLS 功能面。
+
+verify_builds:
+  - lsquic/4.9.4 conan create + test_package PASS（2026-09-17 本机）
+  - 上游 82 测试 80/81（hcsi_reader 豁免：musl open_memstream 平台 bug）
+
+refs:
+  - ngtcp2 crypto/ossl/ossl.c（SSL_set_quic_tls_cbs 六回调标杆）
+  - openssl/core_dispatch.h OSSL_FUNC_SSL_QUIC_TLS_*（2001-2006）
+  - 本仓 archives/l/lsquic/4.9.4/patches/0001-openssl-tls-backend-port.patch

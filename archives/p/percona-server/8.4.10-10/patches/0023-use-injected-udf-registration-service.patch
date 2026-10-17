@@ -1,0 +1,250 @@
+diff --git a/components/audit_log_filter/audit_log_filter.cc b/components/audit_log_filter/audit_log_filter.cc
+index fa0e11f9333f6aa7de0a7c711302fa7b62f58a8c..9ccc1bd95f3292f911f8ff2fb0830a41c27a18a6 100644
+--- a/components/audit_log_filter/audit_log_filter.cc
++++ b/components/audit_log_filter/audit_log_filter.cc
+@@ -28,8 +28,13 @@
+ #include <mysql/components/component_implementation.h>
+ #include <mysql/components/service_implementation.h>
+ 
++#include <mysql/components/services/component_status_var_service.h>
++#include <mysql/components/services/component_sys_var_service.h>
++#include <mysql/components/services/dynamic_privilege.h>
+ #include <mysql/components/services/mysql_connection_attributes_iterator.h>
++#include <mysql/components/services/mysql_thd_store_service.h>
+ #include <mysql/components/services/mysql_thd_attributes.h>
++#include <mysql/components/services/udf_registration.h>
+ 
+ #include <mysql/components/services/event_tracking_authentication_service.h>
+ #include <mysql/components/services/event_tracking_command_service.h>
+@@ -67,6 +72,15 @@ REQUIRES_SERVICE_PLACEHOLDER(mysql_current_thread_reader);
+ REQUIRES_SERVICE_PLACEHOLDER(mysql_thd_attributes);
+ REQUIRES_SERVICE_PLACEHOLDER(mysql_string_get_data_in_charset);
+ REQUIRES_SERVICE_PLACEHOLDER(mysql_string_factory);
++REQUIRES_SERVICE_PLACEHOLDER(component_sys_variable_register);
++REQUIRES_SERVICE_PLACEHOLDER(component_sys_variable_unregister);
++REQUIRES_SERVICE_PLACEHOLDER(dynamic_privilege_register);
++REQUIRES_SERVICE_PLACEHOLDER(global_grants_check);
++REQUIRES_SERVICE_PLACEHOLDER(mysql_security_context_options);
++REQUIRES_SERVICE_PLACEHOLDER(mysql_thd_security_context);
++REQUIRES_SERVICE_PLACEHOLDER(mysql_thd_store);
++REQUIRES_SERVICE_PLACEHOLDER(status_variable_registration);
++REQUIRES_SERVICE_PLACEHOLDER(udf_registration);
+ REQUIRES_PSI_MEMORY_SERVICE_PLACEHOLDER;
+ 
+ SERVICE_TYPE(log_builtins) *log_bi = nullptr;
+@@ -154,25 +168,13 @@ class EventsConsumer {
+ };
+ 
+ bool init_abort_exempt_privilege() {
+-  my_service<SERVICE_TYPE(dynamic_privilege_register)> reg_priv_srv(
+-      "dynamic_privilege_register", SysVars::get_comp_registry_srv());
+-
+-  if (reg_priv_srv.is_valid() &&
+-      reg_priv_srv->register_privilege(STRING_WITH_LEN("AUDIT_ABORT_EXEMPT")) ==
+-          0) {
+-    return true;
+-  }
+-
+-  return false;
++  return mysql_service_dynamic_privilege_register->register_privilege(
++             STRING_WITH_LEN("AUDIT_ABORT_EXEMPT")) == 0;
+ }
+ 
+ void deinit_abort_exempt_privilege() {
+-  my_service<SERVICE_TYPE(dynamic_privilege_register)> reg_priv_srv(
+-      "dynamic_privilege_register", SysVars::get_comp_registry_srv());
+-
+-  if (reg_priv_srv.is_valid()) {
+-    reg_priv_srv->unregister_privilege(STRING_WITH_LEN("AUDIT_ABORT_EXEMPT"));
+-  }
++  mysql_service_dynamic_privilege_register->unregister_privilege(
++      STRING_WITH_LEN("AUDIT_ABORT_EXEMPT"));
+ }
+ 
+ mysql_service_status_t get_sql_command(MYSQL_THD thd,
+@@ -445,25 +447,9 @@ AuditLogFilter::AuditLogFilter(
+       m_is_active{true} {}
+ 
+ bool AuditLogFilter::init() noexcept {
+-  const auto *reg_srv = SysVars::get_comp_registry_srv();
+-
+-  if (reg_srv->acquire(
+-          "mysql_thd_security_context",
+-          reinterpret_cast<my_h_service *>(
+-              const_cast<SERVICE_TYPE_NO_CONST(mysql_thd_security_context) **>(
+-                  &m_security_context_srv))) == 1 ||
+-      reg_srv->acquire("mysql_security_context_options",
+-                       reinterpret_cast<my_h_service *>(
+-                           const_cast<SERVICE_TYPE_NO_CONST(
+-                               mysql_security_context_options) **>(
+-                               &m_security_context_opts_srv))) == 1 ||
+-      reg_srv->acquire(
+-          "global_grants_check",
+-          reinterpret_cast<my_h_service *>(
+-              const_cast<SERVICE_TYPE_NO_CONST(global_grants_check) **>(
+-                  &m_grants_check_srv))) == 1) {
+-    return false;
+-  }
++  m_security_context_srv = mysql_service_mysql_thd_security_context;
++  m_security_context_opts_srv = mysql_service_mysql_security_context_options;
++  m_grants_check_srv = mysql_service_global_grants_check;
+ 
+   return m_security_context_srv != nullptr &&
+          m_security_context_opts_srv != nullptr &&
+@@ -475,16 +461,6 @@ void AuditLogFilter::deinit() noexcept {
+   m_audit_udf->deinit();
+   m_log_writer->close();
+ 
+-  const auto *reg_srv = SysVars::get_comp_registry_srv();
+-  reg_srv->release(reinterpret_cast<my_h_service>(
+-      const_cast<SERVICE_TYPE_NO_CONST(mysql_thd_security_context) *>(
+-          m_security_context_srv)));
+-  reg_srv->release(reinterpret_cast<my_h_service>(
+-      const_cast<SERVICE_TYPE_NO_CONST(mysql_security_context_options) *>(
+-          m_security_context_opts_srv)));
+-  reg_srv->release(reinterpret_cast<my_h_service>(
+-      const_cast<SERVICE_TYPE_NO_CONST(global_grants_check) *>(
+-          m_grants_check_srv)));
+ }
+ 
+ int AuditLogFilter::notify_event(audit_event_class_t event_class,
+@@ -1181,10 +1157,19 @@ PROVIDES_SERVICE(component_audit_log_filter, event_tracking_authentication),
+ BEGIN_COMPONENT_REQUIRES(component_audit_log_filter)
+ REQUIRES_SERVICE(registry), REQUIRES_SERVICE(log_builtins),
+     REQUIRES_SERVICE(log_builtins_string),
++    REQUIRES_SERVICE(component_sys_variable_register),
++    REQUIRES_SERVICE(component_sys_variable_unregister),
+     REQUIRES_SERVICE(mysql_thd_attributes),
++    REQUIRES_SERVICE(dynamic_privilege_register),
++    REQUIRES_SERVICE(global_grants_check),
+     REQUIRES_SERVICE(mysql_current_thread_reader),
++    REQUIRES_SERVICE(mysql_security_context_options),
++    REQUIRES_SERVICE(mysql_thd_security_context),
++    REQUIRES_SERVICE(mysql_thd_store),
++    REQUIRES_SERVICE(status_variable_registration),
+     REQUIRES_SERVICE(mysql_string_get_data_in_charset),
+     REQUIRES_SERVICE(mysql_string_factory), REQUIRES_PSI_MEMORY_SERVICE,
++    REQUIRES_SERVICE(udf_registration),
+     END_COMPONENT_REQUIRES();
+ 
+ BEGIN_COMPONENT_METADATA(component_audit_log_filter)
+diff --git a/components/audit_log_filter/audit_udf.cc b/components/audit_log_filter/audit_udf.cc
+index bc7f857d49e2268b35cab879c30f0534d105294c..6dc18252f0f5437a5ed3c9f0f36960271c7adde6 100644
+--- a/components/audit_log_filter/audit_udf.cc
++++ b/components/audit_log_filter/audit_udf.cc
+@@ -43,6 +43,8 @@
+ #include <regex>
+ #include <unordered_set>
+ 
++extern SERVICE_TYPE(udf_registration) *mysql_service_udf_registration;
++
+ namespace audit_log_filter {
+ namespace {
+ 
+@@ -215,13 +217,10 @@ bool reload_audit_rules_or_set_error(char *result,
+ AuditUdf::~AuditUdf() { deinit(); }
+ 
+ bool AuditUdf::init(UdfFuncInfo *begin, UdfFuncInfo *end) {
+-  my_service<SERVICE_TYPE(udf_registration)> udf_registration_srv(
+-      "udf_registration", SysVars::get_comp_registry_srv());
+-
+   for (UdfFuncInfo *it = begin; it != end; ++it) {
+     assert(it->return_type == STRING_RESULT || it->return_type == INT_RESULT);
+ 
+-    if (udf_registration_srv->udf_register(
++    if (mysql_service_udf_registration->udf_register(
+             it->udf_name, it->return_type,
+             (it->return_type == STRING_RESULT)
+                 ? reinterpret_cast<Udf_func_any>(it->udf_str_func)
+@@ -240,11 +239,9 @@ bool AuditUdf::init(UdfFuncInfo *begin, UdfFuncInfo *end) {
+ void AuditUdf::deinit() noexcept {
+   if (!m_active_udf_names.empty()) {
+     int was_present = 0;
+-    my_service<SERVICE_TYPE(udf_registration)> udf_registration_srv(
+-        "udf_registration", SysVars::get_comp_registry_srv());
+-
+     for (const auto &name : m_active_udf_names) {
+-      udf_registration_srv->udf_unregister(name.c_str(), &was_present);
++      mysql_service_udf_registration->udf_unregister(name.c_str(),
++                                                       &was_present);
+     }
+ 
+     m_active_udf_names.clear();
+diff --git a/components/audit_log_filter/component_registry_service.cc b/components/audit_log_filter/component_registry_service.cc
+index ec74a0b229efd515b9166e377264220193ee8982..b85db88f77e92745e2b3fd4cd216bfad9e615db1 100644
+--- a/components/audit_log_filter/component_registry_service.cc
++++ b/components/audit_log_filter/component_registry_service.cc
+@@ -15,11 +15,12 @@
+ 
+ #include "components/audit_log_filter/component_registry_service.h"
+ 
++extern SERVICE_TYPE(registry) *mysql_service_registry;
++
+ namespace audit_log_filter {
+ 
+ comp_registry_srv_container_t get_component_registry_service() {
+-  return {mysql_plugin_registry_acquire(),
+-          [](comp_registry_srv_t *p) { mysql_plugin_registry_release(p); }};
++  return {mysql_service_registry, [](comp_registry_srv_t *) {}};
+ }
+ 
+ }  // namespace audit_log_filter
+diff --git a/components/audit_log_filter/sys_vars.cc b/components/audit_log_filter/sys_vars.cc
+index 81970ee8cbc892efc830378f74c7d91a55e15bff..5271b7c268d01f57fa9b821bf3742bd9db1326ca 100644
+--- a/components/audit_log_filter/sys_vars.cc
++++ b/components/audit_log_filter/sys_vars.cc
+@@ -40,6 +40,14 @@
+ #include <string_view>
+ #include <unordered_map>
+ 
++extern SERVICE_TYPE(component_sys_variable_register)
++    *mysql_service_component_sys_variable_register;
++extern SERVICE_TYPE(component_sys_variable_unregister)
++    *mysql_service_component_sys_variable_unregister;
++extern SERVICE_TYPE(mysql_thd_store) *mysql_service_mysql_thd_store;
++extern SERVICE_TYPE(status_variable_registration)
++    *mysql_service_status_variable_registration;
++
+ namespace audit_log_filter {
+ namespace {
+ 
+@@ -769,14 +777,11 @@ std::string get_log_file_name_value(const char *full_path) {
+ }  // namespace
+ 
+ bool SysVars::init() noexcept {
+-  my_service<SERVICE_TYPE(status_variable_registration)>
+-      status_var_registration_srv("status_variable_registration",
+-                                  SysVars::get_comp_registry_srv());
+-  my_service<SERVICE_TYPE(component_sys_variable_register)>
+-      sys_var_registration_srv("component_sys_variable_register",
+-                               SysVars::get_comp_registry_srv());
+-  my_service<SERVICE_TYPE(mysql_thd_store)> thd_store_service(
+-      "mysql_thd_store", SysVars::get_comp_registry_srv());
++  auto *status_var_registration_srv =
++      mysql_service_status_variable_registration;
++  auto *sys_var_registration_srv =
++      mysql_service_component_sys_variable_register;
++  auto *thd_store_service = mysql_service_mysql_thd_store;
+ 
+   if (thd_store_service->register_slot(
+           kReaderContextSlotName.data(),
+@@ -834,14 +839,11 @@ bool SysVars::init() noexcept {
+ }
+ 
+ void SysVars::deinit() noexcept {
+-  my_service<SERVICE_TYPE(status_variable_registration)>
+-      status_var_registration_srv("status_variable_registration",
+-                                  SysVars::get_comp_registry_srv());
+-  my_service<SERVICE_TYPE(component_sys_variable_unregister)>
+-      sys_var_registration_srv("component_sys_variable_unregister",
+-                               SysVars::get_comp_registry_srv());
+-  my_service<SERVICE_TYPE(mysql_thd_store)> thd_store_service(
+-      "mysql_thd_store", SysVars::get_comp_registry_srv());
++  auto *status_var_registration_srv =
++      mysql_service_status_variable_registration;
++  auto *sys_var_registration_srv =
++      mysql_service_component_sys_variable_unregister;
++  auto *thd_store_service = mysql_service_mysql_thd_store;
+ 
+   // Current THD instance may still hold allocated resources which will not
+   // be released properly after unregistering slots below. Cleaning them up

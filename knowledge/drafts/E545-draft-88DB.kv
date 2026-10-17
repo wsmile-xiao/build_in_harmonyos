@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E545.kv，填写各字段
+# 对应的人类文档: doc/E545.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E545
+trigger_tool: test|conan|CI
+phase: testing
+error_signature: cannot statx '/storage/Users/[^']*': No such file or directory|cannot stat ['"]?/storage/Users/[^ '\"]+['"]?: No such file or directory|test_package.*(failed|error).*set -e|Failed to run test_package|conan create.*test_package.*ERROR
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: testing,conan,packaging,portability
+match_keywords: test_package, 硬编码宿主路径, set -e, statx, cannot stat, harmonybrew, CI 中止, conan create, 发布阻塞
+title: test_package 硬编码构建机个人绝对路径：目标 worker 缺少该路径时 set -e 直接中止整个 test_package，包无法通过 CI 发布
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: test_package 脚本把构建机个人绝对路径（如 /storage/Users/<user>/.harmonybrew）当作必然存在的校验对象，配合 set -e 在目标 worker 上 stat 失败即中止整条测试链，导致 conan create 失败、包永远无法进入 release 流水线
+affected_scope: 所有含 test_package 的 Conan 配方，尤其是使用宿主前缀遮蔽/绝对路径校验的包
+verification_cmd: grep -nE '/storage/Users/|[.]conan2' <pkg>/test_package/*.sh  # 出现构建机个人路径即高危
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: 把宿主路径校验改为「根存在才执行」，不存在时输出 SKIPPED 且不改变退出码；必须保留的无条件校验层（如遮蔽 ~/.conan2）继续无条件执行，负向控制强度不降级
+rec_description:        可选校验层按「根存在才执行」降级：root="$HOME/.harmonybrew"; if [ -e "$root" ]; then chmod 000 "$root"; mask=1; else mask=0; fi；收尾同样以 $mask 判定，并打印 HARMONYBREW_MASK=SKIPPED (root absent)
+rec_command:            [ -e "$HOST_ROOT" ] && chmod 000 "$HOST_ROOT" || echo "HOST_MASK=SKIPPED (root absent: $HOST_ROOT)"
+rec_auto_fix: false
+rec_impl:               optional-host-mask-with-skip
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:
+fallback_description:
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern: chmod 000 .*/storage/Users/|stat -c %a /storage/Users/|test -d /storage/Users/[^ ]+ &&
+forbid_1_reason: 把构建机个人绝对路径当作必然存在的对象并在 set -e 下直接使用，目标 worker 上不存在即中止整条测试链
+forbid_1_consequence: test_package 失败 → conan create 失败 → 包无法通过 CI、无法进入 release 流水线（如 r-base 4.5.1 合入后两个月未发布）
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             [E316]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E545.md
+last_updated: 2026-09-30
+source_event:           r-base/4.5.1 test_package 在缺少 /storage/Users/currentUser/.harmonybrew 的机器上 stat 失败并因 set -e 中止，导致 4.5.1 长期无法发布（4.5.1.1 修复）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 88DB

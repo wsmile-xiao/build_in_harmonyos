@@ -1,0 +1,30 @@
+#====================================================================
+# Draft: 输出不可逆的工具用"结构不变量"做判据，而不是抄 golden 向量 ——
+#        不可逆 ≠ 只能硬编码；只要输出必须满足某种逐位/逐行约束，就能把判据写成
+#        自闭合的不变量，覆盖全部输出行而不依赖任何期望值（连带避免"把错误输出
+#        抄成期望值"的自我固化）
+#   Stem: letterize-1.6-structural-invariant-consumer-test — pairs with same-stem .md
+#====================================================================
+
+id:                     DRAFT-LETTERIZE-STRUCTURAL-INVARIANT-CONSUMER-TEST
+trigger_tool:           ci
+phase:                  testing
+error_signature:        (无具体错误串；本条目是判据设计规约，用于提升 L1 测试的覆盖质量)
+
+# ═══ Layer 1: 识别层 ═══
+severity:               3
+category:               test-design, coverage, ci-gate
+match_keywords:         test_package, 消费者测试, golden 向量, 期望值, 结构不变量, 长度守恒, 逐位约束, 枚举输出, 不可逆, 组合爆炸, 词表, 假绿, 自我固化
+
+title:                  输出不可逆的工具用结构不变量做判据（长度守恒 + 逐位键位约束），而不是抄 golden 向量
+
+root_cause:            消费者测试有一种默认心智模型："不可逆的输出只能靠硬编码期望值验证"。于是对**枚举型 / 组合型**工具（把输入展开成大量候选，如 letterize 把 7 位号码展开成 78 条助记词）就只能断言"输出里含某一行"。这有三个问题：① 一条断言只覆盖 78 行里的一行，其余 77 行完全不校验；② 期望值往往是从一次运行结果**反抄**的，一旦实现有 bug，测试会把 bug 固化为"期望行为"，绿得非常稳定；③ 组合爆炸时人工列举不可行，于是干脆只测"能跑、有输出"，判据退化为空壳。实际上**不可逆不等于无约束**：只要输出在结构上必须满足某种不变量（逐位映射、长度守恒、字符集封闭、行间单调、总量守恒……），就能写出覆盖**全部**输出行的自闭合判据，不需要任何期望值。
+affected_scope:         所有"输入 → 一组候选/展开/枚举"的 CLI 与库。实测实例：letterize 1.6（`archives/l/letterize/1.6`，PR !9xxx）——7 位号码展开 78 行、10 位展开 246 行，属性判据逐行校验全部输出。同类可套用：`base32/base64` 候选枚举、拼写建议、`dnsrecon` 类字典展开、哈希前缀碰撞枚举、`morse` 变体、`rotN` 全排列、正则候选生成。★ 与"往返一致性"判据（见 DRAFT-LUNAR-ROUNDTRIP-PROPERTY-CONSUMER-TEST）互补：往返适用于**可逆**转换，结构不变量适用于**不可逆但有约束**的输出；两者都不需要外部对照表。
+verification_cmd:       `letterize 234 | awk '{print length($0)}' | sort -u` → 应只输出一个非零长度（长度守恒）；`letterize 234 | sed 's/^\(.\).*/\1/' | sort -u` → 应只输出 abc 子集（逐位键位约束）。任一条件不成立即判据前提被破坏
+
+# ═══ Layer 2: 决策层 ═══
+rec_priority:           1
+rec_approach:           per-line-structural-invariant-over-golden-vectors
+rec_description:        改法：把"输出含某一行"换成**对每一行逐位校验不变量**。以 letterize 为例定义两条：**P1 长度守恒**——每行助记词长度必须等于输入长度（逐位 1:1 映射，任何长度漂移都是实现缺陷）；**P2 键位约束**——第 i 位上，输出字符要么等于输入字符（输入位不是 2-9 时，如 0/1/'-'/字母原样透传），要么落在该数字键位的字母集合内（2→abc 3→def 4→ghi 5→jkl 6→mno 7→prs 8→tuv 9→xyz）。实现要点：① 把输出按行切分后**逐行调用校验函数**，遇到第一条违规就报出"第几行第几位、输入字符、允许集合、实际字符"——定位信息必须自带，否则 CI 只告诉你"属性不成立"；② 属性成立时也要打印**校验了多少行**（`全部 246 行成立`），否则"0 行通过"和"246 行通过"在日志里无法区分——这正是假绿的来源；③ 字母集合的**大小写必须与被测输出一致**——letterize 输出小写，首版判据写成大写 `ABC` 导致 6 个用例全 FAIL（实测：`第 0 位：输入 '2' 映射到 "ABC"，输出却是 'a'`），这是判据自身的缺陷而非程序缺陷，须先用一条 golden 首行断言（`adg`）锚定大小写约定；④ 不变量之外的少量 golden 断言（非空行数 + 首行）保留，用于锚定词表过滤行为——但它们是**辅助**而非主体，主体是覆盖全部行的属性；⑤ 属性判据同样要遵守既有规范：`expect()` 计数而非 `assert()`、`popen` 内存直读不落盘、`pclose==-1 || !WIFEXITED || code∈{126,127} || code>=128` 判"跑不起来"、循环读到 EOF 再 `pclose`。参考实现：archives/l/letterize/1.6/test_package/test_letterize.c（34 条断言，其中属性判据逐行校验 8 组输入共 353 行输出）。
+rec_command:            # 逐行不变量骨架（C 版）\nstatic int line_ok(const char *line, const char *input, char *why, size_t whycap) {\n    size_t i, n = strlen(input);\n    if (strlen(line) != n) { snprintf(why, whycap, "长度 %zu != %zu", strlen(line), n); return 0; }  /* P1 */\n    for (i = 0; i < n; i++) {\n        unsigned char in = input[i], out = line[i];\n        if (in >= \'2\' && in <= \'9\') { if (!strchr(keypad[in-\'0\'], out)) { snprintf(why, whycap, "第 %zu 位 %c 不允许 %c", i, in, out); return 0; } }  /* P2 */\n        else if (out != in) { snprintf(why, whycap, "第 %zu 位 %c 应透传", i, in); return 0; }\n    }\n    return 1;\n}\n/* 调用方：逐行校验并累计 */\nfor (i = 0; i < lines; i++) { get_line(buf, i, one, sizeof one); if (!line_ok(one, input, why, sizeof why)) { bad++; if (bad == 1) expect(0, "逐位映射属性", why); } }\nif (!bad) expect(lines > 0, "逐位映射属性全部行成立", "");   /* ★ 打印行数，区分 0 行与 N 行 */
+rec_auto_fix:           false

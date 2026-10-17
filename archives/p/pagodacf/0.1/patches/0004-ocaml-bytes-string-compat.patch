@@ -1,0 +1,79 @@
+--- a/cf_seq.ml
++++ b/cf_seq.ml
+@@ -384,19 +384,26 @@
+         Buffer.contents b
+ 
+ let to_substring =
+-    let rec loop str pos stop = function
++    (* OCaml 4.06+ split immutable [string] from mutable [bytes].
++       [String.unsafe_set] now requires [bytes].  The public .mli
++       keeps [string] for source compatibility; we convert at the
++       boundary and operate on a [bytes] view internally.  The view
++       shares the original string's memory, so writes are visible to
++       the caller -- matching the pre-4.06 in-place semantics. *)
++    let rec loop (b : bytes) pos stop = function
+         | P (hd, tl) when pos < stop ->
+-            String.unsafe_set str pos hd;
+-            loop str (succ pos) stop (Lazy.force tl)
++            Bytes.unsafe_set b pos hd;
++            loop b (succ pos) stop (Lazy.force tl)
+         | x ->
+             x
+     in
+     fun s str pos len ->
++        let b = Bytes.unsafe_of_string str in
+         if pos < 0 then
+             invalid_arg "Cf_seq.to_substring: pos < 0";
+         if pos + len > String.length str then
+             invalid_arg "Cf_seq.to_substring: pos + len > String.length str";
+-        lazy (loop str pos len (Lazy.force s))
++        lazy (loop b pos len (Lazy.force s))
+ 
+ let to_array =
+     let f cr _ =
+--- a/cf_message.ml
++++ b/cf_message.ml
+@@ -49,13 +49,22 @@
+ let normalize m =
+     if test_invariant_ m then m else filter_for_invariant_ [] m
+ 
+-let rec sub_blit_loop_ ?(i = 0) dest =
++let rec sub_blit_loop_ ?(i = 0) (dest : bytes) =
+     function
+     | [] ->
+         ()
++    (* OCaml 4.06+: [String.blit] now requires [bytes] src/dst.
++       Message substrings carry [string] sources, while [dest] is a
++       freshly-allocated [bytes] buffer from [Bytes.create].  Use
++       [Bytes.blit_string] to copy directly from the [string] source
++       into the [bytes] destination.  The explicit [(dest : bytes)]
++       annotation and inline [Bytes.length] invariant avoid the
++       [string] type pollution that [sub_invariant_] (via
++       [String.length]) would impose on [dest].  This is type-correct
++       in both [-safe-string] and [-unsafe-string] modes. *)
+     | (s, pos, len) :: tl ->
+-        assert (sub_invariant_ (dest, i, len));
+-        String.blit s pos dest i len;
++        assert (i >= 0 && len > 0 && i + len <= Bytes.length dest);
++        Bytes.blit_string s pos dest i len;
+         let i = i + len in
+         sub_blit_loop_ ~i dest tl
+ 
+@@ -76,9 +85,15 @@
+         ""
+     | tl ->
+         let n = length tl in
+-        let s = String.create n in
++        (* [String.create] returns [bytes] in 4.06+.  Build a [bytes]
++           buffer, blit the substrings into it, then freeze it to
++           [string] via [Bytes.unsafe_to_string] for the public
++           [contents : t -> string] API.  We release ownership of the
++           buffer after this point, satisfying unsafe_to_string's
++           no-further-mutation contract. *)
++        let s = Bytes.create n in
+         sub_blit_loop_ s tl;
+-        s
++        Bytes.unsafe_to_string s
+ 
+ let copy m = create (contents m)
+ 

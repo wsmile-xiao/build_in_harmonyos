@@ -1,12 +1,84 @@
---- notcurses-3.0.17.orig/src/demo/input.c	2025-10-29 00:02:11.000000000 +0800
-+++ notcurses-3.0.17.work/src/demo/input.c	2026-04-16 17:55:02.185048750 +0800
-@@ -176,7 +176,9 @@
+--- a/src/demo/input.c
++++ b/src/demo/input.c
+@@ -1,6 +1,8 @@
+ #include <fcntl.h>
+ #include <errno.h>
+ #include <unistd.h>
++#include <signal.h>
++#include <time.h>
+ #include <pthread.h>
+ #include "demo.h"
+ 
+@@ -19,6 +21,11 @@
+ static nciqueue** enqueue = &queue;
+ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+ static pthread_cond_t cond; // use pthread_condmonotonic_init()
++#ifndef HAVE_PTHREAD_CANCEL
++// set by stop_input(): the dispatcher polls notcurses_get_nblock()
++// instead of blocking forever, and exits once this is seen.
++static volatile sig_atomic_t input_stop_requested;
++#endif
+ 
+ static int
+ handle_mouse(const ncinput* ni){
+@@ -121,6 +128,34 @@
+   ncinput ni;
+   struct notcurses* nc = vnc;
+   uint32_t id;
++#ifndef HAVE_PTHREAD_CANCEL
++  // no pthread_cancel: don't block indefinitely in notcurses_get_blocking().
++  // poll at a fixed interval instead, so stop_input() can shut us down
++  // cooperatively (the 50ms granularity is imperceptible for user input).
++  for(;;){
++    if(input_stop_requested){
++      break;
++    }
++    id = notcurses_get_nblock(nc, &ni);
++    if(id == 0){ // no input available; sleep and recheck
++      struct timespec ts = { .tv_sec = 0, .tv_nsec = 50 * 1000 * 1000, };
++      nanosleep(&ts, NULL);
++      continue;
++    }
++    if(id == (uint32_t)-1){
++      break;
++    }
++    if(id == NCKEY_EOF){
++      break;
++    }
++    // go ahead and pass keyboard through to demo, even if it was a 'q' (this
++    // might cause the demo to exit immediately, as is desired). we can't just
++    // mess with the menu/HUD in our own context, as the demo thread(s) might
++    // be rendering, or otherwise fucking with things we musn't fuck with
++    // concurrentwise (z-axis manipulations, etc.).
++    pass_along(&ni);
++  }
++#else
+   while((id = notcurses_get_blocking(nc, &ni)) != (uint32_t)-1){
+     if(id == 0){
+       continue;
+@@ -135,6 +170,7 @@
+     // concurrentwise (z-axis manipulations, etc.).
+     pass_along(&ni);
+   }
++#endif
+   return NULL;
+ }
+ 
+@@ -176,8 +212,17 @@
  int stop_input(void){
    int ret = 0;
    if(input_pipefds[0] >= 0){
-+#ifndef __OHOS__
++#ifdef HAVE_PTHREAD_CANCEL
      ret |= pthread_cancel(tid);
-+#endif
      ret |= pthread_join(tid, NULL);
++#else
++    // no pthread_cancel: request cooperative shutdown. the dispatcher polls
++    // every 50ms, so the join returns promptly. (note: closing the pipes
++    // first would not wake it -- it blocks on the notcurses input queue,
++    // not on the pipe.)
++    input_stop_requested = 1;
++    ret |= pthread_join(tid, NULL);
++#endif
      ret |= close(input_pipefds[0]);
      ret |= close(input_pipefds[1]);
+     input_pipefds[0] = input_pipefds[1] = -1;

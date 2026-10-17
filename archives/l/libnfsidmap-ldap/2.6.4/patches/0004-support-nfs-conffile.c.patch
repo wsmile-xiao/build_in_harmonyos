@@ -1,0 +1,474 @@
+--- a/support/nfs/conffile.c
++++ b/support/nfs/conffile.c
+@@ -47,20 +47,95 @@
+ #include <string.h>
+ #include <unistd.h>
+ #include <errno.h>
+ #include <err.h>
+ #include <syslog.h>
+ #include <libgen.h>
+ #include <sys/file.h>
+ #include <time.h>
+ #include <dirent.h>
+ 
++/*
++ * musl-based libcs (the OHOS SDK one among them) provide neither
++ * versionsort() nor strverscmp(): both are GNU extensions that glibc
++ * declares in <dirent.h>/<string.h>.  conf_init_dir() below calls
++ * versionsort() unconditionally to sort the include files of the
++ * "conf.d" style directories (see conf_init_dir() below), so a libc
++ * without it cannot compile this file at all.
++ *
++ * Both symbols are therefore declared and defined here as weak.  The
++ * definitions are compiled unconditionally, without any platform
++ * conditional: where the libc exports a strong definition (glibc and
++ * friends) the linker prefers it and these definitions stay inert, and
++ * where the libc lacks the symbol (musl/OHOS) the weak definitions bind at
++ * link time.  strverscmp() keeps the GNU semantics (a digit run starting
++ * with '0' sorts first, otherwise the longer run is larger, equal-length
++ * runs are compared digit by digit and never accumulated into an integer,
++ * and all other differing bytes compare as plain bytes).
++ */
++int versionsort(const struct dirent **, const struct dirent **);
++int strverscmp(const char *, const char *);
++
++__attribute__((weak)) int strverscmp(const char *l0, const char *r0)
++{
++	const unsigned char *l = (const unsigned char *)l0;
++	const unsigned char *r = (const unsigned char *)r0;
++	size_t llen, rlen;
++
++	/* Find the first differing character. */
++	while (*l == *r) {
++		if (*l == '\0')
++			return 0;
++		++l;
++		++r;
++	}
++
++	if (isdigit(*l) && isdigit(*r)) {
++		/* Leading-zero rule: the run starting with '0' sorts first. */
++		if ((*l == '0') != (*r == '0'))
++			return (*l == '0') ? -1 : 1;
++
++		/* Skip the common leading zeros, then compare runs. */
++		while (*l == '0')
++			++l;
++		while (*r == '0')
++			++r;
++
++		/* Compare remaining digit-run lengths (no overflow). */
++		llen = 0;
++		while (isdigit(l[llen]))
++			++llen;
++		rlen = 0;
++		while (isdigit(r[rlen]))
++			++rlen;
++		if (llen != rlen)
++			return llen > rlen ? 1 : -1;
++
++		/* Equal lengths: compare digit-by-digit. */
++		while (llen-- > 0) {
++			if (*l != *r)
++				return (*l < *r) ? -1 : 1;
++			++l;
++			++r;
++		}
++		/* Digit runs equal; fall through to plain byte comparison. */
++	}
++
++	return (int)*l - (int)*r;
++}
++
++__attribute__((weak)) int versionsort(const struct dirent **a,
++				      const struct dirent **b)
++{
++	return strverscmp((*a)->d_name, (*b)->d_name);
++}
++
+ #include "conffile.h"
+ #include "xlog.h"
+ 
+ #define CONF_FILE_EXT ".conf"
+ #define CONF_FILE_EXT_LEN ((int) (sizeof(CONF_FILE_EXT) - 1))
+ 
+ #pragma GCC visibility push(hidden)
+ 
+ static void conf_load_defaults(void);
+ static char * conf_readfile(const char *path);
+@@ -346,21 +421,21 @@
+ 
+ 		/* copy the section name */
+ 		*section = strdup(line);
+ 		if (!*section) {
+ 			xlog_warn("config error at %s:%d:"
+ 				  "malloc failed", filename, lineno);
+ 			return;
+ 		}
+ 
+ 		/* there is no arg, we are done */
+-		if (val == NULL) 
++		if (val == NULL)
+ 			return;
+ 
+ 		/* check for the closing " */
+ 		ptr = strchr(val, '"');
+ 		if (ptr == NULL) {
+ 			xlog_warn("config error at %s:%d: "
+ 				  "non-matched '\"', ignoring until next section",
+ 				filename, lineno);
+ 			return;
+ 		}
+@@ -572,21 +647,21 @@
+ 				fd, new_conf_addr, (unsigned long)sz);
+ 			goto fail;
+ 		}
+ 		close(fd);
+ 
+ 		/* XXX Should we not care about errors and rollback?  */
+ 		new_conf_addr[sz] = '\0';
+ 		return new_conf_addr;
+ 	fail:
+ 		close(fd);
+-		if (new_conf_addr) 
++		if (new_conf_addr)
+ 			free(new_conf_addr);
+ 	}
+ 	return NULL;
+ }
+ 
+ /* remove and free up any existing config state */
+ static void conf_free_bindings(void)
+ {
+ 	unsigned int i;
+ 	for (i = 0; i < sizeof conf_bindings / sizeof conf_bindings[0]; i++) {
+@@ -611,23 +686,23 @@
+ 
+ 	conf_data = conf_readfile(conf_file);
+ 	if (conf_data == NULL)
+ 		return 1;
+ 
+ 	/* Load default configuration values.  */
+ 	conf_load_defaults();
+ 
+ 	/* Parse config contents into the transaction queue */
+ 	conf_parse(trans, conf_data, &section, &subsection, conf_file);
+-	if (section) 
++	if (section)
+ 		free(section);
+-	if (subsection) 
++	if (subsection)
+ 		free(subsection);
+ 	free(conf_data);
+ 
+ 	return 0;
+ }
+ /* Open the config file and map it into our address space, then parse it.  */
+ static int
+ conf_load_file(const char *conf_file)
+ {
+ 	int trans;
+@@ -651,39 +726,39 @@
+ 	free(conf_data);
+ 
+ 	/* Free potential existing configuration.  */
+ 	conf_free_bindings();
+ 
+ 	/* Apply the new configuration values */
+ 	conf_end(trans, 1);
+ 	return 0;
+ }
+ 
+-static void 
++static void
+ conf_init_dir(const char *conf_file)
+ {
+ 	struct dirent **namelist = NULL;
+ 	char *dname, fname[PATH_MAX], *cname;
+ 	int n = 0, nfiles = 0, i, fname_len, dname_len;
+ 	int trans, rv, path_len;
+ 
+ 	dname = malloc(strlen(conf_file) + 3);
+ 	if (dname == NULL) {
+ 		xlog(L_WARNING, "conf_init_dir: malloc: %s", strerror(errno));
+-		return;	
++		return;
+ 	}
+ 	sprintf(dname, "%s.d", conf_file);
+ 
+ 	n = scandir(dname, &namelist, NULL, versionsort);
+ 	if (n < 0) {
+ 		if (errno != ENOENT) {
+-			xlog(L_WARNING, "conf_init_dir: scandir %s: %s", 
++			xlog(L_WARNING, "conf_init_dir: scandir %s: %s",
+ 				dname, strerror(errno));
+ 		}
+ 		free(dname);
+ 		return;
+ 	} else if (n == 0) {
+ 		free(dname);
+ 		return;
+ 	}
+ 
+ 	trans = conf_begin();
+@@ -694,86 +769,86 @@
+ 	 	switch (d->d_type) {
+ 			case DT_UNKNOWN:
+ 			case DT_REG:
+ 			case DT_LNK:
+ 				break;
+ 			default:
+ 				continue;
+ 		}
+ 		if (*d->d_name == '.')
+ 			continue;
+-		
++
+ 		fname_len = strlen(d->d_name);
+ 		path_len = (fname_len + dname_len);
+ 		if (!fname_len || path_len > PATH_MAX) {
+-			xlog(L_WARNING, "conf_init_dir: Too long file name: %s in %s", 
++			xlog(L_WARNING, "conf_init_dir: Too long file name: %s in %s",
+ 				d->d_name, dname);
+-			continue; 
++			continue;
+ 		}
+ 
+ 		/*
+ 		 * Check the naming of the file. Only process files
+ 		 * that end with CONF_FILE_EXT
+ 		 */
+ 		if (fname_len <= CONF_FILE_EXT_LEN) {
+-			xlog(D_GENERAL, "conf_init_dir: %s: name too short", 
++			xlog(D_GENERAL, "conf_init_dir: %s: name too short",
+ 				d->d_name);
+ 			continue;
+ 		}
+ 		cname = (d->d_name + (fname_len - CONF_FILE_EXT_LEN));
+ 		if (strcmp(cname, CONF_FILE_EXT) != 0) {
+-			xlog(D_GENERAL, "conf_init_dir: %s: invalid file extension", 
++			xlog(D_GENERAL, "conf_init_dir: %s: invalid file extension",
+ 				d->d_name);
+ 			continue;
+ 		}
+ 
+ 		rv = snprintf(fname, PATH_MAX, "%s/%s", dname, d->d_name);
+ 		if (rv < path_len) {
+-			xlog(L_WARNING, "conf_init_dir: file name: %s/%s too short", 
++			xlog(L_WARNING, "conf_init_dir: file name: %s/%s too short",
+ 				d->d_name, dname);
+ 			continue;
+ 		}
+ 
+ 		if (conf_load_files(trans, fname))
+ 			continue;
+ 		nfiles++;
+ 	}
+ 
+ 	if (nfiles) {
+ 		/* Apply the configuration values */
+ 		conf_end(trans, 1);
+ 	}
+ 	for (i = 0; i < n; i++)
+ 		free(namelist[i]);
+ 	free(namelist);
+ 	free(dname);
+-	
++
+ 	return;
+ }
+ 
+ int
+ conf_init_file(const char *conf_file)
+ {
+ 	unsigned int i;
+ 	int ret;
+ 
+ 	for (i = 0; i < sizeof conf_bindings / sizeof conf_bindings[0]; i++)
+ 		LIST_INIT (&conf_bindings[i]);
+ 
+ 	TAILQ_INIT (&conf_trans_queue);
+ 
+-	if (conf_file == NULL) 
++	if (conf_file == NULL)
+ 		conf_file=NFS_CONFFILE;
+ 
+ 	/*
+-	 * First parse the give config file 
+-	 * then parse the config.conf.d directory 
++	 * First parse the give config file
++	 * then parse the config.conf.d directory
+ 	 * (if it exists)
+ 	 *
+ 	 */
+ 	ret = conf_load_file(conf_file);
+ 
+ 	/*
+ 	 * When the same variable is set in both files
+ 	 * the conf.d file will override the config file.
+ 	 * This allows automated admin systems to
+ 	 * have the final say.
+@@ -1585,21 +1660,21 @@
+ 		ret = asprintf(&line, "# %s: %s\n", tag, comment);
+ 	}
+ 
+ 	if (ret == -1) {
+ 		xlog(L_ERROR, "malloc error composing header");
+ 		return NULL;
+ 	}
+ 
+ 	return line;
+ }
+-		
++
+ /* compose a 'file modified' comment */
+ static char *
+ make_timestamp(const char *tag, time_t when)
+ {
+ 	struct tm *tstamp;
+ 	char datestr[80];
+ 	char *result = NULL, *tmpstr = NULL;
+ 	int ret;
+ 
+ 	tstamp = localtime(&when);
+@@ -1831,21 +1906,21 @@
+ 		xlog_warn("conf_write: malloc failed");
+ 		return false;
+ 	}
+ 
+ 	/* strip trailing spaces from the name */
+ 	end = strchr(name, ':');
+ 	if (end) *(end--) = 0;
+ 	while (end && end > name && isblank(*end))
+ 		*(end--)=0;
+ 
+-	if (strcasecmp(name, field)==0) 
++	if (strcasecmp(name, field)==0)
+ 		found = true;
+ 
+ 	free(name);
+ 	return found;
+ }
+ 
+ 
+ /* delete a buffer queue whilst optionally outputting to file */
+ static int
+ flush_outqueue(struct tailhead *queue, FILE *fout)
+@@ -2021,21 +2096,21 @@
+ 		return true;
+ 
+ 	return false;
+ }
+ 
+ static int
+ lock_file(FILE *f)
+ {
+ 	int ret;
+ 	ret = flock(fileno(f), LOCK_EX);
+-	if (ret) 
++	if (ret)
+ 		xlog(L_ERROR, "Error could not lock the file");
+ 	return ret;
+ }
+ 
+ /***
+  * Write a value to an nfs.conf style filename
+  *
+  * create the file if it doesnt already exist
+  * if value==NULL removes the setting (if present)
+  */
+@@ -2087,42 +2162,42 @@
+ 				goto cleanup;
+ 		} else {
+ 			if (append_line(&inqueue, NULL, make_section(section, arg)))
+ 				goto cleanup;
+ 
+ 			if (append_line(&inqueue, NULL, make_tagline(tag, value)))
+ 				goto cleanup;
+ 		}
+ 
+ 		append_queue(&inqueue, &outqueue);
+-	} else 
++	} else
+ 	if (strcmp(section, "#") == 0) {
+ 		/* Adding a comment line */
+ 		struct outbuffer *where = NULL;
+ 		struct outbuffer *next = NULL;
+ 		bool found = false;
+ 		int err = 0;
+ 
+ 		if (lock_file(infile))
+ 			goto cleanup;
+ 
+ 		buffsize = 4096;
+ 		buff = calloc(1, buffsize);
+ 		if (buff == NULL) {
+ 			xlog(L_ERROR, "malloc error for read buffer");
+ 			goto cleanup;
+ 		}
+ 		buff[0] = '\0';
+ 
+ 		/* read in the file */
+ 		do {
+-			if (*buff != '\0' 
++			if (*buff != '\0'
+ 			&& !is_taggedcomment(buff, "Modified")) {
+ 				if (append_line(&inqueue, NULL, strdup(buff)))
+ 					goto cleanup;
+ 			}
+ 
+ 			err = read_line(&buff, &buffsize, infile);
+ 		} while (err == 0);
+ 
+ 		/* if a tagged comment, look for an existing instance */
+ 		if (tag && *tag != '\0') {
+@@ -2171,21 +2246,21 @@
+ 			xlog(L_ERROR, "malloc error for read buffer");
+ 			goto cleanup;
+ 		}
+ 
+ 		buff[0] = '\0';
+ 		do {
+ 			struct outbuffer *where = NULL;
+ 
+ 			/* read in one section worth of lines */
+ 			do {
+-				if (*buff != '\0' 
++				if (*buff != '\0'
+ 				&& !is_taggedcomment(buff, "Modified")) {
+ 					if (append_line(&inqueue, NULL, strdup(buff)))
+ 						goto cleanup;
+ 				}
+ 
+ 				err = read_line(&buff, &buffsize, infile);
+ 			} while (err == 0 && buff[0] != '[');
+ 
+ 			/* find the section header */
+ 			where = TAILQ_FIRST(&inqueue);
+@@ -2206,24 +2281,24 @@
+ 						break;
+ 					}
+ 				}
+ 
+ 				/* no active assignment, but is there a commented one */
+ 				if (!found) {
+ 					where = section_start;
+ 					while ((where = TAILQ_NEXT(where, link)) != NULL) {
+ 						if (is_comment(where->text)) {
+ 							char *cline = where->text;
+-							while (isspace(*cline)) 
++							while (isspace(*cline))
+ 								cline++;
+ 
+-							if (*cline != '#') 
++							if (*cline != '#')
+ 								continue;
+ 							cline++;
+ 
+ 							if (is_tag(cline, tag)) {
+ 								found = true;
+ 								break;
+ 							}
+ 						}
+ 					}
+ 				}

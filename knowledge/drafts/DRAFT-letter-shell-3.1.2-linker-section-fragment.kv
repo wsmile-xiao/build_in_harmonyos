@@ -1,0 +1,79 @@
+#====================================================================
+# DRAFT-letter-shell-3.1.2-linker-section-fragment
+#    段注册型嵌入式 C 库的消费者链接：最小链接片段 INSERT AFTER .data
+#    随包分发 + 消费者 -Wl,-T 链接 + 按命令类型选择导出签名
+# 来源: letter-shell 3.1.2 适配（Path B 知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-letter-shell-3.1.2-linker-section-fragment
+trigger_tool:           conan|clang|ld.lld|test_package
+phase:                  linking|packaging|testing
+error_signature:        undefined symbol: _shell_command_start|
+                         undefined symbol: _shell_command_end|
+                         ld\.lld: error: undefined symbol|
+                         KEEP\(\*shellCommand\)|
+                         shellCommand section
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               linking, embedded, section, conan, packaging
+match_keywords:         shellCommand, SECTION(x), _shell_command_start,
+                        _shell_command_end, KEEP, INSERT AFTER, linker fragment,
+                        shell.lds, SHELL_EXPORT_CMD, SHELL_TYPE_CMD_MAIN,
+                        SHELL_TYPE_CMD_FUNC, -Wl,-T, static archive,
+                        segment 注册, 段边界符号
+title:                  段注册型嵌入式 C 库消费者链接失败：最小链接片段（INSERT AFTER .data 定义段边界符号）随包分发，消费者 -Wl,-T 链接；导出命令按 SHELL_TYPE_CMD_MAIN（argc/argv）而非 CMD_FUNC（int 参数）签名
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             |
+  库把命令/注册表放入自定义链接段（如 __attribute__((section("shellCommand")))），
+  初始化代码在 __GNUC__ 下取 &_<seg>_start / &_<seg>_end 边界符号；这些符号只由
+  链接脚本提供（上游 demo 带 shell.lds, KEEP(*(shellCommand))）。Conan 静态库
+  消费者若未带该脚本，ld.lld 报 undefined symbol；此外命令执行按 attr.type 分派：
+  SHELL_TYPE_CMD_FUNC 以解析后的 int 参数（shellExtParsePara/SHELL_PARAM_FLOAT）
+  调用，SHELL_TYPE_CMD_MAIN 以 (argc, argv) 调用——消费者导出命令签名不符会
+  在运行时按错误参数解释导致段错误/错误结果。
+affected_scope:         使用自定义链接段+段边界符号注册机制的嵌入式 C 库在
+                        Conan/静态库打包下的所有消费者链接场景。
+verification_cmd:       clang -I<include> test.c <lib>/libletter-shell.a \\
+                        -Wl,-T,<lib>/shellcmds.lds -o test && ./test
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           ship-minimal-linker-fragment
+rec_description:        |
+  (1) 配方目录提供最小链接片段 shellcmds.lds：
+      SECTIONS { .shellCommand : { _shell_command_start = .;
+      KEEP(*(shellCommand)) _shell_command_end = .; } } INSERT AFTER .data;
+      INSERT AFTER 复用默认链接脚本，避免整段重写；
+  (2) conanfile.py: exports = "shellcmds.lds"; export_sources() 中 copy 到
+      export_sources_folder；package() 复制到 lib/；
+  (3) 消费者/test_package 以 -Wl,-T,<lds> 链接；
+  (4) 消费者导出命令用 SHELL_EXPORT_CMD(SHELL_CMD_PERMISSION(0)|
+      SHELL_CMD_TYPE(SHELL_TYPE_CMD_MAIN)|SHELL_CMD_PARAM_NUM(n), ...) 的
+      (int argc, char *argv[]) 签名（CMD_FUNC 是 int 参数形式）；
+  (5) 命令输出校验通过 shell.write 捕获回调断言。
+rec_command:            cat > shellcmds.lds <<'EOF'
+                        SECTIONS
+                        {
+                          .shellCommand : { _shell_command_start = .; KEEP(*(shellCommand)) _shell_command_end = .; }
+                        } INSERT AFTER .data;
+                        EOF
+rec_auto_fix:           false
+rec_impl:               conan-recipe + test_package
+
+# 回退方案
+fallback_priority:      2
+fallback_approach:      use-upstream-lds
+fallback_description:   若库自带完整链接脚本（如 demo/x86-gcc/shell.lds），可直接
+                        引用其 KEEP(*shellCommand) 段定义；但完整脚本含平台特定
+                        OUTPUT_ARCH/SEARCH_DIR，INSERT AFTER 片段更可移植。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+# ★ 禁止策略 ★
+# 不得：以 strip 段/移除 SHELL_EXPORT_CMD 规避链接错误；不得伪造段边界符号
+# 为常量 0（命令表扫描会读非法地址）；不得把 CMD_FUNC 签名误用为 main 型。

@@ -1,0 +1,153 @@
+id: E6339
+draft: true
+title: "Conan override requirement 不会成为 PkgConfigDeps 的直接生成器依赖"
+category: conan, pkg-config, meson, dependencies, build-system
+match_keywords: >
+  override=True, force=True, PkgConfigDeps, direct requirement, zlib.pc,
+  Dependency zlib not found, tried pkgconfig, transitive override, generator closure,
+  glib version conflict, bad escape, Windows path replacement
+root_cause: >
+  Conan 2 的 override=True requirement 只在图中改写同名既有传递依赖的版本，
+  不建立当前 recipe 实际消费所需的直接 requirement。force=True 只强制版本选择；
+  与 override=True 组合时 Conan 2.29.1 仍把节点标为 direct=False，即使传入
+  direct=True 也不能把它用于当前 recipe 的 component requires。此时若
+  package_info 直接引用 `glib::`，严格校验会报“not a direct requirement”；应
+  让合法的 glib2/libsoup/json-glib 闭包传递该节点，并显式保留 headers/libs/run
+  及 transitive traits。若其 `.pc` 还引用了未生成的传递 `.pc`，应把真实且已发布
+  的包（本次为 pcre2）声明为直接生成器依赖；同时按 resolved recipe name 选择
+  生成器来源，避免 `dependencies["glib2"]` 被 override 别名劫持；或在不需要图级
+  override 的场景使用仅 force=True 的直接 requirement。多个提供者若精确要求同名
+  包的不同
+  recipe 版本，还必须由根 recipe 选择唯一 ABI 兼容版本；在 Windows 上把反斜杠
+  路径直接作为 re.sub replacement 也会触发 `PatternError: bad escape`，应使用
+  callable replacement。即使任务私有 `.pc` 目录已写入
+  `MesonToolchain.pkg_config_path`，平台 worker 仍可能从 Meson 原生文件之外启动
+  `pkg-config` 子进程；若没有同步写入当前 recipe 的
+  `buildenv_info.PKG_CONFIG_PATH`，该子进程仍找不到 `zlib.pc`。
+error_signature: >
+  Dependency "zlib" not found, tried pkgconfig; Package zlib was not found in the
+  pkg-config search path; zlib.pc not found; graph contains zlib but generators do not
+trigger_tool: conan, PkgConfigDeps, meson, pkg-config
+phase: generate|configuration|build
+severity: 2
+rec_priority: 1
+rec_approach: direct-force-and-override-requirement-for-consumed-provider
+rec_description: >
+  当 recipe 自身会通过 pkg-config、头文件或链接实际消费某包，同时还必须覆盖
+  传递链中的精确版本时，优先使用 force=True 建立直接 requirement；仅当平台图
+  解析需要强制改写同名传递版本时才加入 override=True，并显式保留
+  headers/libs/run/transitive traits，避免在 component requires 中引用该 override
+  节点。随后用 fresh Conan
+  home 验证完整 graph 和 --build=never 二进制闭包，检查 generators 中存在所需
+  .pc，再重建下游包和消费者。若 recipe 并不直接消费该包，才保留单独
+  override=True，不应仅为制造元数据而扩大依赖表面。对 Windows-hosted OHOS
+  worker，还要把同一任务私有目录通过
+  `buildenv_info.prepend_path("PKG_CONFIG_PATH", ...)` 注入 Conan build environment，
+  使 Meson 内部和脱离 native file 的 pkg-config 子进程使用同一闭包。
+rec_command: >
+  conan graph info <recipe> -pr:h <host-profile> -pr:b <build-profile> &&
+  conan install <recipe> -pr:h <host-profile> -pr:b <build-profile> --build=never &&
+  conan create <recipe> -pr:h <host-profile> -pr:b <build-profile> --build=never
+rec_auto_fix: false
+rec_impl: direct-requirement-graph-repair
+fallback_priority: 2
+fallback_approach: compatible-normal-direct-requirement
+fallback_description: >
+  若当前 recipe 直接消费该包但不需要强制统一全图版本，可声明普通直接
+  requirement，并用兼容版本范围让 Conan 正常求解；仅在 graph 中不存在冲突且
+  所有消费者 ABI 约束一致时使用。若仍有版本冲突，应修正提供者 recipe 的依赖
+  语义，不能在消费方伪造生成器文件。
+fallback_command: >
+  conan graph info <recipe> -pr:h <host-profile> -pr:b <build-profile> &&
+  conan install <recipe> -pr:h <host-profile> -pr:b <build-profile> --build=never
+fallback_auto_fix: false
+fallback_impl: manual-compatible-range-review
+forbid_1_pattern: >
+  write.*\.pc|generate.*fake.*pkg-config|copy.*system.*\.pc
+forbid_1_reason: >
+  手写或复制 .pc 会掩盖 requirement 身份错误，且无法证明头文件、库与 ABI
+  来自同一 Conan package revision。
+forbid_1_consequence: >
+  构建可能偶然通过，但二进制闭包、RREV/PREV 和目标运行时身份不可验证。
+forbid_2_pattern: >
+  graph.*contains.*dependency.*pass|override=True.*direct dependency|reuse.*old.*W3
+forbid_2_reason: >
+  graph 中出现 override 节点不等于生成器获得直接依赖；依赖身份变化后旧 W3
+  也不再绑定当前输入闭包。
+forbid_2_consequence: >
+  平台 CI 会继续缺失 .pc，或把不同依赖 revision 的目标证据错误拼接为 PASS。
+verification_cmd: >
+  在隔离 CONAN_HOME 依次执行 conan graph info、conan install --build=never 和
+  conan create；断言最终图只有一个精确版本、所需 zlib.pc 出现在 generators、
+  build 与 test_package 均 RC0。本次实证中依赖 recipe 从 override=True 修正为
+  force=True 后发布为 libsoup3/3.6.5-r3；下游 librest/0.10.2 r037 生成
+  zlib/1.3.1.1 元数据并完成 80/80 编译、test_package 构建，目标 W3 run-021
+  consumer 1/1 PASS，冻结 receipt/release/postrelease 全链 PASS。随后平台 CI
+  #50040 暴露 libsoup3-r3 与 json-glib 的 glib/2.84.0.1 精确版本冲突；根 recipe
+  增加 `override=True, force=True` 的 glib/2.84.0.1.1 requirement 后，旧 r049
+  在 package_info 严格 direct 校验处暴露了 direct 标志缺失；r051 又证明默认
+  override traits 会隐藏 pcre2 的 pkg-config 闭包。移除非法的
+  `glib::glib-2.0` component require 并显式恢复 headers/libs/run/transitive traits
+  后仍缺少 `pcre2.pc`，故增加真实的 `pcre2/10.45` direct requirement；必须以新
+  Conan run 证明 graph/install、package_info 和 generators 均成功，最终只保留
+  glib/2.84.0.1.1，且生成 glib/json-glib/pcre2/libsoup3 `.pc`。r055 证明移除
+  glib2 component 后 test_package 链接缺少 `g_type_check_instance_is_a` 与
+  `g_object_unref`；r056 证明仅恢复 component 仍因 override 节点 direct 校验失败；
+  r060 通过显式 `glib2/2.88.0` direct requirement 并保留该 component，完成
+  package_info、OHOS 交叉编译、打包、CMake consumer 和 test_package RC0。
+affected_scope: >
+  Conan 2 配方中“当前包实际消费某依赖，但该依赖此前只以 override=True 形式
+  出现”的 Meson/Autotools/pkg-config 构建；不适用于纯粹由顶层统一传递版本、
+  当前 recipe 完全不读取其头文件、库或生成器元数据的场景。
+safety_boundary: >
+  force=True/override=True 不能替代 ABI 兼容性判断、W0 二进制发布检查或消费者验证；不得在
+  下游手写假的 .pc 掩盖上游 requirement 语义错误，也不得把 graph 可解析等同于
+  generator 闭包或二进制闭包可用。依赖身份变化必须重建 package revision 并
+  创建新的目标验证 successor，旧 W3 证据不可复用。
+principles:
+causes: []
+caused_by: []
+similar_to: E468
+conflicts_with: []
+prerequisite_of: []
+doc_file: knowledge/drafts/E6339-draft-1146.md
+last_updated: 2026-09-18
+source_event: >
+  librest/0.10.2 PR 10543 CI 49460 在 libsoup3/3.6.5-r2 缺少 zlib.pc；修正并发布
+  libsoup3/3.6.5-r3 后，librest r037 本地 Conan 80/80 与 W3 run-021 consumer
+  1/1、release/postrelease、冻结 validator 全部 PASS。CI #50040 又发现 r3 与
+  json-glib 的 glib 精确版本冲突；当前根 recipe 用 `override=True, force=True`
+  的直接 requirement 统一至 2.84.0.1.1，并记录 graph/install r002 的 RC0、
+  同时保留 Windows re.sub replacement 的 callable 修复；r055-r059 进一步证明
+  override 节点不能承接组件 direct metadata，而真实 GLib/GObject 链接闭包必须由
+  独立的 `glib2/2.88.0` direct requirement 提供。
+authors: 1146
+source_pr: 10543
+source_commit:
+metrics_success_count: 1
+metrics_fail_count: 3
+metrics_confidence: 1.0
+metrics_last_used: 2026-09-18
+contributor_id: 1146
+current_candidate_correction: >
+  本轮当前候选已移除 glib2/2.88.0 direct requirement 和 glib2::glib2
+  component 引用，保留 glib/2.84.0.1.1 force=True，并显式声明
+  libffi/3.4.4 与 pcre2/10.45。Windows OHOS 交叉构建只把已发布包内的
+  libpcre2-8.pc、libpcre2-posix.pc 和 libffi.pc 复制到任务私有生成器目录，
+  通过绝对 prefix 解析真实包元数据，不生成伪包。当前 r074 本地包由
+  conan-create-r074-cross.log 生成；平台旧候选 CI #50072 的 glib2 测试超时
+  是移除该 direct requirement 的回归依据。当前候选 W3 run-028 绑定
+  HEAD 6329953d5c8f6b3d5a040bd5526e7ddeee1f0a23、tree
+  c2d5ccff1577567cee90474df3225874aaa0c986，唯一 launch 后
+  consumer 1/1 PASS、RESULT_FROZEN/RELEASED/POSTRELEASE 全部 PASS。
+  该修正取代草稿中 r060 的 glib2 direct 叙述；r060 仅保留为历史失败/诊断证据。
+  本轮又修复平台 CI #50135 暴露的 zlib.pc worker 闭包缺口：zlib/1.3.1.1
+  改为当前 recipe 的真实 direct requirement，并从解析 package folder 复制真实
+  zlib.pc 到任务私有 pkg_config_path，使用 callable replacement 绑定绝对 prefix。
+  conan-create-r083-zlib-pc-fix.log 与 .rc 证明图、84/84 编译、打包、CMake
+  consumer 配置/编译和 test_package 构建 RC0；can_run=False 的目标 ELF 仍只由
+  新 successor W3 证明，run-029/旧 run-028 不得复用。平台 CI #50135 又证明仅设置
+  `MesonToolchain.pkg_config_path` 仍不足；本候选同步调用
+  `buildenv_info.prepend_path("PKG_CONFIG_PATH", ...)` 并输出任务私有目录，r084
+  `conan-create-r084-pkgconfig-env.rc=0` 且日志包含 zlib-pc-fix、package、consumer
+  与 test_package 构建证据。

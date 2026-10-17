@@ -1,0 +1,76 @@
+# 运行期依赖：四个均以 run=True 声明（承重项）。本包 package_type="application"，
+# Conan 对 application 的下游传播把 headers/libs 置 False、只留 run；不带 run=True 时
+# 四依赖被列入 "Skipped binaries"，其 runenv_info 不进消费者环境，import pytest 即报
+# No module named 'pluggy'（CI 实测）。本机对照：普通 requires → 消费者 PYTHONPATH 中
+# pluggy/iniconfig 命中 0/0；run=True → 1/1。no_skip=True 不能替代（只解 skip、不传环境）。
+# tool_requires 构建上下文同理（xkeyboard-config 的用法），conanbuildenv 同样只在 run=True 时有。
+# packaging/26.3 另有自身缺口：它用 Conan 1.x env_info 导出路径，Conan 2 忽略该对象
+# （CI 打印 WARN: deprecated: 'env_info' used in: packaging/26.3），消费者 PYTHONPATH 里
+# 唯独没有 packaging 条目。修它自身在本 PR 内不可行（已发布 + 一 PR 一包），故由本包
+# package_info() 代为发布四个依赖的 site-packages：用 _find_site_packages() 探测布局
+# （pygments 在 lib/python/site-packages、其余在 lib/python3.12/...，不硬编码），取不到即
+# output.warning 具名告警。成功时打印 "published N dependency site-packages path(s)"（实测 N=4）。
+test_files:
+- path: "test_package/test_pytest.py"
+test_type: "R34"
+assertion_count: 41
+description: "来源校验（pytest 必须来自 package_folder）+ 四个运行时依赖各自来源校验（各自 __file__ 必须落在其 package_folder 下，防 user-site 副本掩盖环境传递缺口）+ user-site 屏蔽自证（PYTHONNOUSERSITE=1 必须已生效）+ pytest 可导入（site-packages）+ _pytest 引擎 + py.py shim + _pytest/_py + 版本一致性(9.1.1) + dist-info/entry_points + PATH 上的 pytest 程序可执行（含 shebang/可执行位校验；PATH 无 python3 时经解释器执行）+ 公开 API + py shim 的 path/error + 真实跑通 2 个样例用例 + ExitCode"
+
+upstream_test_in_build: true
+upstream_test_command: "PYTHONUSERBASE=<staged root> <host python> -m pytest testing/ -q --no-header --basetemp=<probed tmp> -rf --deselect <6 个设备不可能节点>"
+upstream_test_count: 4231
+upstream_test_result: "4164 passed / 0 failed / 41 skipped / 6 deselected / 13 xfailed / 7 xpassed（实测 648.51s；全套 51 个模块，rc=0）"
+# 说明：执行 pytest **自带套件的全部 51 个模块**（collect 得 4231 个节点 = 4164+41+6+13+7），
+# 不是子集。依赖经 PYTHONUSERBASE 指向的「自包含根」供给，解释器仍是宿主原装 python。
+# 为什么不给宿主解释器拼 PYTHONPATH：上游有测试会派生子 pytest 进程，且两条机制独立生效——
+#   · src/_pytest/pytester.py 每用例执行 mp.setenv("HOME", tmphome)，HOME 一改，
+#     user site（~/.local/lib/pythonX.Y/site-packages）就从子进程 sys.path 里消失；
+#   · testing/test_debugging.py 用 monkeypatch.setenv("PYTHONPATH", ...) **覆盖**而非追加。
+# 实测同一套件在 PYTHONPATH 方案下 141 项失败（统一报 No module named 'pluggy'），
+# 改用 PYTHONUSERBASE 供给后 0 失败。PYTHONUSERBASE 能同时扛住这两条：site.py 在每次
+# 解释器启动时把 user site 解析为 $PYTHONUSERBASE/lib/pythonX.Y/site-packages，与 HOME
+# 和 PYTHONPATH 都无关。探针实测：HOME 被改且 PYTHONPATH 被覆盖时，不设该变量的普通
+# 解释器无法 import pluggy，设了则 pytest/pluggy/iniconfig/xmlschema/hypothesis 全套可用。
+# 配方不用 venv：python -m venv 会写 pyvenv.cfg 并依赖 sys._base_executable，在 CI 沙箱里
+# 生成的解释器在执行任何代码前就失败（Fatal Python error: init_fs_encoding ...
+# No module named 'encodings'）。
+# dev 依赖不按名解析，而是按 URL + PyPI sha256 直取 11 个固定通用 wheel，再 pip --no-index 装本地文件。
+# 为什么必须钉文件：按名解析不可复现——CI worker 的索引选中了
+# hypothesis-6.165.3-cp310-abi3-ohos_aarch64.whl（该版本次不发布通用 wheel，且该文件 PyPI 本身不收录），
+# 该构建在本设备上导入即失败（"Error loading shared library ...: Permission denied"，设备只加载它认可的 ELF），
+# 而本机解释器标签恰好排除了它、静默选中 6.155.7 —— 两台主机跑的代码不同。
+# 用 pip 平台标签约束也不行：worker 实测同一索引此后完全给不出 hypothesis（"from versions: none"）。
+# 钉死文件即把索引排除在决策之外；哈希取自 PyPI，且 _PYPI_MIRRORS 两个镜像经逐个校验与 PyPI 字节一致，
+# 故镜像只作兜底、绝不改变装入内容。
+# 另：装 dev 依赖时用 --no-index 装本地 wheel，天然没有解析步骤，也就不会出现 pip 用它自己的
+# pytest/pygments 覆盖已铺副本的问题（实测过：曾 pygments 2.20.0.1→2.21.0、skip 数 76→43，
+# 即部分用例跑的是下载来的 wheel 而非被测包）。
+# bash 缺口与修法：上游 test_argcomplete.py 直接 shell 调 `bash -c "compgen ..."`，
+# test_parseopt.py 跑 `bash --version` 失败即 pytest.skip("bash is not available")。
+# CI worker 的 PATH（/data/app/bin:/system/bin:/system/sbin:/vendor/bin 加 ~/.local/bin）里没有 bash，
+# 实测 argcomplete 用例报 FileNotFoundError: 'bash' 而失败、parseopt 相关用例静默跳过（本地有 bash，故只在 CI 暴露）。
+# 仅把 bash 加进 PATH 不够：本轮实测 PATH 前置 bash 软链后 CI 结果与未供给时逐字相同
+# （同样 1 failed/4137 passed/67 skipped），即零效果。根因是 worker 解释器对裸名走
+# posix_spawn 快路径、直接调 os.posix_spawn("bash", ...)，而本平台 musl 的 posix_spawn
+# 不搜索 PATH（搜 PATH 的是 posix_spawnp）。本机能过是因为其 subprocess.py 走 fork/exec
+# 并按 os.get_exec_path 搜 PATH。
+# 故两条并用：①_supply_bash() 按 shutil.which → /data/service/hnp/bin/bash → /bin/bash →
+# /usr/bin/bash 探测（不硬编码），校验是可用 GNU bash 后建只含 bash 软链的 suite-bin/ 前置到 PATH；
+# ②_write_spawn_compat() 往自包含根写 _ohos_spawn_compat.py + zz_ohos_spawn_compat.pth，
+# 由 .pth 在解释器每次启动时把 os.posix_spawn 包一层（裸名先按 PATH 解析，绝对路径原样透传）；
+# 用 .pth 而非 sitecustomize 是避免宿主同名模块赢得导入、静默丢补丁。
+# 实测：os.posix_spawn("bash",...) 在 PATH 确有 bash 时仍 ENOENT；载入该 shim 后成功。
+# 全套（CI 同形 PATH）：4164 passed, 41 skipped, 6 deselected, 13 xfailed, 7 xpassed in 648.51s，rc=0。
+# 铺入时同时补齐 dist-info 元数据：套件 conftest.py 会 importlib.metadata.version("pygments")，
+# test_entry_points.py 会 importlib.metadata.distribution("pytest")。pluggy/iniconfig 自带
+# *.dist-info，而 pygments/2.20.0.1 的包目录不含元数据，故按模块自报 __version__ 合成
+# （读不到即失败，不臆造），否则 22 个用例在 fixture 阶段报 PackageNotFoundError。
+# 6 项以 --deselect 具名排除（节点名逐个列出，可复核），全部经探针证实为设备能力缺失、
+# 非打包缺陷：
+#   · 硬链接——设备上没有任何可写文件系统支持 os.link（EACCES），tmpdir 无法建硬链接；
+#   · /etc/passwd——运行 uid 无 passwd 记录（pwd.getpwuid 抛 KeyError），pwd 是读同一
+#     数据库的 C 扩展，无法在不换解释器的前提下顶替；
+#   · /usr 不可列（权限 0711）——Python completer 与 bash compgen 都返回空，"两者不同"
+#     的断言失去前提。常规解法 user namespace 被设备 seccomp 策略拒绝（unshare 收到 SIGSYS）。
+# 除这 6 项外任何失败都会让 build 失败（配方对 rc != 0 抛 ConanException 并打印失败节点），
+# 因此本门禁是真实门禁。数字由配方从会话末尾汇总行解析并打印，与本文件一致。

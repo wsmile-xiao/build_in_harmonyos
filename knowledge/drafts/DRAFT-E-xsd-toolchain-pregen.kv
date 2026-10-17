@@ -1,0 +1,57 @@
+id: DRAFT-E-xsd-toolchain-pregen
+title: "CodeSynthesis XSD 工具链（xsdcxx/xsdbin）交叉编译环境预生成方案"
+category: build-system
+severity: major
+match_keywords:
+  - "xsdcxx"
+  - "XSDCXX"
+  - "find_package_handle_standard_args(XSDCXX"
+  - "Could NOT find XSDCXX"
+  - "libxsd"
+  - "CodeSynthesis"
+  - "grammar-input-stream"
+error_signature: "Could NOT find XSDCXX (missing: XSDCXX XSDCXX_INCLUDE_DIRS) / xsdcxx: command not found"
+error_excerpt: "find_package_handle_standard_args(XSDCXX DEFAULT_MSG ...) — Could NOT find XSDCXX"
+root_cause: >
+  依赖 CodeSynthesis XSD 生成器的库（libkolabxml 等）在构建期需要 xsdcxx
+  （xsd→C++ 代码生成）和 xsdbin（schema→grammar 数组编译）两个 host 工具。
+  交叉编译 CI worker 上没有这些工具（制品仓无 xsd 包，官方预编译二进制仅
+  x86_64）。且 CodeSynthesis 已停止维护（4.0.0 为末版，2014）。
+rec_approach: >
+  三步预生成方案：
+  1) 在 OHOS 设备本机从 xsd-4.0.0+dep.tar.bz2 源码编译 xsdcxx/xsdbin
+     （OHOS SDK clang + conan 静态 xerces-c，本机即 arm64 可直接运行）。
+     两个坑：a) 组件目录无扩展名 version 文件与 libc++ <version> 头冲突
+     （新版 libc++ 无条件 include <version>）→ 重命名 version.txt；
+     b) libxsd-frontend operator<<(wostream&, Path) 编译错 → path.string()
+     逐字符 widen 成 wstring。
+  2) 用与上游 CMakeLists 相同的命令预生成，务必加 --std c++11（默认 c++03
+     生成的代码用 dom::auto_ptr，在 XSD_CXX11 模式 libxsd 头下不存在）：
+     xsdcxx cxx-tree --std c++11 --generate-polymorphic --generate-serialization
+     --namespace-map http://kolab.org=KolabXSD --root-element ... <schemas>
+     xsdbin --array-name iCalendar_schema --output-dir . <schemas>
+  3) 预生成产物（bindings/*.cxx|hxx、*-schema.cxx、libxsd/xsd/ header-only
+     runtime）放 patches/，conanfile build() copy 进源码树；patch 上游
+     CMakeLists：检测 XSDCXX 不可用时改用 copy 预生成文件（保留原路径作为
+     fallback）。
+  编译宏：-DXSD_CXX11 -DXSD_CXX11_TEMPLATE_ALIAS -DXSD_CXX11_NULLPTR
+  （clang-on-OHOS 伪装 GCC 4.2，TEMPLATE_ALIAS 不会自动推导）。
+solution: |
+  # conanfile.py build() 关键段
+  src_patches = os.path.join(self.source_folder, "patches")
+  for entry in ("bindings", "libxsd"):
+      copy(self, "*", src=os.path.join(src_patches, entry),
+           dst=os.path.join(self.source_folder, entry))
+
+  # CMakeLists patch（保留原逻辑 fallback）
+  if (XSDCXX STREQUAL "xsd-pre-generated")
+      add_custom_command(OUTPUT ${SCHEMA_SOURCEFILES}
+          COMMAND ${CMAKE_COMMAND} -E copy_directory
+                  ${CMAKE_SOURCE_DIR}/bindings ${CMAKE_BINARY_DIR}/bindings ...)
+  else()
+      # 原上游 xsdcxx 生成命令
+  endif()
+fallback: "若无 OHOS 本机环境，可在任意 Linux x86_64 上编译 xsdcxx（build2 或 xsd-4.0.0+dep make），预生成产物与平台无关（纯 C++ 源码）。"
+verify_builds: "local conan create libkolabxml/1.2.1 (OHOS arm64) PASS; upstream tests 84/84 PASS"
+prescan_pattern: "find_program\\(XSDCXX|xsdcxx cxx-tree"
+last_updated: 2026-09-19

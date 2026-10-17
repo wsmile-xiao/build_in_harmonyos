@@ -1,0 +1,58 @@
+#====================================================================
+# DRAFT-xmhtml-1.1.10-ohos-loader-refused-dependency-map - OHOS 设备拒绝映射已发布依赖二进制:按"依赖是否真缺"分类判定(present-but-refused vs 真缺库),测试脚本运行期分级放行(PLATFORM_POLICY_SKIP+符号级降级验证),禁 stub 顶替与权限/清缓存式绕行(xmhtml 案例)
+#====================================================================
+
+id:                     DRAFT-xmhtml-1.1.10-ohos-loader-refused-dependency-map
+trigger_tool:           test|runtime|ld|clang
+phase:                  runtime
+error_signature:        Error loading shared library <lib>: (needed by <obj>)|Error loading shared library <lib>: Permission denied|Error relocating <obj>: <sym>: symbol not found
+
+severity:               2
+category:               runtime|testing|dependency|compat|platform
+
+match_keywords:         Error loading shared library, needed by, Permission denied, Error relocating, symbol not found, present-but-refused, test_package runtime failure, 依赖存在无法映射, device map policy, conan create test() 127, LD_LIBRARY_PATH 有库却加载失败
+
+title:                  OHOS 设备拒绝映射已发布依赖二进制——按"依赖是否真缺"分类判定,测试脚本运行期分级放行(PLATFORM_POLICY_SKIP + 符号级降级验证),禁 stub 顶替
+
+root_cause:             OHOS 设备加载器对部分已发布依赖二进制(实测 libxft/2.3.9 与 fontconfig/2.18.3 的 .so 内容)拒绝映射:文件存在(可 -e/可 md5sum/可读)但 exec/dlopen 映射失败。musl 的 exec 路径消息原因段为空——`Error loading shared library <lib>: (needed by <obj>)`,只有 dlopen/dlerror 路径才带 `Permission denied`;依赖未映射导致本包库的 Xft*/Fc* 符号级联报 `symbol not found`。拒绝随**内容**走:同目录、同创建方式下其它依赖内容(libXrender/libXm/libxml2)可正常映射,与权限位(0750/0755/0770)、ELF 程序头/动态段标签、复制/objcopy 重写方式无关;本地源码重建同名依赖的新产物同样被拒。
+
+affected_scope:         运行期加载共享依赖、且其依赖的**已发布二进制**被目标设备映射策略拒绝的包:典型为启用可选字体/图形栈(Xft→fontconfig→freetype/libxml2)的 GUI/HTML/排版/绘图类库;纯静态自包含库、仅依赖 libc/libstdc++ 的包不受影响;依赖可正常映射的设备与 CI 不受影响(三条严格路径生效)。构建期(链接/头文件)即命中属另一口径(见 fallback)。
+
+verification_cmd:       detect_loader_refused_map.py --probe libXft.so.2 libfontconfig.so.1 --lib-path <.../p/lib> → 两库 present-but-refused,exit 0;--probe libNoSuchLib.so.9 → missing,exit 1(反向验证:真缺库不得被判为策略面);对真实 conan-create.log 判读 exit 0(实测 2026-10-04);修复后 conan-verify G0/G1/G2/G3/G4 + L2/L4/L5 全绿(xmhtml 1.1.10)。
+
+rec_priority:           1
+rec_approach:           classify-by-dependency-presence-with-symbol-level-fallback
+rec_description:        ①判据:对日志点名的每个依赖,先在运行期库路径(LD_LIBRARY_PATH / 绝对路径)解析——全部命中⇒存在但被拒绝映射(设备策略面);任一解析不到、或原因属 invalid ELF/架构不符/No such file 等⇒真缺库或真缺陷(必须修,R36)。②处置:test_package 保持真实执行消费者(R34),失败后分级——本包自身库失败=FAIL、依赖解析不到=FAIL、依赖存在却拒绝映射=打印 PLATFORM_POLICY_SKIP 证据块(逐库给出解析到的绝对路径)+符号级降级验证(nm -D 断言本包库导出公共 API/widget 类符号)后放行。③依赖可加载环境(CI/正常设备)三条严格路径都不触发,仍是完整运行期验证。④构建期就命中⇒按 env_unsupported 上报,不得 stub 顶替。
+rec_command:            bash test_package/test_xmhtml_consumer.sh <bindir> <pkg_libdir>;python3 knowledge/drafts/ohos-loader-refused-map-gap/detect_loader_refused_map.py --log <conan-create.log> --probe-named --lib-path "$LD_LIBRARY_PATH"
+rec_auto_fix:           false
+rec_impl:               test-package-classifier
+
+fallback_priority:      2
+fallback_approach:      env-unsupported-report-with-evidence
+fallback_description:   运行期无可绕路径时(例如包必须真实加载该依赖才有意义、或构建期即被拒),按 env_unsupported 上报并在 PR 说明附判据输出;禁止把测试改空壳或伪造 .ci-result.json 绕过。
+fallback_command:       python3 scripts/ohc-run.py result <pkg> <ver> --status env_unsupported --failed-reason "loader-refused-map: <soname> present-but-refused (evidence: detect_loader_refused_map.py exit 0)"
+fallback_auto_fix:      false
+fallback_impl:          report-only
+
+forbid_1_pattern:       同名空壳\s*\.so|weak\s*stub|伪造\s*soname|stub\s*库顶替
+forbid_1_reason:        用空壳/弱符号顶替被拒依赖让测试"通过"会掩盖真实依赖链,消费者行为与真实部署不一致(等同 R8 空壳性质)。
+forbid_1_consequence:   CI 绿而实机不可用;使用者按 Conan 依赖链安装后仍在运行期失败,问题后移且无信号。
+forbid_2_pattern:       chmod\s+[0-7]{3,4}[^|]*\.so|objcopy[^|]*被拒库|清缓存重下依赖反复重试
+forbid_2_reason:        实测改权限位/软链重建/objcopy 重写/反复清缓存重下均无效(拒绝随内容走),只消耗轮次与 CI 额度。
+forbid_2_consequence:   同一方向反复试(R41/R43 止损口径)耗尽预算,问题原样存在且无结论沉淀。
+
+principles:             []
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-xmhtml-1.1.10-ohos-loader-refused-dependency-map.md
+last_updated:           2026-10-04
+source_event:           XmHTML 1.1.10 HarmonyOS PC 适配(W3 conan-verify G2 运行期加载失败;分类判据 + 符号级降级验证落地,知识包同 PR 交付)
+authors:                weijiapan
+source_commit:          pending-pr-commit
+
+metrics_success_count:  0
+metrics_fail_count:     0

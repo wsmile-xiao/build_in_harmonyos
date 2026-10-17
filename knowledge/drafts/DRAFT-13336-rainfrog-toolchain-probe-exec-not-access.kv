@@ -1,0 +1,133 @@
+#════════════════════════════════════════════════════════════════════
+# DRAFT — 工具链可用性探测：os.access(X_OK) 会谎报可执行，必须真跑一次
+# 触发事件: rainfrog 0.3.20（Rust/cargo）HarmonyOS PC 适配；首版照抄
+#            alass/2.0.0 先例的 os.access 探测 → conan create 崩在
+#            PermissionError（errno 13），未退到 bottle 引导
+# 日期: 2026-09-27
+#
+# 与既有条目的关系（增量说明）:
+#   DRAFT-below-ohos-unsigned-rust-toolchain = 未签名 ELF 无法 execve 的
+#     **原因层**判定 + 自签名修复（并明确"不要再查 mode 位"）
+#   E232 / DRAFT-libisal-2.31.1 / DRAFT-yices-2.7.0 = 要执行的构建脚本/
+#     产物 exec 被拒；DRAFT-rjj666 = 软链路径 exec 被拒（路径前置类）
+#   本条增量 = **探测/决策层**：os.access(X_OK) 基于 mode 位与 uid/gid 判定，
+#     与 OHOS 实际执行策略**不等价**——"os.access 返回 True 但 exec 失败"
+#     这一组合在库内命中 0；本仓约 19 个 Rust 配方沿用 os.access 写法。
+#════════════════════════════════════════════════════════════════════
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     draft-13336-rainfrog-toolchain-probe-exec-not-access
+trigger_tool:           conan|os.access|subprocess|cargo|rustc
+phase:                  build
+error_signature:        PermissionError.*Errno 13.*Permission denied.*(bin/cargo|bin/rustc|usr/local/bin/cargo)|os\.access.*X_OK.*True
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               conan, ohos, toolchain-provisioning, silent-misdetect
+match_keywords:         os.access, X_OK, PermissionError, Errno 13, Permission denied,
+                        工具链探测, 可用性检测, bootstrap 回退, harmonybrew bottle,
+                        cargo, rustc, 未签名 ELF, file_manager 组, 0o750,
+                        探测误判, 存在性 vs 可执行性 vs 真能执行
+title:                  工具链可用性探测不能用 os.access(X_OK)：权限位说"可执行"而实际 exec 被拒，探测层必须真跑一次并查退出码，否则"回退 bootstrap"分支被永久短路
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             两层叠加。①os.access(X_OK) 完全基于 POSIX mode 位与
+                        uid/gid 关系判断，**不涉及** OHOS 的额外执行约束
+                        （未签名 ELF / 域与挂载的执行策略）——文件 0o750、
+                        组 file_manager，os.access 认为当前用户可用而返回
+                        True，真正 execve 时才被内核/loader 拒绝；
+                        ②这类配方普遍写成"找到可用工具链就用，否则 bootstrap"，
+                        探测误判使**回退分支永远走不到**，构建直接崩在第一个
+                        真正的 subprocess 调用，现场也看不到"其实可引导"。
+                        与 DRAFT-below-* 的边界：那条解决"被拒之后怎么办"
+                        （签名/拷贝），本条解决"如何不误判"（探测方式）。
+
+affected_scope:         所有"探测工具链/工具是否可用 + 回退 bootstrap"式配方与代码。
+                        本仓最集中于 Rust 系：约 19 个配方用 harmonybrew bottle
+                        引导工具链，多数沿用 os.access 写法。亦适用于任何在
+                        OHOS 上判断"外部工具/预编译产物能否执行"的逻辑。
+                        通用判据：**存在性(isfile) ≠ 权限可执行(access) ≠
+                        真能执行(exec)**，三者须分开验证，第三项只能真跑。
+
+verification_cmd: |
+  # 1) 一行复现"探测说可执行、实际被拒"（同一文件两种结论）
+  python3 -c "import os,subprocess;p='/storage/Users/currentUser/usr/local/bin/cargo';
+    print('isfile',os.path.isfile(p));print('access X_OK',os.access(p,os.X_OK));
+    subprocess.run([p,'--version'])"
+  # 期望: isfile True / access X_OK True / 随后 PermissionError [Errno 13]
+  # 2) 权限位对照（组可执行 → os.access 判 True）
+  ls -l /storage/Users/currentUser/usr/local/bin/cargo      # -rwxr-x--- ... file_manager
+  # 3) 证明确有"可引导"的替代路径（否则"误判短路"后果被低估）
+  ls -d /storage/Users/currentUser/usr/rust-* ~/.harmonybrew/bin/cargo \
+        /data/service/hnp/bin/cargo /data/app/bin/cargo 2>/dev/null   # 期望: 均不存在
+  # 4) 修正后端到端
+  conan create archives/r/rainfrog/0.3.20 \
+    -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           probe-by-execution-not-access
+rec_description:        把探测从"查权限位"改为"真跑一次 + 查退出码"：
+                        subprocess.run([path,"--version"], capture_output=True,
+                        timeout=60)，捕获 OSError/subprocess.SubprocessError
+                        返回 False，仅当 returncode==0 且输出含工具名时判为可用。
+                        设备上那个 0o750/组 file_manager 的 cargo 因此被正确判为
+                        不可用，配方随即退到 bottle 引导，一次构建通过
+                        （67/67 上游测试 + 4/4 消费者断言）。
+                        代价：多一次进程启动（~10–50ms）；要求 --version 是无副作用
+                        的只读操作（cargo/rustc/编译器/git 均满足）。若某工具
+                        --version 有副作用，改用 --help / -V 等更保守参数。
+rec_command:            conan create archives/r/rainfrog/0.3.20 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      pin-toolchain-source-and-skip-runtime-probe
+fallback_description:   若不便改探测逻辑：把工具链来源**固定**为已知可用的制品仓/
+                        已签名路径（不做运行时多候选探测），即"不探测就不会误判"。
+                        代价：丧失"本机已有可用工具链则直接复用"的能力，且来源一旦
+                        失效（如 bottle 被轮换）无自适应余地；仅作为过渡方案。
+fallback_command:       —
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       os\.access\([^)]*X_OK\)|os\.path\.isfile\([^)]*\)\s*and\s*os\.access
+forbid_1_reason:        权限位与"能否 exec"不等价：os.access 只看 mode 位与
+                        uid/gid，不覆盖 OHOS 的签名/域/挂载执行策略。
+forbid_1_consequence:   探测误判 ⇒ 回退分支被短路 ⇒ conan create 崩在
+                        PermissionError，且现场看不到"其实可引导"。
+
+forbid_2_pattern:       chmod\s+\+?x.*cargo|chmod\s+0?777.*cargo
+forbid_2_reason:        失败根因不是 POSIX mode 位（详见 DRAFT-below-*：mode 已是
+                        0755 仍被拒），chmod 无法绕过签名/执行策略门禁。
+forbid_2_consequence:   误判方向、反复调权限，问题依旧。
+
+forbid_3_pattern:       探测失败后直接\s*(raise|sys\.exit)|\bif not cargo:\s*raise
+forbid_3_reason:        存在回退路径（bottle 引导）时，把"探测失败"当成致命错误会
+                        丢掉回退能力；探测失败应与"该候选不可用"等同处理，
+                        继续尝试下一候选/回退方案。
+forbid_3_consequence:   构建在引导阶段即失败、白耗一轮 CI，而实际有可用替代路径
+                        （rainfrog 同机实测：无其它可用 rust，故回退是唯一路径，
+                        被短路后无第二条路可走）。
+
+principles:             P013
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-below-ohos-unsigned-rust-toolchain,E232,DRAFT-libisal-2.31.1-autotools-unbuildable-makefile-unx,DRAFT-yices-2.7.0-llvm-strip-exec-denied,DRAFT-rjj666-libmysofa-packaged-bin-symlink-deny-resolve,wagyu-0.6.1-rust-legacy-lockfile-ohos-port
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               drafts/DRAFT-13336-rainfrog-toolchain-probe-exec-not-access.md
+last_updated:           2026-09-27
+source_event:           rainfrog 0.3.20 HarmonyOS PC 适配（首版照抄 os.access 探测崩在 PermissionError；改实执行探测后一次通过）
+authors:                atomcode <noreply@atomgit.com>
+source_pr:              13336
+source_commit:          108ee4d3d5
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-27
+
+draft:                  true
+contributor_id:         atomcode

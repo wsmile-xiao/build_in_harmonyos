@@ -1,0 +1,111 @@
+#====================================================================
+# DRAFT-c-ares-lite-1.33.1-harmonyos-autotools-portability
+# — c-ares-lite 1.33.1 HarmonyOS autotools portability 闭环
+# 触发事件: c-ares-lite 1.33.1（官方 c-ares v1.33.1）HarmonyOS PC (aarch64) R01 适配
+# 查重: 无同 stem 草稿；与 E007(build-aux/ config.guess) / E129(umask 077) 差异见下
+#====================================================================
+
+id:                     DRAFT-c-ares-lite-1.33.1-harmonyos-autotools-portability
+trigger_tool:           configure|make|conan|patch
+phase:                  configuration|compilation
+error_signature:        cannot guess build type|
+                         OS ohos not recognized|
+                         patch stream is incomplete|
+                         could not setup config files machinery|
+                         failed to create '/tmp/ares_*'|
+                         chmod(aliases.filename(), 0) Which is: -1|
+                         addrtype_ Which is: -1
+
+severity:               2
+category:               autotools|portability|platform-limitation
+match_keywords:         config.guess, config.sub, HarmonyOS, linux-ohos,
+                         ohos-linux, umask 077, HMDFS, E007, E129, c-ares,
+                         patch_ng, toybox diff, cannot guess build type,
+                         tempnam, TMPDIR, ares-test, temporary hosts file
+title:                  c-ares-lite 1.33.1 HarmonyOS autotools portability：config.guess/config.sub 识别 + configure umask 修复三补丁闭环
+
+root_cause: >
+  1) GNU config.guess（c-ares 1.33.1 自带 Copyright 1992-2024 版）无
+  *:HarmonyOS:*:* 分支，uname -s=HarmonyOS 无法匹配，configure 报 cannot guess
+  build type；config.sub OS 列表也不识别 ohos-linux。2) HMDFS 新目录强制 setgid，
+  configure 脚本内 umask 077 建临时目录 drwx--S--- 属主不可写，config.status
+  建立 CONFIG_FILES 机制失败（E129）。3) 补丁文件若不以换行结尾，patch_ng
+  (conan apply_conandata_patches) 解析报 'patch stream is incomplete'（toybox
+  diff 生成手写补丁易踩）。4) [R15] OHOS 上 tempnam(NULL) 忽略 $TMPDIR 且
+  /tmp 只读，上游测试 TempFile/TempNam 建临时 hosts 文件失败（20 用例：
+  16 HostAlias + 4 FileChannelTest.GetAddrInfoHosts*）。5) [R14/R15] OHOS/HMDFS/
+  SELinux 上 chmod(file,0) 返回成功但权限仍 0660、fopen 仍可读（16 项
+  HostAliasUnreadable 平台语义限制；R13 时 /tmp 只读致 chmod 返回 -1）。
+  6) [R14/R15] /etc/hosts(HMDFS) 含 ::1 localhost 且 AF_INET6 socket 可用，但
+  c-ares 查询 localhost 返回空（addrs=0/addrtype=-1）——独立平台解析链路限制，
+  非外网 DNS 问题（3 项 LiveGetLocalhostByNameV6）。
+solution: >
+  三补丁组合：config/config.guess 增 HarmonyOS 分支输出 ${MACHINE}-unknown-linux-ohos；
+  config/config.sub 三处识别（ohos-linux / OS 列表 ohos* / 内核列表 linux-ohos*-）；
+  configure 临时目录创建 umask 077->022。补丁文件必须保留末尾换行（patch_ng 硬性
+  要求，否则 'patch stream is incomplete'）。已在 c-ares-lite 1.33.1 固化到
+  archives/c/c-ares-lite/1.33.1/patches/ 并在 conandata.yml 声明，conan create
+  build() 经 apply_conandata_patches 应用。4) [R15] 追加测试侧补丁
+  patches/0004-ares-test-tmpdir-ohos.patch：TempNam 在 dir==nullptr 且 $TMPDIR
+  非空时显式传 $TMPDIR 给 tempnam；未设置保留上游回退；不修改生产逻辑/断言；
+  禁止推广为生产路径替换或 file:///绝对路径方案。5-6) [R14/R15/R16] chmod(0)
+  拒绝读取语义与 localhost IPv6 解析为平台限制：不适用方案，不得改断言/宽泛跳过/
+  伪造通过；仅记录精确平台语义、验证与恢复条件。
+affected_scope: >
+  HarmonyOS PC 上源码树内自带 config/config.guess + config/config.sub 的
+  autotools C/C++ 库；c-ares 及其同类。非 build-aux/ 布局（与 E007 互补）。
+  [R15] 亦覆盖这类库自带 gtest 测试用 tempnam 建临时文件的场景。
+  [R14/R15/R16] 平台限制面：OHOS/HMDFS/SELinux 上 chmod(file,0) 语义与
+  localhost IPv6 解析链路（c-ares 查询返回空）。
+verification_cmd: >
+  ./configure --prefix=... && make -j1 && clang -I include test.c -o smoke libcares.a &&
+  ./smoke；sha256sum 官方 tarball 比对声明值；conan create / conan-verify
+  验证 G0-G4+L2/L4/L5；[R15] TMPDIR=$HOME/tmp ./arestest：list 1111、
+  通过 1092/失败 19（临时 hosts 类 20 项消除），LANDS_UNDER_TMPDIR_PREFIX 探针 exit 0；
+  [R14/R15] chmod 探针（rc=0→0660→fopen SUCCESS）与 gtest filter 复跑
+  LiveGetLocalhostByNameV6（1 通过 3 失败）。
+
+rec_priority:           1
+rec_approach:           patch-autotools-config-subtree
+rec_description: >
+  对源码树内 config/config.guess 增加 HarmonyOS 分支输出 ${MACHINE}-unknown-linux-ohos；
+  config/config.sub 三处（ohos-linux 归一化 / OS 列表 ohos* / 内核列表 linux-ohos*-）；
+  configure 临时目录 umask 077->022。补丁必须以换行结尾（patch_ng 要求）。
+rec_command: >
+  patch -p1 < patches/0001-config-config.guess.patch &&
+  patch -p1 < patches/0002-config-config.sub.patch &&
+  patch -p1 < patches/0003-configure.patch
+rec_auto_fix:          true
+rec_impl:              patch-files
+
+forbid_1_pattern:      --build=*|--host=*
+forbid_1_reason:        误判为交叉编译 cross_compiling=yes，AC_RUN_IFELSE 等运行时检测全部跳过，生成错误 config.h
+forbid_1_consequence:   级联错误链（同 E007 forbid）
+
+fallback_priority:      2
+fallback_approach:      consult-knowledge
+fallback_description:   布局为 build-aux/ 时走通用脚本 patch-autotools-ohos.pl（E007）
+fallback_command:       perl ${SKILL_ROOT}/scripts/patch-autotools-ohos.pl build-aux/config.guess build-aux/config.sub
+fallback_auto_fix:      false
+fallback_impl:          none
+
+principles:              P001, P003, P011
+caused_by:
+similar_to:             E007, E129
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-c-ares-lite-1.33.1-harmonyos-autotools-portability.md
+last_updated:           2026-09-02
+source_event:           archives/c/c-ares-lite/1.33.1 (pc3-34 R01/R02/R03/R14/R15)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                pc3-34
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count: 0
+metrics_fail_count: 0
+metrics_confidence: 0.0
+metrics_last_used:

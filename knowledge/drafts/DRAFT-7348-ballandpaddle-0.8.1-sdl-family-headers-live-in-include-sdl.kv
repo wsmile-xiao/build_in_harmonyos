@@ -1,0 +1,208 @@
+# ═══ Draft knowledge entry — sdl_image / sdl_mixer / sdl_ttf 的公开头装在 include/SDL/ 下，
+# 但 cpp_info.includedirs 只声明 ["include"]：AutotoolsDeps 算出的 -I 差一层，
+# configure 的链接探测报 yes 而 make 报 fatal error: 'SDL_image.h' file not found ═══
+# Timestamp: 2026-09-22
+# Software: ballandpaddle 0.8.1 (GNU Ball and Paddle，SDL 1.2 + 内嵌 Guile)
+# Gate: 编译期（库链接没问题，头文件搜索路径差一层）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-7348-ballandpaddle-0.8.1-sdl-family-headers-live-in-include-sdl
+trigger_tool:           configure|autoconf|cc|gcc|clang|cmake|pkg-config
+phase:                  compilation
+error_signature:        fatal error: 'SDL_image\.h' file not found|
+                         fatal error: 'SDL_mixer\.h' file not found|
+                         fatal error: 'SDL_ttf\.h' file not found|
+                         checking for IMG_LoadPNG_RW in -lSDL_image\.\.\. yes|
+                         checking for Mix_LoadWAV_RW in -lSDL_mixer\.\.\. yes|
+                         checking for TTF_OpenFontRW in -lSDL_ttf\.\.\. yes|
+                         include/SDL/SDL_image\.h|
+                         SDL_image\.h: No such file or directory
+
+severity:               3
+category:               build, autotools, sdl, conan, portability, probe-mismatch
+match_keywords:         SDL_image.h, SDL_mixer.h, SDL_ttf.h, include/SDL, includedirs,
+                         cpp_info includedirs, AutotoolsDeps, CPPFLAGS, -I one level short,
+                         AC_CHECK_LIB link probe vs header probe, dependency found but header not found,
+                         sdl12-compat, sdl_image, sdl_mixer, sdl_ttf, pkg-config Cflags includedir/SDL,
+                         package_info inconsistent with installed layout, conan recipe consumer fix,
+                         ballandpaddle
+
+title:                  依赖包把公开头文件装在 `include/SDL/` 下（与它们自己 `.pc` 里的
+                        `Cflags: -I${includedir}/SDL` 一致），`package_info()` 却只声明
+                        `includedirs = ["include"]` —— 消费者拿到的 `-I` 差一层，编译期
+                        `fatal error: 'SDL_image.h' file not found`；而 configure 的
+                        `AC_CHECK_LIB` **纯链接探测**刚刚报过 `...in -lSDL_image... yes`，
+                        极具误导性
+
+root_cause: >
+  两条独立事实叠加，且第一条专门负责制造误导。
+
+  (1) **`checking for IMG_LoadPNG_RW in -lSDL_image... yes` 与头文件搜索路径毫无关系。**
+  `AC_CHECK_LIB(SDL_image, IMG_LoadPNG_RW)` 只做一件事：往链接行加 `-lSDL_image`，
+  看能不能解析出 `IMG_LoadPNG_RW` 这个**符号**。它不打开任何头文件，也不检查 `-I`。
+  因此该行打印 `yes` 只证明「库在、符号在」，**完全不能证明「头在搜索路径里」**。
+  头文件那条通路根本不在这一步 —— 头是 `make` 里第一个 `#include` 时才被找的。
+  「依赖找到了」≠「头能找到」，这是本条全部迷惑性的来源。
+
+  (2) **声明与实际布局不一致。** 这三个包把公开头文件装在 `include/SDL/` 下：
+      <pkg>/include/SDL/SDL_image.h
+      <pkg>/include/SDL/SDL_mixer.h
+      <pkg>/include/SDL/SDL_ttf.h
+  `package_info()` 里却只写了 `includedirs = ["include"]`（漏掉 `/SDL`）。
+  消费者侧 `AutotoolsDeps` 忠实按声明计算，得到 `-I<pkg>/include` —— 差一层。
+  证据是**依赖包自己发的 `.pc`**（唯一权威的对外承诺）：
+      # <pkg>/lib/pkgconfig/SDL_image.pc
+      Cflags: -I${includedir}/SDL
+  即 `include/SDL` 才是它们承诺的搜索路径。
+
+  (3) **同族包形态不一致是最快的定位线索。** 同一份 `AutotoolsDeps` 生成的编译行里
+  会同时出现正确的与错误的 `-I`：
+      -I<p>/sdl_i.../p/include           ← sdl_image，少一层
+      -I<p>/sdl_m.../p/include           ← sdl_mixer，少一层
+      -I<p>/sdl_t.../p/include           ← sdl_ttf，少一层
+      -I<p>/sdl12.../p/include/SDL       ← sdl12-compat，正确（它声明的就是 ["include/SDL"]）
+  「同一批依赖里有的 `-I` 带 `/SDL`、有的不带」= 头文件布局/声明不一致，
+  无需再往「依赖没装」方向查。
+
+affected_scope: >
+  一切「依赖包的公开头文件实际位于某个子目录（如 `include/SDL/`、`include/<libname>/`），
+  但 `package_info()` 的 `includedirs` 只声明了父目录」的场景，在消费者用
+  AutotoolsDeps / CMakeDeps 等按声明生成 `-I` 时必炸。
+  判据一（制品侧，权威）：`ls <pkg>/include/`，若头文件都在 `include/<sub>/` 下，
+  再 `cat <pkg>/lib/pkgconfig/*.pc | grep -i cflags` 看它自己写的 `-I` 有没有带该子目录。
+  判据二（消费者侧）：编译行里对同一族依赖，`-I` 的深度不一致。
+  判据三（症状侧）：`configure` 报 `<fn> in -l<lib>... yes` 之后 `make` 报
+  `'<lib>.h' file not found` —— **看到这个组合不要再查依赖是否安装**。
+  同族信号：任何 `AC_CHECK_LIB(<lib>, <sym>)` 通过而 `AC_CHECK_HEADER(<lib>.h)` 未通过
+  的情况；乃至 CMake 的 `find_library` 成功而 `find_path` 失败。
+  容易踩的推断：以为 `configure` 的 "checking for ... yes" 覆盖了头文件可用性 ——
+  `AC_CHECK_LIB` 是纯链接探测，与 `-I` 无关。
+
+verification_cmd: >
+  # 判据一：制品实际布局 vs 包自己承诺的搜索路径（最权威）
+  ls <dep>/include/                                  # 期望：只有一个子目录 SDL/
+  ls <dep>/include/SDL/SDL_image.h                   # 期望：存在
+  cat <dep>/lib/pkgconfig/SDL_image.pc | grep -i cflags
+  #   期望：Cflags: -I${includedir}/SDL   ← 包自己承认要带 /SDL
+
+  # 判据二：消费者侧拿到的 -I（在 build_folder 里）
+  grep -o -- '-I[^ ]*' conanautotoolsdeps.sh | grep -i sdl
+  #   修复前：<dep>/include（少一层）；修复后：<dep>/include/SDL（带上了）
+  grep -c -- '-I.*include/SDL' conanautotoolsdeps.sh
+  #   期望：4（sdl12-compat + 补出来的三个）
+
+  # 判据三：复现「链接探测 yes / 头找不到」的分离
+  grep -n 'checking for IMG_LoadPNG_RW' config.log        # → yes（这只是链接探测）
+  grep -n 'SDL_image.h' <build_folder>/src/main.cpp       # → 第 29 行有 #include
+
+  # 判据四：修复后真编过
+  grep -n 'fatal error' <build_log>                        # → 无
+  ls <build_folder>/src/*.o                                # → 目标文件已生成
+
+rec_priority:           1
+rec_approach:           append-the-missing-include-SDL-level-to-CPPFLAGS-on-AutotoolsDeps-environment-for-the-affected-siblings
+rec_description: >
+  在消费者配方的 `generate()` 里，往 `AutotoolsDeps` **自己的 `environment`** 上追加
+  `CPPFLAGS`，补上缺失的那一层：
+      deps = AutotoolsDeps(self)
+      deps.environment.append("CPPFLAGS", self._sdl_family_include_flags())
+      deps.generate()
+  其中 `_sdl_family_include_flags()` 对每个已知布局异常的包，若 `<pkg>/include/SDL`
+  目录存在就产出一条 `-I<pkg>/include/SDL`，否则跳过（不要把不存在的路径塞进命令行）。
+  要点：
+    - **必须追加在 `deps.generate()` 之前**。`AutotoolsDeps.environment` 是惰性的，
+      官方文档即此用法（"If you need to modify some of the computed values you can
+      access to the ``environment`` object."）。`Environment.append` 对列表值走
+      `extend`，故补出的 `-I` 与它算出的 `CPPFLAGS` 合并成**同一条 export**，
+      不存在「脚本顺序互相覆盖」问题（conan 生成的脚本保留 `$VAR`）。
+    - **只补声明真的错的包**：已正确声明 `["include/SDL"]` 的包（如 sdl12-compat）
+      不要重复补，否则出现重复 `-I`（无害但脏）。判据是
+      「`<pkg>/include/SDL` 存在」**且**「`cpp_info` 未指到它」。
+    - **不碰上游源码、不给依赖包打补丁**：这是**包声明与包实际布局不一致**在
+      消费者侧的补偿，改上游 `#include` 写法或 sed 改依赖包都属于把环境问题
+      写成源码变更（见 forbid）。
+rec_command:            >
+  # generate() 内：
+  #   deps = AutotoolsDeps(self)
+  #   deps.environment.append("CPPFLAGS", self._sdl_family_include_flags())
+  #   deps.generate()
+  # helper：
+  #   flags = []
+  #   for name in ("sdl_image", "sdl_mixer", "sdl_ttf"):
+  #       folder = self.dependencies.host[name].package_folder
+  #       d = os.path.join(folder, "include", "SDL")
+  #       if os.path.isdir(d): flags.append("-I" + d)
+  #   return flags
+  # 自检：grep -c -- '-I.*include/SDL' conanautotoolsdeps.sh
+rec_auto_fix:           false
+rec_impl:               recipe
+
+fallback_priority:      2
+fallback_approach:      publish-a-revision-of-the-dependency-with-includedirs-fixed-to-include-SDL
+fallback_description:   >
+  给这三个依赖包各出一个修订版，把 `package_info()` 的
+  `cpp_info.includedirs` 从 `["include"]` 改成 `["include/SDL"]`（与它们自己
+  `.pc` 里的 `Cflags: -I${includedir}/SDL` 对齐）。这样**所有**消费者一起受益，
+  不必每个消费者各补一次。代价是要发新版本、走依赖侧流程，且改动面比单包补偿大；
+  同时要确认没有别的消费者已经在依赖 `-I<pkg>/include` 这一层（例如它把非 SDL
+  的头也放在 `include/` 根下），否则会把已经能编的包改坏。
+fallback_command:       # 依赖侧：cpp_info.includedirs = ["include/SDL"]，重新 conan create 后消费者直接删掉补偿
+fallback_auto_fix:      false
+fallback_impl:          dependency
+
+forbid_1_pattern:       sed\s+-i.*#include\s*["<]SDL/|把\s*"SDL_image\.h"\s*改成\s*"SDL/SDL_image\.h"|补丁.*include.*SDL/SDL_
+forbid_1_reason:        把「本环境某个依赖包的 includedirs 声明写浅了一层」这个**包布局
+                        事实**写成上游源码变更。工程把 `#include "SDL_image.h"` 改成
+                        `#include "SDL/SDL_image.h"` 后，在所有**正常布局**的平台上
+                        （发行版 libsdl-image1.2-dev 仍提供 `<SDL_image.h>`，并由它自己的
+                        `.pc` 补 `-I.../SDL`）行为反而改变，且上游升级必冲突。
+forbid_1_consequence:   适配不可上游化（P005），补丁语义错误且成为长期维护负担。
+                        正确位置是**构建期补一个 -I**（或修依赖包的 includedirs），
+                        上游源码一行不动。
+
+forbid_2_pattern:       includedirs\s*=\s*\[\s*["']include/SDL["']\s*\]\s*.*(sdl_mixer|sdl_ttf|sdl_image)|把三层以上头路径全量硬编码|glob.*include.*递归.*-I
+forbid_2_reason:        补偿性 `-I` 必须**以依赖包自报的契约**（其 `.pc` 的 `Cflags`）
+                        为准，且只补确实存在该子目录的包。无判据地硬编码一串路径、
+                        或用 glob 递归把所有子目录全塞进 `-I`，会在依赖升级改变布局时
+                        静默带进错误路径，也让「为什么补这条」无从考证。
+forbid_2_consequence:   配方对依赖版本变化脆弱，且掩盖真实契约，后续排查无据可依。
+
+forbid_3_pattern:       extra_cflags\s*=.*include/SDL|CFLAGS.*-I.*include/SDL.*(configure.*前|configure_args)|把 -I 塞进 configure_args
+forbid_3_reason:        这一层 `-I` 属于**依赖 flags**，必须与同一份 `AutotoolsDeps`
+                        算出的其他依赖 `-I` 落在同一条 `CPPFLAGS` export 里；绕过
+                        `AutotoolsDeps` 手塞 `extra_cflags`/`CFLAGS` 会另起一条通路，
+                        在依赖 flag 需要重算（传递依赖、profile 变化）时与主通路脱节，
+                        且顺序可能与它算出的 `-I` 相互覆盖。
+forbid_3_consequence:   依赖 flags 出现「两条独立通路」，本机通过、换 profile 或
+                        依赖版本后失败，适配不可复现。
+
+principles:             P014, P005
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-7348-ballandpaddle-0.8.1-sdl12-compat-has-no-sdl-config
+                        （同族：**依赖已正确注入，但探针/声明与制品不符** ——
+                         本条是「包声明少了一层 / 链接探测被误读为头可用」，
+                         那条是「探针找可执行脚本 sdl-config，而制品没有」）
+                        DRAFT-7348-ballandpaddle-0.8.1-ac-check-lib-probes-a-fixed-soname
+                        （同族：**探针找的东西与制品不符** —— 那条是探针按写死的
+                         soname 找库，本条是探针被误当成了头探测）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-7348-ballandpaddle-0.8.1-sdl-family-headers-live-in-include-sdl.md
+last_updated:           2026-09-22
+source_event:           archives/b/ballandpaddle/0.8.1 适配（sdl_image/1.2.12、
+                        sdl_mixer/1.2.12、sdl_ttf/2.0.11 的头在 include/SDL/ 下，
+                        cpp_info 只声明 include/）
+
+authors:                2301_76770579
+source_pr:              11639
+source_commit:          d6cdf6bf132a3fe55f5ab698df7b9170ea3a75c6
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-22
+
+draft:                  true
+contributor_id:         2301_76770579

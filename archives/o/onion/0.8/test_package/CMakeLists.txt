@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.15)
+project(onion_smoke C)
+
+find_package(onion REQUIRED CONFIG)
+
+add_executable(onion_smoke main.c)
+find_package(Threads REQUIRED)
+target_link_libraries(onion_smoke PRIVATE onion::onion Threads::Threads)
+if(CMAKE_SYSTEM_NAME MATCHES "^(OHOS|HarmonyOS)$")
+    add_executable(onion_harmony harmony_tests/hmdfs_http.c)
+    target_link_libraries(onion_harmony PRIVATE onion::onion Threads::Threads)
+    foreach(test_target onion_smoke onion_harmony)
+        set_property(TARGET ${test_target} PROPERTY BUILD_RPATH "${ONION_TEST_RUNTIME_DIR}")
+        target_link_options(${test_target} PRIVATE "-Wl,--disable-new-dtags")
+    endforeach()
+endif()

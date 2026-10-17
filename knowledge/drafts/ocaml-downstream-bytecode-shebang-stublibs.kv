@@ -1,0 +1,183 @@
+#====================================================================
+# DRAFT — findlib/OCaml 生态下游包在 OHOS 的字节码工具 shebang 失效与
+#         stublibs 注入适配模式
+# 触发事件: findlib (ocamlfind) 1.9.8 适配（configure 阶段首个真实错误）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-ocaml-downstream-bytecode-shebang-stublibs
+trigger_tool:           configure|make|conan|ocamlc|ocamlrun
+phase:                  configuration|building|test_package
+error_signature:        cannot determine ocaml's standard library directory|
+                         Cannot load required shared library dllunix|
+                         No such file or directory.*ocamlrun|
+                         install: inaccessible or not found|
+                         no bytecode file specified|
+                         expected Caml1999X031, got
+
+severity:               2
+category:               ohos, toolchain, ocaml, conan
+match_keywords:         ocamlfind, findlib, ocaml, ocamlc, ocamlrun, ocamlopt,
+                         OCAMLRUN, OCAMLLIB, CAML_LD_LIBRARY_PATH, stublibs,
+                         dllunix.so, dllstr.so, shebang, hmmac, GNU install,
+                         tool_requires ocaml, META, topfind, -custom
+
+title:                  下游 OCaml 生态包（ocamlfind/findlib 类）在 HarmonyOS PC 上的字节码工具拉入方式、
+                        stublibs 加载路径与 install(1) 缺失三类适配
+
+topic: >
+  E253 覆盖的是 OCaml 工具链**自身**（ocaml/4.14.1.1.4）的迁移。当下游包
+  （findlib/ocamlfind 等）以 `tool_requires("ocaml/...")` 拉入工具链在 OHOS 上
+  构建时，会遇到一组**不同**的适配点：构建期脚本直接调用 OCaml 字节码工具
+  （ocaml 顶层、configure 自举出的辅助程序），这些工具的 shebang 指向 conan
+  包**编译期嵌入的 ocamlrun 绝对路径**，在 store 重定位后失效；OHOS hmmac 亦
+  拒绝直接执行 shebang 脚本。此外字节码运行/链接需定位 OCaml C stubs
+  （dllunix.so 等），且 OHOS 无 GNU install(1)。
+
+root_cause: >
+  1) OCaml 字节码工具（`ocaml` 顶层、以及 configure 期间 `make -C tools/extract_args`
+     构建出的 extract_args）是脚本，其 shebang 形如
+     `#!<build-time-prefix>/bin/ocamlrun`。conan 包 store 迁移（…/.cache/conan2/p/b/X
+     → …/.conan2/p/X）后该绝对路径不存在，直接执行报 ENOENT；即便路径存在，
+     OHOS hmmac 也拒绝执行 shebang 脚本（E253 同源限制）。→ 只能显式
+     `"$OCAMLRUN" <tool> ...` 调用。
+  2) 字节码链接/运行要加载 C stubs（dllunix.so/dllstr.so/dllthreads.so，位于
+     `lib/ocaml/stublibs/`）。shebang 失效导致自动定位失败 → 报
+     "Cannot load required shared library dllunix"。该缺失还会让 configure 的
+     能力探测（DLL 支持、ppxopt）**误判**为不支持。须设 CAML_LD_LIBRARY_PATH。
+  3) `ocamlc -where` 返回的 stdlib 路径同样来自编译期嵌入常量，store 迁移后失效，
+     导致 findlib configure 的 `[ ! -d "$ocaml_core_stdlib" ]` 判定失败
+     （"cannot determine ocaml's standard library directory"）。须设 OCAMLLIB。
+  4) OHOS 为 toybox/BusyBox 环境，无 GNU coreutils 的 install(1)；不少项目
+     configure 硬编码 `INSTALLDIR = install -d` / `INSTALLFILE = install -c`。
+  5) 附：OCaml `-custom`（字节码 + 链接 C 运行时）产物在 OHOS 无法独立执行——
+     hmmac 拦截，重签名后 custom runtime 报 "no bytecode file specified"
+     （runtime 在 musl aarch64 上把自身 ELF 误当字节码参数）。这会导致上游基于
+     `-custom` 的集成测试执行阶段无法通过（平台限制，非被测包缺陷）。
+
+durable_solution: >
+  在配方的 build() 中统一以「环境变量驱动的显式解释器调用」替换直接执行，
+  并把这些变量作为补丁的守卫条件（非 OHOS 平台不设置 → 行为与上游一致，
+  不引入 __OHOS__ 平台宏，满足 R8/PF5）：
+
+  ```python
+  ocaml_pkg    = self.dependencies.build["ocaml"].package_folder
+  ocaml_bin    = f"{ocaml_pkg}/bin"
+  ocaml_stdlib = f"{ocaml_pkg}/lib/ocaml"
+  env = (f"OCAMLRUN={ocaml_bin}/ocamlrun "
+         f"OCAMLLIB={ocaml_stdlib} "
+         f"CAML_LD_LIBRARY_PATH={ocaml_stdlib}/stublibs "
+         f"PATH={ocaml_bin}:$PATH")
+  self.run(f"{env} /bin/sh ./configure ...", env="conanrun")
+  ```
+
+  补丁侧（单个 configure 补丁即可覆盖）：
+  - 新增辅助函数，仅当环境变量存在时改走显式解释器：
+    ```sh
+    ocaml_run () { if test -n "$OCAMLRUN"; then "$OCAMLRUN" "$@"; else "$@"; fi; }
+    ```
+    并替换所有直接调用点（脚本/工具名可能因库而异，需按实际 configure 内容定位）。
+  - 在 stdlib 目录确定后注入 stubs 路径，并写入 Makefile.config 供子 make 继承：
+    ```sh
+    ocaml_setup_runenv () {
+      if test -n "$OCAMLRUN" && test -d "$ocaml_core_stdlib/stublibs"; then
+        CAML_LD_LIBRARY_PATH="$ocaml_core_stdlib/stublibs${CAML_LD_LIBRARY_PATH:+:$CAML_LD_LIBRARY_PATH}"
+        export CAML_LD_LIBRARY_PATH
+      fi
+    }
+    ```
+  - install(1) 探测式回退（与上游注释中 BSD 建议一致）：
+    ```sh
+    if in_path install; then INSTALLDIR="install -d"; INSTALLFILE="install -c"
+    else INSTALLDIR="mkdir -p"; INSTALLFILE="cp"; fi
+    ```
+
+impact: >
+  适用于所有以 tool_requires ocaml 在 OHOS 构建、且构建期调用 OCaml 字节码工具
+  的下游包（findlib/ocamlfind、以及 opam/dune 生态工具、使用 ocaml 的 autoconf
+  脚本项目）。仅影响配置/构建/测试期，不影响最终安装产物（findlib 的 make install
+  优先安装原生 ocamlfind_opt，无 shebang 依赖）。
+
+recovery: >
+  - 现象 "No such file or directory: .../ocamlrun" 或 "cannot load dllunix" →
+    设 OCAMLRUN / OCAMLLIB / CAML_LD_LIBRARY_PATH 三变量，并把脚本调用改为显式
+    "$OCAMLRUN"（不要只改 PATH，PATH 不能解决 shebang 内嵌路径问题）。
+  - 现象 "install: inaccessible or not found" → configure 加 install 探测回退。
+  - 上游测试因 `-custom` 产物无法执行而失败 → 按 docs/TEST_QUALITY_SPEC.md §3.3
+    如实申报豁免，并用 `ocamlfind ocamlopt -linkpkg -package <lib>`（原生路径）
+    做等价功能验证，同时保留原始日志作为证据（避免 R51 申报失真）。
+
+evidence_chain: >
+  findlib (ocamlfind) 1.9.8 适配（archives/f/findlib/1.9.8）：
+    - configure 首个真实错误: "configure: cannot determine ocaml's standard library directory"
+      → 根因 ocamlc -where 指向失效 .cache/conan2 路径 → 设 OCAMLLIB 后通过；
+    - 第二错误: "Cannot load required shared library dllunix" → 设 CAML_LD_LIBRARY_PATH；
+    - 第三错误: "install: inaccessible or not found" → configure 探测回退 mkdir -p/cp；
+    - make all / make opt / make install 全部 EXIT=0；
+    - 上游 itest: 编译阶段 4/4 通过（err.out 为空），执行阶段平台豁免；
+      等价验证等同语义 4/4 通过（reports/equiv-verification.log）。
+    - 日志: archives/f/findlib/1.9.8/reports/{configure,make-all,make-opt,make-install,itest,equiv-verification}.log
+
+verification_cmd: >
+  cd archives/f/findlib/1.9.8 && conan create . \
+    -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 \
+    --build=missing --user=ohpcd --channel=stable
+
+limitations: >
+  - 需确认上游 configure 中所有字节码调用点都已纳入补丁（本例 3 处：ocaml 顶层 ×2、
+    extract_args ×1）；不同项目调用点不同，须逐一 grep 核对，遗漏会导致后续步骤
+    再次报 shebang 错误。
+  - OCaml `-custom` 产物平台限制无法通过本模式绕过（属 OCaml 运行时缺陷），
+    依赖它的上游测试只能豁免 + 等价验证。
+
+rec_priority:           1
+rec_approach:           ocaml-downstream-explicit-interpreter
+rec_description: >
+  以 OCAMLRUN/OCAMLLIB/CAML_LD_LIBRARY_PATH 三个环境变量驱动补丁守卫，把
+  configure 中的字节码工具直接调用改为显式 "$OCAMLRUN" 调用、注入 stublibs
+  搜索路径、并为 install(1) 缺失提供 mkdir -p/cp 回退；不引入 __OHOS__ 宏。
+rec_command:            OCAMLRUN=<ocaml>/bin/ocamlrun OCAMLLIB=<ocaml>/lib/ocaml CAML_LD_LIBRARY_PATH=<ocaml>/lib/ocaml/stublibs /bin/sh ./configure ...
+rec_auto_fix:           false
+rec_impl:               conan-recipe-ocaml-downstream-ohos
+
+fallback_priority:      2
+fallback_approach:      conanfile 在 build() 中用 replace_in_file 直接改写 configure 调用点
+fallback_description:   若不便维护补丁文件，可在 conanfile.py build() 里用 replace_in_file
+                        对 configure 做等价改写；缺点是逻辑藏在配方中、上游同步时易漏改。
+fallback_command:       replace_in_file(self, "configure", "tools/extract_args/extract_args", "$OCAMLRUN tools/extract_args/extract_args")
+fallback_auto_fix:      false
+fallback_impl:          conanfile-replace-in-file
+
+forbid_1_pattern:       shebang.*#!/.*ocamlrun.*rewrite|patch shebang to absolute ocamlrun
+forbid_1_reason:        仅改 shebang 绝对路径在 OHOS 仍不可行：hmmac 拒绝执行 shebang 脚本
+                        （E253 实测，无论指向 /bin/sh 还是 bash）
+forbid_1_consequence:   脚本仍报 Permission denied / Operation not permitted
+
+forbid_2_pattern:       PATH=.*ocaml.*bin:?\$PATH(?![^\n]*OCAMLRUN)
+forbid_2_reason:        只把 ocaml bin 加进 PATH 不能解决字节码工具 shebang 内嵌的
+                        ocamlrun 绝对路径失效问题（shebang 不查 PATH）
+forbid_2_consequence:   仍报 ".../ocamlrun: No such file or directory"
+
+forbid_3_pattern:       __OHOS__.*(ocaml|OCAMLRUN|dllunix)
+forbid_3_reason:        补丁新增行禁平台宏（R8/PF5）；本模式用环境变量守卫即可跨平台
+forbid_3_consequence:   preflight PF5 拦截，PR 无法合入
+
+principles:             P001, P003, P011
+similar_to:             E253, E017
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/ocaml-downstream-bytecode-shebang-stublibs.md
+last_updated:           2026-09-22
+source_event:           findlib (ocamlfind) 1.9.8 适配 HarmonyOS PC（archives/f/findlib/1.9.8）
+authors:                OpenDesk
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-22
+
+draft:                  true
+contributor_id:         default

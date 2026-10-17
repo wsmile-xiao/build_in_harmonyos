@@ -1,0 +1,32 @@
+#====================================================================
+# Draft: "修改 + 读取"必须是两次独立调用 —— 当工具同时提供查看选项与修改选项
+#        时，把它们放进同一次调用可能命中短路分支，输出的是**修改前**的状态；
+#        断言于是恒等于基准值，测试永远绿而从未验证过一次真实改动
+#   Stem: paxctl-0.9-mutate-then-read-separate-invocations — pairs with same-stem .md
+#====================================================================
+
+id:                     DRAFT-PAXCTL-MUTATE-THEN-READ-SEPARATE-INVOCATIONS
+trigger_tool:           ci
+phase:                  testing
+error_signature:        (无具体错误串；本条目是判据设计规约。典型症状是"改动类用例全绿但改动其实没生效")
+
+# ═══ Layer 1: 识别层 ═══
+severity:               4
+category:               test-design, false-green, ci-gate
+match_keywords:         test_package, 消费者测试, mutate, verify, -v, 查看选项, 修改选项, 短路, 假通过, 恒等断言, 状态读取, 两次调用, 幂等
+
+title:                  "修改 + 读取"必须是两次独立调用 —— 同一次调用里的查看选项可能只反映修改前状态，让断言恒等于基准值
+
+root_cause:            很多 CLI 同时提供"查看当前状态"和"修改状态"两类选项（paxctl 的 `-v` 与 `-m`、`ip` 的 `show` 与 `set`、`sysctl` 的读与写、`ethtool` 的查询与设置……）。写消费者测试时最自然的写法是"一次调用同时传修改选项和查看选项"，期望输出里直接看到新状态：
+    run_cmd("-v -m " + fixture)
+    assert_contains(out, "-----m-x----")      /* ← 期望看到改动后的串 */
+但实测 `paxctl -v -m <file>` 的输出是 **`-------x----`（改动前）** —— `-v` 命中了"仅查看"的短路分支，**修改根本没有被应用**。于是：① 断言写成"期望改动后"会直接 FAIL（这是幸运情况，至少暴露了）；② 但更常见的是作者改用"断言改动前的基准串"，测试**全绿却从未验证过任何一次真实改动**——因为无论传什么修改选项，`-v` 都只回显旧状态。这类**恒等断言**比崩溃更难发现：它不会报错、不会超时、覆盖率数字漂亮，只是把一整类功能判成了"从来没人测过"。
+affected_scope:         所有"查询选项与修改选项可共存"的 CLI/库。实测实例：paxctl 0.9（`archives/p/paxctl/0.9`，PR !9xxx）——`paxctl -v -m f` 输出 `-------x----` 而非 `-----m-x----`；正确做法是先 `paxctl -m f` 再 `paxctl -v f`。同类需警惕：`ip link show/set`、`ethtool`、`sysctl -w/-a`、`setterm`、`hdparm`、`tc qdisc show/change`、`git config --get/--set`（`--get` 会忽略 `--set` 参数）。
+verification_cmd:       对同一夹具跑两次并对比：`P -v -m F | grep 'PaX flags'` 与 `P -m F && P -v F | grep 'PaX flags'`。若第一条的输出等于基准串而第二条不同，即命中本条目；两条输出相同则说明该工具不会短路（可安全合并调用）
+
+# ═══ Layer 2: 决策层 ═══
+rec_priority:           1
+rec_approach:           two-phase-invocation-mutate-then-verify
+rec_description:        改法：把"应用改动"和"读取结果"拆成**两次独立进程调用**，并各自断言退出码：① `run(mutate_args, fixture)` 断言退出码；② `run("-v", fixture)` 解析输出、断言目标状态。要点：★ **反向自检**——在写用例之前先跑一次"修改+查看合并调用"，与"两次调用"对比；只要两者输出不同，就把合并写法定为禁止写法并写进注释，避免后来者"优化"回去；★ `-v` 这类查看选项**本身也要单独断言退出码**，因为部分工具在"查看+修改"合并时会以成功码静默跳过修改；★ 对"改动应当生效"和"改动应当可撤销"分别建用例，形成 mutate→verify→restore 三态闭环（paxctl 用 `-z` 复位，实测从三种不同前置状态复位后都回到基准串 `-------x----`，这条复位不变量本身就是高价值的属性判据）；★ 夹具策略：**用被测程序自身的二进制副本当夹具**——paxctl 操作的是 ELF 程序头，任何本包产出的 aarch64 ELF 都合法，用 `bin/paxctl` 自身既避免引入外部样本、又顺带证明"产物是结构完好、可被工具正确解析的 ELF"；★ 可写目录**不得**假定 `/tmp`（OHOS 上只读），应由 `test()` 阶段在 `self.build_folder` 下建 scratch 目录并以 argv 传入，测试程序**自己再探测一次可写性**（写一个探针文件并检查返回值），把"目录不可写"与"被测程序有缺陷"区分开；★ 判据实现照旧：`expect()` 计数而非 `assert()`、`popen` 内存直读、`pclose==-1 || !WIFEXITED || code∈{126,127} || code>=128` 判"跑不起来"、循环读到 EOF 再 `pclose`。参考实现：archives/p/paxctl/0.9/test_package/test_paxctl.c（74 条断言：10 个单标志 + 2 个组合标志的标志串、复位不变量、标志串↔说明行一致性、夹具完好性）。
+rec_command:            # ✅ 两段式：先改，再读\nrc1 = run_capture("%s \\"%s\\"", mutate_args, fixture, buf);      /* 1) 应用改动 */\nexpect(rc1 == 0, "应用改动退出码", "");\nrc2 = run_capture("-v \\"%s\\"", fixture, buf);                       /* 2) 独立读取 */\nextract_flags(buf, flags);\nexpect(strcmp(flags, want) == 0, "标志串", flags);\n\n# ❌ 禁止写法：合并调用会让 -v 命中短路分支，输出改动前状态\n# run_capture("-v %s \\"%s\\"", mutate_args, fixture, buf);   /* 实测输出恒为基准串 */\n\n# ✅ scratch 可写性显式探测（不假定 /tmp）\nif (copy_file(bin, probe_tmp) != 0) { expect(0, "scratch 目录可写", probe_tmp); return 1; }\nremove(probe_tmp);
+rec_auto_fix:           false

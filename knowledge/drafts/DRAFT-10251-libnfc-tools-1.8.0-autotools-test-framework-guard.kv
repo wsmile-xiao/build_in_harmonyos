@@ -1,0 +1,167 @@
+#====================================================================
+# DRAFT-10251-libnfc-tools-1.8.0-autotools-test-framework-guard
+#   上游测试套件被 configure 守卫静默排除（make check 报 TOTAL: 0）
+#   —— 先判「没跑」再补框架
+# 来源: PR #10251 feat(libnfc-tools): 1.8.0 适配 HarmonyOS PC
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-10251-libnfc-tools-1.8.0-autotools-test-framework-guard
+trigger_tool:           configure|make|automake
+phase:                  testing|configure
+error_signature:        #\s*TOTAL:\s*0|
+                         Nothing to be done for ['"]?check['"]?|
+                         WITH_CUTTER=no|
+                         system ['"]?ohos['"]? not recognized|
+                         Error loading shared library libcutter\.so\.0
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               testing, autotools, configure-guard, am-conditional,
+                        optional-dependency, ohos, upstream-tests
+match_keywords:         上游测试, 通过率, 0/6, TOTAL: 0, make check, 用例没测,
+                        没跑, 不进构建, 不参与构建, 静默排除, AM_CONDITIONAL,
+                        WITH_CUTTER, AC_CHECK_CUTTER, cutter, libcheck, cmocka,
+                        cpputest, 可选测试框架, Nothing to be done,
+                        cut_omit, OMIT, 测试框架缺失, rule4, R51
+title:                  autotools 可选测试框架缺失时 configure 守卫静默把测试套件排除出构建（make check 报 TOTAL: 0）：先判「没跑」再补框架真实执行
+prescan_pattern:        AC_CHECK_CUTTER|AM_CONDITIONAL|
+                        if\s+WITH_|if\s+HAVE_|
+                        cutter_unit_test|check_PROGRAMS
+prescan_globs:          configure.ac, configure.in, Makefile.am, test/Makefile.am,
+                        */Makefile.am, m4/*.m4
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             autotools 把可选测试框架当可选构建依赖：configure.ac 用
+                        AC_CHECK_CUTTER([>= 1.1.7])（或 PKG_CHECK_MODULES /
+                        AC_CHECK_LIB + AM_CONDITIONAL 同构写法）探测框架，
+                        test/Makefile.am 把全部用例包在 if WITH_CUTTER 条件块里。
+                        框架缺失 → WITH_CUTTER=no → AM_CONDITIONAL 为假 →
+                        test/ 目标为空 → make check 打印 "Nothing to be done
+                        for 'check'" 并以退出码 0 结束，只留下 "# TOTAL: 0"。
+                        机制性质：这是上游"优雅降级"设计而非报错——configure
+                        不失败、make 不失败、CI 不红，因此极易被误判为
+                        「上游测试全部通过」（谎报 6/6）或「该平台跑不了测试」
+                        （归因平台限制，审查明确不接受）。真相是测试目标
+                        根本未生成：不是通过、不是失败，是存在性缺失。
+                        本机制与目标平台无关，Linux x86 上同样复现。
+
+affected_scope:         所有上报"上游测试通过率"却得到 TOTAL: 0（或远小于
+                        清点数的 N）的 autotools/CMake 项目。本题实证：
+                        libnfc-tools 1.8.0（Cutter，6 个用例 0/6）；
+                        同构框架：check(libcheck)、cmocka、cppunit/cpputest；
+                        CMake 侧对应 find_package 失败导致 BUILD_TESTING
+                        静默关闭。涉及积分赛/审查 R51「上游测试三步法」与
+                        审查 rule4（通过率 + 少报）判定的核心争议点。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           diagnose-silent-test-exclusion-then-provide-framework
+rec_description:        【第一步 定性（先判"没跑"，再谈其他）】
+                        ① make check 2>&1 | grep -E '^# (TOTAL|PASS|FAIL)'
+                           → TOTAL: 0 即本模式指纹；
+                        ② grep -E 'WITH_CUTTER|HAVE_CUTTER' configure
+                           + grep '^WITH_CUTTER' config.status（宏名以
+                           configure.ac 为准）→ 看条件变量快照；
+                        ③ grep -n 'cutter_unit_test' test/Makefile 与
+                           grep -n '^check_PROGRAMS\|^TESTS' test/Makefile
+                           → 目标为空 = 决定性证据。
+                        三步结论只可能三种，处置完全不同：
+                        ①框架缺失（本模式）→ 补框架重建；
+                        ②存在但全 skip/omit → 按框架语义如实上报
+                          （Cutter OMIT 非 FAIL，计入 passed）；
+                        ③上游确无测试 → 附清点证据（TESTS 目标数=0），
+                          不得编造通过率。
+
+                        【第二步 补齐框架（以 Cutter 1.2.6 真机交叉编译为例）】
+                        ⓐ 取带 configure 的 release tarball——Cutter 的
+                           GitHub 镜像树不含 autoconf 产物，设备无系统
+                           automake/libtool 时无法 autoreconf；用 SourceForge
+                           release tarball（自带 configure/aclocal.m4/config/
+                           ltmain.sh）。
+                        ⓑ 补 autotools 三元组：config.sub 加 linux-ohos 分支、
+                           config.guess 加 *:HarmonyOS:*:* 分支（否则
+                           system 'ohos' not recognized）。
+                        ⓒ 按依赖顺序构建：
+                           m4macros → glib-compatible → gcutter → cutter
+                           （libcutter 链接依赖 gcutter，顺序错报
+                           No rule to make target '../gcutter/libgcutter.la'）。
+                        ⓓ 运行期把 soname 软链实体化：libtool 产
+                           libcutter.so.0 → libcutter.so.0.1.0 的符号链接，
+                           OHOS musl 加载器不识别该别名（报 Error loading
+                           shared library libcutter.so.0，reason 为空；
+                           同 .so 用 ctypes dlopen 却成功——主要烟幕）；
+                           cp -f libcutter.so.0.1.0 libcutter.so.0 后正常
+                           （见 E505/E492）。
+
+                        【第三步 真实执行】上游 test/*.c 原始文件零修改，
+                        编译进 runner 真机执行，如实回填 N/N′/通过率。
+
+                        【铁律】禁止强改 WITH_CUTTER=yes 或写 stub 让用例
+                        "看起来跑过"（R8 精神：空壳=功能缺失+谎报测试）；
+                        禁止以"平台限制/无环境"收尾（审查明确不接受）。
+rec_command:            cd <上游源码树> && make check 2>&1 | grep -E '^# (TOTAL|PASS|FAIL)'
+                        # 定性后按需补齐框架；本包可复现脚本：
+                        # archives/l/libnfc-tools/1.8.0/upstream-tests/build_and_run_upstream_tests.sh
+rec_auto_fix:           false
+rec_impl:               diagnose-then-cross-build-test-framework
+
+fallback_priority:      2
+fallback_approach:      conan-tool-requires-test-framework
+fallback_description:   无法手工交叉编译时，用 conan tool_requires 封装测试框架
+                        配方（自建 cutter/1.2.6 recipe，参照 glib 的交叉编译
+                        参数与三元组补丁），由 conan 管理构建与依赖；
+                        更规范但需先产出可发布的框架配方。本包实测走手工路径。
+fallback_command:       自建配方后：self.tool_requires("cutter/1.2.6")
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       WITH_CUTTER=yes|ac_cv_.*cutter.*=yes|强制.*WITH_CUTTER
+forbid_1_reason:         禁止绕过 configure 守卫强行置真（或手写框架 stub）：框架
+                        实质缺失时用例仍不能真跑，属谎报测试（R8）
+forbid_1_consequence:   用例"看似通过"实则未执行，审查核实即判少报/造假
+forbid_2_pattern:       平台限制.*不跑|无环境.*跳过|硬件.*无法测试.*因此不测
+forbid_2_reason:         框架缺失是*可解决*的构建依赖问题，不是平台限制；审查
+                        规则明确"无论任何理由(平台限制/缺依赖/无环境等)均不通过"
+forbid_2_consequence:   rule4 判 FAIL（VERDICT=FAIL / REQUEST_CHANGES）
+forbid_3_pattern:       修改.*test/.*\.c.*让.*通过|sed.*test/.*assert
+forbid_3_reason:         本模式是"测试根本没跑"，改测试源无意义且破坏上游原始性；
+                        真为"跑了但失败"场景须走 celero 三模式定性法并单列补丁披露
+forbid_3_consequence:   掩盖真实问题 + 上游测试非原始，审查拒收
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             DRAFT-celero-2.10.0-upstream-test-debt-triage（互补：跑了但失败 vs 根本没跑）、
+                        DRAFT-ohos-glib-test-framework-cmake-inject（CMake 形态的测试框架适配链）
+caused_by:              E505（OHOS loader 不解析 soname 符号链接别名，Cutter 运行期子问题）、
+                        E492（实体化 soname 别名，同族）、
+                        DRAFT-ohos-intltool-toolchain-stub（Cutter configure 前置坑，不重复登记）
+conflicts_with:
+prerequisite_of:        R51 上游测试三步法 / 审查 rule4 判定的前置判别能力
+
+# ═══ 元数据 ═══
+verification_cmd:       cd archives/l/libnfc-tools/1.8.0/upstream-tests && \
+                        sh build_and_run_upstream_tests.sh
+                        # 期望: 3 test(s), 0 failure(s), 0 error(s), 6 omission(s), 100% passed
+doc_file:               knowledge/drafts/DRAFT-10251-libnfc-tools-1.8.0-autotools-test-framework-guard.md
+last_updated:           2026-09-16
+source_event:           PR #10251 feat(libnfc-tools): 1.8.0 适配 HarmonyOS PC；
+                        审查 comment 189960349 判 rule4 FAIL「上游有用例 6 个但
+                        一个也没测（0/6），无论任何理由均不通过」→ 真机交叉编译
+                        Cutter 1.2.6 后 6 用例真实执行（0 failure/0 error、
+                        6 omission、100% passed）；CI 复跑绿（build #48683）
+authors:                SunShine_06
+source_pr:              10251
+source_commit:          2ce1a91cd6
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-16

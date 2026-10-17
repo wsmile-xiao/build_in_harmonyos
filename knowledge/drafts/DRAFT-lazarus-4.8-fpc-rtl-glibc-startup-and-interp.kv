@@ -1,0 +1,75 @@
+#====================================================================
+# DRAFT-lazarus-4.8-fpc-rtl-glibc-startup-and-interp
+# Linux/glibc 目标的启动对象（cprt0.o/crt1.o）落到 OHOS/musl：
+# __libc_csu_init/__libc_csu_fini 未定义 + ELF 解释器仍指向 ld-linux，
+# 形成「链接通过但一执行就失败」的假阳性。
+#
+# 本条目为 draft，不预占正式 E 编号，禁止直接 promote。
+# 触发事件: lazarus 4.8 HarmonyOS PC 适配（task #8032，2026-09-29）
+#====================================================================
+
+id:                     DRAFT-lazarus-4.8-fpc-rtl-glibc-startup-and-interp
+trigger_tool:           fpc|ld.lld|clang|conan
+phase:                  linking|packaging|runtime
+error_signature:        undefined symbol: __libc_csu_init|undefined symbol: __libc_csu_fini|ld.lld: error: undefined symbol: __libc_csu_init|Could not open '/lib/ld-linux-aarch64.so.1'
+severity:               2
+category:               toolchain, portability, runtime, linking
+match_keywords:         fpc, lazarus, cprt0, crt1, __libc_csu_init, __libc_csu_fini, glibc, musl, ld-musl-aarch64, ld-linux-aarch64, .interp, ELF interpreter, PT_INTERP, startup object, RTL, OHOS, 启动对象, 解释器
+title:                  Linux/glibc 编译器的启动对象落到 OHOS/musl：musl 缺 __libc_csu_init/__libc_csu_fini，且 ELF 解释器仍写死 /lib/ld-linux-aarch64.so.1——需空实现 shim + 打包期就地改写 .interp 两步齐做
+prescan_pattern:        __libc_csu_init|__libc_csu_fini|ld-linux-aarch64\.so\.1|cprt0|crt1
+prescan_globs:          conanfile.py|Makefile|*.sh
+
+# Layer 2: Diagnosis
+root_cause:             FPC 的 Linux/AArch64 RTL 启动对象 cprt0.o（FPC 侧的 crt1）在 _start 路径里引用 glibc 专有的 __libc_csu_init/__libc_csu_fini；OHOS 用的 musl 不提供这两个符号，于是 ld.lld 报 `undefined symbol: __libc_csu_init`。以空实现 shim（-k<shim.o>）链过之后还有第二道坎：FPC 的 ELF 写入器把默认解释器字符串 /lib/ld-linux-aarch64.so.1 写进 .interp（PT_INTERP），而 OHOS 只有 /lib/ld-musl-aarch64.so.1，二进制一执行就 `Could not open '/lib/ld-linux-aarch64.so.1'`。实测 -k--dynamic-linker=/lib/ld-musl-aarch64.so.1 在该链接路径下不生效（产物 .interp 仍是 ld-linux），所以必须在打包阶段就地改写 .interp 字节。两步缺一不可，否则得到「链接成功/构建全绿但产物不可执行」的假阳性。
+affected_scope:         任何「复用 Linux/glibc 目标启动对象，或自带 ELF 解释器路径假设」的产物落地 OHOS/musl：①FPC RTL 的 cprt0/crt1 族（lazarus 及一切以 fpc 为 tool_requires 的消费者）；②其它语言/运行时自带的 _start 与 crt 对象；③直接搬运的 Linux 预编译 ELF。仓内相关：DRAFT-lfortran-runtime-ohos-adaptation 同为「语言运行时落 OHOS」，但那条的签名是**库级链接期 glibc 扩展符号缺失**（feenableexcept），本条目是**启动对象 + 可运行性（解释器路径）**，两者互补不重叠。
+
+# Layer 3: Solution Space
+rec_priority:           1
+rec_approach:           empty-csu-shim-plus-inplace-interp-retarget
+rec_description:        两步一起做。①用 OHOS clang 以 aarch64 汇编写一份空的 __libc_csu_init/__libc_csu_fini（各自 `.globl` + 函数体直接 ret），编译成 .o 后以 -k<shim.o> 链入；②在 conanfile 的 package() 里，对交付的每个 ELF 原地改写 PT_INTERP：把字节串 `/lib/ld-linux-aarch64.so.1\x00`（26 字节）替换为 `/lib/ld-musl-aarch64.so.1\x00`（25 字节），多出的 1 字节补 \x00，保持文件长度与其余偏移不变（无需重链接，也不需要 patchelf）。两步都要做：只补 shim 则 .interp 仍错，只改 .interp 则启动符号缺失链接不过。
+rec_command:            conanfile.py（摘要）：_make_shim(): clang -c ohos-glibc-shim.s -o ohos-glibc-shim.o；链接时 --opt='-k<shim.o>'；_fix_interpreters(): data=bytearray(open(exe,'rb').read()); i=data.find(b'/lib/ld-linux-aarch64.so.1\x00'); data[i:i+len(new)]=new; data[i+len(new):i+len(old)]=b'\x00'*(len(old)-len(new))（len(old)=26, len(new)=25）。
+rec_auto_fix:           true
+rec_impl:               conan-recipe（汇编 shim + package() 就地改写 .interp）
+
+fallback_priority:      2
+fallback_approach:      patchelf-or-relink
+fallback_description:   若允许外部工具，可用 patchelf --set-interpreter 改写；但 OHOS worker 不保证有 patchelf，且用 patchelf 改短解释器会重排空间、需重新签名，故默认走「等长原地替换」的纯 Python 实现。诚实权衡：等长替换依赖旧串 26 / 新串 25 的固定长度关系，若未来 FPC 改变默认解释器字符串需同步更新。
+fallback_command:       patchelf --set-interpreter /lib/ld-musl-aarch64.so.1 <exe>（之后仍需 binary-sign-tool 重签）
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe（外部工具场景）
+
+forbid_1_pattern:       用 -Wl,--allow-shlib-undefined / -z undefs / 忽略 __libc_csu_init 未定义符号当作「已适配」
+forbid_1_reason:        启动符号在 _start 调用，缺失会在进程启动时崩；忽略未定义符号把问题后移到运行期。
+forbid_1_consequence:   产物一执行即崩溃，构建日志却全绿。
+
+forbid_2_pattern:       只做 .interp 改写不补启动符号 / 只补 shim 不改 .interp|用 #ifdef __OHOS__ 空壳守卫
+forbid_2_reason:        两步是同一问题的两半：少任一步要么链接不过，要么链接过但跑不起来（典型的假阳性）；平台名空壳守卫违反 R8/R40。
+forbid_2_consequence:   最危险的一类：CI 构建绿、test_package 若只做 --version 探测可能仍过，但真实可执行性不成立。
+
+# Layer 4: Principles
+principles:             P-TOOLCHAIN-001
+
+# Relations
+causes:                 []
+caused_by:              [musl 不提供 glibc 专有 __libc_csu_init/__libc_csu_fini, fpc 的 ELF 写入器固定写 /lib/ld-linux-aarch64.so.1 且 -k--dynamic-linker= 不生效, OHOS 只有 /lib/ld-musl-aarch64.so.1]
+similar_to:             [DRAFT-lfortran-runtime-ohos-adaptation, E2175]
+conflicts_with:         []
+prerequisite_of:        []
+
+# Metadata
+doc_file:               knowledge/drafts/DRAFT-lazarus-4.8-fpc-rtl-glibc-startup-and-interp.md
+last_updated:           2026-09-29
+verification_cmd:       ①未打补丁：ld.lld 报 `undefined symbol: __libc_csu_init`；并验 musl 确不提供：llvm-nm -D --defined-only <sysroot>/usr/lib/aarch64-linux-ohos/libc.so | grep -c __libc_csu = 0；②只补 shim 后仍不可运行：readelf -x .interp <exe> 显示 /lib/ld-linux-aarch64.so.1，直接执行报 Could not open '/lib/ld-linux-aarch64.so.1'；③两步齐做后：readelf -x .interp <exe> 为 /lib/ld-musl-aarch64.so.1，<exe> 正常执行（本项目 ./runtests 上游子集 48 项实跑，41 通过）。
+source_event:           lazarus 4.8 适配（task #8032，2026-09-29）：aarch64 OHOS 交付物链接期 cprt0.o 引 __libc_csu_init → 链空 shim + package() 等长改写 .interp → make lazbuild rc=0、lazbuild --version=4.8、上游 test/runtests 子集实跑 48 项（41 通过 / 3 失败 / 4 错误，偏差均归因 nogui widgetset 与代码页差异）。
+authors:                staralsnow
+source_pr:              待建
+source_commit:          合并后回填
+
+# Quality metrics
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-29
+
+draft: true
+contributor_id:         staralsnow

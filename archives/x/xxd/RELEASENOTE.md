@@ -3,28 +3,28 @@
 ## 快速安装
 
 ```bash
-tar xzf xxd-9.1.0-ohos-aarch64.tar.gz -C ~/usr/local
-
-cd xxd-9.1.0-ohos-aarch64 && sh install-xxd-9.1.0.sh
+# 通过 Conan 安装
+conan install xxd/9.1.0 -r ohpcd
 ```
 
 ## 可用版本
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 9.1.0 | success | 0 |
+| 9.1.0 | built | 0 |
 
 ## 当前版本 (9.1.0) 详情
 
 ### 包内容
-- 二进制: N/A
-- 包大小: 107.6KB
+- 二进制: xxd (命令行工具)
+- 包大小: ~108KB
 
 ### 编译信息
-- 构建系统: simple_makefile
+- 构建系统: makefile
 - 目标: ohos-aarch64
 - 质量门禁: PASS
 - 补丁数: 0
+- 源码: vim v9.1.0 (src/xxd/)
 
 ## 环境要求
 - HarmonyOS/OpenHarmony aarch64

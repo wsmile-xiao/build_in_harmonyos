@@ -1,0 +1,127 @@
+#════════════════════════════════════════════════════════════════════
+# DRAFT — 从 conan 工具包供给 OHOS Rust 工具链：搬移二进制破 sysroot（E0463），
+#          且 cargo 的动态依赖闭包随 rust 构型而变
+# 触发事件: rainfrog 0.3.20（Rust/cargo）HarmonyOS PC 适配；签名后把 cargo/rustc
+#           复制到 build_folder → 编译即 E0463 can't find crate for `std`
+# 日期: 2026-09-27
+#
+# 与既有条目的关系（增量说明）:
+#   DRAFT-below-ohos-unsigned-rust-toolchain = 官方 dist **未签名**无法 execve 的
+#     原因 + 自签名修复 + libssl/libcrypto/libz + CA；**已确立用 tool_requires
+#     引入 rust-toolchain 包的路线**
+#   DRAFT-13336-…-probe-exec-not-access = 探测层（os.access 谎报可执行）
+#   wagyu-…-rust-legacy-lockfile = bottle URL 会过期
+#   本条增量 = ① 签完名**搬移**二进制会破 rustc 的 sysroot 推导（E0463），须显式
+#     --sysroot；② cargo 的动态依赖闭包**随 rust 构型变化**，不可假定工具包自带
+#     运行库。两条命题在库内均命中 0。
+#════════════════════════════════════════════════════════════════════
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     draft-13336-rainfrog-rust-toolchain-relocate-sysroot
+trigger_tool:           rustc|cargo|conan|tool_requires|RUSTFLAGS
+phase:                  compilation
+error_signature:        E0463.*can't find crate for .std.|the .aarch64-unknown-linux-ohos. target may not be installed
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan, rust, toolchain-provisioning, sysroot
+match_keywords:         E0463, can't find crate for std, sysroot, --sysroot, rustc,
+                        cargo, rust-toolchain, tool_requires, 搬移, 复制二进制,
+                        自签名, librustc_driver, NEEDED, libgit2, libssh2, libcurl,
+                        libsqlite3, libzstd, CDN bottle 轮换
+title:                  从 conan 工具包供给 OHOS Rust 工具链：搬移二进制会破 rustc 的 sysroot 推导（E0463 can't find crate for std），须显式 --sysroot 指回包目录；且 cargo 的动态依赖闭包随 rust 构型而变，不可假定工具包自带运行库
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             rustc 由**自身可执行文件路径**推导 sysroot
+                        （<bin>/../lib/rustlib/<triple>/lib）。为签名而把 bin/cargo、
+                        bin/rustc 复制到别处后，sysroot 随之变成那个新目录 → 找不到
+                        target 标准库（E0463）。而只读负载（std rlib、rustlib 等）
+                        体积大（实测该包 890MB），全量复制代价高且无需 exec。
+                        与 below 草稿的边界：那条解决"为何不能执行"（未签名→签名），
+                        本条解决"签名要搬文件、搬完为何编译不了"（sysroot）——
+                        只签名不处理 sysroot 会从 EACCES 变成 E0463。
+                        附带：同一 CDN 的不同 rust 版本，其 cargo 的动态依赖闭包
+                        并不相同（1.97.1 需 3 个库；1.98.1_2 再加 5 个），
+                        故"工具包自带全部运行库"是错误假设。
+
+affected_scope:         所有从 conan 工具包供给 Rust 工具链、且需要把二进制复制/搬离
+                        原包目录的配方（常见动因：为签名、为构建隔离）。本仓 Rust 系
+                        约 19 个配方走 harmonybrew bottle 引导，若改用仓内
+                        rust-toolchain 包都会遇到本条；任何"复制工具链二进制"的场景
+                        同理（Go/zig 等自带发行包的语言亦然）。
+
+verification_cmd: |
+  # 1) 复现：签名 rustc 后看它推导出的 sysroot 指向哪
+  <signed-dir>/bin/rustc --print sysroot
+  #    若指向 <signed-dir>（其中无 std）→ 编译必 E0463
+  # 2) 一行确认 std 在原包内
+  ls <pkg>/lib/rustlib/aarch64-unknown-linux-ohos/lib/*.rlib | wc -l    # 期望 >0
+  # 3) 加 --sysroot 后编译通过（不落盘）
+  <signed-dir>/bin/rustc --sysroot=<pkg> --edition 2021 --emit=metadata \
+      -o /tmp/x.rmeta t.rs                                          # 无输出即成功
+  # 4) 附带事实：先看 NEEDED，别沿用旧版本库清单
+  readelf -d <pkg>/bin/cargo | grep NEEDED
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           relocate-executables-only-and-pass-explicit-sysroot
+rec_description:        只复制并签名需要 exec 的少数文件（bin/cargo、bin/rustc，
+                        以及 rustc 会 dlopen 的 librustc_driver-*.so），再用
+                        RUSTFLAGS="--sysroot=<包目录>" 把标准库指回原包目录；
+                        ~890MB 只读负载留在包内不动（std 等不被 exec，无需签名）。
+                        实测：加 --sysroot 后真实编译推进（372 个 crate 编成，
+                        无 E0463）。
+rec_command:            RUSTFLAGS="--sysroot=<tool_requires 的 rust-toolchain 包目录> -C linker=<clang>" cargo build --release --locked
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      sign-in-place-without-relocation
+fallback_description:   若不搬移二进制（就地签名，即 DRAFT-below-* 的做法），
+                        rustc 路径不变、sysroot 推导正常，**无需** --sysroot。
+                        代价：需可写 conan 缓存（就地改包目录），且签名不幂等时
+                        须自行加 marker；本仓偏向复制到构建目录以保持缓存只读。
+fallback_command:       —
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       复制.*(cargo|rustc).*后.*不.*sysroot|RUSTFLAGS=.*(?!sysroot).*cargo build
+forbid_1_reason:        搬移 rustc 后不显式给 sysroot，rustc 会按新路径推导出一个
+                        不含 std 的 sysroot，必然 E0463。
+forbid_1_consequence:   签名环节看似成功（--version 正常），编译阶段才失败，
+                        现象与"工具链坏了"混淆，白耗一轮 CI。
+
+forbid_2_pattern:       假定.*(rust|工具包).*自带.*(全部)?运行库|沿用.*1\.97\.1.*(库清单|libssl)
+forbid_2_reason:        cargo 的动态依赖闭包随 rust 构型变化：实测 1.97.1 只需
+                        libssl/libcrypto/libz，而 1.98.1_2 还需 libgit2/libssh2/
+                        libcurl/libsqlite3（librustc_driver 另需 libzstd）。
+forbid_2_consequence:   升级 rust 版本后运行库缺失，报 Error loading shared library
+                        libXxx.so，而误以为是工具链或镜像问题。
+
+forbid_3_pattern:       全量复制.*(工具链|包目录|890M|lib/rustlib)
+forbid_3_consequence:   为了 sysroot 而把整包（实测 890MB）复制一遍，构建耗时与
+                        磁盘占用显著上升，且多数文件本不需要 exec。
+forbid_3_reason:        只读负载（std rlib/rustlib）不需 exec、也无需签名，
+                        留在包内 + --sysroot 即可。
+
+principles:             []
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-below-ohos-unsigned-rust-toolchain,DRAFT-13336-rainfrog-toolchain-probe-exec-not-access,wagyu-0.6.1-rust-legacy-lockfile-ohos-port,E105,E154,E509
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               drafts/DRAFT-13336-rainfrog-rust-toolchain-relocate-sysroot.md
+last_updated:           2026-09-27
+source_event:           rainfrog 0.3.20 HarmonyOS PC 适配（签名后搬移 rustc 触发 E0463；加 --sysroot 修复）
+authors:                atomcode <noreply@atomgit.com>
+source_pr:              13336
+source_commit:          30bc90cfe5
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-27
+
+draft:                  true
+contributor_id:         atomcode

@@ -1,0 +1,31 @@
+--- a/c/src/proactor/epoll.c
++++ b/c/src/proactor/epoll.c
+@@ -2533,6 +2533,28 @@
+ 
+     n_events = epoll_wait(p->epollfd, p->kevents, p->kevents_capacity, timeout);
+ 
++    /* HarmonyOS: the kernel epoll does not implement EPOLLONESHOT semantics.
++       start_polling()/rearm_polling() rely on it to deliver exactly one event
++       per arm, and the ready-list "schedule" eventfd is deliberately left
++       readable forever (see epoll_eventfd_init(): it writes 1 and is never
++       read).  Without one-shot behaviour that descriptor is reported by every
++       epoll_wait(), so poller_do_epoll() never takes its "no new events"
++       return path and the poller spins forever inside next_event_batch()
++       (observed as a hang in c-proactor-test / proactor_interrupt_timeout).
++       Emulate EPOLLONESHOT for that descriptor by disarming it as soon as the
++       poller has taken the delivery; all re-arm paths already call
++       rearm_polling() (EPOLL_CTL_MOD). */
++    for (int ee_i = 0; ee_i < n_events; ee_i++) {
++      epoll_extended_t *ee = (epoll_extended_t *) p->kevents[ee_i].data.ptr;
++      if (ee && ee->fd == p->eventfd) {
++        struct epoll_event disarm = {0};
++        disarm.data.ptr = ee;
++        disarm.events = 0;
++        memory_barrier(ee);
++        epoll_ctl(p->epollfd, EPOLL_CTL_MOD, ee->fd, &disarm);
++      }
++    }
++
+     lock(&p->sched_mutex);
+     p->poller_suspended = false;
+ 

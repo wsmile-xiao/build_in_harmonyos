@@ -1,0 +1,11 @@
+cmake_minimum_required(VERSION 3.8)
+project(test_fast_float LANGUAGES CXX)
+enable_testing()
+find_package(fast_float REQUIRED CONFIG)
+add_executable(test_fast_float test.cpp)
+target_link_libraries(test_fast_float fast_float::fast_float)
+add_test(NAME test_fast_float COMMAND test_fast_float)
+# HarmonyOS 专项测试（#ifdef __OHOS__ 实质逻辑, R6）
+add_executable(test_ohos_special ohos_special_test.cpp)
+target_link_libraries(test_ohos_special fast_float::fast_float)
+add_test(NAME test_ohos_special COMMAND test_ohos_special)

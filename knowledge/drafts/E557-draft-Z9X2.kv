@@ -1,0 +1,71 @@
+#====================================================================
+# E557 — libc++ 不完整标准库特性的 __has_include 误判：改用 __cpp_* 特性宏
+# 头文件存在不等于特性可用；探针区分"头在但实现不完整"与"特性可用"
+#====================================================================
+
+id:                     E557
+trigger_tool:           clang|cmake|conan|make
+phase:                  compilation
+error_signature:        explicit specialization of non-template struct .formatter.|out-of-line definition of .formatter. does not match any declaration in namespace .std.|too few template arguments for class template .formatter.|_LIBCPP_HAS_NO_INCOMPLETE_(FORMAT|RANGES)
+
+severity:               2
+category:                libc, compat, headers, c++, clang, portability
+match_keywords:         __has_include, __cpp_lib_format, __cpp_lib_ranges, _LIBCPP_HAS_NO_INCOMPLETE_FORMAT, _LIBCPP_HAS_NO_INCOMPLETE_RANGES, std formatter, std::formatter specialization, libc++ incomplete, feature test macro, 特性宏, formatter, ranges, boxed-cpp, libcxx-ohos
+title:                  libc++ 不完整标准库特性的 __has_include 误判：改用 __cpp_* 特性宏
+
+root_cause:             OHOS clang 15 自带 libc++ 的 <format>/<ranges> 等头文件物理存在（__has_include 判真），但实现被 _LIBCPP_HAS_NO_INCOMPLETE_FORMAT、_LIBCPP_HAS_NO_INCOMPLETE_RANGES 抑制：version 头不导出对应的 __cpp_lib_* 特性宏，且 std::formatter 主模板声明为双模板形参且无默认 charT。上游库惯用 "#if __has_include(<format>)" 门控对 std::formatter 的单参特化，于是在该工具链上条件判真、特化写法与声明不匹配，头文件被 include 的瞬间即编译失败，未触碰任何库 API 的消费者也一并挂掉。
+affected_scope:         所有以 __has_include 或头文件可见性作为标准库特性开关的 C++20/23 头文件级库（formatter/fmt 集成、ranges 工具、expected/format 混合头），在 libc++-ohos（clang 15）交叉或原生构建时编译期失败；与语言/构建系统无关，属工具链标准库能力缺口，具备跨仓库复现性。
+verification_cmd:       最小探针编译并判返回值：printf "#include <version>\n#include <ranges>\nint main(){ return\n#if defined(__cpp_lib_ranges)\n 0;\n#else\n 1;\n#endif\n }\n" | clang++ -std=c++20 -x c++ - -o probe && ./probe; echo exit=$? —— exit 1 表示 <ranges> 头可见但 __cpp_lib_ranges 未定义，证实头存在不等于特性可用；对 <format> 同理换头名与宏名
+
+rec_priority:           1
+rec_approach:           replace-has-include-with-cpp-feature-macro
+rec_description:        把库头中的特性门控从 __has_include(<头名>) 改为对应 __cpp_lib_* 特性宏判真（即 defined(__cpp_lib_format) 等价形式），使"启用条件"与标准库真实能力一致：在不完整 libc++ 上条件判假、功能优雅缺席但编译可用；在完整实现（clang 17/18、libc++ 完整模式、MSVC、libstdc++）上宏为真，行为与上游逐字一致。若上游测试文件已使用特性宏守卫，把库头对齐到同款守卫即零语义差异的最小移植补丁。
+rec_command:            单行守卫替换：把预处理条件 if __has_include(\<format\>) 改为 if defined(__cpp_lib_format)（含 fmt/format.h 回退分支时保持 fmt 链不动）；补丁保存为 patches/NNNN-*.patch，conandata 标 patch_type=portability，附 strip 与三行上下文
+rec_auto_fix:           false
+rec_impl:               conan-recipe-patch
+
+fallback_priority:      2
+fallback_approach:      capability-probe-then-graceful-degradation
+fallback_description:   当库以 __has_include 判定后还使用了非标准形态 API（如 formatter 模板形参个数不一致的多处特化）时，先用 verification_cmd 式最小探针在目标工具链判定该特性真实可用面，再分情况处理：整段特性缺失则同样以特性宏收口（与 rec 等价）；特性部分可用则按探针结果补平台守卫，守卫内走无该特性的等价写法（如 std::format 缺席时退回 operator<< 流输出）。禁止删除功能或伪造空壳 stub。
+fallback_command:       编译最小探针 → 记录 __cpp_* 与头可见性组合 → 按探针矩阵改写守卫
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+forbid_1_pattern:       __has_include\(<format>\)\s*\n\s*#include <format>
+forbid_1_reason:        在头可见但实现不完整的 libc++（OHOS clang15）上 __has_include(<format>) 判真，后续 std::formatter 单参特化直接编译失败；该模式是本类缺陷的根源，不得作为特性开关保留。
+forbid_1_consequence:   头文件级编译错误传染所有 include 该头的消费者，配方与测试构建全红，且错误位置与被调用 API 完全无关，极难定位到工具链能力边界。
+
+forbid_2_pattern:       -D__cpp_lib_format=|#define\s+__cpp_lib_format\b
+forbid_2_reason:        手工伪造或命令行强制注入特性宏等于宣称平台具备其并不具备的能力（_LIBCPP_HAS_NO_INCOMPLETE_FORMAT 明确抑制实现），formatter 运行语义（parse/format 契约）在该 libc++ 上不可用。
+forbid_2_consequence:   编译侥幸通过后在 std::formatter 依赖处运行期 UB 或行为不一致；伪造宏同时污染同工具链其他库的特性判定，破坏"探针即事实"的可信链。
+
+forbid_3_pattern:       rm\s+-f.*boxed|delete.*formatter|remove.*#if.*format
+forbid_3_reason:        直接删除 formatter 功能段或测试用例是破坏上游语义的静默删测试（R51/§9 红线）；本例补丁一行保留功能块，只改判据，功能在完整工具链上自动恢复。
+forbid_3_consequence:   消费者永久失去 std::format 能力，上游升级时合并冲突，且赛事静态审查与人工复核判为删测试/降分母。
+
+forbid_4_pattern:       patch.*__OHOS__|#ifdef\s+__OHOS__.*(format|formatter)
+forbid_4_reason:        把平台宏塞进补丁或头文件作为开关（PF5/R8 默认禁止）；修复必须建立在"标准能力探针"上（__cpp_* 宏），平台中立、跨 libc++ 版本通用，而非针对鸿蒙单点特判。
+forbid_4_consequence:   补丁与特定 OS 绑定，无法回提交上游、升级 libc++ 后失效，并触发 PF5 补丁平台宏闸与 R8 检视意见。
+
+principles:             P003, P005, P013
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               doc/E557.md
+last_updated: 2026-09-07
+source_event:           boxed-cpp 1.4.3（contour-terminal）OHOS clang15 适配：boxed.hpp 第 210 行 __has_include(<format>) 致单参 std::formatter 特化编译失败，0001 补丁改 __cpp_lib_format；同工具链探针实测 __cpp_lib_ranges 同样缺失（第二个独立复现点）
+
+authors:                wanderlust_0823 <wanderlust_0823@noreply.gitcode.com>
+source_pr: "!8711"
+source_commit: d309e18da7cefed85d322089f0e45e6e146af1a8
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-07
+
+draft: true
+contributor_id: Z9X2

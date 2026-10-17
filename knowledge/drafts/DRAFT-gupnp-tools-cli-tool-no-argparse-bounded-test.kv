@@ -1,0 +1,45 @@
+#====================================================================
+# DRAFT-gupnp-tools-cli-tool-no-argparse-bounded-test
+# 上游 CLI 工具 main() 无参数解析：--help 冒烟会永久挂起，
+# 改用「有界运行 + SIGTERM + wait 断言干净退出」
+# 触发事件: gupnp-tools 0.12.4 HarmonyOS PC 适配
+#====================================================================
+
+id:                     DRAFT-gupnp-tools-cli-tool-no-argparse-bounded-test
+trigger_tool:           conan|test_package|meson|ninja
+phase:                  testing
+error_signature:        conan create 卡在 test_package 不返回|--help 无任何输出且进程常驻|test 阶段超时被 KILL|g_main_loop_run 阻塞
+
+severity:               2
+category:               testing, conan, runtime
+match_keywords:         test_package hang, --help blocked, no option parser, GOptionContext absent, g_main_loop_run, bounded run, SIGTERM, wait, exit 124, conan create timeout, application package test, R34
+title:                  When an upstream CLI tool has no argument parser, smoke-test it with a bounded run instead of --help
+
+root_cause:             上游工具集项目里，很多 CLI 的 main() 根本没有参数解析
+                        （无 GOptionContext / getopt），而是直接建主循环常驻
+                        （gupnp-event-dumper 就是 `GUPnPContextManager` +
+                        `GMainLoop` + `g_main_loop_run()`）。此时用
+                        `--help` 做 test_package 冒烟**不会退出**：
+                        conan create 会永久卡在 test 阶段（实测进程 35 分钟
+                        不返回），本地 W3/CI 最终按超时判负——失败现象被
+                        误读为"构建失败"，真实原因却是测试入口选错。
+
+rec_approach:           bounded-run-assert-clean-exit
+rec_description:        application 型包（产物是 bin/ 下可执行文件）的
+                        test_package，先判断被测工具是否有参数解析：
+                        ① 有 GOptionContext（如 gssdp-discover）：`--help`
+                           打印用法并 exit 0，是最稳的冒烟入口；若还支持
+                           "跑一次就退出"的选项（`-n <秒>`），优先用它做
+                           真实功能性冒烟。
+                        ② 无参数解析（常驻主循环）：改为**有界运行**——
+                           后台启动 → `sleep N` → `kill -TERM $pid` →
+                           `wait $pid; exit $?`，断言退出码为 0。上游通常
+                           注册了 SIGINT/SIGTERM → g_main_loop_quit，因此
+                           干净退出码为 0；若崩溃/库解析失败/提前退出，
+                           wait 会返回非 0，测试自然失败。这样既证明二进制
+                           能启动、能解析整条依赖栈，又不会挂起。
+                        不要用 `timeout` 的结果码当断言：timeout 超时会
+                           返回 124，语义混乱（无法区分"正常常驻"与"卡死"）。
+rec_command:            bash -c '"$BIN" & p=$!; sleep 3; if kill -0 $p 2>/dev/null; then kill -TERM $p; fi; wait $p; exit $?'
+related_docs:           notes.md（gupnp-tools 0.12.4「修复记录」）; docs/TEST_QUALITY_SPEC.md
+last_updated:           2026-09-27

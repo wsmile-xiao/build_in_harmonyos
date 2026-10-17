@@ -2,7 +2,7 @@
 
 ## 编译环境
 - 构建系统: cmake
-- 编译日期: 2026-05-29
+- 编译日期: 2026-08-27
 - 编译器: clang/clang++ (Clang 15.0.4 for OHOS aarch64)
 - 状态: built (minimal - ytm library only)
 
@@ -95,7 +95,17 @@ No tests were found
 2. 当上述Qt/KF QML组件可用后，可关闭OHOS_MINIMAL_BUILD选项构建完整应用
 3. ytm静态库是pybind11 Python嵌入库，运行时需要Python环境和ytmusicapi/yt-dlp Python包
 4. Ytdlp和YTMusicAPI是RUNTIME依赖，仅需要Python环境中有这些包即可（不影响编译）
+
+## Conan适配修复 (2026-08-27)
+
+| # | 问题 | 根因 | 解决方案 |
+|---|------|------|----------|
+| 1 | conanfile.py pip install在build()中执行 | generate()先于build()执行，pybind11_DIR未设置 | 将pip3 install移至generate()，安装后立即查找cmake dir |
+| 2 | test_package链接失败 | ytm PUBLIC链接pybind11::embed，消费者需libpython | 改为PRIVATE链接，ytmusic.h不依赖pybind11头文件 |
+| 3 | patch 0002无法应用 | 原始src/CMakeLists.txt中DEFAULT_VALUE_GETTERS行有尾随空格 | 重新生成patch，保留尾随空格 |
+| 4 | pybind11版本不固定 | pip3 install pybind11安装最新版 | 固定为pybind11==3.0.4 |
+| 5 | CI #49384 find_package(pybind11) 失败 | `pip3` 与 `python3` 从 PATH 解析可能对应不同解释器，pip 装到 A 解释器的 site-packages 而 import 探测用 B 解释器，pybind11_DIR 未设置 | `_ensure_pybind11` 统一用 sys.executable 执行 pip install 和 import 探测；失败时显式 raise ConanInvalidConfiguration |
 ---
 
-**编译结束**: 2026-05-29 18:44
+**编译结束**: 2026-08-27 01:12
 **最终状态**: built

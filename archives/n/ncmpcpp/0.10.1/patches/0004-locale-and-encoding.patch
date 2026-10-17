@@ -1,0 +1,723 @@
+diff --git a/src/utility/encoding.h b/src/utility/encoding.h
+new file mode 100644
+index 0000000..ceabb64
+--- /dev/null
++++ b/src/utility/encoding.h
+@@ -0,0 +1,38 @@
++/***************************************************************************
++ *   Copyright (C) 2008-2021 by Andrzej Rybczak                            *
++ *   andrzej@rybczak.net                                                   *
++ *                                                                         *
++ *   This program is free software; you can redistribute it and/or modify  *
++ *   it under the terms of the GNU General Public License as published by  *
++ *   the Free Software Foundation; either version 2 of the License, or     *
++ *   (at your option) any later version.                                   *
++ *                                                                         *
++ *   This program is distributed in the hope that it will be useful,       *
++ *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
++ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
++ *   GNU General Public License for more details.                          *
++ *                                                                         *
++ *   You should have received a copy of the GNU General Public License     *
++ *   along with this program; if not, write to the                         *
++ *   Free Software Foundation, Inc.,                                       *
++ *   51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA.              *
++ ***************************************************************************/
++
++#ifndef NCMPCPP_UTILITY_ENCODING_H
++#define NCMPCPP_UTILITY_ENCODING_H
++
++#include <string>
++
++// UTF-8 <-> wide string conversion helpers. boost::locale is unavailable on
++// HarmonyOS PC, so ncmpcpp ships its own minimal UTF-8 codec.
++namespace Encoding {
++
++std::string toUtf8(const std::string &s);        // identity
++std::string toUtf8(std::string &&s);             // identity (move)
++std::string toUtf8(const std::wstring &s);       // UTF-16/32 -> UTF-8
++std::wstring fromUtf8(const std::wstring &s);    // identity
++std::wstring fromUtf8(const std::string &s);     // UTF-8 -> UTF-16/32
++
++} // namespace Encoding
++
++#endif // NCMPCPP_UTILITY_ENCODING_H
+diff --git a/src/utility/encoding.cpp b/src/utility/encoding.cpp
+new file mode 100644
+index 0000000..cb6ad5b
+--- /dev/null
++++ b/src/utility/encoding.cpp
+@@ -0,0 +1,146 @@
++/***************************************************************************
++ *   Copyright (C) 2008-2021 by Andrzej Rybczak                            *
++ *   andrzej@rybczak.net                                                   *
++ *                                                                         *
++ *   This program is free software; you can redistribute it and/or modify  *
++ *   it under the terms of the GNU General Public License as published by  *
++ *   the Free Software Foundation; either version 2 of the License, or     *
++ *   (at your option) any later version.                                   *
++ *                                                                         *
++ *   This program is distributed in the hope that it will be useful,       *
++ *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
++ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
++ *   GNU General Public License for more details.                          *
++ *                                                                         *
++ *   You should have received a copy of the GNU General Public License     *
++ *   along with this program; if not, write to the                         *
++ *   Free Software Foundation, Inc.,                                       *
++ *   51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA.              *
++ ***************************************************************************/
++
++#include "utility/encoding.h"
++
++#include <cstdint>
++#include <utility>
++
++namespace Encoding {
++namespace {
++
++void appendUtf8(std::string &out, uint32_t cp)
++{
++	if (cp < 0x80)
++		out += static_cast<char>(cp);
++	else if (cp < 0x800)
++	{
++		out += static_cast<char>(0xC0 | (cp >> 6));
++		out += static_cast<char>(0x80 | (cp & 0x3F));
++	}
++	else if (cp < 0x10000)
++	{
++		out += static_cast<char>(0xE0 | (cp >> 12));
++		out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
++		out += static_cast<char>(0x80 | (cp & 0x3F));
++	}
++	else
++	{
++		out += static_cast<char>(0xF0 | (cp >> 18));
++		out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
++		out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
++		out += static_cast<char>(0x80 | (cp & 0x3F));
++	}
++}
++
++uint32_t decodeUtf8(const std::string &s, size_t &i)
++{
++	const unsigned char c = static_cast<unsigned char>(s[i]);
++	uint32_t cp;
++	size_t len;
++	if (c < 0x80) { cp = c; len = 1; }
++	else if ((c >> 5) == 0x06) { cp = c & 0x1F; len = 2; }
++	else if ((c >> 4) == 0x0E) { cp = c & 0x0F; len = 3; }
++	else if ((c >> 3) == 0x1E) { cp = c & 0x07; len = 4; }
++	else { cp = 0xFFFD; len = 1; }
++
++	if (i + len > s.size())
++	{
++		i = s.size();
++		return 0xFFFD;
++	}
++	for (size_t j = 1; j < len; ++j)
++	{
++		const unsigned char cc = static_cast<unsigned char>(s[i + j]);
++		if ((cc >> 6) != 0x02) { cp = 0xFFFD; len = 1; break; }
++		cp = (cp << 6) | (cc & 0x3F);
++	}
++	i += len;
++	return cp;
++}
++
++} // namespace
++
++std::string toUtf8(const std::string &s) { return s; }
++std::string toUtf8(std::string &&s) { return std::move(s); }
++
++std::string toUtf8(const std::wstring &s)
++{
++	std::string out;
++	out.reserve(s.size());
++	if (sizeof(wchar_t) == 2)
++	{
++		for (size_t i = 0; i < s.size(); ++i)
++		{
++			const uint16_t u = static_cast<uint16_t>(s[i]);
++			if (u >= 0xD800 && u <= 0xDBFF && i + 1 < s.size())
++			{
++				const uint16_t lo = static_cast<uint16_t>(s[i + 1]);
++				if (lo >= 0xDC00 && lo <= 0xDFFF)
++				{
++					const uint32_t cp = 0x10000
++						+ ((static_cast<uint32_t>(u) - 0xD800) << 10)
++						+ (lo - 0xDC00);
++					appendUtf8(out, cp);
++					++i;
++					continue;
++				}
++			}
++			appendUtf8(out, u);
++		}
++	}
++	else
++	{
++		for (wchar_t wc : s)
++			appendUtf8(out, static_cast<uint32_t>(wc));
++	}
++	return out;
++}
++
++std::wstring fromUtf8(const std::wstring &s) { return s; }
++
++std::wstring fromUtf8(const std::string &s)
++{
++	std::wstring out;
++	out.reserve(s.size());
++	if (sizeof(wchar_t) == 2)
++	{
++		for (size_t i = 0; i < s.size(); )
++		{
++			const uint32_t cp = decodeUtf8(s, i);
++			if (cp >= 0x10000)
++			{
++				const uint32_t v = cp - 0x10000;
++				out += static_cast<wchar_t>(0xD800 + (v >> 10));
++				out += static_cast<wchar_t>(0xDC00 + (v & 0x3FF));
++			}
++			else
++				out += static_cast<wchar_t>(cp);
++		}
++	}
++	else
++	{
++		for (size_t i = 0; i < s.size(); )
++			out += static_cast<wchar_t>(decodeUtf8(s, i));
++	}
++	return out;
++}
++
++} // namespace Encoding
+diff --git a/src/utility/functional.h b/src/utility/functional.h
+index a5727c3..9a0fe57 100644
+--- a/src/utility/functional.h
++++ b/src/utility/functional.h
+@@ -21,9 +21,12 @@
+ #ifndef NCMPCPP_UTILITY_FUNCTIONAL_H
+ #define NCMPCPP_UTILITY_FUNCTIONAL_H
+ 
+-#include <boost/locale/encoding_utf.hpp>
++#include <algorithm>
++#include <string>
+ #include <utility>
+ 
++#include "utility/encoding.h"
++
+ /// Map over the first element in range satisfying the predicate.
+ template <typename InputIterator, typename PredicateT, typename MapT>
+ InputIterator find_map_first(InputIterator first, InputIterator last, PredicateT &&p, MapT &&f)
+@@ -44,23 +47,31 @@ void find_map_all(InputIterator first, InputIterator last, PredicateT &&p, MapT
+ 	while (it != last);
+ }
+ 
+-// convert string to appropriate type
++// convert string to appropriate type (only char <-> wchar_t conversions
++// are used in ncmpcpp; boost::locale, which provided utf_to_utf before, is
++// unavailable on HarmonyOS PC)
+ template <typename TargetT, typename SourceT>
+-struct convertString
++struct convertString;
++
++template <>
++struct convertString<char, char>
+ {
+-	static std::basic_string<TargetT> apply(const std::basic_string<SourceT> &s)
+-	{
+-		return boost::locale::conv::utf_to_utf<TargetT>(s);
+-	}
++	static std::string apply(const std::string &s) { return s; }
+ };
+-template <typename TargetT>
+-struct convertString<TargetT, TargetT>
++template <>
++struct convertString<char, wchar_t>
+ {
+-	static const std::basic_string<TargetT> &apply(const std::basic_string<TargetT> &s)
+-	{
+-		return s;
+-	}
++	static std::string apply(const std::wstring &s) { return Encoding::toUtf8(s); }
++};
++template <>
++struct convertString<wchar_t, char>
++{
++	static std::wstring apply(const std::string &s) { return Encoding::fromUtf8(s); }
++};
++template <>
++struct convertString<wchar_t, wchar_t>
++{
++	static std::wstring apply(const std::wstring &s) { return s; }
+ };
+-
+ 
+ #endif // NCMPCPP_UTILITY_FUNCTIONAL_H
+diff --git a/src/utility/wide_string.h b/src/utility/wide_string.h
+index 009b4ab..bc6cf5f 100644
+--- a/src/utility/wide_string.h
++++ b/src/utility/wide_string.h
+@@ -21,18 +21,20 @@
+ #ifndef NCMPCPP_UTILITY_WIDE_STRING_H
+ #define NCMPCPP_UTILITY_WIDE_STRING_H
+ 
+-#include <string> // include before boost to compile on MACOSX
+-#include <boost/locale/encoding_utf.hpp>
++#include <string>
++#include <utility>
++
++#include "utility/encoding.h"
+ 
+ template <typename StringT>
+ std::string ToString(StringT &&s)
+ {
+-	return boost::locale::conv::utf_to_utf<char>(std::forward<StringT>(s));
++	return Encoding::toUtf8(std::forward<StringT>(s));
+ }
+ template <typename StringT>
+ std::wstring ToWString(StringT &&s)
+ {
+-	return boost::locale::conv::utf_to_utf<wchar_t>(std::forward<StringT>(s));
++	return Encoding::fromUtf8(std::forward<StringT>(s));
+ }
+ 
+ size_t wideLength(const std::wstring &ws);
+
+diff --git a/src/utility/string.h b/src/utility/string.h
+index 75d6576..67a2516 100644
+--- a/src/utility/string.h
++++ b/src/utility/string.h
+@@ -61,4 +61,6 @@ void removeInvalidCharsFromFilename(std::string &filename, bool win32_compatible
+ 
+ void escapeSingleQuotes(std::string &filename);
+ 
++std::string toLower(std::string s);
++
+ #endif // NCMPCPP_UTILITY_STRING_H
+diff --git a/src/utility/string.cpp b/src/utility/string.cpp
+index 5356e65..996bc61 100644
+--- a/src/utility/string.cpp
++++ b/src/utility/string.cpp
+@@ -19,6 +19,7 @@
+  ***************************************************************************/
+ 
+ #include <cassert>
++#include <cctype>
+ #include <cwctype>
+ #include <algorithm>
+ #include "utility/string.h"
+@@ -108,3 +109,14 @@ void escapeSingleQuotes(std::string &filename)
+ 		}
+ 	}
+ }
++
++std::string toLower(std::string s)
++{
++	// ASCII lowercase; non-ASCII bytes pass through unchanged.
++	for (auto &c : s)
++	{
++		if (static_cast<unsigned char>(c) < 0x80)
++			c = std::tolower(static_cast<unsigned char>(c));
++	}
++	return s;
++}
+diff --git a/src/charset.cpp b/src/charset.cpp
+index c0fcc53..f7cff37 100644
+--- a/src/charset.cpp
++++ b/src/charset.cpp
+@@ -18,68 +18,164 @@
+  *   51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA.              *
+  ***************************************************************************/
+ 
+-#include <boost/locale.hpp>
++#include <cstdint>
++#include <cctype>
++#include <locale>
++#include <string>
++#include <utility>
++
+ #include "charset.h"
+ #include "settings.h"
+ 
+ namespace Charset {
+ 
+-std::locale internalLocale()
++namespace {
++
++bool asciiCaseInsensitiveEqual(const char *a, const char *b)
++{
++	if (a == nullptr || b == nullptr)
++		return false;
++	while (*a && *b)
++	{
++		if (std::tolower(static_cast<unsigned char>(*a)) != std::tolower(static_cast<unsigned char>(*b)))
++			return false;
++		++a;
++		++b;
++	}
++	return *a == *b;
++}
++
++bool isUtf8OrUnspecified(const char *charset)
+ {
+-	boost::locale::generator gen;
+-	std::locale loc = gen("");
+-	bool is_utf = std::use_facet<boost::locale::info>(loc).utf8();
+-	std::string name = std::use_facet<boost::locale::info>(loc).name();
+-	if (!is_utf && name != "C" && name != "POSIX")
++	return charset == nullptr || *charset == 0
++		|| asciiCaseInsensitiveEqual(charset, "utf-8")
++		|| asciiCaseInsensitiveEqual(charset, "utf8")
++		|| asciiCaseInsensitiveEqual(charset, "c")
++		|| asciiCaseInsensitiveEqual(charset, "posix")
++		|| asciiCaseInsensitiveEqual(charset, "ascii")
++		|| asciiCaseInsensitiveEqual(charset, "us-ascii");
++}
++
++bool isLatin1(const char *charset)
++{
++	return asciiCaseInsensitiveEqual(charset, "iso-8859-1")
++		|| asciiCaseInsensitiveEqual(charset, "iso8859-1")
++		|| asciiCaseInsensitiveEqual(charset, "latin1")
++		|| asciiCaseInsensitiveEqual(charset, "latin-1");
++}
++
++std::string latin1ToUtf8(const std::string &s)
++{
++	std::string result;
++	result.reserve(s.size());
++	for (unsigned char c : s)
+ 	{
+-		// if current locale does not use unicode, use variant of this
+-		// locale with utf8 as ncmpcpp uses utf8 internally and we need
+-		// current locale for sorting, case conversions etc.
+-		std::string new_name = std::use_facet<boost::locale::info>(loc).language()
+-		                     + "_"
+-		                     + std::use_facet<boost::locale::info>(loc).country()
+-		                     + ".UTF-8";
+-		loc = gen(new_name);
++		if (c < 0x80)
++			result += static_cast<char>(c);
++		else
++		{
++			result += static_cast<char>(0xC0 | (c >> 6));
++			result += static_cast<char>(0x80 | (c & 0x3F));
++		}
+ 	}
+-	return loc;
++	return result;
++}
++
++std::string utf8ToLatin1(const std::string &s)
++{
++	std::string result;
++	result.reserve(s.size());
++	for (size_t i = 0; i < s.size(); ++i)
++	{
++		const unsigned char c = static_cast<unsigned char>(s[i]);
++		if (c < 0x80)
++		{
++			result += static_cast<char>(c);
++			continue;
++		}
++		uint32_t cp = 0;
++		size_t len = 0;
++		if ((c >> 5) == 0x06) { cp = c & 0x1F; len = 2; }
++		else if ((c >> 4) == 0x0E) { cp = c & 0x0F; len = 3; }
++		else { result += '?'; continue; }
++		if (i + len > s.size()) { result += '?'; break; }
++		bool valid = true;
++		for (size_t j = 1; j < len; ++j)
++		{
++			const unsigned char cc = static_cast<unsigned char>(s[i + j]);
++			if ((cc >> 6) != 0x02) { valid = false; break; }
++			cp = (cp << 6) | (cc & 0x3F);
++		}
++		i += len - 1;
++		result += (valid && cp < 0x100) ? static_cast<char>(cp) : '?';
++	}
++	return result;
++}
++
++std::string toUtf8(const std::string &s, const char *charset)
++{
++	if (isUtf8OrUnspecified(charset))
++		return s;
++	if (isLatin1(charset))
++		return latin1ToUtf8(s);
++	return s; // unsupported charset: pass through unchanged
++}
++
++std::string fromUtf8(const std::string &s, const char *charset)
++{
++	if (isUtf8OrUnspecified(charset))
++		return s;
++	if (isLatin1(charset))
++		return utf8ToLatin1(s);
++	return s;
++}
++
++} // namespace
++
++std::locale internalLocale()
++{
++	// boost::locale is unavailable on HarmonyOS PC. std::locale("") follows
++	// the process C locale (usually C/POSIX or UTF-8 on OHOS); ncmpcpp works
++	// with UTF-8 strings internally either way.
++	return std::locale("");
+ }
+ 
+ std::string toUtf8From(const std::string &s, const char *charset)
+ {
+-	return boost::locale::conv::to_utf<char>(s, charset);
++	return toUtf8(s, charset);
+ }
+ 
+ std::string fromUtf8To(const std::string &s, const char *charset)
+ {
+-	return boost::locale::conv::to_utf<char>(s, charset);
++	return fromUtf8(s, charset);
+ }
+ 
+ std::string utf8ToLocale(const std::string &s)
+ {
+ 	return Config.system_encoding.empty()
+ 	     ? s
+-	     : boost::locale::conv::from_utf<char>(s, Config.system_encoding);
++	     : fromUtf8(s, Config.system_encoding.c_str());
+ }
+ 
+ std::string localeToUtf8(const std::string &s)
+ {
+ 	return Config.system_encoding.empty()
+ 	     ? s
+-	     : boost::locale::conv::to_utf<char>(s, Config.system_encoding);
++	     : toUtf8(s, Config.system_encoding.c_str());
+ }
+ 
+ std::string utf8ToLocale(std::string &&s)
+ {
+ 	if (!Config.system_encoding.empty())
+-		s = boost::locale::conv::from_utf<char>(s, Config.system_encoding);
++		s = fromUtf8(s, Config.system_encoding.c_str());
+ 	return std::move(s);
+ }
+ 
+ std::string localeToUtf8(std::string &&s)
+ {
+ 	if (!Config.system_encoding.empty())
+-		s = boost::locale::conv::to_utf<char>(s, Config.system_encoding);
++		s = toUtf8(s, Config.system_encoding.c_str());
+ 	return std::move(s);
+ }
+ 
+-}
++} // namespace Charset
+diff --git a/src/ncmpcpp.cpp b/src/ncmpcpp.cpp
+index 533b31b..3ef5740 100644
+--- a/src/ncmpcpp.cpp
++++ b/src/ncmpcpp.cpp
+@@ -24,7 +24,7 @@
+ #include <cstring>
+ 
+ #include <boost/date_time/posix_time/posix_time.hpp>
+-#include <boost/locale.hpp>
++
+ #include <iostream>
+ #include <fstream>
+ #include <stdexcept>
+diff --git a/src/actions.cpp b/src/actions.cpp
+index eaf75fe..5b91bfa 100644
+--- a/src/actions.cpp
++++ b/src/actions.cpp
+@@ -23,11 +23,12 @@
+ #include <cstring>
+ #include <boost/date_time/posix_time/posix_time.hpp>
+ #include <boost/filesystem/operations.hpp>
+-#include <boost/locale/conversion.hpp>
++
+ #include <boost/lexical_cast.hpp>
+ #include <algorithm>
+ #include <iostream>
+ 
++#include <regex>
+ #include "actions.h"
+ #include "charset.h"
+ #include "config.h"
+@@ -1750,10 +1751,10 @@ void JumpToPositionInSong::run()
+ 		spos = wFooter->prompt();
+ 	}
+ 	
+-	boost::regex rx;
+-	boost::smatch what;
++	std::regex rx;
++	std::smatch what;
+ 	// mm:ss
+-	if (boost::regex_match(spos, what, rx.assign("([0-9]+):([0-9]{2})")))
++	if (std::regex_match(spos, what, rx.assign("([0-9]+):([0-9]{2})")))
+ 	{
+ 		auto mins = fromString<unsigned>(what[1]);
+ 		auto secs = fromString<unsigned>(what[2]);
+@@ -1761,13 +1762,13 @@ void JumpToPositionInSong::run()
+ 		Mpd.Seek(s.getPosition(), mins * 60 + secs);
+ 	}
+ 	// position in seconds
+-	else if (boost::regex_match(spos, what, rx.assign("([0-9]+)s")))
++	else if (std::regex_match(spos, what, rx.assign("([0-9]+)s")))
+ 	{
+ 		auto secs = fromString<unsigned>(what[1]);
+ 		Mpd.Seek(s.getPosition(), secs);
+ 	}
+ 	// position in%
+-	else if (boost::regex_match(spos, what, rx.assign("([0-9]+)[%]{0,1}")))
++	else if (std::regex_match(spos, what, rx.assign("([0-9]+)[%]{0,1}")))
+ 	{
+ 		auto percent = fromString<unsigned>(what[1]);
+ 		boundsCheck(percent, 0u, 100u);
+@@ -1775,7 +1776,7 @@ void JumpToPositionInSong::run()
+ 		Mpd.Seek(s.getPosition(), secs);
+ 	}
+ 	// position in hh:mm:ss
+-	else if (boost::regex_match(spos, what, rx.assign("([0-9]+):([0-9]{2}):([0-9]{2})")))
++	else if (std::regex_match(spos, what, rx.assign("([0-9]+):([0-9]{2}):([0-9]{2})")))
+ 	{
+ 		auto hours = fromString<unsigned>(what[1]);
+ 		auto mins  = fromString<unsigned>(what[2]);
+@@ -2235,7 +2236,7 @@ void AddRandomItems::run()
+ 	if (rnd_type != 's')
+ 	{
+ 		tag_type = charToTagType(rnd_type);
+-		tag_type_str = boost::locale::to_lower(tagTypeToString(tag_type));
++		tag_type_str = toLower(tagTypeToString(tag_type));
+ 	}
+ 	else
+ 		tag_type_str = "song";
+@@ -2327,7 +2328,7 @@ void ToggleLibraryTagType::run()
+ 		std::string item_type = tagTypeToString(Config.media_lib_primary_tag);
+ 		myLibrary->Tags.setTitle(Config.titles_visibility ? item_type + "s" : "");
+ 		myLibrary->Tags.reset();
+-		item_type = boost::locale::to_lower(item_type);
++		item_type = toLower(item_type);
+ 		std::string and_mtime = Config.media_library_sort_by_mtime ?
+ 		                        " and mtime" :
+ 		                        "";
+diff --git a/src/screens/media_library.cpp b/src/screens/media_library.cpp
+index 2cdfcee..1eea32a 100644
+--- a/src/screens/media_library.cpp
++++ b/src/screens/media_library.cpp
+@@ -19,11 +19,12 @@
+  ***************************************************************************/
+ 
+ #include <boost/date_time/posix_time/posix_time.hpp>
+-#include <boost/locale/conversion.hpp>
++
+ #include <algorithm>
+ #include <array>
+ #include <cassert>
+ 
++#include "utility/string.h"
+ #include "charset.h"
+ #include "display.h"
+ #include "helpers.h"
+@@ -732,7 +733,7 @@ bool MediaLibrary::addItemToPlaylist(bool play)
+ 				std::make_move_iterator(MPD::SongIterator()));
+ 			std::sort(list.begin(), list.end(), SortSongs());
+ 			result = addSongsToPlaylist(list.begin(), list.end(), play, -1);
+-			std::string tag_type = boost::locale::to_lower(
++			std::string tag_type = toLower(
+ 				tagTypeToString(Config.media_lib_primary_tag));
+ 			Statusbar::printf("Songs with %1% \"%2%\" added%3%",
+ 				tag_type, Tags.current()->value().tag(), withErrors(result));
+@@ -926,7 +927,7 @@ void MediaLibrary::toggleColumnsMode()
+ 			nextColumn();
+ 		if (Config.titles_visibility)
+ 		{
+-			std::string item_type = boost::locale::to_lower(
++			std::string item_type = toLower(
+ 				tagTypeToString(Config.media_lib_primary_tag));
+ 			if (isAlbumOnly)
+ 			{
+@@ -966,7 +967,7 @@ void MediaLibrary::toggleSortMode()
+ 		Songs.clear();
+ 		if (Config.titles_visibility)
+ 		{
+-			std::string item_type = boost::locale::to_lower(
++			std::string item_type = toLower(
+ 				tagTypeToString(Config.media_lib_primary_tag));
+ 			if (isAlbumOnly)
+ 			{
+@@ -1004,7 +1005,7 @@ void MediaLibrary::locateSong(const MPD::Song &s)
+ 	std::string primary_tag = s.get(Config.media_lib_primary_tag);
+ 	if (primary_tag.empty())
+ 	{
+-		std::string item_type = boost::locale::to_lower(
++		std::string item_type = toLower(
+ 			tagTypeToString(Config.media_lib_primary_tag));
+ 		Statusbar::printf("Can't use this function because the song has no %s tag", item_type);
+ 		return;
+diff --git a/src/screens/tag_editor.cpp b/src/screens/tag_editor.cpp
+index 5ad6838..861e5a2 100644
+--- a/src/screens/tag_editor.cpp
++++ b/src/screens/tag_editor.cpp
+@@ -18,11 +18,12 @@
+  *   51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA.              *
+  ***************************************************************************/
+ 
++#include "utility/string.h"
+ #include "screens/tag_editor.h"
+ 
+ #ifdef HAVE_TAGLIB_H
+ 
+-#include <boost/locale/conversion.hpp>
++
+ #include <algorithm>
+ #include <fstream>
+ 
+@@ -1050,7 +1051,7 @@ void LowerAllLetters(MPD::MutableSong &s)
+ 	{
+ 		unsigned i = 0;
+ 		for (std::string tag; !(tag = (s.*m->Get)(i)).empty(); ++i)
+-			(s.*m->Set)(boost::locale::to_lower(tag), i);
++			(s.*m->Set)(toLower(tag), i);
+ 	}
+ }
+ 
+diff --git a/src/screens/tiny_tag_editor.cpp b/src/screens/tiny_tag_editor.cpp
+index c791490..fac8838 100644
+--- a/src/screens/tiny_tag_editor.cpp
++++ b/src/screens/tiny_tag_editor.cpp
+@@ -22,7 +22,7 @@
+ 
+ #ifdef HAVE_TAGLIB_H
+ 
+-#include <boost/locale/conversion.hpp>
++
+ 
+ // taglib includes
+ #include <fileref.h>
+@@ -201,7 +201,7 @@ bool TinyTagEditor::getTags()
+ 		return false;
+ 	
+ 	std::string ext = itsEdited.getURI();
+-	ext = boost::locale::to_lower(ext.substr(ext.rfind(".")+1));
++	ext = toLower(ext.substr(ext.rfind(".")+1));
+ 	
+ 	w.clear();
+ 	w.reset();
+diff --git a/src/screens/browser.cpp b/src/screens/browser.cpp
+index b67436b..4a00322 100644
+--- a/src/screens/browser.cpp
++++ b/src/screens/browser.cpp
+@@ -21,7 +21,7 @@
+ #include <algorithm>
+ #include <boost/algorithm/string/predicate.hpp>
+ #include <boost/filesystem.hpp>
+-#include <boost/locale/conversion.hpp>
++
+ #include <time.h>
+ 
+ #include "screens/browser.h"

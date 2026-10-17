@@ -1,0 +1,122 @@
+# ═══ Draft knowledge entry — 不要照抄发行版 CFLAGS（glibc 兼容垫片 vs musl）═══
+# Timestamp: 2026-09-20
+# Software: nedit 5.8
+# Gate: G2 (conan create)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-nedit-5.8-use-dirent-musl-vs-distro-cflags
+trigger_tool:           clang|make|conan
+phase:                  compilation
+error_signature:        sys/dir\.h: No such file or directory|
+                         fatal error: 'sys/dir.h' file not found|
+                         -DUSE_DIRENT|dirent\.h
+severity:               3
+category:               portability|musl|glibc|distro-patching|libc
+match_keywords:         USE_DIRENT, sys/dir.h, dirent.h, printUtils.c, musl,
+                         glibc compatibility shim, debian/rules, dpkg-buildflags,
+                         DEB_CFLAGS_MAINT_APPEND, CFLAGS override, -ansi,
+                         BUILD_UNTESTED_NEDIT, HAVE__XMVERSIONSTRING,
+                         distro patch as libc property
+
+title:                  不要照抄发行版的 CFLAGS：glibc 的兼容垫片让"去掉
+                        -DUSE_DIRENT"在 Debian 上无害、在 musl/OHOS 上直接
+                        编不过
+
+root_cause: >
+  util/printUtils.c 用一个宏在两种目录 API 之间切换：
+      #ifdef USE_DIRENT
+      #include <dirent.h>
+      #else
+      #include <sys/dir.h>
+      #endif
+  glibc **至今**仍提供 <sys/dir.h>（它只是 <dirent.h> 的兼容垫片，给 1980 年代
+  的 BSD 代码用），所以 Debian 的 debian/rules 可以把 CFLAGS 整个覆盖掉、
+  把 USE_DIRENT 丢掉，编辑器照样编得过。musl（以及 OHOS）不提供 <sys/dir.h>，
+  于是那个 #else 分支直接以 "fatal error: 'sys/dir.h' file not found" 失败。
+  关键在于：**发行版为什么能省掉某个宏，往往是该发行版 libc 的性质，而不是
+  上游或目标平台的性质。** 把发行版的补丁与 CFLAGS 当"上游实测基线"照抄，
+  就正好把"只对 glibc 成立"的假设带到了 musl 上。
+affected_scope: >
+  所有"发行版补丁 + musl 目标"的组合。典型触发面是 libc 兼容垫片
+  （sys/dir.h、sys/errno.h、sys/timeb.h、values.h、malloc.h、
+  __USE_GNU 依赖的扩展原型），以及发行版为特定 libc 版本调整过的 feature
+  macro / 标准版本开关（-ansi、_GNU_SOURCE、_DEFAULT_SOURCE 的组合）。
+verification_cmd: >
+  grep -n '#ifdef USE_DIRENT' -A3 -B3 util/printUtils.c
+  grep -c 'sys/dir.h' debian/patches/* debian/rules
+  # 目标平台上是否存在该头文件（交叉工具链 sysroot）
+  ls <sysroot>/usr/include/sys/dir.h
+rec_priority:           1
+rec_approach:           treat-distro-cflags-as-libc-specific-and-audit-each-define
+rec_description: >
+  三步。(a) 把发行版的构建配置（debian/rules 的 CFLAGS/CPPFLAGS/LDFLAGS、
+  patches/series）当作**线索**而不是基线：逐条问"这一条是为了绕开哪个 libc/
+  哪个版本的具体行为"。凡是涉及 libc 头文件、feature macro、标准版本的条目，
+  都要在目标平台上单独验证。(b) 区分两类宏并分别处置：**上游 makefile 里已有
+  的平台默认宏**（nedit 的 -DUSE_DIRENT、-DUSE_LPR_PRINT_CMD 就在
+  makefiles/Makefile.linux 里）应当保留，它们是"上游实测过的本平台配置"；
+  **发行版额外加的宏**（Debian 的 -DBUILD_UNTESTED_NEDIT、
+  -DHAVE__XMVERSIONSTRING）则是该发行版的取舍，要单独评估在 OHOS 上是否必要
+  （本项目结论：两个都不需要，见同批私有符号条目）。(c) 覆盖 CFLAGS 时不要
+  用"-ansi"这类会收紧语言标准的开关去换现代代码；上游默认的 -ansi 在 Debian
+  被换成了 -std=gnu17，本包沿用后者。
+rec_command: >
+  cflags = list(tc.cflags) + [f"-I{d}" for d in incdirs]
+  cflags += ["-DUSE_DIRENT", "-DUSE_LPR_PRINT_CMD"]   # 上游 Linux 基线
+  # 不抄 Debian 的 -DBUILD_UNTESTED_NEDIT -DHAVE__XMVERSIONSTRING
+rec_auto_fix:           false
+rec_impl:               recipe-side-build
+
+fallback_priority:      2
+fallback_approach:      provide-compat-header-shim
+fallback_description: >
+  如果某个包确实**必须**走 <sys/dir.h> 分支（例如宏名不可改、或代码语义依赖
+  struct direct 的字段布局），可以在配方 sources 里带一个
+  files/sys/dir.h 垫片，用 -I 把它排到系统头之前。代价：往包里塞了一个与
+  libc 同名的头文件，容易与真正的 libc 声明冲突（struct direct 的成员名
+  d_ino/d_name 与 struct dirent 一致，但类型宽度可能不同），需要非常小心；
+  收益是不改动上游构建配置。本包**不需要**——它本来就提供了 USE_DIRENT 开关，
+  直接打开才是正解。
+fallback_command:       add files/sys/dir.h shim and -I{source_folder}/files
+fallback_auto_fix:      false
+fallback_impl:          recipe-side-sources
+
+forbid_1_pattern:       整体复制 debian/rules 的 CFLAGS 到 OHOS 配方
+forbid_1_reason:         发行版 CFLAGS 是"为那个发行版的 libc 调的"，
+                           其中的取舍（省掉 USE_DIRENT、加 -ansi）在 musl 上
+                           不成立。
+forbid_1_consequence:    编译在 util/printUtils.c 上失败，报错点是
+                           <sys/dir.h>，与"CFLAGS 抄错了"隔了几层，归因困难。
+forbid_2_pattern:        因为"上游没定义这个宏"就一并去掉上游 makefile 里
+                           平台默认的必需宏
+forbid_2_reason:         makefiles/Makefile.linux 里的 -DUSE_DIRENT 是上游为
+                           Linux 平台实测选择的配置，不是可有可无的开关。
+forbid_2_consequence:    同上：musl 上直接编不过，而"上游没写"的错觉会让人
+                           去怀疑代码而不是配置。
+forbid_3_pattern:       用 -ansi 或 -std=c89/c99 压低语言标准来"对齐上游"
+forbid_3_reason:         上游 -ansi 是 2006 年的历史遗留；现代 clang 下收紧
+                           标准会与系统头（以及 libc 自己的扩展声明）冲突。
+forbid_3_consequence:    大量与移植无关的隐式声明/类型错误淹没真正的问题。
+forbid_4_pattern:       给 libc 同名头文件放垫片作为**第一选择**
+forbid_4_reason:         sys/dir.h / malloc.h 之类垫片与 libc 声明冲突的风险
+                           高于收益，且会随 libc 升级漂移；上游已有宏开关时
+                           打开开关永远更干净。
+forbid_4_consequence:    要么编译期重定义冲突，要么运行期结构体布局不一致。
+
+principles:             P001
+similar_to:             DRAFT-openvi-7.9.33-nonautotools-argv0-mode-musl-pty-ncurses-override
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-nedit-5.8-use-dirent-musl-vs-distro-cflags.md
+last_updated:           2026-09-20
+source_event:           archives/n/nedit/5.8
+
+authors:                2301_76770579
+source_pr:              11631
+source_commit:          e8f7c9b9e
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20

@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 +0000
+From: NebulaAGI <gyccc@atomcode.com>
+Date: Wed, 6 Aug 2025 04:00:00 +0000
+Subject: [PATCH] BuilderTest.testChemistry: skip on remote-DTD
+ ParsingException (rsc.org malformed entity)
+
+`BuilderTest.testChemistry` parses a document whose DOCTYPE references
+the remote DTD `http://www.rsc.org/dtds/rscart37.dtd`, which in turn
+pulls the entity `http://www.rsc.org/dtds/entities/rsc_x.ent`.
+
+Upstream wraps `builder.build(s)` in `catch (IOException ex)` and
+skips when `CITestUtil.shouldIgnore(ex)` fires.  This works when the
+remote host is unreachable / returns a 4xx-5xx that Xerces surfaces
+as an `IOException`.
+
+It does **not** work when the remote host **returns a malformed
+entity page** (e.g. an HTML rate-limit / error page instead of a
+well-formed DTD entity declaration).  In that case Xerces raises a
+`SAXParseException` ("The markup declarations contained or pointed to
+by the document type declaration must be well-formed"), which
+`Builder.build(InputSource)` wraps as a `nu.xom.ParsingException`.
+`ParsingException` extends `Exception`, **not** `IOException`, so it
+escapes the `catch (IOException ex)` block entirely; `shouldIgnore`
+is never consulted and the test fails instead of being skipped as
+upstream intended.
+
+On the HarmonyOS PC preflight machine rsc.org returns exactly such a
+malformed `rsc_x.ent`:
+
+    nu.xom.ParsingException: The markup declarations contained or
+    pointed to by the document type declaration must be well-formed.
+    at line 1, column 2 in
+    http://www.rsc.org/dtds/entities/rsc_x.ent
+
+Fix: add a `catch (ParsingException ex)` branch that consults the new
+`CITestUtil.shouldIgnoreParsingException(ex)` helper added by
+`xom-1.4.4-ci-network.patch`.  When the `ParsingException`'s `uri`
+points at a remote `http://` / `https://` DTD/entity URL or its cause
+chain carries a recognised network exception, the test is skipped as
+upstream's `shouldIgnore` guard does for `IOException`.  No upstream
+assertion is removed or weakened: `testChemistry` has no assertions,
+it only exercises `builder.build(s)` against a remote DTD.
+
+--- a/src/nu/xom/tests/BuilderTest.java
++++ b/src/nu/xom/tests/BuilderTest.java
+@@ -3552,6 +3552,12 @@
+               return;
+           }
+           throw ex;
++      } catch (ParsingException ex) {
++          if (CITestUtil.shouldIgnoreParsingException(ex)) {
++              System.err.println("Skipping testChemistry: remote DTD malformed/unavailable");
++              return;
++          }
++          throw ex;
+       }
+     }
+     

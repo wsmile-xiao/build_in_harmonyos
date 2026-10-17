@@ -1,0 +1,127 @@
+#====================================================================
+# DRAFT E698 — 上游 make test 自建文件树 + 退出码契约测试的清点与打包处置
+# Timestamp: 2026-09-24
+# Software: integrit 4.1（autotools，纯 C 零外部库，上游测试 test/test = 31 断言）
+# Status: DRAFT — 待复审提升为正式 E 条目
+#
+# 探针证据（OHOS 设备 aarch64，clang 15.0.4）：
+#   $ grep -c 'TEST FAILED' test/test                     → 31
+#   $ HOME=<沙箱> make test
+#     → 30 PASS / 1 FAIL（fail-fast，末位 #31）
+#     → test: TEST FAILED: check error exit status
+#     → make: *** [Makefile:135: test] Error 1
+#   期望 `test $status = 2`（INTEGRIT_EXIT_FAILURE），实得 1（INTEGRIT_EXIT_CHANGES）；
+#   根因是 HMDFS 改写 chmod 000 ⇒ 文件仍可读（6/6 可写路径探针全部失效）。
+#   test_package/test.sh 的 9 条消费者断言在设备 9/9 PASS（rc=0）。
+#
+# To promote:
+#   1. Review the evidence below
+#   2. Rename to Ennn.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/Ennn.md
+#====================================================================
+
+id:                     DRAFT-E698-INTEGRIT-4.1-UPSTREAM-MAKE-TEST-SELF-BUILT-TREE-EXITCODE-CONTRACT
+trigger_tool:           make|test|autotools|shell|hmdfs|conan
+phase:                  testing
+error_signature:        'TEST FAILED: check error exit status|make: \*\*\* \[Makefile:[0-9]+: test\] Error 1|test [0-9]+ =. [0-9]+|making a file unreadable'
+
+severity:               3
+category:               tests, upstream-test, autotools, hmdfs, permission-semantics, conan-recipe
+match_keywords:         make test, 上游测试, 自建文件树, fail-fast, 断言清点,
+                        TEST FAILED, check error exit status, 退出码契约,
+                        EXIT_FAILURE, EXIT_CHANGES, chmod 000, 权限语义,
+                        沙箱 HOME, test_package, 消费者断言, 无变化却 changed,
+                        db 自身在 root 内, 温和归因, integrit, E479, E011, E114
+
+title:                  上游 make test 用自建文件树 + 退出码契约做断言（fail-fast shell 驱动器）：先清点总断言数 N，权限位类失败按平台限制归因而非改码，并用不依赖权限位的等价路径补验同一契约
+
+probe_command:          |
+    # 1) 总断言数（fail-fast 脚本：实际跑到 ≠ N，必须单独清点）
+    grep -c 'TEST FAILED' test/test
+    # 2) 跑上游测试（沙箱 HOME，不写真实 HOME）
+    HOME="$TASK_DIR/test-home" make test; echo "rc=$?"
+    # 3) 权限语义探针（判定失败是否属于平台限制）
+    cd "$TASK_DIR" && echo probe > permtest.txt && chmod 000 permtest.txt \
+      && ls -la permtest.txt && cat permtest.txt && echo READ_OK
+    # 4) 等价路径验证退出码 2 契约（不依赖权限位）
+    ./integrit -C "$TASK_DIR/no-such.conf" -c; echo "rc=$?"
+
+root_cause:             |
+    两类根因要分开，不要混成一个：
+    (1) 平台权限语义限制 —— HMDFS 把 chmod 000 改写为 rw-rw----，文件仍可读，
+        于是「制造不可读 ⇒ 程序返回失败码 2」的断言前提在该平台必然不成立，
+        程序读到内容变化返回 1。这是环境限制，不是被测程序缺陷。
+    (2) 测试产物自身在被检查的 root 内 —— 测试写的 db/日志/输出文件落在 root 下，
+        程序把它们当「未知新文件」报 changed，导致「明明没改动却 rc=1」。
+        上游自己的解法是给这些产物加排除行（integrit 的 make-config -i）。
+    附加坑：这类 shell 驱动器多为 fail-fast，日志里的失败位置只说明「第一条失败」，
+    总断言数必须用 grep -c 'TEST FAILED' 单独清点，否则会把「跑到 31 分之 30」
+    误读成「一共只有 30 条」或反过来少报 N。
+
+detection:              |
+    日志同时出现：`TEST FAILED: <断言描述>` + `make: *** [Makefile:<N>: test] Error 1`，
+    且**编译阶段没有任何 error**；断言行呈 `test <实际> '=' <期望>`。
+    若期望值是 2/1/0 这类程序退出码而实得相邻值，优先怀疑平台语义而非逻辑错误。
+
+fix:                    |
+    计数 → 归因 → 分层验证 → 如实登记：
+    1. `grep -c 'TEST FAILED' <test脚本>` 得 N；TOTAL = PASS+FAIL+SKIP+NOT_RUN，
+       四口径不混用、差额逐项归因（参 E328 保留完整上游分母）。
+    2. 权限位类失败按环境限制归因：不改测试期望值、不删断言、不写成 PASS；
+       改用不依赖权限位的等价路径补验同一契约 —— integrit 用
+       `integrit -C <不存在的conf>` ⇒ rc=2 证明 EXIT_FAILURE(2) 在本设备可测，
+       与 chmod 路径互补。
+    3. build() 跑上游测试时打印真实退出码而非吞掉：
+       self.run('make test; rc=$?; echo "MAKE_TEST_RC=$rc (N assertions)"; exit 0',
+                cwd=self.build_folder)
+                ⚠ cwd 必须是 self.build_folder（autotools.* 的工作目录、Makefile 在此），
+                不要用 self.source_folder —— 后者只有原始源码、没有 configure 生成的 Makefile，
+                make 会直接失败却被 `; exit 0` 吞成假绿（参见 integrit notes.md 问题表 #9/#12）。
+       —— CI 日志保留真实结论、审计可核，已知环境限制不至于让整包判失败。
+    4. 测试脚本无执行位（tarball 即 -rw-r--r--）时 chmod +x <script>
+       （生成物面操作，不进 git）。
+    5. test_package 用退出码契约分层断言（0/1/2 各验一次）+ 二进制版本指纹，
+       在权限受限平台也能全绿（integrit 9/9 PASS）。
+
+affected_scope:         任何「上游测试自建临时文件树 / 自己写 db 或日志 / 用权限位做断言」的
+                        autotools、makefile 类老 C 项目，且测试入口是 fail-fast shell 驱动器
+                        （test/ 下的 test、run-tests.sh、TESTS= 等，非 ctest/pytest 注册制）。
+
+verification_cmd:       cd "$TASK_DIR/w0/src/integrit-4.1" && grep -c 'TEST FAILED' test/test \
+                          && HOME="$TASK_DIR/test-home" make test; echo "rc=$?"
+
+rec_priority:           1
+rec_approach:           count-attribute-equivalent-path-verify
+rec_description:        先清点总断言数，再把平台语义类失败单列为环境限制并附原始探针证据，
+                        同时用不依赖该平台限制的等价路径验证同一契约，test_package 承担
+                        可全绿的消费者级契约验证。
+rec_command:            grep -c 'TEST FAILED' test/test && HOME="$TASK_DIR/test-home" make test
+rec_auto_fix:           false
+rec_impl:               archives/i/integrit/4.1/conanfile.py build()、
+                        archives/i/integrit/4.1/test_package/test.sh、
+                        archives/i/integrit/4.1/notes.md 问题表 #3/#7
+
+fallback_priority:      2
+fallback_approach:      declare-not-run-with-evidence
+fallback_description:   若上游测试在该平台连部分执行都无法完成（而非个别断言失败），
+                        按 NOT_RUN 单列并写明具体技术原因与原始证据，N 保持上游真实总数，
+                        绝不压小 N 或改写为 PASS。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       把平台权限语义导致的 FAIL 改成 PASS|删除或跳过该断言以凑全绿|改动上游测试的期望值
+forbid_1_reason:        改期望值/删断言等于削弱上游测试并伪造验证结论（AGENTS §2 禁止伪造与空壳测试）；
+                        平台限制必须作为非 PASS 项带原始证据如实登记，才是可审的结论。
+forbid_1_consequence:   W4 审计少报/伪报判 P1 返工；外部审查按「实测 N 与声明不符」判不通过。
+
+similar_to:             [E479-draft-5CC4, DRAFT-pex-1.20140409-permission-semantics, DRAFT-c-ares-lite-1.33.1-harmonyos-autotools-portability, E011, E114, E328]
+conflicts_with:         []
+caused_by:              [E479-draft-5CC4]
+
+principles:             real-evidence-over-assumption, honest-counting, minimal-patch, environment-first-triage
+
+authors:                integrit-4.1 任务（任务卡 7495）
+source_event:           integrit 4.1 适配（feat/integrit-4.1）
+last_updated:           2026-09-24

@@ -1,0 +1,60 @@
+#====================================================================
+# DRAFT knowledge entry - musl 编译 undeclared identifier 二分诊断：宏真缺失(守卫) vs 宏存在但头没引(补 include)
+# Source package: radioclk/1.0.pristine（r1 误判死包含 → r2 真机 19 错 → r3 全绿）；方法论通用
+#====================================================================
+
+id: DRAFT-musl-undeclared-identifier-header-vs-macro
+trigger_tool: clang|musl-gcc|make|cmake
+phase: compilation
+error_signature: use of undeclared identifier 'TIOCM|use of undeclared identifier 'TIOC|implicit declaration of function 'ioctl|termio\.h: No such file
+severity: 2
+category: compat, libc, musl, headers, diagnosis, methodology
+match_keywords: undeclared identifier, 宏缺失, 头文件布局, termios.h, termio.h, TIOCM, TIOCMGET, TIOCMSET, sys/ioctl.h, 死包含, dead include, 隐式依赖, glibc 头文件链, sysroot grep, 能力守卫, 补 include, 二分诊断
+
+title: musl 交叉编译 undeclared identifier 先二分诊断：sysroot grep 有定义→补 #include（根因B，头文件布局差异）；无定义→E567 能力守卫（根因A，宏真缺失）；"glibc 能编译≠无隐式依赖"
+
+root_cause: >
+  undeclared identifier 在 musl 目标上有两种根因，修复方向相反：
+  A) 宏是平台 ABI 差异（x86/legacy 专属），musl 真没有 → E567 能力守卫；
+  B) 宏在 musl 中存在但位于另一头文件（glibc 头文件链曾间接提供，如
+  <termio.h> 链下的 TIOCM_*，musl 放 <termios.h>）→ 补 #include。
+  陷阱：glibc 下能编译不等于无隐式依赖；只 grep "该头自有符号是否被使用"
+  会漏判链上下文里的其它符号（radioclk r1 误判死包含删除后 r2 真机
+  报 19 个 TIOCM_*/TIOCMGET undeclared）。
+
+affected_scope: >
+  所有迁 musl/OHOS 的 vintage C 串口/终端/系统调用密集代码；判据：
+  grep -rn "define <宏>" <sysroot>/usr/include/ 无输出→根因A；
+  命中未 include 的头→根因B。
+
+verification_cmd: >
+  grep -rn "define TIOCM_CTS" <sysroot>/usr/include/    # 命中 termios.h → 根因B
+  grep -rn "int ioctl" <sysroot>/usr/include/sys/ioctl.h # 原型位置
+  # 修复后交叉编译零 undeclared；真机 shadow CI 门禁全 pass
+
+rec_priority: 1
+rec_approach: bisect-undeclared-identifier-then-fix
+rec_description: >
+  第一步 sysroot grep 分流根因；根因B 补 #include（换正确头，如
+  termio.h→termios.h+sys/ioctl.h），禁止加守卫把可用功能错误降级；
+  根因A 走 E567 能力守卫，确认运行期降级路径后记录功能影响。删除任何
+  "疑似死包含"头之前，必须在目标 sysroot 验证其间接提供的符号未被使用。
+rec_command: >
+  # 根因B:
+  replace_in_file("#include<termio.h>\n", "#include<termios.h>\n#include<sys/ioctl.h>\n")
+  # 根因A:
+  #ifndef TIOCMIWAIT ... #endif  (per E567; 运行期降级路径需上游存在)
+rec_auto_fix: true
+rec_impl: conan-recipe-source
+similar_to: [E567, E565, DRAFT-radioclk-1.0.pristine-musl-termio-tiocmiwait]
+conflicts_with: []
+notes: >
+  与 E567 的分工：E567 管根因A（宏真缺失，守卫隔离，禁伪造数值）；
+  本条目管诊断分流并覆盖根因B（宏存在、头没引，补 include）。
+  与 E053/E063 区分：那些是编译器/告警配置问题，非 libc 布局差异。
+verify_builds: >
+  radioclk/1.0.pristine r2→r3 应用：r3 真机 shadow CI 全绿
+  （conan create 成功、L0/L1/L2/L4/L5 全 pass、L1e 反向验证确认）。
+authors: codex
+source_pr: pending
+source_commit: df4a3dea5e (feat/radioclk-1.0.pristine-codex)

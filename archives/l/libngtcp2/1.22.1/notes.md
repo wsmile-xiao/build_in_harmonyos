@@ -37,3 +37,7 @@ make check: PASS (1/1)
 ## 补丁文件
 1. 0001-add-harmonyos-detection.patch - 添加 HarmonyOS 系统检测
 2. 0002-fix-umask-for-hmdfs.patch - 修复 HMDFS umask 权限问题
+---
+
+**编译结束**: 2026-07-21 11:55
+**最终状态**: built

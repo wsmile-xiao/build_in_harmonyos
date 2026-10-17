@@ -1,0 +1,57 @@
+#====================================================================
+# Draft: reflex 20241231 -- config.status dies with Permission denied on
+#        every file it writes into the scratch dir it just created, when
+#        TMPDIR resolves onto HMDFS; local builds are green
+#====================================================================
+
+id:                     DRAFT-REFLEX-20241231-HMDFS-TMPDIR-CONFIG-STATUS-EACCES
+trigger_tool:           configure|config.status|conan|make
+phase:                  configuration
+
+error_signature:        config\.status: line [0-9]+: .*(subs\.sed|subs\.frag|undefs\.sed|/out|/in): Permission denied|creating \./config\.status|cannot create a temporary directory in
+
+severity:               2
+category:               filesystem|hmdfs|autotools|ci-only-failure
+match_keywords:         reflex, flex, config.status, subs.sed, csXXXXXX, confXXXXXX, mktemp, TMPDIR, HMDFS, /storage, $HOME/.cache/tmp, /data/storage/el2/base/cache, autoconf, autotools, Permission denied EACCES, install-man, CI-only, el2, writable probe
+
+title:                  autoconf 的 config.status 在 HMDFS 上"刚建的目录写不进去"：本地全绿、CI 间歇失败，须把 TMPDIR 钉到非 HMDFS 可写根并显式 chmod 临时目录
+
+root_cause:             autoconf 生成的 config.status 在正文里自建临时目录：
+                        : "${TMPDIR=/tmp}" ; tmp=`(umask 077 && mktemp -d -q "$TMPDIR/csXXXXXX") 2>/dev/null`
+                        随后立刻把 subst 脚本重定向写进去（`sed 's/,@/@@/...' >"$tmp"/subs.sed <<\CEOF`）。
+                        HMDFS（/storage 用户卷）上"新建目录"的属主/权限元数据不会立刻对调用者生效，
+                        于是第一次重定向就 EACCES；后续 subs.frag / out / in / undefs.sed 全部同样失败，
+                        `install-man` 生成不出来 → L1_RESULT=fail。关键迷惑点有三：
+                        ① configure 自身通过（它用的是另一套临时文件路径），只有 config.status 段失败，
+                          看上去像构建中途随机崩；② 失败路径在 $TMPDIR 下，而构建进程的 TMPDIR 是被
+                          上层环境覆盖成 HMDFS 路径的（实测 $HOME/.cache/tmp），并非 worker 自身导出的
+                          /data 路径；③ 同一代码本地（TMPDIR 恰好在 /data）全绿。
+                        形态是**时序相关的间歇竞态**，不是确定性必现：同一份未修复代码上
+                        一次构建失败（#65023）、另一次通过（#65046）；重试有可能偶然躲过，
+                        但根因真实存在且必须从根因消除（不可依赖重试）。
+affected_scope:         autoconf/autotools 源码包（configure + config.status 两段式），在 TMPDIR 指向
+                        HMDFS/网络卷/权限元数据滞后的文件系统时；同一族的还有 config.status 读自己
+                        刚写的 subs1.awk/subs.awk（"could not setup config files machinery"）。
+verification_cmd:       TMPDIR=$HOME/.cache/tmp ./configure >/dev/null 2>&1; ./config.status 2>&1 | head; grep -n 'chmod 700 "\$tmp"' config.status
+rec_priority:           2
+rec_approach:           pin-tmpdir-to-verified-writable-root-and-chmod-the-scratch-dir
+rec_description:        (1) 先判定"是不是确定性问题"：**注意不能只看"同点复现"** —— 本包实测为间歇
+                        竞态（同一未修复代码一次失败一次通过），且不同失败构建可能根因不同
+                        （本例 #65021 是 git-clone 基础设施失败、根本没跑到 config.status）。
+                        正确做法：逐条核对失败步骤与失败行是否为同一根因；是同一根因即视为
+                        真实缺陷并修根因，不要靠重试赌运气。
+                        (2) 在 recipe 里于 configure 之前把 TMPDIR/TMP/TEMP 钉到**经探针验证**的可写根；
+                        探针必须是"建目录→立刻写入该目录内文件→回读"，普通 isdir/可写判断抓不到这个 bug
+                        （父目录是好的）。优先选非 HMDFS 的 /data 缓存（本例 /data/storage/el2/base/cache），
+                        候选全不过时保留原值并告警，不要抛错把原本能过的构建弄挂。
+                        (3) 同时用补丁让 configure 侧自救：去掉 umask 077 依赖 + 建目录后显式
+                        `chmod 700 "$tmp" 2>/dev/null || true`——mktemp -d 本来就申请 0700，这只是让权限位
+                        在元数据滞后的文件系统上确定生效，安全语义不变（此行会随 heredoc 流入 config.status）。
+                        (4) 消费端测试脚本的临时目录同样要探针化，因为生成物、目标文件和链接产物都放那里。
+rec_command:            os.environ.update(dict.fromkeys(("TMPDIR","TMP","TEMP"), "/data/storage/el2/base/cache"))
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# PR 交付后回填（与仓内绝大多数草稿同阶段做法一致）
+source_pr:
+source_commit:

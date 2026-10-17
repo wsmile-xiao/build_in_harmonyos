@@ -1,0 +1,87 @@
+#====================================================================
+# DRAFT — 内存结构体字段用 plain char 存哨兵并与 NIL(-1) 比较：
+#         plain char 无符号的目标上比较恒真 → 控制流崩溃/堆越界
+# Draft only: do not promote without reviewer assignment.
+# Trigger event: libopf/2.1 adaptation (task libopf-2.1-r01-PC1-14)
+#====================================================================
+
+id:                     draft-libopf-2.1-snode-char-unsigned-nil-sentinel
+trigger_tool:           clang|make|test|runtime
+phase:                  runtime
+error_signature:        Splitting data set \.\.\.Signal 11|heap-buffer-overflow.*opf_SplitSubgraph|
+                        status.*!= *NIL|NIL.*comparison|signed char.*status|CHAR_MIN.*0
+
+severity:               2
+category:               portability, toolchain, c-language, abi
+match_keywords:         signed char, plain char, unsigned char, NIL, sentinel, struct field,
+                        aarch64-unknown-linux-ohos, CHAR_MIN, __CHAR_UNSIGNED__, heap-buffer-overflow,
+                        SIGSEGV, opf_SplitSubgraph, char 无符号, 哨兵
+title:                  结构体字段用 plain char 存 NIL(-1) 哨兵，在 plain char 默认无符号的目标上
+                        `status != NIL` 恒真 → 下游按剩余节点数循环写入超容数组 → 堆越界崩溃
+
+root_cause:             C 允许 plain char 符号性由实现决定；OHOS aarch64 工具链（clang 15，
+                        target aarch64-unknown-linux-ohos）默认 plain char 无符号（CHAR_MIN==0、
+                        预定义 __CHAR_UNSIGNED__）。libopf 的 SNode.status/relevant 是 `char`，
+                        代码用 `status = NIL(-1)` 标记"已消费"并以 `status != NIL` 判定，但
+                        -1 存入无符号 char 变成 255，比较恒真：opf_SplitSubgraph 的 while 循环
+                        正常结束（totelems 递减为 0）后，sg2 填充循环仍把所有节点（100）写入
+                        仅 51 容量的 sg2 数组 → ASan 实测 heap-buffer-overflow（OPF.c:1505），
+                        非 ASan 构建直接 SIGSEGV。这与 E419（数据样本值差 256）、DRAFT-8543
+                        （EOF 哨兵死循环）、DRAFT-9645（*p<0 非 ASCII 判定）同源于同一实现定义
+                        行为，但本场景是**内存结构体哨兵字段**、症状是**控制流崩溃/堆越界**，
+                        修复是**源码显式 signed char**（非 toolchain -fsigned-char）。
+affected_scope:         任何在结构体/数组中使用 plain char 字段存储 -1（NIL/EOF/哨兵）并与
+                        -1 比较的 C 库；在 plain char 默认无符号的目标（OHOS aarch64、ARM32、
+                        RISC-V 等）上必然触发，在 x86-64 Linux 上游开发机上通常隐形。编译无
+                        告警、运行期才崩溃，且崩溃点远离赋值点，易被误判为数据问题。
+verification_cmd:       探针：`printf 'int main(){char c=-1;return c==-1?0:1;}' | clang -x c - -o /tmp/c && /tmp/c; echo $?`
+                        返回 1 即 plain char 无符号。源码侧：`grep -nE "char[[:space:]]+status|\.status[[:space:]]*=[[:space:]]*NIL|status[[:space:]]*!= *NIL"`
+                        找哨兵字段；ASan 复现 `clang -fsanitize=address ... && <bin> data/boat.dat 0.5 0 0.5 0`
+                        定位越界写。
+
+rec_priority:           1
+rec_approach:           source-explicit-signed-char
+rec_description:        把存哨兵/状态的 char 字段显式改为 signed char（源码级类型修正，不加
+                        平台宏、不改算法、不动 API 语义）；对含此类字段的每个翻译单元重编，
+                        跑完整上游测试 + 鸿蒙专项测试（覆盖哨兵比较路径）取证。
+rec_command:            修改结构体字段声明：`char status;` → `signed char status;`（同字段
+                        relevant 一并处理），随后 `make CC=clang` 重编，运行全部 examples 脚本
+                        与 test_package 双测试，记录日志与 SHA-256。
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      toolchain-signed-char-mode
+fallback_description:   当字段遍布结构体且改源码代价大、且语义上确实是有符号 8 位值时，
+                        可用 `-fsigned-char` 统一工具链模式（E419 方案）；但内存哨兵比较属
+                        控制流语义，若仅部分翻译单元受影响须全仓一致，否则不同对象符号性
+                        不一致会引入新问题。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          conan-toolchain
+
+forbid_1_pattern:       __OHOS__|ifdef.*OHOS|HarmonyOS.*ifdef
+forbid_1_reason:        这是编译器 plain char 模式问题，不是操作系统特性；平台宏分叉会留下
+                        符号性不一致的对象并掩盖 ABI 意图（与 E419 forbid_2 同口径）。
+forbid_1_consequence:   CI 交叉编译或换工具链后对象符号性漂移，问题复现且更难定位。
+forbid_2_pattern:       cast.*test.*unsigned|change.*expected.*result
+forbid_2_reason:        只改测试期望或显式强转掩盖了库内部哨兵语义错配，不修复 API 行为。
+forbid_2_consequence:   测试假绿，下游消费者仍收到错误控制流结果。
+
+principles:             P005,P013
+causes:                 []
+caused_by:              [E419]
+similar_to:             [E419, DRAFT-8543-plain-char-eof-sentinel-infinite-loop, draft-9645-polyseed-aarch64-char-signed-utf8-lazy]
+conflicts_with:         []
+prerequisite_of:        []
+last_updated:           2026-09-27
+source_event:           libopf/2.1 r01：opf_split 在 boat.dat 上 SIGSEGV，ASan 定位
+                        opf_SplitSubgraph（OPF.c:1505）heap-buffer-overflow；探针确认
+                        plain char 无符号；源码显式 signed char 修复后，6 个 examples 脚本
+                        + 2 个 tools 脚本全部 rc=0，conan create G2 PASS（test_libopf +
+                        ohos_specific_test 2/2），鸿蒙专项断言分割 6+2=8 无崩溃。
+metrics_success_count:  1
+metrics_fail_count:     1
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-27
+authors:                PC1-14

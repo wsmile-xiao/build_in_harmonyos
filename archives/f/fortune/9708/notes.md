@@ -2,9 +2,9 @@
 
 ## 编译环境
 - 构建系统: makefile（无 configure 脚本）
-- 编译日期: 2026-05-19
+- 编译日期: 2026-08-06
 - 编译器: clang 15.0.4
-- 状态: published
+- 状态: built (conan 适配完成)
 
 ## 编译步骤
 
@@ -80,9 +80,7 @@ No input file name
 
 ## 交付物
 
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| fortune-9708-ohos-aarch64.tar.gz | 2.4M | 预编译包（包含 fortune 程序、工具和 35 个数据文件） |
+本 PR 交付 Conan 配方（conanfile.py + conandata.yml + test_package/），编译产物由 CI 流水线从源码构建。
 
 ## 注意事项
 
@@ -91,5 +89,5 @@ No input file name
 3. 使用 POSIX regex 替代 BSD regex，功能完全兼容
 
 ---
-**编译结束**: 2026-05-19 19:09
-**最终状态**: published
+**编译结束**: 2026-08-06
+**最终状态**: built (conan 适配完成, 待 PR 合入后标记 published)

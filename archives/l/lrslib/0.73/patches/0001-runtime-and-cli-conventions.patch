@@ -1,0 +1,129 @@
+diff -Naur a/lrs.c b/lrs.c
+--- a/lrs.c	2026-09-20 23:10:45.799067500 +0800
++++ b/lrs.c	2026-09-20 23:10:45.971067500 +0800
+@@ -53,9 +53,32 @@
+   if(argc == 1)
+      lrs_stdin=1;
+ 
++/* Command line conventions: every argument is normally an input file name, so
++   `lrs --version` used to be read as a (missing) input file.  Answer the two
++   standard queries and terminate successfully instead. */
++  if (argc == 2 && (strcmp(argv[1],"--version")==0 || strcmp(argv[1],"-V")==0))
++    {
++      printf("lrs (lrslib 7.3)\n");
++      return 0;
++    }
++  if (argc == 2 && (strcmp(argv[1],"--help")==0 || strcmp(argv[1],"-h")==0))
++    {
++      printf("usage: %s [input-file] [output-file]\n"
++             "  Reverse search vertex/facet enumeration for H- and V-representations.\n"
++             "  Options are read from the input file, see lrs(1).\n"
++             "  This binary also acts as `redund', `minrep' and `fel' when it is\n"
++             "  invoked under those names.\n", argv[0]);
++      return 0;
++    }
++
+   tmp = malloc(PATH_MAX * sizeof (char));
+ 
+   overfl=lrs1_main(argc,argv,&P,&Q,0,0,tmp,R);    /* set up, read input, no run   */    
++  if(overfl == -1)   /* lrs_setup failed (unreadable input file...): P and Q are  */
++    {                /* still NULL, so the stage 2 cleanup call below would crash */
++      fprintf(stderr,"\n*unrecoverable input error\n");
++      exit(1);
++    }
+   if(overfl==0)
+      overfl=lrs1_main(argc,argv,&P,&Q,overfl,1,tmp,R);  /* run main part of code   */  
+   lrs1_main(argc,argv,&P,&Q,0,2,tmp,R);              /* free memory and close      */
+diff -Naur a/lrslib.c b/lrslib.c
+--- a/lrslib.c	2026-09-20 23:10:45.803068906 +0800
++++ b/lrslib.c	2026-09-20 23:10:45.971067500 +0800
+@@ -27,6 +27,7 @@
+ /* Copyright: David Avis 2005,2022 avis@cs.mcgill.ca         */
+ 
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <setjmp.h>
+ #include <limits.h>
+@@ -1419,7 +1420,15 @@
+ #ifdef LRSLONG
+   if(infilenum==0)         /* stdin gets written to a temporary file */
+        {
+-         strcpy(tmpfilename,"/tmp/lrs_stdinXXXXXX");
++         /* NOT hardcoded /tmp: the platform sandbox may expose /tmp read-only,
++            in which case mkstemp() fails and stdin input cannot be processed.
++            Honour $TMPDIR and fall back to the historical default. */
++         {
++          const char *lrs_tmpdir = getenv("TMPDIR");
++          if (lrs_tmpdir == NULL || *lrs_tmpdir == '\0')
++              lrs_tmpdir = "/tmp";
++          snprintf(tmpfilename,PATH_MAX,"%s/lrs_stdinXXXXXX",lrs_tmpdir);
++         }
+          if(mkstemp(tmpfilename)==-1)
+           {
+            fprintf (stderr,"\n*could not open temporary file for stdin\n");
+@@ -6970,7 +6979,15 @@
+ #ifdef WIN
+         strncpy(tmpfilename,"lrs_restartXXXXXX",PATH_MAX);
+ #else
+-        strncpy(tmpfilename,"/tmp/lrs_restartXXXXXX",PATH_MAX);
++        /* NOT hardcoded /tmp: see the stdin temporary file above.  Without a
++           writable directory the 64/128 bit overflow restart (which is how the
++           hybrid arithmetic recovers exact results) is lost. */
++        {
++         const char *lrs_tmpdir = getenv("TMPDIR");
++         if (lrs_tmpdir == NULL || *lrs_tmpdir == '\0')
++             lrs_tmpdir = "/tmp";
++         snprintf(tmpfilename,PATH_MAX,"%s/lrs_restartXXXXXX",lrs_tmpdir);
++        }
+ #endif
+         /* XXX in principle this file descriptor should be used instead of the name */
+         tmpfd = mkstemp(tmpfilename);
+diff -Naur a/lrsnash.c b/lrsnash.c
+--- a/lrsnash.c	2026-09-20 23:10:45.807065938 +0800
++++ b/lrsnash.c	2026-09-20 23:10:45.971067500 +0800
+@@ -306,6 +306,13 @@
+   game Game;                            // Storage for one game
+   game *g = &Game;
+ 
++  /* Standard CLI query: report the version and terminate successfully. */
++  if (argc == 2 && (strcmp(argv[1],"--version") == 0 || strcmp(argv[1],"-V") == 0))
++	{
++	  printf("lrsnash (lrslib 7.3)\n");
++	  return 0;
++	}
++
+   if(!getArgs(argc, argv))              // Read options and input file names. When we get here:
+ 		return 1;                           // optind is a global integer supplied by getopt, and
+                                         // argv[optind] is the first non-option argument in argv
+diff -Naur a/makefile b/makefile
+--- a/makefile	2026-09-20 23:10:45.807065938 +0800
++++ b/makefile	2026-09-20 23:10:45.971067500 +0800
+@@ -80,6 +80,13 @@
+ 
+ 
+ SHLIB_CFLAGS = -fPIC
++
++# Installed layout: executables in bin/, the shared library in lib/.  The
++# upstream install target drops both into $(prefix) with no RUNPATH at all, so
++# bin/lrs can only find liblrs.so.1 through LD_LIBRARY_PATH.  Make the
++# executables relocatable.  ($$ORIGIN is escaped for make; the shell keeps the
++# single quotes so the linker receives the literal $ORIGIN token.)
++RUNPATHFLAGS ?= -Wl,-rpath,'$$ORIGIN/../lib'
+ mpicxx=mpicc
+ 
+ LRSOBJ=lrs.o lrslong1.o lrslib1.o lrslibgmp.o lrsgmp.o lrsdriver.o
+@@ -259,11 +266,11 @@
+ all-shared: ${SHLIBBIN}
+ 
+ lrs-shared: ${SHLINK} lrs-shared.o
+-	$(CC) $^ -o $@ -L . -llrs
++	$(CC) $^ -o $@ -L . -llrs $(RUNPATHFLAGS)
+ 
+ 
+ lrsnash-shared: ${SHLINK}  lrsnash.c
+-	$(CC) ${CFLAGS} -DGMP -DMA lrsnash.c  lrsnashlib.c -I${INCLUDEDIR} -o $@ -L . -llrs -lgmp
++	$(CC) ${CFLAGS} -DGMP -DMA lrsnash.c  lrsnashlib.c -I${INCLUDEDIR} -o $@ -L . -llrs -lgmp $(RUNPATHFLAGS)
+ 
+ # driver object files
+ 

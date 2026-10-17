@@ -111,5 +111,5 @@ $DEFAULT_PREFIX/bin/git-flow version
 4. **shebang 检查**：所有脚本使用 `#!/bin/sh`，兼容性好
 ---
 
-**编译结束**: 2026-05-27 11:28
-**最终状态**: published
+**编译结束**: 2026-07-15 15:49
+**最终状态**: built

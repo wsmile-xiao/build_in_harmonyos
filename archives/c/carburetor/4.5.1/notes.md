@@ -71,13 +71,11 @@ ohc-run.py verify-build → PASS (G1-G4 全通过)
 2. 原项目依赖 `traxtor` (Python 包)，需要作为运行时依赖安装
 3. carburetor 是 Tractor (Tor 代理管理器) 的 GTK 前端，需要 tractor 服务在后台运行
 4. 源码下载需要使用国内 PyPI 镜像（阿里云等），pythonhosted.org 直连超时
-5. debug 和 release 包内容相同（纯 Python 项目无 ELF 二进制文件）
+5. debug 和 release 包内容相同（纯 Python 项目无 ELF 二进制文件）---
 
+**编译结束**: 2026-08-05 16:46
+**最终状态**: built
 ---
 
-**编译结束**: 2026-05-29
-**最终状态**: built (纯 Python 项目，meson 构建适配完成)
----
-
-**编译结束**: 2026-05-29 16:05
+**编译结束**: 2026-08-05 16:52
 **最终状态**: built

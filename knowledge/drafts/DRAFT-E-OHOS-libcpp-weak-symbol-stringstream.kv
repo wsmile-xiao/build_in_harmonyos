@@ -1,0 +1,63 @@
+id: DRAFT-E-OHOS-libcpp-weak-symbol-stringstream
+title: OHOS clang-15 libc++ 弱符号双副本导致静态库内 std::stringstream 析构 invalid free
+category: platform, toolchain, linking, runtime
+severity: 3
+match_keywords:
+  - Signal 11
+  - core dumped
+  - exit 139
+  - attempting free on address which was not malloc()-ed
+  - ios_base::~ios_base
+  - basic_stringstream
+  - static library
+  - libc++_shared.so
+  - weak symbol
+  - ENABLE_DIGITAL_LAB
+error_signature: "AddressSanitizer: attempting free on address which was not malloc()-ed ... in std::__n1::ios_base::~ios_base() (libc++_shared.so) ... <UserClass>::~UserClass() (binary) ; process exits 139 after all work completes (crash is at static destruction, not during run)"
+error_excerpt: |
+  ==PID==ERROR: AddressSanitizer: attempting free on address which was not malloc()-ed: 0x... in thread T0
+      #0 ... in free
+      #1 ... in std::__n1::ios_base::~ios_base() (/system/lib64/libc++_shared.so+0x...)
+      #2 ... in ModemBPSK::~ModemBPSK() (test binary)
+  Signal 11 (core dumped)
+root_cause: |
+  OHOS SDK clang-15 工具链在编译含 libc++ 模板实例（如 std::stringstream /
+  basic_stringstream 弱符号，带 inline-namespace 版本标记）的静态库时，
+  .a 内生成 weak 副本；消费者二进制再链接 libc++_shared.so 时同名符号
+  存在两份实现（.a 副本 vs .so 副本，两者 ABI inline-namespace 标记存在
+  差异）。运行到进程退出阶段的静态析构时，一份实现的析构逻辑释放了
+  另一份分配域的内存（ios_base 内部 __loc_/iword/pword），导致 invalid
+  free / SIGSEGV。崩溃 100% 复现但发生在全部业务逻辑完成之后（日志全
+  输出、所有断言已通过），极易被误判为"测试通过但退出码异常"。
+rec_approach: |
+  1. 精确定位：给可疑路径写最小构造/析构探针（只构造含 stringstream 成员
+     的类再退出），加 -fsanitize=address 编译运行——ASan 栈直指
+     ios_base::~ios_base + 用户类析构内联帧即为命中。
+  2. 对照实验：无 stringstream 成员的兄弟类（如 analog vs digital modem）
+     构造析构干净退出 = 确认成员级根因。
+  3. 工程修复（按优先级）：
+     a. 消除库内 stringstream：若该成员的功能消费者是 GUI/可选组件，
+        用编译开关（如 ENABLE_DIGITAL_LAB=0）把成员挡在库外——首选。
+     b. 若必须保留：把该类的实现移到共享库（.so）中与 libc++_shared 同
+        域编译，消除跨库弱副本。
+     c. objcopy --localize-symbol 处理 .a 的 weak 副本不可靠（thunk
+        _ZThn16_ 等副本仍会逃逸），不推荐。
+  4. 测试程序侧规避（不解决库消费者问题）：main 末尾 std::_Exit(0)
+     跳过静态析构（只适用于测试二进制，库交付场景禁用此法掩盖）。
+solution: |
+  # cubicsdr 0.2.7 实例：核心库编译启用上游的 ENABLE_DIGITAL_LAB=0
+  # （Digital Lab 消费者是 wx GUI 窗口，OHOS 超出切割面），
+  # 使 ModemDigital 的 outStream 成员彻底不进入 libcubicsdr-core.a。
+  # 配合 patches/0001 修复上游 LAB=0 构建缺陷（outStream 无条件引用）。
+  target_compile_definitions(cubicsdr-core PRIVATE ENABLE_DIGITAL_LAB=0)
+fallback: |
+  若编译开关不可用：把含 stringstream 成员的类的 .cpp 从静态库剔除，
+  改为交付头文件 + 让消费者在自己二进制内实例化（weak 副本同域）。
+verify_builds:
+  - "cubicsdr 0.2.7 本机 conan create（2026-09-20）：LAB=0 + patch 0001 后
+     test_package 11/11 ALL PASS，进程退出码 0（此前 8/8 复现 Signal 11）"
+prescan_pattern: "std::stringstream|basic_stringstream"
+kb_ref: ""
+last_updated: 2026-09-20
+author_agent: "2404_87638649 executor (cubicsdr task #89)"
+source_pr: "cubicsdr-0.2.7"

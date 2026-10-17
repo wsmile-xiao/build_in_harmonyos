@@ -1,0 +1,105 @@
+#====================================================================
+# DRAFT-parse-1.22.2-pep517-build-meta-availability
+#    --no-build-isolation 下 CI 环境缺 setuptools.build_meta
+#    → build() 首步显式 pip install setuptools 保证 PEP 517 后端可用
+# 来源: parse 1.22.2 r02 返工（远端 CI PEP 517 BackendUnavailable）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-parse-1.22.2-pep517-build-meta-availability
+trigger_tool:           conan|pip|build_and_test.sh|CI/PR-validation
+phase:                  building|packaging|CI/PR-validation
+error_signature:        BackendUnavailable: Cannot import 'setuptools\.build_meta'|
+                        prepare_metadata_for_build_wheel.*failed|
+                        Could not import.*setuptools\.build_meta|
+                        error: subprocess-exited-with-error.*build_meta
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               python|packaging|ohos|environment|CI
+match_keywords:         PEP 517, build backend, setuptools.build_meta, --no-build-isolation,
+                        BackendUnavailable, prepare_metadata_for_build_wheel,
+                        pip install setuptools, CI 环境, 本地/CI 分歧,
+                        pure Python, conan create, L1_RESULT=fail
+title:                  --no-build-isolation 依赖环境自带 PEP 517 后端，CI 环境缺 setuptools.build_meta 时 conan create 失败——build() 首步显式安装 setuptools 保证后端可用
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >-
+  pip 的 --no-build-isolation 选项跳过构建隔离、直接复用执行环境的 PEP 517
+  build backend。r01 为规避 inode 受限 worker 的 pip-build-env overlay
+  （Errno 28）在配方中加入 --no-build-isolation——本机 python3 自带
+  setuptools.build_meta（r01 conan create 通过），但远端 CI 设备 Python 缺
+  该后端：pip 导入后端失败 → BackendUnavailable: Cannot import
+  'setuptools.build_meta'，prepare_metadata_for_build_wheel 失败，
+  conan create 退出码 1 → L1_RESULT=fail。同一配方在本地/CI 两环境的
+  后端可用性假设不一致。
+affected_scope:         所有纯 Python 包配方在 --no-build-isolation 下跨环境
+                        （本地/CI）执行、而任一环境缺 PEP 517 后端（setuptools
+                        .build_meta / hatchling / flit_core 等）的场景。
+verification_cmd:       python3 -c "import setuptools.build_meta"（本地期望 OK）；
+                        CI 日志 grep 'BackendUnavailable: Cannot import .*build_meta'
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           build-first-pip-install-setuptools
+rec_description:        conanfile.py build() 首步显式安装 setuptools，随后保留
+                        --no-build-isolation：
+                        1) self.run(f'"{sys.executable}" -m pip install
+                           --break-system-packages --timeout 120 --retries 3
+                           setuptools') —— wheel 安装、不创建 pip-build-env
+                           overlay（不触碰 inode 上限）、--break-system-packages
+                           绕过 PEP 668 externally-managed 守卫；
+                        2) 再执行 pip install --no-deps --no-build-isolation
+                           --target=<install> <source>。
+                        两环境均通过：本机 setuptools 已装（幂等），CI 先装
+                        后端再 --no-build-isolation 导入成功。terminator/2.1.5
+                        同款已验证路径。
+rec_command:            python3 -m pip install --break-system-packages --timeout 120 --retries 3 setuptools && python3 -m pip install --no-deps --no-build-isolation --target="<install>" "<src>"
+rec_auto_fix:           false
+rec_impl:               conanfile-build-method
+
+fallback_priority:      2
+fallback_approach:      drop-build-isolation
+fallback_description:   去掉 --no-build-isolation 让 pip 自建隔离环境并自动安装
+                        build backend（internetarchive/5.10.1 路径）。但需确认
+                        执行环境 inode 充足（pip-build-env overlay 创建大量小
+                        文件，inode 受限 worker 会 Errno 28）——本机 r01 首错
+                        正是 overlay 触发的 inode 耗尽，故本库采用方案 1。
+fallback_command:       python3 -m pip install --break-system-packages --no-deps --prefix="<pkg>" "<src>"
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       修改上游测试或伪造 CI 输出
+forbid_1_reason:        PEP 517 后端是配方适配问题，必须在配方内修复
+forbid_1_consequence:   CI 依旧失败 / 欺骗性行为被审计拦截
+forbid_2_pattern:       把 --no-build-isolation 无条件去掉而不检查 inode
+forbid_2_reason:        inode 受限 worker 上 overlay 会 Errno 28（r01 首错）
+forbid_2_consequence:   本地 W3 回归失败
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             W3, R33
+
+# ═══ 关系图 (Relations) ═══
+causes:
+caused_by:
+similar_to:             DRAFT-vfit-2.1.0-legacy-poetry-copytree-wrapper, DRAFT-parse-1.22.2-pip-no-build-isolation-inode
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-parse-1.22.2-pep517-build-meta-availability.md
+last_updated:           2026-09-21
+source_event:           parse 1.22.2 r02 返工：远端 CI conan create PEP 517 BackendUnavailable
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                pc1-15
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-21

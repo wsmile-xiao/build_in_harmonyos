@@ -21,4 +21,4 @@ htpdate 是一个通过 HTTP 时间协议同步系统时间的工具。它从远
 
 ## 编译选项
 
-- `-D__OHOS__` - OpenHarmony 平台适配（adjtime → adjtimex）
+无额外编译选项。补丁使用 `__linux__` 标准宏（编译器预定义）启用 adjtimex 兼容性。

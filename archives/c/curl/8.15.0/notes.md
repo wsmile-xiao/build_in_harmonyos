@@ -1,46 +1,62 @@
-# curl 8.15.0 编译笔记
+# curl 8.15.0 HarmonyOS PC adaptation notes
 
-## 编译日期
-2026-05-16
+## Scope
 
-## 编译环境
-- 系统: HarmonyOS (HongMeng Kernel 1.12.0)
-- 编译器: clang 15.0.4
-- 链接器: GNU ld 2.45
-- 构建系统: CMake 4.1.2
+- Official source: curl 8.15.0 release archive.
+- Formal package: shared libcurl plus the curl command-line executable.
+- Declared Conan dependencies: `openssl/3.5.6.1` and `zlib/1.3.1.1`.
+- Optional libpsl, nghttp2, libssh, libidn2, Brotli, Zstd, GSSAPI, LDAP,
+  RTMP, c-ares, and HTTP/3 libraries are disabled.
 
-## 依赖
-- OpenSSL 1.1.1w ✅
-- zlib 1.3.1 ✅
+## Dependency status
 
-## 问题与解决
+The earlier W0 blocker is resolved. OpenSSL PR #3047 merged on 2026-08-03.
+On 2026-08-04, a fresh Conan home on HarmonyOS PC downloaded both required
+recipes directly from `ohpcd`:
 
-### 问题1: sockaddr_storage 重复定义
-**原因**: 鸿蒙 SDK 中 linux/socket.h 和 sys/socket.h 都定义了 sockaddr_storage 结构体，导致编译错误。
+- `openssl/3.5.6.1#d871951ad035e2c4eecb6112af441801`
+- `zlib/1.3.1.1#9a23e7d51311d0440b6e4d36cf44e4d9`
 
-**解决**: 禁用 HAVE_LINUX_TCP_H，使用 netinet/tcp.h 替代。修改了以下文件：
-- lib/cf-socket.c
-- lib/connect.c
-- lib/sendf.c
-- lib/setopt.c
+The shared libcurl recipe uses zlib 1.3.1.1 because its static objects are
+compiled with `-fPIC`.
 
-### 问题2: RPATH 相对路径问题
-**原因**: CMake 默认使用相对路径 RPATH (`../lib/libcurl.so`)，鸿蒙系统无法正确解析。
+## Header compatibility
 
-**解决**: 使用静态链接构建 (`BUILD_SHARED_LIBS=OFF`)，避免了动态库依赖问题。
+The previous archive carried a corrupt patch that replaced four preprocessor
+conditions with `#if 0`. It is removed. curl's CMake project already exposes
+`HAVE_LINUX_TCP_H`, and the HarmonyOS configuration sets it to `OFF`, selecting
+`netinet/tcp.h` without modifying upstream source. This follows existing
+knowledge E091 and E119 for the OHOS `sockaddr_storage` header conflict.
 
-### 问题3: 编译器链接器冲突
-**原因**: 默认的 lld 链接器需要 libxml2.so.16 但无法找到。
+## Upstream tests
 
-**解决**: 使用 `-fuse-ld=/data/service/hnp/binutils.org/binutils_2.45/bin/ld` 指定 GNU ld。
+The source contains 1,849 numbered data test definitions, 57 unit C sources,
+4 tool-unit C sources, 231 libtest C sources, plus client and server helpers.
+The recipe builds the aggregate `testdeps` target. It runs `runtests.pl` only
+when Conan reports that target binaries are runnable; Windows-to-OHOS builds
+record compilation and linking only.
 
-## 功能验证
-- ✅ curl --version 输出正常
-- ✅ HTTP 请求正常 (curl -I http://example.com)
-- ⚠️ HTTPS 需要配置 CA 证书路径
+The terminal `conan create` ran natively on an AArch64 HarmonyOS PC against
+commit `0f2ccb7baa1e7eb83ffc7abb8a8c9aa062870820`. The upstream runner considered
+1,849 tests: all 1,556 runnable tests passed and 293 were skipped by upstream
+feature or server-capability checks. No test failed. The Conan consumer linked
+and executed, reporting curl 8.15.0 with OpenSSL 3.5.6 and zlib 1.3.1.
 
-## 补丁文件
-- 0001-disable-linux-tcp-header.patch
+The final package contains 532 regular files, no static archives, and no
+Windows path residue. The build-tree and package-tree hashes are identical for
+both `curl` and `libcurl.so`, confirming that installation did not rewrite the
+signed ELF files. Both files retain `.codesign` sections and use the expected
+`$ORIGIN/../lib:$ORIGIN` RUNPATH. The device log SHA256 is recorded in the
+version manifest so the local validation evidence can be checked independently.
 
-**编译结束**: 2026-05-16 17:02
+## Contest path
+
+- Path A: migrate the old manifest-only archive to a Conan 2 recipe.
+- Paths B/C are not claimed by Issue #1287. If a later technical review finds
+  either path applicable, the Issue title and application material must be
+  updated before the PR description claims it.
+
+---
+
+**编译结束**: 2026-08-04 17:55
 **最终状态**: built

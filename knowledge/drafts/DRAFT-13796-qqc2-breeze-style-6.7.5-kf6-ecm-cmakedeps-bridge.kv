@@ -1,0 +1,76 @@
+draft: DRAFT-13796-qqc2-breeze-style-6.7.5-kf6-ecm-cmakedeps-bridge
+status: pending-editor-review
+title: "KF6/ECM 家族 conan 适配的 CMakeDeps 桥接组合（ECM_MODULE_PATH 三目录 + 手写 cmakedeps_paths + 沙箱 libc++ 遮蔽规避 + KF_IGNORE_PLATFORM_CHECK）"
+category: build-system, cmake, conan, kf6, ohos
+match_keywords: >
+  ECM_MODULE_PATH, extra-cmake-modules, CMakeDeps, cmake_find_mode, KF_IGNORE_PLATFORM_CHECK,
+  KDE platform check, CMAKE_PREFIX_PATH, QML2_IMPORT_PATH, QT_QPA_PLATFORM offscreen,
+  Error relocating, libc++_shared.so, /system/lib64, qqc2, kirigami, kiconthemes, ECMConfig.cmake
+error_signature: "Error relocating \\S+: _ZTINSt4__n1|Could not find ECM|ECM_MODULE_PATH[^\\n]*not (set|found)|KF6.*platform.*not supported|Could NOT find Qt6|cmake_find_mode.*none|No such module.*org\\.kde"
+root_cause: "KF6/ECM 家族项目在 conan CMakeDeps 环境下有四个叠加缺口：(1) CMakeDeps 生成的 ECMConfig.cmake 不传播 ECM_MODULE_PATH 变量（ECM 自带的 Config 会设），导致 ECM 的 modules/find-modules/kde-modules 三类模块查找失效；(2) qtbase 用 cmake_find_mode=none 时 CMakeDeps 不把其 lib/cmake 加入 CMAKE_PREFIX_PATH，Qt6 系 find_package 断链；(3) OHOS 不在 KDE 平台清单，ECM 平台检查默认拒绝；(4) 构建沙箱 LD_LIBRARY_PATH 携带不兼容 libc++_shared.so 遮蔽 /system/lib64 兼容版，host 工具（cmake/moc/qmlcachegen/ecm_query_qt/qtpaths）加载即 'Error relocating ... _ZTINSt4__n1 ...' exit 127。"
+rec_approach: "四点组合：① toolchain variables 显式 KF_IGNORE_PLATFORM_CHECK=TRUE + KF_SKIP_PO_PROCESSING=ON；② 依赖 ecm 包时手动拼接 ECM_MODULE_PATH 三目录（modules/find-modules/kde-modules）写入 tc.variables；③ generate() 手写 conan_cmakedeps_paths.cmake（CMAKE_FIND_PACKAGE_PREFER_CONFIG ON + CMAKE_PREFIX_PATH/LIBRARY_PATH/INCLUDE_PATH/MODULE_PATH 四组依赖路径 + ECM share 目录）并 user_prefers 预加载；④ _runtime_env() 在 OHOS 分支前置 /system/lib64 到 LD_LIBRARY_PATH（host 工具优先解析兼容 libc++），同时 QT_QPA_PLATFORM=offscreen、QML2_IMPORT_PATH/QT_PLUGIN_PATH 指向 conan 包。"
+solution: |
+  conanfile.py 组合实现（qqc2-breeze-style 6.7.5 实证，kiconthemes/kirigami/kconfig 6.26.0 先例链）：
+
+  1) toolchain 变量（平台检查跳过 + ECM 模块路径三目录）：
+
+  ```python
+  tc.variables["KF_IGNORE_PLATFORM_CHECK"] = "TRUE"   # OHOS 不在 KDE 平台清单
+  tc.variables["KF_SKIP_PO_PROCESSING"] = "ON"
+  ecm = self.dependencies.build.get("ecm")
+  if ecm:
+      ecm_share = os.path.join(ecm.package_folder, "share", "ECM")
+      tc.variables["ECM_MODULE_PATH"] = ";".join([
+          os.path.join(ecm_share, "modules"),
+          os.path.join(ecm_share, "find-modules"),
+          os.path.join(ecm_share, "kde-modules"),
+      ])
+  ```
+
+  2) 手写 conan_cmakedeps_paths.cmake（qtbase cmake_find_mode=none 的 CMAKE_PREFIX_PATH 桥）：
+
+  ```python
+  # 收集全部依赖（含 build）：lib/cmake、包根、lib、include、ECM share
+  lines = [
+      "set(CMAKE_FIND_PACKAGE_PREFER_CONFIG ON)",
+      f'set(CMAKE_PREFIX_PATH "{";".join(prefixes)};${{CMAKE_PREFIX_PATH}}")',
+      f'set(CMAKE_LIBRARY_PATH "{";".join(libraries)};${{CMAKE_LIBRARY_PATH}}")',
+      f'set(CMAKE_INCLUDE_PATH "{";".join(includes)};${{CMAKE_INCLUDE_PATH}}")',
+      f'set(CMAKE_MODULE_PATH "{";".join(modules)};${{CMAKE_MODULE_PATH}}")',
+  ]
+  paths_file = os.path.join(self.generators_folder, "conan_cmakedeps_paths.cmake")
+  with open(paths_file, "w") as f:
+      f.write("\n".join(lines) + "\n")
+  ```
+
+  3) 运行期环境（沙箱 libc++ 遮蔽规避 + QML 载荷路径）：
+
+  ```python
+  def _runtime_env(self, include_build=False):
+      env = Environment()
+      for dep in deps:   # 每依赖前置 LD_LIBRARY_PATH/PATH/QT_PLUGIN_PATH/QML2_IMPORT_PATH
+          ...
+      env.define("QT_QPA_PLATFORM", "offscreen")
+      if str(self.settings.os) in ("OHOS", "HarmonyOS"):
+          # 沙箱 LD_LIBRARY_PATH 携带不兼容 libc++_shared.so 遮蔽 /system/lib64 兼容版
+          env.prepend_path("LD_LIBRARY_PATH", "/system/lib64")
+      return env
+  ```
+
+  4) QML 模块型包的 package_info（防止 CMakeDeps 影子配置）：
+
+  ```python
+  self.cpp_info.set_property("cmake_find_mode", "none")  # 项目自带 QQC2BreezeStyleConfig.cmake，防影子
+  self.cpp_info.builddirs = [os.path.join("lib", "cmake")]
+  self.runenv_info.prepend_path("QML2_IMPORT_PATH", os.path.join(self.package_folder, "lib", "qml"))
+  ```
+fallback: >
+  ECM_MODULE_PATH 三目录仍解析失败时：改用 list(APPEND CMAKE_MODULE_PATH) 在 CMakeUserPresets 里硬编码绝对路径（不可迁移，仅应急）；
+  平台检查无法跳过（老 ECM 版本无 KF_IGNORE_PLATFORM_CHECK）：patch KDEPlatformCheck.cmake 白名单追加 OHOS/HarmonyOS；
+  host 工具 libc++ 冲突无 /system/lib64 可用时：task-local 复制兼容 libc++_shared.so 并前置其目录。
+verify_builds: "#13796（CI passed / AI review passed / approved；本机 conan create 全绿，test_qqc2 27/27 控件解析）"
+reference_impl: >
+  qqc2-breeze-style 6.7.5 PR #13796 archives/q/qqc2-breeze-style/6.7.5/conanfile.py；
+  先例链：kiconthemes 6.26.0 / kirigami 6.26.0 / kconfig 6.26.0 / gtksourceview5 5.22.0（NINJA 绝对路径 pin + /system/lib64 前置）
+id: DRAFT-13796
+doc_file: doc/DRAFT-13796.md

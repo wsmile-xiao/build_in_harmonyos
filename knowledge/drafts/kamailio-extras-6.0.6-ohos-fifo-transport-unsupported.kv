@@ -1,0 +1,117 @@
+#====================================================================
+# DRAFT — OHOS 禁止用户进程创建 FIFO（SELinux）→ 应用级 FIFO transport 不可用：
+#         kamailio jsonrpcs 模块初始化期实测错误链
+# 触发事件: kamailio-extras 6.0.6 适配期间跑上游 test/unit 测试套件
+#           （4.sh 依赖 jsonrpcs 的 FIFO transport）2026-09-29
+#
+# 与既有条目的关系（增量说明）:
+#   E525 / E074 记录的是**构建期**后果：OHOS SELinux 禁 FIFO → GNU make jobserver
+#     依赖 FIFO → 必须 make -j1。本条是**同一平台属性的运行期后果**：
+#     应用自身用 mkfifo(2) 建 IPC 通道（kamailio jsonrpcs FIFO transport）时
+#     mod_init 阶段直接 EPERM → 模块初始化失败 → 进程启动报错。
+#     二者根因同源，但触发面（构建工具 vs 应用功能）、判据、处置方式都不同，
+#     故单列；若主编认为应合并，可并入 E525 的 affected_scope 作为运行期分支。
+#   E292 = 含 mkfifo 的通用/测试场景（非 kamailio 专用）
+#   P013 = 平台限制必须降级而非绕过（本条的方案依据）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     kamailio-extras-6.0.6-ohos-fifo-transport-unsupported
+trigger_tool:           runtime
+phase:                  runtime
+error_signature:        'Can.t create FIFO: Operation not permitted|jsonrpc_init_fifo_server|init_mod\(\).*Error while initializing module|error while initializing modules|mkfifo.*Operation not permitted|mkfifo.*EPERM'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               ohos, selinux, limitation, posix, syscall
+match_keywords:         mkfifo, FIFO, EPERM, Operation not permitted, SELinux, jsonrpcs, jsonrpc_init_fifo_server, RPCFIFOPATH, kamailio, init_mod, error while initializing modules, fifo_server, IPC, named pipe, mode=432
+title:                  OHOS 禁 FIFO（SELinux）的应用级后果：kamailio jsonrpcs 的 FIFO transport 在 mod_init 阶段 mkfifo EPERM → 模块初始化失败（错误链完整实证）
+prescan_pattern:        name = "mkfifo-application-ipc"|mkfifo *\(|mkfifo\(|RPCFIFOPATH
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OHOS SELinux 策略禁止用户进程创建 FIFO（与 E525/E074 同源平台属性）。
+                        应用侧表现为：依赖命名管道做 IPC 的模块在**初始化**阶段就失败——
+                        kamailio jsonrpcs 模块 jsonrpc_init_fifo_server() 调 mkfifo(2)
+                        返回 -1/errno=EPERM，随后错误逐层上抛：
+                        jsonrpcs_fifo.c:72 Can't create FIFO (mode=432)
+                          → jsonrpcs_fifo.c:218 → jsonrpcs_fifo.c:575
+                          → jsonrpcs_mod.c:1250（mod_init 失败）
+                          → core/sr_module.c:1041 init_mod(): Error while initializing module
+                          → ERROR: error while initializing modules
+                        **关键判据**：errno 是 EPERM（Operation not permitted）而非
+                        EACCES/ENOENT——不是路径、权限位或目录不存在问题，改权限/换目录/
+                        重试都无效（P013）。kamailio 进程 exit code 为 0（属模块初始化失败，
+                        不是启动失败），只看退出码会误判为"启动成功"。
+affected_scope:         运行期用 mkfifo(2)/FIFO 做 IPC 的功能：kamailio jsonrpcs 的 FIFO
+                        transport（对应上游 test/unit 中依赖 $RPCFIFOPATH 的用例，如 4.sh）；
+                        任何以命名管道为 transport 的守护进程/测试夹具。构建期后果见 E525。
+verification_cmd: |
+  # 1) 平台属性直接判据（与 E525 同源；期望非 0 且报 Operation not permitted）
+  mkfifo /data/local/tmp/ohos_fifo_probe; echo "rc=$?"
+  # 2) 应用级复现（kamailio + jsonrpcs FIFO transport）
+  kamailio -E -f <cfg-with-jsonrpcs-fifo> 2>&1 | grep -E "Can't create FIFO|jsonrpc_init_fifo_server|error while initializing modules"
+  # 3) 反证：去掉 jsonrpcs（或改用非 FIFO transport）后应正常启动并写 pid
+  kamailio -E -f <minimal-cfg> & sleep 2; test -s <pid-file> && echo "启动正常"
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           degrade-to-non-fifo-transport
+rec_description:        按 P013 降级而非绕过：不使用 FIFO transport。
+                        kamailio 场景 → jsonrpcs 改走其它 transport（如 TCP/HTTP 上的
+                        JSON-RPC）或干脆不加载该模块；测试场景 → 跳过依赖 $RPCFIFOPATH
+                        的用例并在测试报告中登记原因（skip + 记因，不是 xfail 掩盖）。
+                        该能力在 OHOS 上属**平台限制**：不因重试/改权限而改变。
+rec_command:            kamailio -E -f <cfg-without-fifo-transport>   # 实测可正常启动并写 pid
+rec_auto_fix:           false
+rec_impl:               env-unsupported
+
+fallback_priority:      2
+fallback_approach:      code-level-shim-unix-socket-transport
+fallback_description:   若业务强依赖 FIFO 语义：在源码层用 Unix domain socket / 普通管道
+                        等价替换 FIFO 通道（属实质性源码适配，需按 P005/P011 出补丁并说明
+                        理由），或将该模块/功能显式标记 env_unsupported 上报。
+                        禁止用「创建普通文件代替 FIFO」之类保持接口名但语义不符的 stub。
+fallback_command:       python3 $SKILL_ROOT/scripts/ohc-run.py result <软件名> <版本> --status env_unsupported --failed-reason "OHOS SELinux 禁 FIFO：jsonrpcs FIFO transport 不可用"
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+forbid_1_pattern:       反复重试.*mkfifo|重试.*Can.t create FIFO|chmod .*\bfifo\b|mkdir .*\bfifo\b
+forbid_1_reason:        EPERM 出自 SELinux 策略，非路径/权限位问题；重试与改权限不会改变结果（P013）。
+forbid_1_consequence:   在错误方向反复消耗预算，最终仍失败（典型耗时黑洞）。
+
+forbid_2_pattern:       忽略.*Can.t create FIFO.*继续|jsonrpc.*\| *true|skipIf.*[Ff]alse
+forbid_2_reason:        忽略初始化错误继续执行 = 用"测试未跑"伪装"测试通过"；平台限制
+                        必须显式登记（skip + 原因），不得静默吞掉。
+forbid_2_consequence:   测试报告失真，属评审硬性不通过项（R51）。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P013
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E525,E074,E292
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               drafts/kamailio-extras-6.0.6-ohos-fifo-transport-unsupported.md
+last_updated:           2026-09-29
+source_event:           kamailio-extras 6.0.6 适配：上游 test/unit 套件在 OHOS 上执行时
+                        4.sh 等依赖 jsonrpcs FIFO transport 的用例失败（49 脚本：38 skip /
+                        2 pass / 9 fail，其中 6 项（4/5/7/14/15/18.sh）即该 mkfifo EPERM，
+                        另 3 项为测试环境依赖缺失（与本条无关））
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                bbzl <bbzl@noreply.gitcode.com>
+source_pr:              pending
+source_commit:          pending
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-29
+
+draft:                  true
+contributor_id:         B7D2

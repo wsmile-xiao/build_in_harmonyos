@@ -1,0 +1,119 @@
+# test_package/MANIFEST.yml
+# 上游官方测试声明文件
+# CI 脚本 (build_and_test.sh L0e) 强制要求此文件存在
+# 详见: docs/TEST_QUALITY_SPEC.md
+
+package: debian-tag2upload-keyring/1.2
+homepage: https://salsa.debian.org/dgit-team/debian-tag2upload-keyring
+
+# 上游测试命令
+# 上游 autopkgtest (debian/tests/verify-one) 在 test_package/run_upstream_tests.py
+# 中被逐字节原样执行，且指向本包交付的 keyring。上游脚本的验签步骤依赖 `rsop`，
+# 该二进制不在 OHOS 工具链与制品仓内（archives/d/debsig-verify/0.34 实测
+# atlocal.in 依次探测 sqop/rsop/gosop/pgpainless-cli/sq/gpg 全部缺失），故由
+# test_package/rsop.py 以纯 Python 实现同一 `rsop verify` 契约替代；该替代已与
+# GnuPG 2.4.5 交叉核对（判定逐例一致），详见 notes.md「上游测试实测」。
+upstream_check_command: "bash debian/tests/verify-one   # 由 run_upstream_tests.py 原样执行，cwd 为暂存目录，keyring 取自 OPENPGP_KEYRING_DIR"
+
+# conanfile.py build() 方法中是否已集成上游测试
+# 上游测试在 test_package 中执行（需要 build() 之后的交付制品），故此处为 false。
+upstream_test_in_build: false
+upstream_test_command: "OPENPGP_KEYRING_DIR=<package>/share/keyrings python3 run_upstream_tests.py <workdir> <bash>"
+
+# 上游实际运行的测试程序
+upstream_tests:
+  - id: verify-one
+    file: debian/tests/verify-one
+    command: "perl <test-tag-object | split; rsop verify <plaintext signature.asc debian-tag2upload.pgp"
+    sha256: a00fda89155ed8657282c799be662fcd2b570b2d84da2e511d05067842bbc3ea
+    fixture: test-tag-object
+    fixture_sha256: d2e3e4a62cdb8c655b6f6d165245c8fe0b43974b94a5502033d56c905c59c67c
+    status: executed
+    note: >
+      上游脚本逐字节原样执行（副本的 sha256 固定于 upstream-test.sha256，取自
+      conandata.yml 锁定的 tarball），cwd 为暂存目录，其中
+      debian-tag2upload.pgp 是本包交付的 share/keyrings/debian-tag2upload.pgp，
+      故断言落在真实制品上。`perl` 拆分与 `rsop verify` 均为真实执行。
+      唯一替代是缺失的 `rsop` 二进制，由 rsop.py 纯 Python 实现。
+      夹具签名是真实的 tag2upload 签名（RSA-4096 / SHA-512 / sigtype 0x00，
+      issuer 374D8CE4…E4683C079），GnuPG 2.4.5 对其报 good signature。
+
+# test_package 中自带的测试 (消费者视角验证)
+test_package_tests:
+  - file: run_upstream_tests.py
+    description: >
+      上游 autopkgtest 驱动器：原样执行 debian/tests/verify-one，断言落在本包
+      交付的 keyring 上（经 runenv OPENPGP_KEYRING_DIR 定位）；随后把 4 组变异
+      输入（篡改 tag object 明文 / 篡改签名 MPI / 替换 keyring RSA 模数 /
+      空 keyring）推过同一条未修改的上游脚本，要求全部被拒，且拒绝必须来自
+      验签器本身而非某个文件缺失，证明 PASS 非空转。
+      该 4 组变异在开发机上另以 GnuPG 2.4.5 复核，判定与 rsop.py 逐例一致。
+      全部检查由运行时计数器统计并在 TAG2UPLOAD_UPSTREAM_TEST_PASS 行打印
+      assertions=20，计入 assertion_count 时非手工推算。
+    command: "python3 run_upstream_tests.py <workdir> <bash>"
+
+  - file: rsop.py
+    description: >
+      缺失 rsop 二进制的纯 Python 等价实现：RFC 4880 包流解析、RFC 4880 §5.2.4
+      v4 签名数据构造、EMSA-PKCS1-v1_5 完整填充校验；按 hashed
+      issuer-fingerprint 子包（type 33）解析签发者。与仓库内
+      archives/d/debsig-verify/0.34/hmbs_gpg_shim.py 采用同一构造。
+    command: "rsop verify <sig> <keyring>   # 由 run_upstream_tests.py 放到 PATH 上游脚本调用"
+
+  - file: test_verify.py
+    description: >
+      消费者视角结构验证：通过 package_info() 注入的 OPENPGP_KEYRING_DIR 定位
+      制品 share/keyrings/debian-tag2upload.pgp，解析 OpenPGP old-format
+      包流；按 RFC 4880 §12.2（SHA-1 over 0x99 + 2 字节包体长度 + 完整
+      公钥包体）重算 v4 指纹 374D8CE4DB96E9CBD4C0972A606D084E4683C079 与
+      long key id 606D084E4683C079，并与 gpg --check-sigs 独立核对；校验
+      RSA-4096、创建时间戳与 user ID；逐条校验 5 个认证签名的 sigtype，
+      按 hashed issuer-fingerprint 子包（type 33）区分出 2 个自签名
+      （0x13，须等于本密钥指纹）与来自 3 个不同第三方颁发者的 0x10 认证；
+      并对 7 种人为损坏副本做变异对照（截断末包 / 首包头 bit7 清零 / 首包长度
+      夸大 / 替换 RSA 模数 / 公钥算法换为 DSA / 密钥位数缩为 2048 /
+      创建时间戳平移），另加 2 项 runenv 契约对照（变量缺失 / 指向无 keyring
+      的目录），全部在流水线内自动执行并要求被拒以证明断言非空转；
+      实测 assertions=46
+    command: "python3 test_verify.py $PACKAGE_ROOT"
+
+  - file: test_consumer_e2e.py
+    description: >
+      完整消费者端到端用例（rule12 要求的非纯断言用例）——跑通「tag2upload
+      验签方拿到本包 keyring 后能否信任该签名密钥」这条完整流程并给出判决，
+      而非罗列断言。四段式：
+      ① 构造输入：只经 runenv 变量 OPENPGP_KEYRING_DIR 定位交付制品，另加固定
+         的待查 key id、固定信任策略常量，无随机量；
+      ② 真实执行：open_keyring → select_key → derive_identity（按 RFC 4880
+         §12.2 从包体重算，覆盖 RSA 模数）→ collect_certifications（只读被签名
+         覆盖的 hashed 子包区）→ evaluate_roster（三道闸门 + 固定名册）→
+         render_report，任一环节异常即抛出，不会带着坏制品产出判决；
+      ③ 产出结果：确定性报告，自签名按 created 排序、第三方按 key id 升序
+         显式排序，不依赖字典或包流迭代序；
+      ④ 校验内容：报告与 REFERENCE_REPORT 逐字节比对，该参考值转录自独立实现
+         GnuPG 2.4.5 的 `gpg --with-colons --check-sigs`（转录见
+         reports/report.md），不用本程序自身输出回填 golden（那属自证）。
+      另含 OHOS 平台适配预检：对真实 Conan 制品目录断言交付面仅
+      licenses/ + share/，且不含 ELF 魔数与 .so/.a/.o。
+       变异对照 5 组（换 RSA 模数 / 删自签名 / 第三方降为 2 个 / 删全部认证 /
+       篡改 user id）必须全部被同一套流水线拒绝，证明 ACCEPT 非空转；
+       实测 assertions=24
+    command: "python3 test_consumer_e2e.py $PACKAGE_ROOT"
+
+# 测试断言总数
+#
+# 三个程序各自在运行时用计数器统计并打印 assertions=N，下面的数字取自一次真实
+# `zsh ci/conan/build_and_test.sh` 的输出（每组变异对照各计 1 项，与另两个程序
+# 同一粒度，不再把一组折叠成一项汇总）：
+#   20 (run_upstream_tests.py)：sha256 固定值比对(3 × 存在+一致) + runenv 契约(2)
+#     + 上游脚本执行成功(1) + 上游脚本确实指向暂存根(1) + rsop 报出 good
+#     signature(1) + 4 组变异对照 × 2 项（被拒 + 拒绝来自验签器而非缺文件）
+#   46 (test_verify.py)：runenv 契约(含 2 项 runenv 对照) + 密钥身份(指纹/key id/
+#     算法/位数/创建时间，5) + user ID(1) + 认证签名逐条(15) + 自签名与第三方
+#     颁发者结构(4) + 变异对照(7) + 包流与计数断言(10)
+#   24 (test_consumer_e2e.py)：报告比对与判决(2) + OHOS 交付面预检(17) + 变异对照(5)
+assertion_count: 90
+
+# 流水线内自动执行、且必须全部按预期失败的变异/损坏对照总数
+# 16 = 上游驱动器 4 + 结构验证 7 + 端到端 5
+mutation_control_count: 16

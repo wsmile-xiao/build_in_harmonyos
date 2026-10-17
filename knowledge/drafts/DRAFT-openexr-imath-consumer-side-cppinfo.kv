@@ -1,0 +1,40 @@
+id: DRAFT-E5xx-openexr-imath-consumer-side-cppinfo
+title: "CMakeDeps 消费侧补丁依赖包组件 includedirs 的三个时序/路径坑（imath→openexr 实战）"
+category: cmake|conan|packaging
+severity: 2
+error_signature: "fatal error: 'ImathConfig.h' file not found"
+match_keywords: cmake, conan, CMakeDeps, includedirs, components, cpp_info, 依赖包, 组件, imath, openexr, transitive_headers, generate, 绝对路径, file not found, ImathConfig.h
+error_excerpt: "openexr_config.h:12:10: fatal error: 'ImathConfig.h' file not found"
+root_cause: |
+  上游库（如 OpenEXR 的 OpenEXRCore）公开头以 `#include <ImathConfig.h>` 直引依赖包
+  （imath）安装在 include/<子目录>/ 下的配置头。上游安装接口（ImathTargets.cmake 的
+  Imath::ImathConfig）同时暴露 include/ 与 include/Imath 两个目录，但本仓库 imath/3.2.2
+  conan 配方 cpp_info 只声明 include/，CMakeDeps 生成的 ImathConfig.cmake 缺子目录，
+  编译期报 file not found。需在**下游配方** generate() 消费侧补齐，但 Conan 2 有三个坑：
+  1. 修改 self.dependencies[dep].cpp_info 的 includedirs 必须用**绝对路径**——相对路径
+     （如 "include/Imath"）在 CMakeDeps 序列化时被丢弃，生成文件不含该目录；
+  2. **包级修改不传导到组件**——imath 配方定义了 components["imath"]，CMakeDeps 用的是
+     组件级数据，只改包级 includedirs 生成文件纹丝不动，必须直接改 components 的
+     includedirs；
+  3. 修改必须在 **CMakeDeps(self) 构造之前**完成（实例化时读取依赖元数据）。
+solution: |
+  # 下游配方 generate()（在 CMakeDeps 构造前）：
+  imath_info = self.dependencies["imath"].cpp_info
+  for info in [imath_info] + list(imath_info.components.values()):
+      dirs = list(info.includedirs)
+      if not any(d.endswith("include/Imath") for d in dirs):
+          for d in dirs:
+              if d.endswith("include"):
+                  dirs.append(os.path.join(d, "Imath"))  # 绝对路径！
+                  break
+          info.includedirs = dirs
+  deps = CMakeDeps(self)   # 构造在修改之后
+  deps.generate()
+  # 组件依赖声明：上游 PUBLIC 依赖要如实进 requires
+  # OpenEXRCore.requires = [config, libdeflate::libdeflate, "imath::imath"]
+  # 配套：self.requires("imath/3.2.2", transitive_headers=True)
+fallback: "若消费侧补丁不可行（如依赖为间接传递），可退回给依赖包配方补组件 includedirs（需递增依赖版本号走独立 PR，CCI imath 配方参考：imath_config 组件 includedirs.append(include/Imath)）"
+verify_builds: "openexr 3.3.4 本地 conan create 全绿 + 上游 135 项测试 100%（2026-09-10，PR 待建）"
+prescan_pattern: "fatal error: 'Imath[A-Za-z]*.h' file not found"
+last_updated: 2026-09-10
+agent: j669539

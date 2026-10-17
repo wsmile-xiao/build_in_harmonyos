@@ -1,0 +1,194 @@
+--- /dev/null
++++ b/poppler-qt5.cpp
+@@ -0,0 +1,191 @@
++/****************************************************************************
++** poppler-qt5.cpp — Implementation of the HarmonyOS PC poppler-qt5
++** compatibility shim (see poppler-qt5.h).
++**
++** Everything is implemented on top of the poppler *core* API shipped by the
++** conan 'poppler' package (libpoppler.so plus the headers under
++** include/poppler), because the same package publishes no Qt bindings
++** (ENABLE_QT5=OFF).
++**
++** Rendering uses SplashOutputDev with splashModeXBGR8 and a top-down bitmap:
++** poppler's splash stores each pixel as [B,G,R,X] in memory (see
++** Splash::pipeRunSimpleXBGR8), which is exactly QImage::Format_RGB32 on a
++** little-endian host such as aarch64, so the bitmap can be wrapped directly.
++**
++** Links are read from the page annotations (PDFDoc::getLinks) and converted
++** to poppler-qt5's normalised (0..1) link area using the page crop box.
++**
++** GPL-2.0-or-later, like upstream vprerex.
++****************************************************************************/
++
++#include "poppler-qt5.h"
++
++#include <QFile>
++#include <QHash>
++
++#include <memory>
++
++#include <poppler/GlobalParams.h>
++#include <poppler/PDFDoc.h>
++#include <poppler/Page.h>
++#include <poppler/Annot.h>
++#include <poppler/Link.h>
++#include <poppler/SplashOutputDev.h>
++#include <poppler/splash/SplashBitmap.h>
++#include <poppler/goo/GooString.h>
++
++namespace Poppler {
++
++namespace {
++
++/* poppler requires its global parameters to be initialised before any
++ * PDFDoc is created; GlobalParamsIniter is the RAII helper for that. The
++ * shim keeps the poppler default error reporting behaviour. */
++void shimErrorCallback(ErrorCategory /*category*/, Goffset /*pos*/, const char * /*msg*/)
++{
++}
++
++void ensureGlobalParams()
++{
++    static GlobalParamsIniter *initer = new GlobalParamsIniter(shimErrorCallback);
++    (void)initer;
++}
++
++} // namespace
++
++class DocumentData
++{
++public:
++    DocumentData() : doc(nullptr), hints(0) { }
++
++    PDFDoc *doc;
++    int hints;
++    QHash<int, Page *> pages;
++};
++
++// ---------------------------------------------------------------- Document
++
++Document::Document(DocumentData *data) : d(data) { }
++
++Document::~Document()
++{
++    for (Page *p : d->pages) {
++        delete p;
++    }
++    delete d->doc;
++    delete d;
++}
++
++Document *Document::load(const QString &filePath)
++{
++    ensureGlobalParams();
++
++    const QByteArray encoded = QFile::encodeName(filePath);
++    PDFDoc *doc = new PDFDoc(std::make_unique<GooString>(encoded.constData()));
++    if (!doc->isOk()) {
++        delete doc;
++        return nullptr;
++    }
++
++    DocumentData *data = new DocumentData();
++    data->doc = doc;
++    return new Document(data);
++}
++
++int Document::numPages() const
++{
++    return d->doc->getNumPages();
++}
++
++Page *Document::page(int index) const
++{
++    if (index < 0 || index >= d->doc->getNumPages())
++        return nullptr;
++    if (d->pages.contains(index))
++        return d->pages.value(index);
++
++    Page *p = new Page(d, index);
++    d->pages.insert(index, p);
++    return p;
++}
++
++void Document::setRenderHint(RenderHint hint, bool on)
++{
++    if (on)
++        d->hints |= static_cast<int>(hint);
++    else
++        d->hints &= ~static_cast<int>(hint);
++}
++
++// -------------------------------------------------------------------- Page
++
++Page::Page(DocumentData *doc, int index) : m_doc(doc), m_index(index) { }
++
++Page::~Page() { }
++
++QImage Page::renderToImage(qreal xres, qreal yres) const
++{
++    PDFDoc *doc = m_doc->doc;
++
++    /* White paper; splashModeXBGR8 stores the components as [B,G,R,X]. */
++    SplashColor paper;
++    paper[0] = 0xff;
++    paper[1] = 0xff;
++    paper[2] = 0xff;
++    paper[3] = 0xff;
++
++    SplashOutputDev splash(splashModeXBGR8, 4, false, paper, true, splashThinLineDefault, false);
++    splash.setFontAntialias((m_doc->hints & Document::TextAntialiasing) != 0);
++    splash.setVectorAntialias((m_doc->hints & Document::Antialiasing) != 0);
++    splash.startDoc(doc);
++    doc->displayPageSlice(&splash, m_index + 1, xres, yres, 0, false, true, false, -1, -1, -1, -1);
++
++    SplashBitmap *bitmap = splash.getBitmap();
++    if (!bitmap)
++        return QImage();
++
++    QImage image(reinterpret_cast<const uchar *>(bitmap->getDataPtr()), bitmap->getWidth(),
++                 bitmap->getHeight(), bitmap->getRowSize(), QImage::Format_RGB32);
++    return image.copy();
++}
++
++QList<Link *> Page::links() const
++{
++    QList<Link *> result;
++    PDFDoc *doc = m_doc->doc;
++
++    std::unique_ptr<Links> links = doc->getLinks(m_index + 1);
++    if (!links)
++        return result;
++
++    ::Page *corePage = doc->getPage(m_index + 1);
++    if (!corePage)
++        return result;
++
++    const PDFRectangle *crop = corePage->getCropBox();
++    const double pageWidth = crop->x2 - crop->x1;
++    const double pageHeight = crop->y2 - crop->y1;
++    if (pageWidth <= 0.0 || pageHeight <= 0.0)
++        return result;
++
++    for (const std::shared_ptr<AnnotLink> &annotLink : links->getLinks()) {
++        if (!annotLink)
++            continue;
++
++        QString url;
++        LinkAction *action = annotLink->getAction();
++        if (action && action->getKind() == actionURI)
++            url = QString::fromStdString(static_cast<LinkURI *>(action)->getURI());
++
++        const PDFRectangle &rect = annotLink->getRect();
++        const QRectF area((rect.x1 - crop->x1) / pageWidth,
++                          (crop->y2 - rect.y2) / pageHeight,
++                          (rect.x2 - rect.x1) / pageWidth,
++                          (rect.y2 - rect.y1) / pageHeight);
++        result.append(new LinkBrowse(area, url));
++    }
++
++    return result;
++}
++
++} // namespace Poppler

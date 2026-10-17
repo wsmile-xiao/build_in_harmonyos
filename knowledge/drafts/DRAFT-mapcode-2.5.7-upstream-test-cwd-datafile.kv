@@ -1,0 +1,83 @@
+#====================================================================
+# DRAFT — 上游单测依赖工作目录：2.45 亿断言全过却报 1 error 并非零退出
+#
+# 场景：HarmonyOS PC (OHOS aarch64) 交叉编译
+# 来源：mapcode 2.5.7 适配（feat/mapcode-2.5.7）
+#====================================================================
+
+id:                     DRAFT-mapcode-2.5.7-upstream-test-cwd-datafile
+trigger_tool:           test
+phase:                  testing
+error_signature:        "\\*\\*\\* ERROR \\*\\*\\* Can't read file|found 1 errors|UNIT TESTS FAILED"
+
+severity:               2
+category:               testing
+match_keywords:         working directory, WORKING_DIRECTORY, cwd, ctest, add_test,
+                        territories.csv, Can't read file, found 1 errors, UNIT TESTS FAILED,
+                        data file, csv fixture, relative path
+title:                  "上游单测用相对路径读数据文件，从构建目录启动即报 1 个 error 并非零退出"
+
+root_cause: >
+  mapcode 的 `test/unittest.c` 用相对路径读取同目录的 `territories.csv`（533 行）
+  与 `alphabets.csv`。从 CMake 构建目录（而非源码 `test/` 目录）启动该程序时，
+  文件打开失败，程序打印
+  `*** ERROR *** Can't read file territories.csv` 与 `0 lines tested from territories.csv`，
+  最终汇总成 `Executed 245633397 tests, found 1 errors` + `UNIT TESTS FAILED!` 并返回非零。
+  即：**2.45 亿条断言全部通过，仅因为工作目录不对就产生 1 个 error**。
+  该签名极具误导性——容易被误判为「平台不兼容 / 浮点行为差异」而放弃适配，
+  实际上只需把工作目录指回源码 `test/`。
+affected_scope:         所有「测试程序相对路径读取数据文件」的上游项目；
+                        典型是自带 csv/txt fixture 的 C/C++ 单测（mapcode / 各类 codegen 测试）
+verification_cmd:       cd <source>/test && <unittest_binary>          # 期望 found 0 errors
+                        # 对照：cd <build> && <unittest_binary>        # 复现 found 1 errors
+
+rec_priority:           1
+rec_approach:           pin-test-working-directory-to-source-fixture-dir
+rec_description: >
+  两处都要固定工作目录，缺一不可：
+  1) CMake 注册测试时显式声明
+     `add_test(NAME unittest COMMAND unittest WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/test)`；
+  2) 在 conanfile 的 build() 里直接执行时传 `self.run(cmd, cwd=<source>/test)`
+     （`self.run` 支持 `cwd=`）。
+  只做 1) 而在 build() 里裸 self.run 仍会踩坑；只做 2) 则 ctest 入口不可用。
+rec_command:            cmake: add_test(NAME <t> COMMAND <bin> WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/<fixture_dir>)
+                        conan: self.run("<bin>", env="conanbuild", cwd=os.path.join(self.source_folder, "test"))
+rec_auto_fix:           false
+rec_impl:               cmake-and-conan-test-cwd
+
+fallback_priority:      2
+fallback_approach:      copy-fixtures-into-build-dir
+fallback_description: >
+  若上游测试把 fixture 路径写死在别处、无法通过 WORKING_DIRECTORY 规避，
+  可在 build() 里把数据文件复制到构建目录，或用 `configure_file`/`-D` 把数据目录
+  作为参数注入测试程序。侵入性更大，仅在 WORKING_DIRECTORY 不可行时使用。
+fallback_command:       cp <source>/test/*.csv <build>/ && self.run("<bin>", cwd=self.build_folder)
+fallback_auto_fix:      false
+fallback_impl:           conan-copy-test-fixtures
+
+forbid_1_pattern:       self\.run\([^)]*unittest[^)]*\)(?![^)]*cwd[[:space:]]*=)
+forbid_1_reason:        直接执行依赖数据文件的上游测试程序却不指定工作目录，
+                        会稳定复现「found 1 errors」并被误读为平台不兼容
+forbid_1_consequence:   build() 阶段非零退出，conan create 失败；排障方向被引向
+                        浮点/字符集/平台 ABI 等无关假设
+
+principles:             P001, P003
+similar_to:             E002
+conflicts_with:
+prerequisite_of:
+caused_by:
+causes:
+requires:
+solved_by:
+
+doc_file:               knowledge/drafts/DRAFT-mapcode-2.5.7-upstream-test-cwd-datafile.md
+last_updated:           2026-09-26
+source_event:           mapcode 2.5.7 W3 conan create 首次 build() 阶段失败
+authors:                A7F3
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-26

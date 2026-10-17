@@ -1,0 +1,122 @@
+--- a/lib/Support/Unix/Perf.inc
++++ b/lib/Support/Unix/Perf.inc
+@@ -7,53 +7,61 @@
+ //
+ //===----------------------------------------------------------------------===//
+ #include <skypat/Support/ManagedStatic.h>
+ #include <time.h>
+ #include <unistd.h>
+ #include <cassert>
+ 
+ #if defined(HAVE_LINUX_PERF_EVENT_H)
+ #include <linux/perf_event.h>
+ #include <sys/ioctl.h>
++#include <sys/types.h>
+ #include <cstring>
+ #include <cstdlib>
++#include <cstdio>
++#include <cerrno>
+ #if defined(HAVE_ASM_UNISTD_H)
+ #include <asm/unistd.h>
+ #endif
+ #endif 
+ 
+ #ifndef SKYPAT_SKYPAT_H
+ #include <skypat/skypat.h>
+ #endif
+ 
+ namespace skypat {
+ namespace testing {
+ namespace internal {
+ 
+ //===----------------------------------------------------------------------===//
+ // Perf Implementation
+ //===----------------------------------------------------------------------===//
+ class PerfImpl
+ {
+ public:
+-  PerfImpl() {
++  PerfImpl() : m_Fd(-1) {
+   }
+   ~PerfImpl() {
+ #if defined(HAVE_LINUX_PERF_EVENT_H)
+-    close(m_Fd);
++    if (m_Fd >= 0)
++      close(m_Fd);
+ #endif
+   }
+ 
+   testing::Interval getCounter() {
+ #if defined(HAVE_LINUX_PERF_EVENT_H)
+-    unsigned long long counter;
+-    read(m_Fd, &counter, sizeof(unsigned long long));
++    if (m_Fd < 0)
++      return 0;
++    unsigned long long counter = 0;
++    if (read(m_Fd, &counter, sizeof(unsigned long long)) !=
++        (ssize_t)sizeof(unsigned long long))
++      return 0;
+     return counter;
+ #else
+     return 0;
+ #endif
+      return -1;
+   }
+ 
+   void init(enum PerfEvent pEvent) {
+ #if defined(HAVE_LINUX_PERF_EVENT_H)
+ 
+@@ -87,34 +95,51 @@
+     attr.config = event_list[pEvent];
+ 
+     if(pEvent < PerfEvent::CPU_CLOCK)
+         attr.type = PERF_TYPE_HARDWARE;
+     else
+         attr.type = PERF_TYPE_SOFTWARE;
+ 
+     attr.size = sizeof(attr);
+ 
+     m_Fd = syscall(__NR_perf_event_open, &attr, 0, -1, -1, 0);
++
++    /* Runtime capability probe: perf_event_open may be compiled in but
++       denied at run time by the kernel, the container or an LSM (observed
++       on HarmonyOS: EACCES for HW and SW events even though
++       perf_event_paranoid is -1).  Report it once and degrade to
++       "counters unavailable" (0) instead of reading an invalid fd. */
++    if (m_Fd < 0) {
++      static bool s_Warned = false;
++      if (!s_Warned) {
++        s_Warned = true;
++        fprintf(stderr,
++                "skypat: perf_event_open is unavailable (errno=%d); "
++                "performance counters are disabled\n", errno);
++      }
++    }
+ #endif
+   }
+ 
+   void start() {
+ #if defined(HAVE_LINUX_PERF_EVENT_H)
+-    ioctl(m_Fd, PERF_EVENT_IOC_ENABLE);
++    if (m_Fd >= 0)
++      ioctl(m_Fd, PERF_EVENT_IOC_ENABLE);
+ #endif
+     m_Start = getCounter();
+     assert(-1 != m_Start && "fail to get performance counters");
+   }
+ 
+   void stop() {
+ #if defined(HAVE_LINUX_PERF_EVENT_H)
+-    ioctl(m_Fd, PERF_EVENT_IOC_DISABLE);
++    if (m_Fd >= 0)
++      ioctl(m_Fd, PERF_EVENT_IOC_DISABLE);
+ #endif
+     m_End = getCounter();
+     assert(-1 != m_End && "fail to get performance counters");
+   }
+ 
+   testing::Interval getValue() const {
+     return (m_End - m_Start);
+   }
+ 
+ private:

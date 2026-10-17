@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(qglviewer_consumer LANGUAGES CXX)
+find_package(libqglviewer REQUIRED CONFIG)
+add_executable(qglviewer_consumer consumer.cpp)
+target_link_libraries(qglviewer_consumer PRIVATE libqglviewer::libqglviewer)
+set_target_properties(qglviewer_consumer PROPERTIES CXX_STANDARD 17)

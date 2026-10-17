@@ -38,7 +38,9 @@ make install DESTDIR=$TEST_PREFIX
 | 4 | AttributeError: deps_cpp_info 不存在 | Conan 1 API 在 Conan 2 中已移除 | 改用 self.dependencies["vampire"].package_folder |
 | 5 | conandata.yml sha256 为占位符 | 自动生成未计算校验和 | 手动计算: 3d991c914e9f400641d8b2e4362065c218c0ecb08079b96b0da1714aa6842520 |
 | 6 | License 标记为 MIT | 模板默认值 | 修正为 BSD-3-Clause |
-| 7 | E092: CMake 不识别 HarmonyOS 平台 | CMake 无 HarmonyOS platform module | 设置 CMAKE_SYSTEM_NAME=Linux + CMAKE_SYSTEM_PROCESSOR=aarch64 |
+| 7 | E092: CMake 不识别 HarmonyOS 平台 (旧版 conan 2.12.0) | CMake 无 HarmonyOS platform module | 旧方案: 手动设置 CMAKE_SYSTEM_NAME=Linux；新方案: 升级到 OHOS 适配版 conan 2.29.1 后自动映射，无需手动覆盖 |
+| 8 | CI L0e 检查失败: test_package/MANIFEST.yml 缺失 | CI 强制要求声明上游测试来源 | 创建 test_package/MANIFEST.yml，声明 vampire 无上游测试 + smoke test 内容 |
+| 9 | conanfile.py 中 CMAKE_SYSTEM_NAME=Linux 覆盖与新版 conan 冲突 | OHOS 适配版 conan 2.29.1 自动映射 OHOS→HarmonyOS，手动覆盖会导致冲突 | 移除 CMAKE_SYSTEM_NAME 和 CMAKE_SYSTEM_PROCESSOR 手动覆盖 |
 
 ## 源码修改
 

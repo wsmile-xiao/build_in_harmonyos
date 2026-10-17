@@ -1,0 +1,143 @@
+--- a/z_validate.c
++++ b/z_validate.c
+@@ -13,22 +13,25 @@
+ // all copies or substantial portions of the Software.
+ // 
+ // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ // FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ // AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ // SOFTWARE.
+ 
++#include <stddef.h>
+ #include <stdint.h>
++#if defined(AVX2) || defined(SSE4)
+ #include <immintrin.h>
++#endif
+ 
+ // How this validator works:
+ //
+ //   [[[ UTF-8 refresher: UTF-8 encodes text in sequences of "code points",
+ //   each one from 1-4 bytes. For each code point that is longer than one byte,
+ //   the code point begins with a unique prefix that specifies how many bytes
+ //   follow. All bytes in the code point after this first have a continuation
+ //   marker. All code points in UTF-8 will thus look like one of the following
+ //   binary sequences, with x meaning "don't care":
+ //      1 byte:  0xxxxxxx
+@@ -200,23 +203,29 @@
+ 
+ #   define V_TABLE_16(...)  _mm_setr_epi8(__VA_ARGS__)
+ 
+ #   define v_shift_lanes_left v_shift_lanes_left_sse4
+ static inline vec_t v_shift_lanes_left(vec_t top) {
+     return _mm_alignr_epi8(top, v_set1(0), 15);
+ }
+ 
+ #else
+ 
+-#   error "No valid configuration: must define one of AVX2 or SSE4
++// Portable configuration: no x86 SIMD (AVX2/SSE4) available, e.g. on
++// aarch64 / HarmonyOS OHOS. z_validate_utf8 is provided by the scalar
++// fallback below, which implements the same acceptance semantics.
+ 
+ #endif
++
++#if defined(AVX2) || defined(SSE4)
++
++
+ 
+ // Validate one vector's worth of input bytes
+ inline int z_validate_vec(vec_t bytes, vec_t shifted_bytes, vmask_t *last_cont) {
+     // Error lookup tables for the first, second, and third nibbles
+     const vec_t error_1 = V_TABLE_16(
+         0x00, 0x00, 0x00, 0x00,
+         0x00, 0x00, 0x00, 0x00,
+         0x00, 0x00, 0x00, 0x00,
+         0x01, 0x00, 0x06, 0x38
+     );
+@@ -328,20 +337,83 @@
+         bytes = v_load(buffer + 1);
+         shifted_bytes = v_load(buffer);
+         if (!z_validate_vec(bytes, shifted_bytes, &last_cont))
+             return 0;
+     }
+ 
+     // The input is valid if we don't have any more expected continuation bytes
+     return last_cont == 0;
+ }
+ 
++#else
++
++// Scalar fallback for targets without AVX2/SSE4 (e.g. aarch64 / OHOS).
++// Implements the same UTF-8 acceptance semantics: rejects overlong
++// encodings, surrogate code points, and values above U+10FFFF.
++
++int z_validate_utf8(const char *data, size_t len) {
++    const unsigned char *s = (const unsigned char *)data;
++    size_t i = 0;
++
++    while (i < len) {
++        unsigned char c = s[i];
++        if (c < 0x80) {
++            // ASCII
++            i++;
++            continue;
++        }
++        int n;
++        unsigned int cp;
++        if ((c & 0xE0) == 0xC0) {
++            // 2-byte sequence: 110xxxxx 10xxxxxx
++            n = 2;
++            cp = c & 0x1F;
++            if (cp < 0x02)  // C0/C1 are overlong
++                return 0;
++        } else if ((c & 0xF0) == 0xE0) {
++            // 3-byte sequence: 1110xxxx 10xxxxxx 10xxxxxx
++            n = 3;
++            cp = c & 0x0F;
++        } else if ((c & 0xF8) == 0xF0) {
++            // 4-byte sequence: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
++            n = 4;
++            cp = c & 0x07;
++            if (cp > 0x04)  // F5..F7 are above U+10FFFF
++                return 0;
++        } else {
++            // stray continuation byte or invalid prefix
++            return 0;
++        }
++        if (i + (size_t)n > len)
++            return 0;  // truncated sequence at end of input
++        for (int j = 1; j < n; j++) {
++            unsigned char cc = s[i + j];
++            if ((cc & 0xC0) != 0x80)
++                return 0;  // expected continuation byte
++            cp = (cp << 6) | (cc & 0x3F);
++        }
++        // Range checks
++        if (n == 3 && cp < 0x800)   // E0 80..9F overlong
++            return 0;
++        if (n == 4 && cp < 0x10000) // F0 80..8F overlong
++            return 0;
++        if (cp >= 0xD800 && cp <= 0xDFFF)
++            return 0;  // UTF-16 surrogate
++        if (cp > 0x10FFFF)
++            return 0;
++        i += (size_t)n;
++    }
++    return 1;
++}
++
++#endif // AVX2 || SSE4
++
+ // Undefine all macros
+ 
+ #undef z_validate_utf8
+ #undef z_validate_vec
+ #undef V_LEN
+ #undef vec_t
+ #undef vmask_t
+ #undef vmask2_t
+ #undef v_load
+ #undef v_set1

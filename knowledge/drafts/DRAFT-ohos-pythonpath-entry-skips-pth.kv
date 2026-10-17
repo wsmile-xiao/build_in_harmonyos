@@ -1,0 +1,149 @@
+#====================================================================
+# DRAFT-ohos-pythonpath-entry-skips-pth — 放在 PYTHONPATH 上的 Python 包
+#   目录**不会执行其中的 .pth**，导致「顶层包可见但 setuptools 的 distutils
+#   shim 缺失」；子环境（嵌套 venv）里复现为 No module named 'distutils'
+#
+# 对应文档: knowledge/drafts/DRAFT-ohos-pythonpath-entry-skips-pth.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+# 注: 本文件所有字段均为单行值或块值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-ohos-pythonpath-entry-skips-pth
+source_lib:             cffi 2.1.1
+trigger_tool:           python|pip|pytest|conan
+phase:                  testing|runtime|installation
+error_signature:        No module named 'distutils'|
+                         ModuleNotFoundError.*distutils|
+                         ImportError.*distutils.*_distutils_hack|
+                         pip install.*distutils.*(not found|missing)|
+                         setuptools.*import.*ok.*distutils.*fail
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               python, packaging, environment, testing, pip
+match_keywords:         .pth, pth file, distutils-precedence.pth, _distutils_hack,
+                         PYTHONPATH, site-packages, site.addsitedir, sitecustomize,
+                         setuptools 引导, bootstrap, distutils shim, setuptools._distutils,
+                         No module named 'distutils', nested venv, 嵌套 venv,
+                         already satisfied, 子进程, subprocess, 测试环境, 引导目录
+title:                  把 Python 包目录放进 PYTHONPATH 只提供**顶层 import**，
+                        其 .pth（如 setuptools 的 distutils-precedence.pth）不会执行
+                        ——「import setuptools 成功」不等于「distutils 可用」，
+                        子环境里会复现 No module named 'distutils'
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  CPython 启动时只对**真正的 site-packages 目录**（site.addsitedir 处理过的）
+  执行其中的 .pth 文件；而通过 **PYTHONPATH** 加入的目录只被加进 sys.path，
+  **不触发 .pth 处理**。这造成一个隐蔽的「半可见」状态：以 setuptools 为例，
+  `import setuptools` 能成功（顶层包在 PYTHONPATH 目录里），但
+  `setuptools/distutils-precedence.pth` 这个 `.pth` 从未执行，于是
+  `import distutils` 找不到——因为 Python 3.12+ 已把 distutils 从 stdlib 移除，
+  完整供给依赖该 `.pth` 安装的 `_distutils_hack` 把 `setuptools._distutils`
+  注册成 `distutils`。
+  更隐蔽的是**它会在子环境里才爆**：当被测套件在嵌套 venv 中重新构建
+  （如 `pip install <src>` 触发 PEP 517 构建）时，子 venv 里的 pip 会因
+  「setuptools 已满足」（它确实能从父进程继承的 PYTHONPATH 看到 setuptools）
+  **跳过安装**，于是那个 venv 的 site-packages 里从未装入 setuptools，
+  也就没有 `.pth`，构建后端 import distutils 立即失败。
+  cffi 2.1.1 实证：把构建期 setuptools 引导目录放进测试 PYTHONPATH 后，
+  `testing/cffi0/test_zintegration.py` 全部 7 项 ERROR（No module named 'distutils'）；
+  **从测试 PYTHONPATH 移除该引导目录**后，嵌套 venv 自行正常安装 setuptools
+  → 7 项 ERROR 转为 8 passed。
+affected_scope: >
+  一切「在测试/构建环境里用 PYTHONPATH 提供某个需要 .pth 才能完整生效的包」的场景：
+  · setuptools（distutils-precedence.pth，Python 3.12+ 上尤其致命）
+  · 任何发布 .pth 做路径注册/命名空间包（namespace package）的包
+  · 被测套件会 fork 子解释器、或创建嵌套 venv、或调子进程 pip 的场合
+  · 用 --target / pip download 引导依赖后以 PYTHONPATH 供给（而非真正 install）
+    的测试环境搭建方式（本仓多包适配沿用此法，风险面较广）
+verification_cmd: >
+  ① 判定「半可见」：分别验证顶层包与 .pth 的效果——
+     `PYTHONPATH=<boot> python3 -c "import setuptools; print(setuptools.__file__)"`
+       → 成功（顶层包可见）
+     `PYTHONPATH=<boot> python3 -c "import distutils; print(distutils.__file__)"`
+       → ModuleNotFoundError（.pth 未执行）
+  ② 对比「真装进 site-packages」的情形：
+     `<venv>/bin/python -m pip install setuptools` 后再 import distutils → 成功
+  ③ 在嵌套 venv 里复现（这是实际爆点）：
+     让被测套件启动嵌套 venv 构建，观察 `ModuleNotFoundError: No module named 'distutils'`
+  ④ 确认 pip 是否被误导跳过安装：子 venv 里
+     `python -m pip install setuptools` 输出 "Requirement already satisfied"
+     但该 venv 的 site-packages 下并无 setuptools 目录 → 即为本坑特征。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           dont-put-pth-bearing-packages-on-pythonpath-install-them
+rec_description: >
+  两条路，按可控性选：
+  ①【首选】**不要**用 PYTHONPATH 提供需要 .pth 才能完整的包（典型 setuptools）。
+     改为让每个需要它的环境**自己真正安装**到自己的 site-packages：
+     · 主测试 venv：`<venv>/bin/python -m pip install setuptools`
+     · 由被测套件派生出的嵌套 venv：**不要**从父进程 PYTHONPATH 泄漏 setuptools
+       进去（即从测试 PYTHONPATH 中**移除**引导目录），让它们各自正常安装。
+     这是 cffi 的最终修法（zintegration 7 ERROR → 8 passed）。
+  ②【备选】若确实必须用 PYTHONPATH 供给（如离线、无 pip 源），则把包**连同其
+     .pth 的效果**一起补上：显式 import 并触发等价注册（如
+     `import setuptools._distutils` 或在 sitecustomize 里手动
+     `sys.modules['distutils'] = setuptools._distutils`），并可复制 .pth 到
+     真正的 site-packages 目录。此路更脆（须随上游 .pth 内容变化同步维护），
+     仅在①不可行时使用。
+rec_command:            <venv>/bin/python -m pip install setuptools   # 首选：真装；不要把引导目录放进 PYTHONPATH
+rec_auto_fix:           false
+rec_impl:               install-into-each-env
+
+fallback_priority:      2
+fallback_approach:      emulate-pth-effect-explicitly
+fallback_description: >
+  无法真正安装时，用 sitecustomize 显式补出被跳过的 .pth 等价效果（把
+  setuptools._distutils 注册为 distutils），并把该补偿写成与上游 .pth 内容
+  对应的注释，便于上游变更时同步。须知这是**模拟**，不如真装可靠。
+fallback_command:       python3 -c "import setuptools._distutils, sys; sys.modules.setdefault('distutils', setuptools._distutils)"
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       import setuptools.*(成功|ok|通过).*(即|就|说明).*distutils 可用|
+                         PYTHONPATH.*setuptools.*(足够|即可|就行)
+forbid_1_reason:        .pth 在 PYTHONPATH 目录上不执行，`import setuptools` 成功
+                        只证明顶层包可见；Python 3.12+ 的 distutils 完全依赖该 .pth，
+                        二者必须分别验证。
+forbid_1_consequence:   本地「测试环境看起来齐备」，一到嵌套 venv / 子解释器就
+                        ModuleNotFoundError，且因 pip 报 already satisfied 而极难定位。
+
+forbid_2_pattern:       嵌套 venv.*(No module named 'distutils').*(跳过|排除|忽略).*(不|未).*(申报|记录)
+forbid_2_reason:        该失败是**环境搭建方式**造成的，属可修项；静默跳过会把
+                        可修问题伪装成上游缺陷，也让通过率分母失真（R51）。
+forbid_2_consequence:   评测与后续复用者被误导；真实修法（改为真装）被埋没。
+
+principles:             P013, P015
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E512, DRAFT-ohos-test-subprocess-overrides-pythonpath-needs-venv,
+                         DRAFT-ohos-source-copy-python-no-dist-info-version-unavailable]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 (Metadata) ═══
+doc_file:               knowledge/drafts/DRAFT-ohos-pythonpath-entry-skips-pth.md
+last_updated:           2026-09-20
+source_event:           cffi 2.1.1 OHOS aarch64 适配：测试 PYTHONPATH 上的 setuptools
+                        引导目录致 testing/cffi0/test_zintegration.py 7 项 ERROR
+                        （No module named 'distutils'），移除后转 8 passed
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:              11334
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20
+
+draft:                  true
+contributor_id:         3211

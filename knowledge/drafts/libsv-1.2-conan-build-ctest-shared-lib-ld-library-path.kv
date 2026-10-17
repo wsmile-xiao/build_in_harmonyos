@@ -1,0 +1,106 @@
+# ═══ Draft knowledge entry — conan build() 内 ctest 加载构建树共享库的三连环修复 ═══
+# Software: libsv 1.2 (CMake shared lib, 上游 7 个 ctest 程序)
+# Evidence: OHOS PC aarch64, cmake 4.1.2, conan 2.29.1 (OHOS 适配版), cmake_layout, Unix Makefiles
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: libsv-1.2-conan-build-ctest-shared-lib-ld-library-path
+severity: 2
+category: conan, cmake, testing, linking, runtime
+trigger_tool: conan|ctest|clang|musl-ldso
+phase: test
+
+title: OHOS 构建树无 rpath + conan 剥离命令级 LD_LIBRARY_PATH + cmake_layout build_folder 陷阱，ctest 需包装脚本内 export
+
+keywords: ctest, LD_LIBRARY_PATH, Error loading shared library, Error relocating, symbol not found, build tree, rpath, RUNPATH, self.run, 环境剥离, cmake_layout, build_folder, build/Release, conanbuild, wrapper script
+
+error_signature: Error loading shared library lib.*\.so.*needed by.*build|Error relocating.*build.*/test_.*symbol not found|[0-9]+% tests passed.*[1-9][0-9]* tests failed
+
+match_keywords: ctest, LD_LIBRARY_PATH, loading shared library, relocating, cmake_layout, build_folder, self.run, conanbuild, upstream tests, HMBS, shared
+
+root_cause: |
+  三环叠加：(1) OHOS 工具链链接的构建树测试二进制不带 RUNPATH（readelf -d
+  无 rpath 段），运行期完全依赖 LD_LIBRARY_PATH；注意 hnp worker 的 conan
+  构建环境下 LD_LIBRARY_PATH 有效（E088 的 namespace 忽略不适用于此场景）。
+  (2) conan 的 self.run 会用环境管理的值覆盖命令字符串里的变量前缀——
+  profile [buildenv] 注册了 LD_LIBRARY_PATH 同名变量，命令级前缀被剥离。
+  (3) cmake_layout 的 self.build_folder 本身就是 <...>/build/Release（单配置
+  生成器输出目录），再拼 "build/Release" 得到不存在路径，LD_LIBRARY_PATH
+  指向空处，症状与未设置相同。
+
+affected_scope: |
+  所有"build() 内执行上游 ctest/测试程序"且被测物为共享库的 conan 2 配方
+  （构建期测试、产物未安装）；OHOS/musl 环境为主，Linux 交叉环境同理。
+
+verification_cmd: |
+  # 设备手动复刻（先证明库与测试本体无问题）
+  R=<conan build>/build/Release
+  LD_LIBRARY_PATH="$R" ctest --test-dir "$R" --output-on-failure
+  # 二进制 rpath 检查（预期无 RUNPATH）
+  readelf -d "$R/test_x" | grep -iE "rpath|runpath" || echo "no rpath"
+
+rec_priority: 1
+rec_approach: wrapper-script-export-ld-library-path
+rec_description: |
+  build() 里用 conan.tools.files.save 生成包装脚本，在脚本内部
+  export LD_LIBRARY_PATH（脚本内部设置不受 conan 环境管理影响），
+  self.run('sh "<script>"') 执行。lib_dir 取 self.build_folder 本身，
+  并用 libsv.so 存在性做布局兜底（防多配置生成器差异）。
+rec_command: |
+  save(self, script,
+       "#!/bin/sh\n"
+       'LD_LIBRARY_PATH="%s" ctest --test-dir "%s" --output-on-failure > "%s" 2>&1\n'
+       "exit $?\n" % (lib_dir, self.build_folder, log_path))
+  self.run('sh "%s"' % script)
+rec_auto_fix: false
+rec_impl: recipe-build-helper
+
+fallback_priority: 2
+fallback_approach: cmake-build-rpath
+fallback_description: |
+  CMakeToolchain 设 CMAKE_BUILD_RPATH 让链接期嵌入库目录，运行期不依赖
+  环境变量；依赖链接器真实输出 rpath（OHOS lld 行为需逐例验证），
+  且与 conan 打包去 rpath 的默认取向相悖。
+fallback_command: tc.cache_variables["CMAKE_BUILD_RPATH"] = lib_dir
+fallback_auto_fix: false
+fallback_impl: recipe-toolchain-var
+
+forbid_1_pattern: self\.run\('LD_LIBRARY_PATH=.*ctest
+forbid_1_reason: 命令级前缀被 conan 环境管理剥离（[buildenv] 注册同名变量），实测无效。
+forbid_1_consequence: 表面上修了，真机 ctest 依旧 0/N，浪费整轮窗口。
+forbid_2_pattern: os\.path\.join\(self\.build_folder,\s*"build",\s*"Release"\)
+forbid_2_reason: cmake_layout 下 build_folder 已是 build/Release，再拼得到不存在路径。
+forbid_2_consequence: LD_LIBRARY_PATH 指向空目录，症状与未设置完全相同，极难从日志分辨。
+
+principles: R33, R34
+
+causes: []
+caused_by: []
+similar_to: E019, E088, E294, E042
+conflicts_with: []
+prerequisite_of: libsv-1.2-shadow-ci-runner-toolchain-path
+
+doc_file: doc/libsv-1.2-conan-build-ctest-shared-lib-ld-library-path.md
+
+last_updated: 2026-09-27
+source_event: libsv 1.2 真机 shadow CI r3-r6（ctest 0/7 → 7/7 全绿）
+
+evidence: |
+  libsv 1.2（OHOS PC aarch64，2026-09-27）：
+  - r3/r4 ctest 0/7（Error loading shared library libsv.so + Error relocating
+    symbol not found）；r4 命令级 LD_LIBRARY_PATH 前缀无效（被 conan 剥离）。
+  - 设备手动：LD_LIBRARY_PATH="$R" ctest --test-dir "$R" --output-on-failure
+    → 100% tests passed, 7/7（hnp 环境 LD_LIBRARY_PATH 有效的直接证据）。
+  - readelf -d test_version 无 rpath/runpath 段。
+  - r5 包装脚本 + 错误 lib_dir（build_folder+"/build/Release"）→ 仍 0/7；
+    RUN: 行显示脚本实际生成于 .../build/Release/run-upstream-ctests.sh，
+    由此确认 build_folder 即 build/Release。
+  - r6 lib_dir=self.build_folder（存在性兜底）→ ctest 7/7，
+    HMBS_UPSTREAM_TEST_RESULT passed（executed=7, failed=0, skipped=0），
+    test_package ./test_sv 26 checks 0 failures，L0/L1/L4/L5 全 pass。
+  - 适配版 conan 2.29.1 的 ConanFile 无 can_run()（AttributeError 实测），
+    交叉守卫须用 conan.tools.build.cross_building。
+
+authors:
+source_pr:
+source_commit:
+draft_date: 2026-09-27

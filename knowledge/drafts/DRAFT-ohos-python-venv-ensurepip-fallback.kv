@@ -1,0 +1,199 @@
+#====================================================================
+# DRAFT-ohos-python-venv-ensurepip-fallback —— OHOS Python 常无可用
+#   ensurepip，`python -m venv` 因此在建 venv 阶段就失败（pip 装不上），
+#   表现为「开发机全绿 / CI worker 全红」；须回退 --without-pip 并从外层
+#   解释器自举 pip
+#
+# 对应文档: knowledge/drafts/DRAFT-ohos-python-venv-ensurepip-fallback.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+# 注: 本文件所有字段均为单行值或块值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-ohos-python-venv-ensurepip-fallback
+source_lib:             werkzeug 3.1.8
+trigger_tool:           python|venv|pip|conan|pytest
+phase:                  build|testing
+error_signature:        -m', 'ensurepip', '--upgrade', '--default-pip'.*returned non-zero exit status|
+                         ensurepip.*returned non-zero exit status 1|
+                         Command .*ensurepip.*failed|
+                         could not create the test virtualenv|
+                         venv.*(pip|ensurepip).*(不可用|unavailable)|
+                         ModuleNotFoundError.*No module named .ensurepip|
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               python, environment, testing, build-system, portability
+match_keywords:         ensurepip, venv, virtualenv, --without-pip, _bundled,
+                         pip, bootstrap, 自举, test-venv, 测试环境, 隔离环境,
+                         sys.executable, CI worker, 本地绿 CI 红, 解释器自带,
+                         上游测试套件, R51, site-packages, --target,
+                         pip-*.whl, ensurepip wheel
+title:                  OHOS Python 常缺可用的 ensurepip（_bundled wheel 缺失），
+                        导致 `python -m venv` 在「建 venv 装 pip」这一步就失败——
+                        开发机自带该 wheel 而 CI worker 不带，表现为同一份代码
+                        「本地全绿、CI 全红」；须回退 `--without-pip` 并用外层
+                        解释器的 pip 自举进 venv
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  `python -m venv <dir>` 默认行为里包含一步 `ensurepip --upgrade --default-pip`
+  ——即把 pip **安装进新 venv**。而 OHOS 上的 Python 常常**没有可用的 ensurepip**：
+  其 `ensurepip/_bundled/` 下的 pip wheel 缺失（或 ensurepip 模块本身不完整），
+  于是该步骤失败，venv 根本建不出来：
+      Error: Command '[...]/test-venv/bin/python3', '-m', 'ensurepip',
+             '--upgrade', '--default-pip']' returned non-zero exit status 1
+  后果是**测试环境搭建阶段就中断**：上游测试套件一条都没跑，构建栈报的是
+  「could not create the test virtualenv」，而真正的根因（解释器缺 ensurepip）
+  在错误信息里完全不出现。
+  【为什么难查——「本地绿、CI 红」】本条目的危害不在报错本身，而在它**只在
+  部分解释器上出现**：开发机/部分 worker 的 Python 恰好带 `_bundled/pip-*.whl`，
+  `python -m venv` 顺畅成功，评测者本地全绿；CI worker 的解释器不带，必红。
+  同一份代码、同一个 commit、换台机器结论相反，极易被误判为「flaky / 平台故障 /
+  worker 网络问题」而反复重跑，掩盖真实的环境前提缺失。
+  本仓实证（werkzeug 3.1.8，CI #54104）：本地 conan create 全绿（967 passed），
+  CI 在建 venv 处即失败，上游用例 0 条执行。
+affected_scope: >
+  所有「在构建/测试期创建 Python 隔离 venv（`python -m venv`）以运行上游测试套件
+  或安装构建依赖」的 Python 包适配：werkzeug（独立 venv 跑 pytest）、任何用 venv
+  隔离被测包与测试依赖的配方、以及 `pip install` 到 venv 的 PEP 517 构建流程。
+  尤其在需要**真实运行上游套件而非跳过**（R51）的场景下高发——因为一旦放弃 venv
+  改为在系统解释器里直装，就引入了别的污染风险，不能简单退化。
+  同一个坑还会以另一形态出现：**直接 `python -m ensurepip` 自举 pip 同样失败**
+  （缺 _bundled wheel），故「先用 ensurepip 装 pip 再建 venv」的写法也不可用。
+verification_cmd: >
+  ① 判定解释器是否真的缺 ensurepip（**不要只看有没有 ensurepip 模块**）：
+     python3 -c "import ensurepip, os; d=os.path.join(os.path.dirname(ensurepip.__file__),'_bundled'); print(d, os.path.isdir(d) and os.listdir(d) or 'MISSING')"
+     → 目录不存在或为空 = 该解释器的 venv 必失败
+  ② 直接验 `python -m venv` 的失败（即 CI 现象）：
+     python3 -m venv /tmp/_venvprobe ; echo "rc=$?"
+     → 命中时打印 "… '-m', 'ensurepip', '--upgrade', '--default-pip']' returned
+       non-zero exit status 1"
+  ③ 确认真因不是别的（路径/权限/TMPDIR）：
+     python3 -m ensurepip --version
+  ④ 对照确认「换解释器就好」：换一个自带 _bundled wheel 的 python3 重复 ②，
+     成功即坐实是本条的环境差异，而非代码缺陷。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           venv-without-pip-then-verify-startup-then-bootstrap-pip
+rec_description: >
+  **一律 `--without-pip` 直接建 venv**，不要「先试常规 venv、失败再回退」：
+  ① 建：`sys.executable -m venv --without-pip <venv_dir>`
+     ——彻底绕开 ensurepip。**不要**先试带 pip 的常规 venv：本平台 ensurepip
+     不可靠，该步会在**中途**失败并留下残缺骨架；再对半成品做 `--clear` 重建，
+     正是「目录齐全、bin/python 也在，却解释器起不来」的来源（CI 实证）。
+  ② **当场实测解释器能否启动**（这是本条的第二个关键）：
+         <venv>/bin/python -c "import encodings, sys; print(sys.prefix)"
+     启动失败时报错形如
+         Fatal Python error: init_fs_encoding: failed to get the Python codec
+         of the filesystem encoding
+         ModuleNotFoundError: No module named 'encodings'
+     且 `sys.prefix` 指向 **base** 而非 venv。**rc==0、bin/python 存在都不足以
+     判定 venv 可用**；不做这步实测，坏 venv 会带到后面某次 pip 调用才爆，把
+     「venv 没建好」伪装成「pip 不可用」。
+  ③ 实测失败则换 **virtualenv**（`--no-seed`）：它与 stdlib `venv` 是两套独立
+     实现（env 布局、pyvenv.cfg 写法、stdlib 定位都不同），是**真正不同的**
+     兜底路径；两者都失败才抛错。
+  ④ 自举 pip：venv 自身此刻**没有 pip，无法自举**，必须用**外层**解释器的 pip
+     装进 venv 的 site-packages：
+         sys.executable -m pip install --no-deps --target <venv>/lib/pythonX.Y/site-packages pip
+     自举后 `<venv>/bin/python -m pip --version` **实测**可用，失败即抛错
+     ——不让「套件没跑」伪装成通过（R51）。
+  ⑤ 执行环境顺带清掉 `PYTHONHOME`：它会把 venv 解释器的 stdlib 定位整个带偏，
+     同样导致 `No module named 'encodings'`。
+  关键点：**venv 本体仍是同一个隔离环境、跑同一套上游用例**，只是 pip 的来源从
+  ensurepip 换成外层解释器；测试的真实性与隔离性均不降级，故优于「改用系统
+  解释器直装」或「跳过依赖 venv 的用例」。
+rec_command:            # 建（绕开 ensurepip）→ 实测启动 → 自举 pip → 复检
+                        python3 -m venv --without-pip <venv>
+                        <venv>/bin/python -c "import encodings, sys; print(sys.prefix)"   # 必须成功
+                        # 失败 → python3 -m virtualenv --no-seed <venv>
+                        python3 -m pip install --no-deps --target <venv>/lib/python3.12/site-packages pip
+                        <venv>/bin/python -m pip --version   # 必须成功
+rec_auto_fix:           false
+rec_impl:               single-path-bootstrap-with-startup-verification
+
+fallback_priority:      2
+fallback_approach:      virtualenv-no-seed-另一套实现
+fallback_description: >
+  `venv --without-pip` 未能产出**可启动**的解释器时，改用 **virtualenv**：
+      python3 -m pip install --target <tools> virtualenv
+      PYTHONPATH=<tools> python3 -m virtualenv --no-seed <venv_dir>
+  `--no-seed` 不种 pip（pip 仍由外层自举），也免去对 wheel 的依赖。之所以它是
+  **真正不同**的兜底而非重复：virtualenv 与 stdlib `venv` 是两套独立实现，env
+  布局、pyvenv.cfg 写法与 stdlib 定位各异，实测在本平台可正常产出可启动的
+  venv（`created virtual environment CPython3.12.9 ...`，其解释器 `import
+  encodings` 正常、自举 pip 后 `pip --version` 正常上报）。
+只在前一条路径失败时使用；两者皆不可用才抛错，不得静默降级为「不跑套件」。
+fallback_command:       python3 -m pip install --target <tools> virtualenv && PYTHONPATH=<tools> python3 -m virtualenv --no-seed <venv>
+fallback_auto_fix:      false
+fallback_impl:          virtualenv-no-seed
+
+forbid_1_pattern:       ensurepip.*(不可用|缺失|失败).*(改用|退化为).*系统解释器.*(直接|直装)|
+                         (放弃|改为).*(不用|去掉) venv.*(装|installing).*全局
+forbid_1_reason:        因 ensurepip 缺失就退化为「系统解释器直装测试依赖」，会把
+                        测试依赖与被测包、宿主环境混在一起（PYTHONPATH/版本/污染），
+                        且掩盖真实缺口；正解是保留 venv 隔离、只换 pip 来源。
+forbid_1_consequence:   隔离性丢失，宿主污染导致的假通过/假失败接踵而至；后续同类
+                        适配被误导为「OHOS 不能建 venv」。
+
+forbid_3_pattern:       venv.*(建好|创建成功|rc==0|返回 0).*(即|就).*(可用|可用性)|
+                         (bin/python|解释器).*(存在|生成).*(即|就).*(可用|视为成功)|
+                         venv.*(不|未).*(启动|运行).*(就|即).*(直接|继续).*pip install
+forbid_3_reason:        **rc==0、目录齐全、bin/python 存在，都不等于该解释器能跑**。
+                        本平台出现过「venv 目录完整却起不来」：
+                            Fatal Python error: init_fs_encoding ... No module
+                            named 'encodings'（sys.prefix 指向 base 而非 venv）
+                        省掉启动实测，这个失败会推迟到后面某次 pip 调用才爆，报成
+                        「pip 不可用」，把根因（venv 没建好）彻底掩盖。
+forbid_3_consequence:   诊断被误导到 pip/网络方向，反复在错误的层面重试；CI 反复红。
+
+forbid_4_pattern:       先试.*(带 pip 的|常规).*venv.*失败.*(再|然后).*(--clear|重建|重试)
+forbid_4_reason:        带 pip 的常规 venv 会因 ensurepip 不可靠而**中途失败**，留下
+                        残缺骨架；再对半成品 `--clear` 重建属两段式构造，易产出状态
+                        不一致的 venv（CI 实测即如此）。应一步 `--without-pip` 到底，
+                        不留半成品。
+forbid_4_consequence:   出现「目录齐全、解释器却起不来」这类难查的坏 venv。
+
+forbid_2_pattern:       上游测试.*(未跑|没跑|0 条|not run).*(视为|算作|记为).*(通过|pass)|
+                         venv.*创建失败.*(跳过|deselect).*(不|未).*(申报|记录)
+forbid_2_reason:        venv 建不出来 = 套件一条未跑。把它记成通过或静默跳过属 R51
+                        失真；必须显式抛错或如实申报「未运行」。
+forbid_2_consequence:   通过率虚高，评审与复用者被误导；真实修法（回退 --without-pip）
+                        被埋没。
+
+principles:             P013, P015
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E544, E512, E543,
+                         DRAFT-ohos-test-subprocess-overrides-pythonpath-needs-venv,
+                         DRAFT-ohos-pythonpath-entry-skips-pth]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 (Metadata) ═══
+doc_file:               knowledge/drafts/DRAFT-ohos-python-venv-ensurepip-fallback.md
+last_updated:           2026-09-20
+source_event:           werkzeug 3.1.8 OHOS aarch64 适配：本地 conan create 全绿
+                        （967 passed），CI #54104 在 _build_test_venv() 处失败
+                        ——"'-m', 'ensurepip', '--upgrade', '--default-pip']'
+                        returned non-zero exit status 1"，上游用例 0 条执行；
+                        回退 --without-pip + 外层 pip 自举后 CI 现象下全绿
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:              11302
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-20
+
+draft:                  true
+contributor_id:         3211

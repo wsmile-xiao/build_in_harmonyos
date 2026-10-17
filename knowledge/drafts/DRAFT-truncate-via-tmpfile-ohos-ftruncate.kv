@@ -1,0 +1,102 @@
+#====================================================================
+# DRAFT-truncate-via-tmpfile-ohos-ftruncate.kv
+# 文件截断用 tmpfile()+freopen() 技巧在 OHOS 只读 /tmp 上失败，
+# POSIX 平台改用 ftruncate(2) 的源码级修复。
+# 与 E272（tmpfile EACCES → LD_PRELOAD shim，测试阶段）互补：
+# 本条目针对"tmpfile 仅作截断中间缓冲"场景，提供无运行时依赖的源码修复。
+#====================================================================
+
+# Layer 0: error / trigger surface
+id:                     DRAFT-truncate-via-tmpfile-ohos-ftruncate
+trigger_tool:           conan|make|clang|test_package|make test
+phase:                  build|testing
+error_signature:        RESIZE-FILE.*fail|INCORRECT RESULT.*RESIZE-FILE|tmpfile.*NULL|Read-only file system|truncate.*THROW_RESIZE_FILE|FILE-SIZE.*mismatch
+
+# Layer 1: identification
+severity:               2
+category:               ohos, filesystem, portability, conan, source-patch
+match_keywords:         tmpfile, freopen, ftruncate, fileno, truncate, RESIZE-FILE, shrink, /tmp read-only, erofs, E002, POSIX, ANSI C file truncation, pf_fileio_stdio, __OHOS__, __unix__, _DEFAULT_SOURCE, unistd.h
+title:                  文件截断用 tmpfile()+freopen() 技巧在 OHOS 只读 /tmp 上失败，POSIX 平台改用 ftruncate(2)
+
+root_cause:             |
+  纯 ANSI C 没有 truncate API，部分可移植库（如 pforth 的 pf_fileio_stdio.c）用
+  「tmpfile() + freopen(NULL,"w+b",f)」技巧实现文件收缩：
+  1) 先把原文件前 Newsize 字节复制到 tmpfile() 创建的临时文件；
+  2) freopen(NULL,"w+b",File) 截断原文件；
+  3) 再从临时文件复制回原文件。
+  该技巧依赖 tmpfile() 能创建临时文件。OHOS 的 /tmp 是只读 erofs（E002），
+  tmpfile() 返回 NULL，整条 TruncateFile 流程失败，表现为 RESIZE-FILE 收缩
+  （shrink，新尺寸 < 旧尺寸）返回非零，FILE-SIZE / READ-FILE 断言连带失败。
+  注意：扩展（extend，新尺寸 > 旧尺寸）走 ExtendFile（fwrite 填 0），不受影响。
+
+affected_scope:         任何在 OHOS 上用 tmpfile()+freopen() 技巧实现文件截断/收缩的库（纯 ANSI C 文件 I/O 层，而非 POSIX ftruncate）
+
+verification_cmd:       |
+  # 1) 确认 /tmp 只读（tmpfile 失败的直接根因）
+  touch /tmp/probe 2>&1 && echo writable || echo "Read-only file system"
+  # 2) 确认源码用 tmpfile+freopen 做截断
+  grep -nE "tmpfile|freopen" <fileio>.c
+  # 3) 补丁后在 OHOS 真机重跑，确认 RESIZE-FILE 收缩断言转绿
+
+rec_priority:           1
+rec_approach:           truncate-use-ftruncate-on-posix
+rec_description:        |
+  1) 用平台宏守卫区分 POSIX 与非 POSIX：
+     #if defined(__unix__) || defined(__APPLE__) || defined(__OHOS__)
+  2) POSIX 平台直接在 TruncateFile 内调用 ftruncate(fileno(File), (off_t)Newsize)，
+     成功即返回 FALSE（无错误），无需任何临时文件；
+  3) 保留原 tmpfile()+freopen() 逻辑作为非 POSIX（嵌入式）回退，不破坏上游可移植性；
+  4) 需 #include <unistd.h>；musl 的 fileno/ftruncate/off_t 依赖 _DEFAULT_SOURCE 或
+     _POSIX_C_SOURCE，构建旗标需带 -D_DEFAULT_SOURCE（pforth Makefile 已带）。
+rec_command:            |
+  # pforth 实测：补丁后 OHOS shadow CI 二跑 t_file.fth 90 passed/4 failed → 94/0
+  CI_PACKAGES="archives/p/pforth/2.0.1" zsh ci/conan/build_and_test.sh
+rec_auto_fix:           false
+rec_impl:               source-patch-ftruncate
+
+fallback_priority:      2
+fallback_approach:      tmpfile-shim-ld-preload
+fallback_description:   若库不可改源码（如交叉工具链 binutils 的 libctf，见 E272），
+                        退而用测试阶段 tmpfile-shim.so（mkstemp(TMPDIR)+unlink+fdopen）
+                        经 LD_PRELOAD 注入。但该方案有运行时 LD_PRELOAD 依赖，且仅
+                        覆盖测试进程，不如 ftruncate 源码修复干净。
+fallback_command:
+fallback_auto_fix:       false
+fallback_impl:
+
+forbid_1_pattern:       把 tmpfile() 失败泛化为"OHOS 不支持文件截断/RESIZE-FILE"
+forbid_1_reason:         tmpfile() 失败的直接根因是 /tmp 只读（E002），不是文件 I/O
+                         能力缺失。扩展（extend）不受影响，收缩（shrink）用 ftruncate
+                         即可修复。
+forbid_1_consequence:   误判为平台能力缺失，放弃适配或引入不必要的运行时 shim。
+
+forbid_2_pattern:       当 tmpfile 仅作截断中间缓冲时仍用 LD_PRELOAD shim 替代源码级 ftruncate
+forbid_2_reason:         tmpfile+freopen 只是纯 ANSI C 无 truncate API 的绕行技巧；POSIX
+                         平台本就有 ftruncate(2)。源码级 ftruncate 无运行时注入依赖、
+                         覆盖生产 package，优于仅测试进程生效的 LD_PRELOAD shim。
+forbid_2_consequence:   生产环境 RESIZE-FILE 仍失败（shim 不进入 package），问题未真正闭环。
+
+forbid_3_pattern:       无条件在源码中调用 ftruncate 而不加平台守卫
+forbid_3_reason:         pforth 等库的 stdio 文件 I/O 层面向嵌入式（无 unistd/ftruncate）。
+                         无条件引入 POSIX API 会破坏非 POSIX 平台可移植性。
+forbid_3_consequence:   嵌入式/非 POSIX 目标编译失败。
+
+principles:             P017, P004
+
+causes:                 []
+caused_by:              []
+similar_to:             [E272, E002]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-truncate-via-tmpfile-ohos-ftruncate.md
+last_updated:           2026-09-20
+source_event:           pforth/2.0.1 OHOS PC 适配：真机 shadow CI 首跑 make test 中 t_file.fth RESIZE-FILE 收缩 4 断言失败（90 passed, 4 failed），根因 tmpfile() 遇只读 /tmp；补丁 POSIX 改用 ftruncate(2) 后二跑 94/0 通过，上游合计 346/346
+draft:                  true
+contributor_id:         codex
+authors:                codex
+source_pr:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.90
+metrics_last_used:      2026-09-20

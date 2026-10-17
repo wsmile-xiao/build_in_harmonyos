@@ -1,0 +1,75 @@
+#====================================================================
+# Draft: 上游无构建系统的 header/源混合单文件库（minimp3 形态）Conan 化
+#        组合方案 —— amalgamated 单 TU 薄静态库 + 上游 shell 测试 CTest 化
+# 来源: minimp3 0.0-git.ea99364 适配 (PR !14508, j669539)
+#====================================================================
+
+id:                     DRAFT-MINIMP3-NOBUILD-CONAN-CTEST
+draft:                  minimp3-0.0-git.ea99364-nobuild-conan-ctest
+status:                 pending-editor-review
+trigger_tool:           conan|clang|cmake|ctest
+phase:                  packaging|testing
+severity:               2
+category:               conan|testing|build-system
+title:                  上游无构建系统的 header/源混合单文件库 Conan 化：INTERFACE 打包丢符号，须 save() 生成 amalgamated 单 TU 薄静态库；上游 scripts/*.sh shell 测试逐一注册 CTest 在 build() 内真跑
+
+match_keywords: >
+  no build system, header-only, single-file library, header source hybrid,
+  MINIMP3_IMPLEMENTATION, amalgamated TU, undefined reference, CTest,
+  shell test migration, minimp3, MurmurHash3, smhasher, stb-style,
+  conanfile save, cmake.test, test.sh vectors
+
+error_signature:       undefined reference to `mp3dec_(ex_open|ex_read|load_buf|detect_buf|iterate)'|no CMakeLists\.txt|no Makefile.*upstream|MINIMP3_IMPLEMENTATION.*redefined
+
+root_cause: >
+  一类单文件 C/C++ 库（minimp3/stb 系列、MurmurHash3 等）上游不提供任何
+  构建系统（无 CMakeLists.txt/Makefile/configure，仅 .travis.yml 或
+  scripts/build.sh），且采用 header/源混合形态：实现段在
+  #ifdef XXX_IMPLEMENTATION 宏守卫内。两个陷阱：(1) 按 header-only 用
+  INTERFACE 库打包会编译任何 TU——但 *_ex.h 若含非 static 公共函数
+  （minimp3_ex.h 有 14 个：mp3dec_load_buf/mp3dec_ex_open 等），消费者
+  链接时直接 undefined reference；(2) 上游测试是 shell for-循环
+  （scripts/test.sh 逐向量解码比对 PCM），不经迁移则完全不会在 Conan
+  生命周期内执行，CI L1 无测试痕迹。
+
+solution: |
+  conanfile.py 的 build() 用 conan.tools.files.save() 生成两个文件（零源码补丁）：
+  (1) amalgamated 单 TU（如 minimp3.c）：
+        #define MINIMP3_IMPLEMENTATION
+        #include "minimp3_ex.h"
+  (2) 薄 CMakeLists.txt：
+        add_library(minimp3 minimp3.c)
+        target_include_directories(minimp3 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+        install(TARGETS minimp3 ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
+        install(FILES minimp3.h minimp3_ex.h DESTINATION include)
+  上游测试驱动（minimp3_test.c，自带 main，独立 TU）原样编译为可执行，
+  enable_testing() 后：shell for-循环逐向量展开为 add_test(NAME
+  upstream_vector_<name> COMMAND <驱动> <vec.bit> <vec.pcm>
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})，自检/模式抽样同理；
+  build() 末尾调用 cmake.test() 全量真跑（CI 日志留 L1a/L1b/L1c 痕迹）。
+  package_info: self.cpp_info.libs = ["minimp3"]；消费者禁止再定义
+  MINIMP3_IMPLEMENTATION（符号已在库内）。
+  参照先例: archives/m/MurmurHash3/0.0.1/conanfile.py（hancho 构建系统
+  被 CMakeLists 替换，同款 save() 打法）。
+
+fallback: >
+  不便生成 TU 时可退化为真 header-only INTERFACE 包：package() 只拷贝
+  两个 .h 到 include/，cpp_info.includedirs=["include"]，但必须在使用
+  说明中强制消费者在恰好一个 TU 里 #define MINIMP3_IMPLEMENTATION——
+  该方案把实现激活义务转嫁给每个消费者，且 ex API 的链接契约（libm）
+  失去包管理，仅作下策。
+
+pitfall: >
+  conan 2.29 的 CMake.test(cli_args=[...]) 中 cli_args 是拼在
+  cmake --build 命令行上的（不是 ctest 参数）：传 ctest 专属参数如
+  --output-on-failure 会让 cmake 打印 usage 并 exit 1（ConanException:
+  Error 1 while executing）。正确写法是裸 cmake.test()，诊断输出用
+  CTEST_OUTPUT_ON_FAILURE=1 环境变量。
+
+verify_builds:         本地 conan create (ohos-aarch64, clang 15.0.4) 全绿：86/86 上游 CTest（1 selftest 72 断言 + 83 参考向量 PSNR 比对 + 2 模式抽样）+ test_package 25 消费者断言；PR !14508
+reference_impl:        minimp3 PR !14508（archives/m/minimp3/0.0-git.ea99364/conanfile.py）；先例 MurmurHash3/0.0.1
+upstream_tests_kept:   86/86 原样真跑（驱动零修改，仅组织形式 shell→CTest）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:             https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/merge_requests/14508
+source_commit:         255734917c

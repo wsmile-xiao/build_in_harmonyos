@@ -1,0 +1,128 @@
+#====================================================================
+# DRAFT-onnxruntime-major-version-upgrade-patch-migration
+#   大库版本升级在 OHOS 交叉链上的三类高频故障组合：
+#     ① 补丁集跨版本精确迁移（fuzz 蒙混 vs 精确上下文）
+#     ② 宿主工具 buildenv 继承（裸 subprocess → CI-only 链接器崩溃）
+#     ③ 失效镜像链耗尽 CI 构建预算（官方源可达时直连优先）
+#   触发事件: onnxruntime 1.27.1 → 1.28.0 版本升级
+#             （archives/o/onnxruntime/1.28.0，PR #9776）
+#   近邻条目: E132（lld 缺 libxml2.so.16）、E227（补丁双解析器零 fuzz 校验）、
+#             E299/E372（Conan 源码下载分层诊断 / 官方源优先回退）
+#   组合增量: 三者互相咬合的诊断树（前一个故障掩盖后一个），非单点
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-onnxruntime-major-version-upgrade-patch-migration
+trigger_tool:           conan|patch|clang|ld|cmake|python
+phase:                  compilation|configuration|linking
+error_signature:        hunk no\.[0-9]+ doesn't match source file at line [0-9]+|ConanOutput.*has no attribute.*warn|Error relocating .*symbol not found|Error loading shared library libxml2\.so\.[0-9]+|conan create TIMED OUT after [0-9]+s
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan,patch,toolchain,version,portability
+match_keywords:         hunk doesn't match, git apply --check, conan patch, patch_ng, subprocess.run, buildenv, conanbuild, LD_LIBRARY_PATH, lld, libxml2.so, protoc, ConanOutput warn, mirror timeout, TIMED OUT, version upgrade, FetchContent, 补丁迁移, 镜像超时
+title:                  大库版本升级在 OHOS 交叉链上的三类故障组合：补丁集精确迁移、宿主工具 buildenv 继承、失效镜像链耗尽 CI 构建预算
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             版本升级把三类原本独立的故障串成一条链，且前一个故障会掩盖后一个，
+                        必须按「补丁 → 环境 → 网络预算」的顺序逐个消除才能收敛。
+                        ① 补丁迁移：上游重构被补丁命中的文件结构（onnxruntime 1.28.0 把
+                        cmake/onnxruntime_mlas.cmake 的 set_source_files_properties 块改为
+                        list(APPEND mlas_platform_srcs) 并统一设置），使旧补丁的 hunk 上下文失配；
+                        `git apply --check` 靠 fuzz 容错仍可能通过，而 Conan 的 Python patch 库
+                        要求精确上下文，于是本地校验绿、conan create 红。
+                        ② 构建环境泄漏：Conan 配方内用裸 subprocess.run() 构建宿主工具（protoc）
+                        不会继承 profile 的 [buildenv]；CI worker 无环境 LD_LIBRARY_PATH 时，
+                        OHOS SDK 的 lld（已 strip、无 RUNPATH）找不到同目录 llvm/lib 下的
+                        libxml2.so.16，链接器起不来 → 宿主工具无法构建 → 构建中断；
+                        本地因 shell 已导出 LD_LIBRARY_PATH 而被掩盖，形成「本地绿 CI 红」。
+                        ③ 镜像预算耗尽：配方把 6 个 gh 代理镜像排在官方源之前，镜像全失效时
+                        每个候选都要耗满 connect/read 超时与重试预算（单依赖约 10 分钟），
+                        12 个 FetchContent 依赖累计超出 conan create 的 3600s 上限，
+                        表现为 TIMED OUT —— 而官方 github.com 在 CI worker 上实测可达。
+affected_scope:         带补丁集、需在构建期用 subprocess 生成宿主工具、且从 GitHub 拉取
+                        FetchContent 依赖的大型 C/C++ 库在 OHOS aarch64 上的跨版本升级
+                        （本次实证：onnxruntime 1.27.1 → 1.28.0，8 个补丁 / 12 个依赖 /
+                        1 小时级全量构建）。三类子模式也可单独出现在任何 conan 配方上。
+verification_cmd:       # ① 补丁精确性：干净树应用后与 .work 树 diff=0
+                        git apply --check patches/*.patch && patch --dry-run --fuzz=0 -p1 -d $SRC -i patches/0002-cmake-onnxruntime_mlas.cmake.patch
+                        # ② 环境继承：配方内宿主工具改为 self.run(..., env="conanbuild")
+                        grep -n 'env="conanbuild"' conanfile.py
+                        # ③ 镜像排序：日志中官方源先于镜像出现
+                        grep -m1 'downloading from https://github.com' $CONAN_LOG
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           patch-regen+env-inherit+mirror-reorder
+rec_description:        三子模式按序组合修复，共同前提是「本地产物必须与 CI 干净环境同语义」：
+                        ① 补丁集跨版本迁移时不要手工调 hunk 偏移，直接从 .orig/.work 树
+                        diff 重新生成全部补丁（上下文由目标版本源码自动产出），黄金验证 =
+                        干净树应用后与原工作树 diff=0；
+                        ② 配方内一切宿主工具构建改用 conan 的 run 接口并显式传递构建环境
+                        （self.run(..., env="conanbuild")），让 conan 按 profile [buildenv]
+                        合成工具链环境，禁止依赖 agent shell 里已有的环境变量；
+                        ③ 依赖下载把官方源排首位（实测可达时直连），镜像降级为回退，
+                        并把每候选重试压到单次（retry=1，吸收瞬断即可），避免把 CI 构建预算
+                        消耗在死镜像的重试上。
+rec_command:            # ① 重新生成补丁（以目标版本源码树为基准）
+                        diff -ruN --label a/<file> --label b/<file> <file>.orig <file>.work > patches/000N-<name>.patch
+                        # ② 宿主工具构建走 conan 环境合成
+                        self.run(f'cmake -S {host_src} -B {host_build}', env="conanbuild")
+                        # ③ 官方源优先 + 单次尝试
+                        urls = [official_url] + mirror_urls   # 官方源在前
+                        # tools.files.download(..., retry=1)
+rec_auto_fix:           false
+rec_impl:               patch-regen+env-inherit+mirror-reorder
+
+fallback_priority:      2
+fallback_approach:      manual-review-per-symptom
+fallback_description:   三类子模式各自有近邻单点条目可先行参照：补丁校验语义见 E227/E526/E282，
+                        链接器环境见 E132，下载分层与官方源优先见 E299/E372；当无法判定
+                        当前症状属于哪一类时，按后文诊断树逐类排除，不要一次性改多处。
+fallback_command:       grep -n "E227\|E526\|E282\|E132\|E299\|E372" knowledge/graph/index.tsv
+fallback_auto_fix:      false
+fallback_impl:          manual-review
+
+forbid_1_pattern:       调 hunk 行号.*掩盖|fuzz.*蒙混|patch.*--fuzz=[1-9]
+forbid_1_reason:        手工调 hunk 偏移或依赖 fuzz 容错只是让本机校验通过，Conan 侧
+                        仍按精确上下文应用，升级后随时再次失配；必须按目标版本源码重新生成。
+forbid_1_consequence:   本地 git apply --check 绿而 conan create 红，浪费一轮全量构建（1 小时级）。
+
+forbid_2_pattern:       export LD_LIBRARY_PATH.*conanfile|os\.environ\[.LD_LIBRARY_PATH.\].*=.*agent
+forbid_2_reason:        在配方里手工塞 agent shell 的 LD_LIBRARY_PATH 属于把本地环境污染
+                        固化进配方，CI 干净 worker 上不存在该变量，缺陷只是被再次掩盖。
+forbid_2_consequence:   同一「本地绿 CI 红」缺陷反复出现，配方不可复现。
+
+forbid_3_pattern:       镜像.*放.*前|mirror_urls.*\+.*official|所有镜像.*重试.*3
+forbid_3_reason:        官方源实测可达时把镜像排在前面，等于把 CI 构建预算交给失效第三方，
+                        且每个候选重试次数越高、预算烧得越快。
+forbid_3_consequence:   conan create TIMED OUT 且从未进入编译阶段，门禁全过却判负。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P005,P011,P014
+
+# ═══ 关系图 (Relations) ═══
+causes:
+caused_by:
+similar_to:             E132,E227,E299,E372,E526,E282
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-onnxruntime-major-version-upgrade-patch-migration.md
+last_updated:           2026-09-15
+source_event:           onnxruntime 1.27.1 → 1.28.0 OHOS PC 版本升级（PR #9776）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:              #9776
+source_commit:          fc787ba38a
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-15
+
+draft:                  true
+contributor_id:         ONNXRT

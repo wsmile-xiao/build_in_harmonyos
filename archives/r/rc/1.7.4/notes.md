@@ -11,7 +11,7 @@
 | 编译器 | clang 15.0.4 (aarch64-unknown-linux-gnu) |
 | CFLAGS | -Wall -fPIC -O2 |
 | 构建模式 | 模式 B（AI 手动编译） |
-| 状态 | published |
+| 状态 | built |
 
 ## 编译步骤（完整日志）
 
@@ -255,3 +255,7 @@ share/man/man1/rc.1
 2. umask 测试失败是 HMDFS 平台限制，不影响 rc 功能
 3. rc 是 shell 程序，不支持 `--version` 命令行参数（但 `$version` 变量可用）
 4. 补丁 0003/0004 是平台必需修复，其他补丁为 autoreconf 自动生成
+---
+
+**编译结束**: 2026-09-17 18:05
+**最终状态**: built

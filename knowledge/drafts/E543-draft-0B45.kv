@@ -1,0 +1,65 @@
+#====================================================================
+# E543 — GNU make shell for 循环目标掩盖子目录 make 失败，多目录生成链静默丢产物
+# 对应的人类文档: doc/E543.md
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E543
+trigger_tool:           make
+phase:                  compilation|installation|testing
+error_signature:        for d in .*\; do \(cd|make\[1\].*No such file or directory|cp: cannot stat.*(marpa|\.c|\.h|\.pdf).*No such file|Cannot open input file.*(copier|\.list)|make.*returned 0 but.*(missing|not generated)
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               build-system, portability, autotools
+match_keywords:         make for-loop, recursive make, exit code mask, silent failure, subdir make, cweb, ctangle, cweave, pdftex, texinfo, generated sources, missing artifact, subshell exit code, per-subdir-make-target
+title:                  GNU make shell for 循环目标掩盖子目录 make 失败，上游多目录构建静默丢产物
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             上游顶层 Makefile 用 shell for 循环递归构建多个子目录（如 libmarpa work/Makefile 的 sources 目标 `for d in ac ami dev tavl public; do (cd $$d; $(MAKE)); done`），子 shell 中 make 的退出码不传播：for 循环退出码只取决于最后一个目录的子 make。前面子目录因构建机工具缺失（cweave/pdftex/texinfo 等）失败并跳过生成 CWEB 派生产物时，顶层 make 仍返回 0，错误推迟到 copier 缺文件或消费者编译缺头文件才暴露，甚至被管道（`make ... | tail`）再次吞掉。
+affected_scope:         任何用 shell for 循环递归调用子 make 的上游 Makefile（literate-programming/代码生成型项目高发：libmarpa 等），在 OHOS 构建机普遍缺 GNU 排版工具链（pdftex/makeinfo/texi2any）时，子目录静默失败丢生成产物。与 E074（jobserver FIFO）不同：本条是退出码语义问题，与并行无关。
+verification_cmd:       cd work && make sources; echo $? — 子目录 dev/ami 报 "cweave: No such file or directory"（Error 127）但整体仍返回 0 即命中；改为 (cd dev && make sources) 单独执行立即非零。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           per-subdir-make-target
+rec_description:        不调用顶层 for 循环目标，改为按子目录逐个调用其真正的生成目标（sources/all），使每个子 make 失败立即显式暴露；若子目录默认 all 拖入不可用的文档规则（pdf/texi），先甄别并调用纯代码生成目标或先创建占位产物。
+rec_command:            for subdir, target in (("dev","sources"),("ami","sources"),("tavl","all"),("public","all"),("ac","all")): self._run("(cd %s && make %s)" % (subdir,target), cwd=work_dir)
+rec_auto_fix:           false
+rec_impl:               conan-recipe-build-step
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:      makefile-trace-verification
+fallback_description:   仍用顶层循环，但在其后逐一验证关键生成产物存在（test -f），缺失即 fail-fast；缺点是每种产物要手工枚举，新产物易漏检。
+fallback_command:       make sources && test -f dev/marpa.c && test -f public/marpa.h && test -f ami/marpa_ami.h
+fallback_auto_fix:      false
+fallback_impl:          package-patch
+
+# Layer 4: 防误用 (Forbidden Patterns)
+forbid_1_pattern:       make sources 2>&1 \| (tail|head|grep)
+forbid_1_reason:        管道后命令的退出码会覆盖 make 的非零退出码，叠加本条根因后失败完全不可见；错误输出必须完整落盘检查。
+forbid_1_consequence:   生成链失败被双重掩盖，后续阶段报出无关错误（如 copier 缺文件），定位成本极高。
+
+forbid_2_pattern:       touch.*(marpa\.c|\.h\.p50|_ami\.h)
+forbid_2_reason:        禁止用 touch 伪造生成产物时间戳让 make "通过"——这是假适配（产物从未真实生成，交付物不完整）。
+forbid_2_consequence:   打包内容与上游发布物不一致，库功能缺失，属于交付造假。
+
+# Layer 5: 关系图谱
+principles:             P010
+causes:                 []
+caused_by:              []
+similar_to:             [E074, E402]
+conflicts_with:         []
+prerequisite_of:        []
+
+# Layer 6: 元数据
+doc_file:               knowledge/doc/E543.md
+last_updated:           2026-09-17
+source_event:           libmarpa/11.0.13 适配：work/Makefile sources 循环掩盖 dev/ami 子目录 cweave 失败，marpa_ami.h 前置声明块缺失导致消费者 -DNDEBUG 构建报 implicit declaration
+authors:                AtomCode (glm-5.3) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     0

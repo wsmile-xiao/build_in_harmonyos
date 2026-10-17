@@ -1,0 +1,104 @@
+# ═══ Draft knowledge entry — musl/OHOS libc 缺少 cuserid() ═══
+# Timestamp: 2026-09-11
+# Software: coolmail 1.3
+# Gate: 设备 conan create 首轮编译失败 → 补丁 → conan create 通过
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E579.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E579.md
+
+id:                     E579
+trigger_tool:           clang
+phase:                  compilation
+error_signature:        call to undeclared function 'cuserid'|
+                        call to undeclared library function 'strcat'|
+                        incompatible integer to pointer conversion passing 'int' to parameter of type 'const char *'|
+                        no member named 'cuserid'|
+                        undefined symbol: cuserid
+
+severity:               2
+category:               musl, libc, portability, headers, compat
+match_keywords:         cuserid, L_cuserid, obsolete POSIX API, implicit function declaration,
+                         undeclared function, int to pointer conversion, string.h under ifdef,
+                         getpwuid, getlogin, LOGNAME, USER, musl libc.so missing symbol,
+                         static libc.a only, 1990s C code, C99 implicit declaration is an error
+title:                  musl/OHOS libc 保留 L_cuserid 宏但不声明也不导出 cuserid()：老 C 代码隐式声明后判 int→pointer 硬错误，手工补 prototype 仍会在动态链接期失败
+
+root_cause: >
+  OHOS 的 musl 头文件保留了 L_cuserid 宏（$SYSROOT/usr/include/stdio.h:173
+  #define L_cuserid 20），但不声明 cuserid()；该符号在动态库 libc.so 中不存在，
+  只存在于静态归档 libc.a（cuserid.o / T cuserid）。因此 `char buf[L_cuserid];`
+  能通过编译，而 `cuserid(buf)` 被按 C89 规则隐式声明为返回 int，传给
+  strcat() 的 const char * 形参时 clang 15 直接报
+  "incompatible integer to pointer conversion passing 'int' to parameter of type
+  'const char *'"（-Wimplicit-function-declaration 在 C99+ 属硬错误类别）。
+  因为符号在 libc.so 中缺失，即使手工补 `extern char *cuserid(char *);`
+  也只在编译期过得去，动态链接/运行期仍会因未定义符号失败。
+  同类伴随症状：老代码把 <string.h> 藏在 #ifdef AUDIO 之类的可选特性块里，
+  关掉该特性后 strcat/strcmp/strncpy 全部走隐式声明（coolmail 实测 4 处警告）。
+
+affected_scope:         一切 1990 年代 C 代码（coolmail/xbiff 系、老 X11 工具、BSD 血统
+                        Unix 工具）在 musl/OHOS 上的适配；任何依赖 cuserid()/L_cuserid
+                        取登录名的程序；任何把标准头文件包在可选特性 #ifdef 内的老工程。
+
+verification_cmd:       SYSROOT=/data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/sysroot；
+                        grep -rn 'L_cuserid' $SYSROOT/usr/include/stdio.h；
+                        nm -D $SYSROOT/usr/lib/aarch64-linux-ohos/libc.so | grep -i cuserid （空）；
+                        nm $SYSROOT/usr/lib/aarch64-linux-ohos/libc.a | grep -i cuserid （cuserid.o T cuserid）
+
+rec_priority:           1
+rec_approach:           source-portability-patch
+rec_description:        用 passwd 数据库 + 环境变量回退替换 cuserid()：getpwuid(getuid()) ->
+                        getlogin() -> getenv("LOGNAME") -> getenv("USER") -> 字面 "unknown"，
+                        并删除 L_cuserid 缓冲区依赖；同时把被 #ifdef 包住的 <string.h> 改成无条件包含。
+                        补丁不引入 OHOS 条件编译，glibc/musl 通用，可向上游提交。
+rec_command:            python3 scripts/ohc-run.py refresh-patch --auto <软件> <版本> --project-dir <worktree>
+rec_auto_fix:           false
+rec_impl:               manual-source-patch
+
+fallback_priority:      2
+fallback_approach:      recipe-injected-compat-header
+fallback_description:   无法改上游源码时，在配方 build() 里注入一个同签名包装实现或
+                        -include 兼容头；仅适用于静态链接或自建 libc 的场景，动态链接
+                        libc.so 时该符号仍然缺失，通用性差。
+fallback_command:       make CFLAGS="-O2 -include cuserid_compat.h"
+fallback_auto_fix:      false
+fallback_impl:          recipe-injected-umbrella-header
+
+forbid_1_pattern:       extern\s+char\s*\*\s*cuserid\s*\(|char\s*\*\s*cuserid\s*\(char\s*\*\s*\)
+forbid_1_reason:        该符号只存在于静态 libc.a，libc.so 不导出；手工补 prototype 只掩盖编译错误
+forbid_1_consequence:   编译通过但动态链接期/运行期报 undefined symbol: cuserid，故障后移到 test_package 或真机运行阶段
+
+forbid_2_pattern:       -Wno-implicit-function-declaration|#pragma\s+GCC\s+diagnostic\s+ignored\s+"-Wimplicit-function-declaration"
+forbid_2_reason:        C99 起隐式函数声明属错误类别，且 int 返回类型与 char * 实参不匹配会产生
+                        指针截断（UB）；压制告警只隐藏症状
+forbid_2_consequence:   指针被截断成 int，运行时随机崩溃或取到错误字符串，同时掩盖真正的缺头文件问题
+
+principles:             P005, P013
+
+causes:                 []
+caused_by:              []
+similar_to:             E534, E338
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/E579-draft-A26E.md
+last_updated:           2026-09-11
+source_event:           coolmail 1.3 OHOS 适配：conan create 首轮在 coolmail.c:107 报
+                        cuserid 隐式声明 int→pointer 硬错误；补丁后 conan create 与
+                        test_package 全绿
+
+authors:                Awstme <awstme@qq.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-11
+
+draft: true
+contributor_id: A26E

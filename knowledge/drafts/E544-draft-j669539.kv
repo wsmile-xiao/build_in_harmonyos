@@ -1,0 +1,93 @@
+draft: E544-draft-j669539
+status: pending-editor-review
+title: "setuptools/pyproject 构建的 Python C 扩展包在 CI Worker 的四重适配链（pillow 16 轮实证：二进制 diff/setuptools bootstrap/LDSHARED bfd+libpython/wheel 重签）"
+category: conan, testing, python, dynamic-loading, security, ci, linker
+match_keywords: >
+  setup.py build_ext, setuptools missing, ModuleNotFoundError setuptools,
+  LDSHARED, fuse-ld=bfd, ld.lld libxml2, xmlFree symbol not found,
+  missing binary patch data, GitCode PR diff binary, wheel unpack,
+  bdist_wheel, Missing .codesign section, Missing libpython NEEDED,
+  pillow, CPython extension, test_package, binary-sign-tool
+error_signature: >
+  missing binary patch data.*\.ttf|
+  patch does not apply.*binary|
+  ModuleNotFoundError: No module named .setuptools.|
+  xmlFree: symbol not found|Error loading shared library libxml2|
+  Missing \.codesign section|
+  Missing libpython NEEDED
+root_cause: >
+  setuptools/pyproject 构建的 Python C 扩展包（区别于 meson 构建的 numpy）
+  在 CI Worker 上存在四层独立的故障链，每层都需要单独适配：
+  (1) 二进制传输层：GitCode PR diff 机制无法可靠携带仓库内二进制文件
+  （592KB 的 FreeMono.ttf 在 diff 中损坏，报 "missing binary patch data"，
+  被误诊为"与 main 冲突"——实际 rebase 无效，必须移除二进制文件改用系统
+  资源 /system/fonts/）；
+  (2) 构建工具层：CI Worker 的裸 HNP python 缺 setuptools/wheel（setup.py
+  第一行 from setuptools import 即挂），需 bootstrap 到 build 目录并
+  PYTHONPATH 注入；
+  (3) 链接器层：SDK ld.lld 链接 libxml2.so.16 在部分 Worker 上缺失
+  （xmlFree symbol not found），必须 LDSHARED="clang -fuse-ld=bfd -shared"
+  绕开——但覆盖 LDSHARED 会丢掉 setup.py 默认的 libpython 链接，必须
+  显式补 -L<python_lib> -lpython3.12（否则 .so 无 libpython NEEDED 条目）；
+  (4) 签名层：bfd 链接的 .so 无 .codesign 段，package() 从 wheel 解包后
+  必须对全部 PIL/*.so 显式 binary-sign-tool 重签（E212 fallback 的 ELF
+  验证三查之一）。
+solution: |
+  四层适配链全部落地（pillow PR #7641 构建 #37369 CI 全绿实证，16 轮攻坚）：
+
+  层 1 — 仓库零二进制（test_package 资源）：
+  测试资源（字体/图片/fixture）不进 git，改用系统路径定位：
+  ```python
+  def _find_system_font():
+      for cand in ["/system/fonts/FTAeroSans-Regular.ttf",
+                   "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]:
+          if os.path.isfile(cand):
+              return cand
+      raise AssertionError("no system ttf font found")
+  ```
+  OHOS 真机与 CI Worker 都有 /system/fonts/。
+
+  层 2 — setuptools bootstrap（build() 开头）：
+  ```python
+  probe = subprocess.run([python3, "-c", "import setuptools"], capture_output=True)
+  if probe.returncode != 0:
+      boot_dir = os.path.join(self.build_folder, "_pybootstrap")
+      subprocess.run([python3, "-m", "pip", "install", "--no-deps",
+                      "--target", boot_dir, "setuptools", "wheel",
+                      "-i", "https://pypi.tuna.tsinghua.edu.cn/simple"], ...)
+  # 后续 os.environ["PYTHONPATH"] 前缀注入 boot_dir
+  ```
+
+  层 3 — LDSHARED 完整覆盖（换链接器 + 补 libpython 缺一不可）：
+  ```python
+  os.environ["LDSHARED"] = (
+      f"/data/service/hnp/bin/clang -fuse-ld=bfd -shared "
+      f"-L{python_lib_dir} -lpython3.12")
+  ```
+  只做 -fuse-ld=bfd 不补 -lpython3.12，会在层 4 的 ELF 验证暴露
+  （.so 无 libpython NEEDED 条目）。
+
+  层 4 — package() 从 wheel 解包后重签：
+  ```python
+  with zipfile.ZipFile(wheel) as zf:
+      zf.extractall(site_packages)
+  for so in glob.glob(os.path.join(site_packages, "PIL", "*.so")):
+      subprocess.run(["/data/service/hnp/bin/binary-sign-tool", "sign",
+                      "-inFile", so, "-outFile", so,
+                      "-selfSign", "1", "-signAlg", "SHA256withECDSA"], ...)
+  ```
+
+  test_package 用 subprocess 捕获完整输出（conan self.run 异常不带
+  stdout/stderr），E212 判定后降级为符号级 ELF 验证（.codesign 节 +
+  PyInit_ 符号 + NEEDED "或符号"双判据）。
+fallback: >
+  签名重试仍失败时按 R41/R43 证据格式上报（每文件探测矩阵 + Worker 编号
+  + 构建号），禁止 skip/stub 伪装绿灯；二进制资源若测试必须（无法用系统
+  替代），在 test 的 conanfile 里运行时从 conan 包内定位而非仓库存储。
+verify_builds: #37369, #37359, #37349, #37343, #37329, #37323
+reference_impl: >
+  pillow: PR #7641 构建 #37369（CI 全绿实证，16 轮攻坚）；
+  numpy: PR #7667 #36910（meson 体系姊妹条目 E543）；
+  pycairo: archives/p/python-cairo/1.29.0（E212 先例）
+id: E544
+doc_file: doc/E544.md

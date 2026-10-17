@@ -1,0 +1,128 @@
+fix SIGCHLD reap race and pslot ring accounting bugs
+
+
+reap_child() looked up the finished child starting from the global
+ring cursor ps and dereferenced it unconditionally. Because SIGCHLD
+can interrupt the main select loop at any point, ps could be NULL
+(ring drained) or pointing at a different node; the handler then
+zeroed the wrong slot's pid, read output from and freed the wrong
+node, and advanced the global cursor to a freed node while other
+nodes were still alive -- a use-after-free that crashed mpssh
+whenever a child exited while the cursor sat elsewhere.
+
+Fix the handler to:
+  * guard the NULL-cursor case before lookup
+  * look the finished child up by pid into a local done_ps node
+    (pslot_bypid) and skip cleanly when it is not found
+  * drain output and record the exit status on done_ps only
+  * assign the pslot_del() return value back to the global cursor so
+    it always references a live node or NULL, never a freed slot
+
+pslot_del() also incremented pslots instead of decrementing it when
+the last ring node was removed, so pslots grew every time the ring
+emptied and the main loop's select mask overran the ring. Decrement
+it, and reset the global cursor to NULL once the ring is empty so
+the select loop does not dereference the just-freed slot.
+---
+ mpssh.c | 51 +++++++++++++++++++++++++++++++++++++++++----------
+ pslot.c |  8 +++++++-
+ 2 files changed, 48 insertions(+), 11 deletions(-)
+
+diff --git a/mpssh.c b/mpssh.c
+index 116f89d..0a0ef39 100644
+--- a/mpssh.c
++++ b/mpssh.c
+@@ -82,26 +82,48 @@ reap_child()
+     int pid;
+     int ret;
+ 
++    struct procslot *done_ps;
++
+     while ((pid = waitpid(-1, &ret, WNOHANG)) > 0) {
+         done++;
+-        ps = pslot_bypid(ps, pid);
+-        ps->pid = 0;
++        /*
++         * ps can only be NULL here if the ring was already drained;
++         * pslot_bypid() would dereference it, so guard before lookup
++         */
++        if (ps == NULL)
++            continue;
++        done_ps = pslot_bypid(ps, pid);
++        /*
++         * the slot may not be found if SIGCHLD is delivered
++         * before the parent recorded the pid (fork raced with
++         * child exit); the slot is still cleaned up by the main
++         * select loop in that case
++         */
++        if (done_ps == NULL)
++            continue;
++        done_ps->pid = 0;
+ 
+         if (WIFEXITED(ret))
+-            ps->ret = WEXITSTATUS(ret);
++            done_ps->ret = WEXITSTATUS(ret);
+         else
+-            ps->ret = 255;
++            done_ps->ret = 255;
+ 
+-        while (pslot_readbuf(ps, OUT))
+-            pslot_printbuf(ps, OUT);
+-        while (pslot_readbuf(ps, ERR))
+-            pslot_printbuf(ps, ERR);
++        while (pslot_readbuf(done_ps, OUT))
++            pslot_printbuf(done_ps, OUT);
++        while (pslot_readbuf(done_ps, ERR))
++            pslot_printbuf(done_ps, ERR);
+         /*
+          * make sure that we print some output in verbose mode
+          * even if there is no data in the buffer
+          */
+-        pslot_printbuf(ps, OUT);
+-        ps = pslot_del(ps);
++        pslot_printbuf(done_ps, OUT);
++        /*
++         * pslot_del() free()s done_ps and returns the next live
++         * node, or NULL when the ring becomes empty. the global
++         * cursor must follow, otherwise it dangles on the freed
++         * node while the ring is still non-empty
++         */
++        ps = pslot_del(done_ps);
+         /* decrement this last, its used in pslot_bypid */
+         children--;
+     }
+@@ -570,6 +592,15 @@ main(int argc, char *argv[])
+         }
+         FD_ZERO(&readfds);
+         children_fds = children;
++        /*
++         * the ring can be empty here (all children reaped while the
++         * last host record was consumed); a NULL cursor must never be
++         * dereferenced by FD_SET below
++         */
++        if (ps == NULL || children_fds == 0) {
++            UNBLOCK_SIGCHLD;
++            continue;
++        }
+         for (i=0; i <= children_fds; i++) {
+             FD_SET(ps->io.out[0], &readfds);
+             FD_SET(ps->io.err[0], &readfds);
+diff --git a/pslot.c b/pslot.c
+index 25daf37..565b823 100644
+--- a/pslot.c
++++ b/pslot.c
+@@ -128,7 +128,13 @@ pslot_del(struct procslot *pslot)
+     free(pslot_todel);
+ 
+     if (is_last) {
+-        pslots++;
++        pslots--;
++        /*
++         * the ring is now empty; reset the global cursor, otherwise
++         * the main select loop dereferences the freed slot (use-after-
++         * free crash right after the last child is reaped)
++         */
++        ps = NULL;
+         return(NULL);
+     }
+ 

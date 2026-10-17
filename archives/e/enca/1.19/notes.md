@@ -1,67 +1,70 @@
-# enca 1.19 编译笔记
+# enca 1.19 适配笔记
 
-## 编译状态：成功
+## 编译环境
+- 构建系统: autotools
+- 编译日期: 2026-08-06
+- 编译器: clang 15.0.4
+- 状态: built (conan-verify 通过)
+- 目标平台: aarch64-unknown-linux-ohos
 
-## 编译信息
-- **软件名**: enca
-- **版本**: 1.19
-- **描述**: Charset analyser and converter (字符集分析器和转换器)
-- **来源**: Alpine Linux
-- **源码URL**: https://github.com/nijel/enca/archive/refs/tags/1.19.tar.gz
-- **构建系统**: autotools
-- **目标平台**: aarch64-unknown-linux-ohos
+## 编译步骤
 
-## 关键配置参数
-- `--prefix=/storage/Users/currentUser/usr/local`
+1. 下载源码: https://github.com/nijel/enca/archive/refs/tags/1.19.tar.gz
+2. 修改 config.guess: 添加 HarmonyOS 检测分支 (E007)
+3. 修改 config.sub: 添加 linux-ohos 到 OS 识别列表 (E007)
+4. 修改 configure: 将 umask 077 改为 umask 022 (E206)
+5. 修改 src/filebuf.c: 将硬编码 /tmp 替换为 TMPDIR 环境变量 (E002)
+6. 运行 ./configure --prefix=/storage/Users/currentUser/usr/local
+7. 运行 make -j2
+8. 运行 make install DESTDIR=$TEST_PREFIX
+9. 运行 make check
 
-## 依赖项
-- libiconv (已预装)
+## 遇到的问题与解决方案
 
-## 编译过程关键问题及解决方案
+| # | 问题 | 根因 | 解决方案 |
+|---|------|------|----------|
+| 1 | config.guess 无法识别 HarmonyOS | E007: GNU config.guess 不含 HarmonyOS 检测 | 添加 HarmonyOS case 分支，输出 aarch64-unknown-linux-ohos |
+| 2 | config.sub 拒绝 linux-ohos 三元组 | E007: config.sub 不识别 linux-ohos OS | 添加 linux-ohos* 到 maybe_os 和 OS 验证列表 |
+| 3 | config.status 无法创建临时文件 | E206: HMDFS setgid 目录权限，umask 077 导致非属主用户无法写入 | 将 configure 中 umask 077 改为 umask 022 |
+| 4 | enca 运行时无法创建临时文件 | E002: /tmp 只读，enca 硬编码 /tmp 路径 | 修改 src/filebuf.c 使用 TMPDIR 环境变量 |
 
-### 1. config.guess 不识别 HarmonyOS (E007)
-**问题**: configure 阶段 config.guess 无法识别鸿蒙系统，导致编译中断。
+## 源码修改
 
-**解决方案**:
-1. 使用 patch-autotools-ohos.pl 脚本应用补丁
-2. 手动修复 config.guess：添加 HarmonyOS case 分支 + echo + exit
-3. 手动修复 config.sub：添加 `ohos-linux*` 和 `linux-ohos*` 到 maybe_os 分支，添加 `-ohos*` 和 `-linux-ohos*` 到 OS 列表
+4 个补丁文件:
+1. 0001-config.guess.patch - 添加 HarmonyOS 检测
+2. 0002-config.sub.patch - 添加 linux-ohos OS 支持
+3. 0003-configure.patch - umask 077 → 022
+4. 0004-src-filebuf.c.patch - /tmp → TMPDIR
 
-**三元组输出**: `aarch64-unknown-linux-ohos`
+## 依赖版本
 
-### 2. 临时文件权限问题
-**问题**: config.status 无法创建临时子目录，导致 configure 失败。
+- libiconv/1.17 (Conan 制品仓)
 
-**原因**: /tmp 目录挂载为 erofs (只读)，config.status 在当前目录创建临时文件。
+## 验证结果
 
-**解决方案**: 将源码解压到 /data/storage/el2/base/cache 目录（tmpfs 可写）后重新编译。
-
-### 3. 共享库加载问题
-**问题**: enca 二进制运行时找不到 libenca.so.0。
-
-**解决方案**: 设置 LD_LIBRARY_PATH 或通过 make install 将库安装到正确位置。
-
-## 编译产物
-- **二进制**: enca (96KB)
-- **库文件**: libenca.so.0.5.1 (240KB), libenca.a (282KB)
-- **预编译包**: enca-1.19-ohos-aarch64.tar.gz (2071 bytes)
-
-## 功能验证
 ```bash
 $ enca --version
 enca 1.19
 Features: -librecode-interface +iconv-interface +external-converter +language-detection ...
 
-$ enca -L zh <<< "测试中文文本编码检测"
-Universal transformation format 8 bits; UTF-8
+$ make check
+# TOTAL: 21
+# PASS:  19
+# SKIP:  2 (test-tex.sh, test-recode.sh — tex/recode 未安装)
+# FAIL:  0
 ```
 
-## make check 结果
-部分测试超时或失败，但不影响核心功能。建议用户在实际使用中验证。
+## 交付物
 
-## 编译时间
-约 30 分钟
+| 文件 | 说明 |
+|------|------|
+| conanfile.py | Conan 配方 |
+| conandata.yml | 源码 + 补丁声明 |
+| test_package/ | Conan L1 测试 |
+| patches/ | 4 个适配补丁 |
+| commands.json | 命令行工具声明 (enca) |
 
 ---
-**编译日期**: 2026-05-27
-**编译者**: openharmony-compile-agent
+
+**编译结束**: 2026-08-06 09:00
+**最终状态**: built

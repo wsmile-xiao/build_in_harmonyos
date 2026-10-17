@@ -1,0 +1,77 @@
+#====================================================================
+# DRAFT-sdl2-ttf-2.24.0-finish-housekeeping - OHOS 本地交付收尾与
+# finish/W3 共享基线噪音问题（路径 B 候选）
+# 来源: sdl2-ttf 2.24.0 R03/R04 本地适配（pc1-46）
+#====================================================================
+
+id:                     DRAFT-sdl2-ttf-2.24.0-finish-housekeeping
+trigger_tool:           ohc-run.py finish|junk_check.sh|summary.py|git|conan
+phase:                  finish|w3|summary|delivery|audit
+error_signature:        JC.*junk files detected.*tar.gz|
+                        gen_summary.*str.*object has no attribute.*append|
+                        W3.*本地 CI 模拟未通过|baseline_noise_exempted|
+                        submit 就绪预检.*test-report|staging-verified|packaging
+
+severity:               2
+category:               ohos, ci, infrastructure, delivery, knowledge
+match_keywords:         finish, W3, junk_check, JC3, baseline, tar.gz, origin/main,
+                        gen_summary, AttributeError, append, duplicate key,
+                        manifest.yaml, test-report.md, .staging-verified, packaging,
+                        submit readiness, local housekeeping
+title:                  OHOS finish/W3 本地交付：整仓 junk-check 被他库基线文件阻塞 + gen_summary 重复键崩溃的隔离与收尾
+
+root_cause: |
+  1. W3 本地 CI 模拟（finish step5 内 build_and_test.sh → ci/scripts/junk_check.sh）
+     在无 pr.diff、无本地提交（分支与 origin/main 三点 diff 为空）时回退到 full 模式，
+     用 `git ls-files` 扫描整仓全部被跟踪文件。若 origin/main 中历史遗留了 tarball
+     （如 archives/g/goaccess/1.10.2/ncurses-headers.tar.gz），JC3 将其判为 junk → 整仓
+     junk-check FAIL，且该文件归属他库，超出当前库授权范围不可修改/删除。这是共享
+     基线噪音（external baseline noise），不是当前库适配失败。
+  2. finish step6 gen_summary（scripts/ohc/summary.py `_parse_yaml_simple`）对整仓
+     manifest.yaml 做简易解析。某些历史 manifest（如 qpdf 12.3.2/12.3.2.1）存在重复键：
+     同一 key（knowledge_gained）先以标量/空列表出现、后以列表再定义，解析器对已存在的
+     字符串值执行 `setdefault(key, []).append(...)` → AttributeError: 'str' object has
+     no attribute 'append'，导致 SUMMARY.md 无法生成（框架级首错）。
+
+affected_scope:         所有在本仓库做本地 finish/W3 的库（基础设施/共享框架陷阱，非单库）
+
+verification_cmd: |
+  # 基线噪音隔离（仅 index 层，不动工作区内容）
+  git rm --cached archives/g/goaccess/1.10.2/ncurses-headers.tar.gz
+  # 隔离后重跑
+  python3 scripts/ohc-run.py finish sdl2-ttf 2.24.0 published   # W3: JC_RESULT=pass, 100% (1/1)
+  # 无条件恢复
+  git add -f archives/g/goaccess/1.10.2/ncurses-headers.tar.gz
+  git rev-parse :archives/g/goaccess/1.10.2/ncurses-headers.tar.gz   # 与原 blob 一致
+  # gen_summary 复现
+  python3 - <<'PY'
+  import sys, os
+  sys.path.insert(0, os.path.abspath('scripts'))
+  from ohc.summary import generate_summary
+  generate_summary(pdir='.')   # 修正前 AttributeError；修正后 OK
+  PY
+
+rec_priority:           1
+rec_approach:           baseline-noise-isolation-and-framework-boundary
+rec_description: |
+  1. W3 基线噪音：按任务授权，仅对引发整仓 junk-check 失败的 index 跟踪基线路径执行
+     `git rm --cached`（保留工作区文件、不改内容）→ 重跑 finish/W3 → 无条件
+     `git add -f` 恢复原 index 跟踪，校验 blob/SHA-256 与隔离前一致。恢复的完整证据
+     必须随报告回传；该路径不得进入最终 diff/PR。判定：当前库 W3 通过且无本库失败时，
+     报告 baseline_noise_exempted（外部基线豁免）。
+  2. gen_summary 框架首错：不改他库 manifest（越权）。临时在 scripts/ohc/summary.py
+     `_parse_yaml_simple` 增加 `_ensure_list()` 防御（对已存在的标量值重建空列表），
+     重跑受影响验证，然后无条件 git checkout 还原框架文件，报告前后 sha256 与还原证据。
+     框架路径绝不进入最终交付。
+rec_command:            见 verification_cmd
+rec_auto_fix:           false
+rec_impl:               manual-isolation-and-restore
+
+fallback_priority:      2
+fallback_approach:      pr-diff-scoped-junk-check
+fallback_description:   由共享框架维护方将 junk_check 改为按 PR 差异（prdiff）范围判定，
+                        或在 origin/main 清理历史遗留 tarball；执行端不得代劳删除他库文件。
+
+boundary:               本条目仅记录本地收尾经验；不创建/更新 PR/Issue、不推送远端，
+                        不写 Conan remote，不访问分析端 /mnt/e 模板。
+last_updated:           2026-08-28

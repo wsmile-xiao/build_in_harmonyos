@@ -10,9 +10,9 @@
 
 ### 1. 源码下载
 
-使用 GitHub 加速镜像下载源码：
+使用官方 GitHub 源下载：
 ```
-URL: https://ghfast.top/https://github.com/plougher/squashfs-tools/archive/refs/tags/4.7.5.tar.gz
+URL: https://github.com/plougher/squashfs-tools/archive/refs/tags/4.7.5.tar.gz
 ```
 
 ### 2. 编译配置
@@ -61,3 +61,7 @@ unsquashfs version 4.7.5 (2026/05/29)
 | 0001-mksquashfs-pthread-cancel-stub.patch | mksquashfs.c 中 pthread_cancel stub |
 | 0002-restore-pthread-cancel-stub.patch | restore.c 中 pthread_cancel stub |
 | 0003-pthread-cancel-stub-header.patch | pthread_cancel stub 头文件 |
+---
+
+**编译结束**: 2026-07-16 01:04
+**最终状态**: built

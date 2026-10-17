@@ -1,0 +1,101 @@
+#====================================================================
+# DRAFT-libuev-2.4.1-ohos-fork-signalfd-eagain-spurious — OHOS fork 跨进程
+#   共享 signalfd 产生虚假可读事件（read 返回 EAGAIN），事件循环库误分发
+#   信号回调导致误判
+# 触发事件: libuev 2.4.1 第一轮适配（OHOS PC arm64，make check 阶段）
+# 知识新增类：四范围查重均无该模式（E399 词面相关但根因/方案不同）
+#====================================================================
+
+id:                     DRAFT-libuev-2.4.1-ohos-fork-signalfd-eagain-spurious
+trigger_tool:           runtime|test
+phase:                  testing|runtime
+error_signature:        child\[.*\] crashed.*OK|
+                         signal: PID.*caused segfault|
+                         FAIL signal.*exit status: 255|
+                         read.*EAGAIN.*signalfd|
+                         spurious.*signalfd.*fork|
+                         Resource temporarily unavailable.*signo
+
+severity:               2
+category:               platform|signal|event-loop|libc-compat|runtime
+match_keywords:         signalfd, fork, EAGAIN, EWOULDBLOCK, spurious wakeup,
+                         epoll, event loop, SIGCHLD, SIGSEGV, shared fd,
+                         open file description, OHOS, HarmonyOS, uev,
+                         read failure, watchdog, daemon,
+                         false positive signal callback
+title:                  OHOS fork 跨进程共享 signalfd 虚假可读（EAGAIN）：
+                         事件循环库必须对 read 失败区分"无数据"与"真错误"，
+                         不得把虚假可读当作信号事件分发回调
+
+root_cause: >
+  在 OHOS（HongMeng Kernel 1.12，Linux 兼容内核）上，signalfd(2) 的文件描述符
+  经 fork(2) 后由父子进程共享同一个 open file description。当子进程持有被阻塞
+  （sigprocmask 屏蔽）的、且被 signalfd 监视的信号并因该信号死亡（例如故意
+  触发的 SIGSEGV，或 SIGCHLD 正常退出）时，内核会将该待决信号反映到共享的
+  signalfd 上，父进程的 epoll_wait 因此报告该 fd 可读；但父进程 read() 时
+  该信号并不属于父进程（或已被子进程死亡回收），read 返回 -1 errno=EAGAIN。
+  事件循环库若把 "read() != sizeof(struct signalfd_siginfo)" 一律当作真实信号
+  事件处理（如 libuev 原实现：失败时照常以 UEV_READ 调用回调，siginfo 置零），
+  回调会按 w->signo 误判（例如 SIGSEGV watcher 被触发，应用误以为父进程崩溃），
+  导致测试失败/守护进程误退出。
+
+affected_scope: >
+  OHOS 上所有使用 signalfd + epoll 的事件循环库（libuev、libev、libevent 等
+  signalfd 集成路径）以及 fork 子进程并要求子进程崩溃/退出的应用（进程看护、
+  插件隔离、测试桩）。真实 Linux 上同一场景不出现或极罕见，属 OHOS 内核行为
+  差异，因此上游测试可能在 Linux CI 通过、在本平台确定性失败。
+
+verification_cmd: >
+  cd libuev 源码目录 && make check
+  （修复前 signal 测试 5/5 确定性失败；修复后 7/7 PASS）
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority: 1
+rec_approach: In the event-loop signal dispatch path, when
+  read(signalfd, ...) fails with errno EAGAIN/EWOULDBLOCK (spurious wakeup:
+  the shared signalfd was made readable by a forked child's pending signal),
+  skip the watcher callback entirely (continue) — do NOT dispatch, do NOT
+  stop/restart the watcher. Only real read errors that persist after restart
+  should be reported to the application.
+rec_description: >
+  对 signalfd 的 read 失败区分 EAGAIN（虚假可读，无数据可分发，保持 watcher
+  活跃并跳过回调）与其它错误（按原逻辑重启或上报 UEV_ERROR）。libuev 补丁
+  为最小实现：仅新增 EAGAIN/EWOULDBLOCK 分支 continue，其余行为不变。
+rec_command: >
+  patch -p1 < archives/l/libuev/2.4.1/patches/0001-src-uev.c.patch
+  （等价修改：uev_run() 的 case UEV_SIGNAL_TYPE 中 read()!=sz 且
+   errno==EAGAIN||EWOULDBLOCK 时 continue）
+
+# 回退方案
+fallback_priority:      2
+fallback_approach:      在 fork 后由子进程主动 close() 继承的 signalfd（不共享）
+fallback_description:   子进程 exec/exit 前关闭继承的 signalfd fd；但子进程崩溃
+                         路径无法保证执行，且要求库调用方配合，不如库内守卫通用
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       __OHOS__|#ifdef.*OHOS
+forbid_1_reason:        R8: patches/ 默认禁止平台宏；该修复是通用 EAGAIN 语义
+                         守卫（所有 POSIX 平台均安全），无需平台条件编译
+forbid_1_consequence:   CI preflight PF5 拦截，增加返工轮次
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P015
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E399, E233]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+rec_auto_fix: true
+doc_file:               knowledge/drafts/DRAFT-libuev-2.4.1-ohos-fork-signalfd-eagain-spurious.md
+last_updated:           2026-09-23
+source_event:           libuev-2.4.1-r01-pc2-37-20260922T192305Z

@@ -1,0 +1,125 @@
+#====================================================================
+# E615 — CMake+Conan 适配的四类确定性陷阱：宿主依赖静默回退、生成器吞掉
+#        $LD_LIBRARY_PATH、传递依赖头文件不传播、上游安装清单漏头文件
+#====================================================================
+
+# Layer 0: Error Surface
+id:                     E615
+trigger_tool:           cmake, conan, make, ninja
+phase:                  configure, build, test
+error_signature: |
+  unable to find library -l[<]?expat
+  Error relocating .*/[A-Za-z0-9_.-]+: [A-Za-z_][A-Za-z0-9_]*: symbol not found
+  Error loading shared library .*: No such file or directory
+  fatal error: 'libxml/.*\.h' file not found
+  fatal error: 'comps_types\.h' file not found
+  Unable to create temporary file for communication; may not have permissions
+
+# Layer 1: Recognition
+severity:               3
+category:               conan, cmake, ohos, fake-green, packaging
+prescan_pattern:        CMAKE_FIND_PACKAGE_PREFER_CONFIG|LD_LIBRARY_PATH="\$[{A-Za-z_]*|find_package\((ZLIB|LibXml2|EXPAT)|install\(FILES \$\{.*_HEADERS\}
+root_cause:             |
+  在 OHOS 设备上按 Conan 2 适配「上游 CMake 工程 + C 库 + 语言绑定」时,以下四类问题
+  全部表现为**假绿或方向错误的报错**,已在 libcomps 0.1.24 上逐条实测:
+
+  (1) 宿主依赖静默回退 —— Conan 的 CMakeToolchain 会写
+      `set(CMAKE_FIND_PACKAGE_PREFER_CONFIG ON)`。若配方不调用 CMakeDeps,且上游读的是
+      Find 模块的旧式变量(大写: LIBXML2_LIBRARY/LIBXML2_LIBRARIES/EXPAT_LIBRARY/
+      ZLIB_LIBRARIES/ZLIB_INCLUDE_DIRS),find_package/find_library 会命中设备 PATH 上
+      ~/.harmonybrew 的 *-config.cmake。实测 CMakeCache 出现
+      LIBXML2_LIBRARY=~/.harmonybrew/Cellar/libxml2/.../libxml2.so、
+      ZLIB_DIR=~/.harmonybrew/lib/cmake/ZLIB,链接行出现
+      ~/.harmonybrew/lib/libz.so.1.3.1.zlib-ng。
+      **设备上编译通过、干净 worker 上必红**,且构建日志无任何异常字样。
+
+  (2) 构建生成器吞掉 $LD_LIBRARY_PATH —— 上游把 shell 片段直接写进
+      add_custom_target 的 COMMAND:`export LD_LIBRARY_PATH="${OUT}/:$LD_LIBRARY_PATH"`。
+      Makefile 生成器把 `$L` 当 make 变量引用、Ninja 生成器把 `$LD_LIBRARY_PATH` 当
+      ninja 变量引用,**两种生成器都展开为空**,继承来的搜索路径被清成 `<build>/src/:`,
+      测试二进制随即 `Error relocating ...: symbol not found`。
+      实测 build.make 与 build.ninja 里的命令都只剩 `${OUT}/:`。
+
+  (3) 传递依赖头文件不传播 —— Conan 2 的 `transitive_headers` 默认为 None(等于不传播)。
+      若被测库的**公开头文件**包含依赖的头(如 libcomps 的 comps_utils.h 含
+      <libxml/encoding.h>、comps_parse.h 含 <expat.h>),消费者的 CMakeDeps config 里
+      对应依赖的 *_INCLUDE_DIRS_RELEASE 为空,编译消费者即失败。
+      判据:比较 `conan install` 在「直接 requires」与「经中间包传递」两种图下生成的
+      <dep>-<cfg>-data.cmake 的 INCLUDE_DIRS 行。
+
+  (4) 上游安装清单漏头文件 —— `install(FILES ${libcomps_HEADERS})` 是显式清单,
+      而已安装的 comps_log.h 会 `#include "comps_types.h"`。对安装集合做包含闭包计算:
+      清单(去掉被注释的 #comps_list.h)25 个头、包含闭包 26 个,差集 = ['comps_types.h'](补丁后安装 26 个)。
+      上游 RPM 用 `%{_includedir}/<name>/*.h` 通配安装,掩盖了该缺陷;
+      按 CMake 显式清单打包必然暴露,且**任何消费者都无法编译**。
+
+  附带判据(同类):check 0.15.2 的 IPC 临时文件受 TEMP/TMPDIR 控制(不是硬编码 /tmp),
+  在 /tmp 只读的 OHOS 上把 TMPDIR/TMP/TEMP 指到构建目录内可写目录即可全量运行;
+  报错形态 `check_msg.c:NNN: Unable to create temporary file for communication`
+  极易被误读成权限/环境损坏。
+
+# Layer 2: Fix Strategy
+rec_approach:           pin-all-consumed-vars-and-verify-link-line
+fix_description:        |
+  (1) 配方调用 `CMakeDeps(self).generate()`,并把上游**实际读到的每个变量**用
+      tc.variables 钉到 Conan 包目录:
+        LIBXML2_INCLUDE_DIR / LIBXML2_LIBRARY / LIBXML2_LIBRARIES
+        EXPAT_INCLUDE_DIR / EXPAT_LIBRARY / EXPAT_LIBRARIES
+        ZLIB_INCLUDE_DIRS / ZLIB_LIBRARY / ZLIB_LIBRARIES
+        CHECK_INCLUDE_DIR / CHECK_LIBRARY
+        PYTHON_EXECUTABLE / PYTHON_INCLUDE_DIR / PYTHON_LIBRARY / PYTHON_LIBRARIES
+      验证不看退出码,而是 diff `build.ninja`/`link.txt` 的 LINK_LIBRARIES 与
+      CMakeCache 的 FIND 变量,**确认零个宿主路径**(grep -c harmonybrew == 0)。
+  (2) 补丁把 COMMAND 里的 `$LD_LIBRARY_PATH` 写成 `$$LD_LIBRARY_PATH`:
+      Makefile 与 Ninja 生成器都会把 `$$` 还原成 `$` 交给 shell,继承值得以保留。
+      不要为此改用 Ninja——Ninja 同样吞掉该变量,换生成器解决不了。
+  (3) 对**公开头文件包含其头**的依赖声明 `requires(ref, transitive_headers=True)`;
+      不要试图用 cpp_info.requires 绕过——一旦声明 cpp_info.requires,
+      Conan 要求每个直接依赖都被引用(python/zlib 也得列上),副作用更大。
+  (4) 用包含闭包脚本核对安装清单,缺的头用补丁补进 `*_HEADERS`,
+      并在 notes.md 注明上游 RPM 通配安装掩盖了该缺陷。
+  (5) 测试环境统一注入 TMPDIR/TMP/TEMP(构建目录内可写目录)+ CK_FORK=no。
+
+fix_code:               |
+  # conanfile.py (节选)
+  def requirements(self):
+      self.requires("zlib/1.3.1.1")
+      self.requires("libxml2/2.15.3.1", transitive_headers=True)   # 公开头含 <libxml/...>
+      self.requires("expat/2.8.2.1", transitive_headers=True)      # 公开头含 <expat.h>
+      self.requires("python/3.12.9")
+
+  def generate(self):
+      CMakeDeps(self).generate()          # 缺它 -> 命中宿主 ~/.harmonybrew 的 *-config.cmake
+      tc = CMakeToolchain(self)
+      tc.variables["LIBXML2_INCLUDE_DIR"] = os.path.join(lx.package_folder, "include", "libxml2")
+      tc.variables["LIBXML2_LIBRARY"] = self._first_match(os.path.join(lx.package_folder, "lib", "libxml2.so*"), "libxml2")
+      tc.variables["LIBXML2_LIBRARIES"] = tc.variables["LIBXML2_LIBRARY"]
+      tc.variables["EXPAT_INCLUDE_DIR"] = os.path.join(ex.package_folder, "include")
+      tc.variables["EXPAT_LIBRARY"] = self._first_match(os.path.join(ex.package_folder, "lib", "libexpat.so*"), "expat")
+      tc.variables["EXPAT_LIBRARIES"] = tc.variables["EXPAT_LIBRARY"]
+      tc.variables["ZLIB_INCLUDE_DIRS"] = os.path.join(zl.package_folder, "include")
+      tc.variables["ZLIB_LIBRARIES"] = self._first_match(os.path.join(zl.package_folder, "lib", "libz.*"), "zlib")
+      tc.generate()
+
+  # 补丁(生成器无关的转义):
+  #   - COMMAND export LD_LIBRARY_PATH="${LIBCOMPS_OUT}/:$LD_LIBRARY_PATH"
+  #   + COMMAND export LD_LIBRARY_PATH="${LIBCOMPS_OUT}/:$$LD_LIBRARY_PATH"
+
+  # 安装清单包含闭包核对:
+  #   python3 - <<'PY'   # 闭包(26) - 清单(25) = ['comps_types.h']（补丁后 26）
+  #   ... 见 notes.md “上游测试清单”一节同款 AST/正则脚本 ...
+
+  # 验证宿主路径零残留:
+  #   grep -c harmonybrew build/Release/build.ninja build/Release/CMakeCache.txt   # 期望 0
+
+fix_reference:          archives/l/libcomps/0.1.24/conanfile.py; archives/l/libcomps/0.1.24/patches/
+validation:             |
+  - conan create 退出码 0;CMakeCache 与 build.ninja 中 `grep -c harmonybrew` = 0。
+  - 上游 C 套件 `target test`:test_comps 5/5、test_parse 8/8(Checks: N, Failures: 0, Errors: 0)。
+  - 上游 Python 绑定套件 `target pytest_run`:Ran 84 / 11 / 4 tests,全部 OK。
+  - test_package 消费者:30 checks, 0 failures。
+  - 对照实验(修前):(a) 无 CMakeDeps 时 CMakeCache 出现 ~/.harmonybrew 的 libxml2/zlib,
+    且链接行出现 libz.so.1.3.1.zlib-ng;(b) 未加 $$ 时 build.make/build.ninja 的
+    LD_LIBRARY_PATH 退化为 `<build>/src/:` 并触发 relocating 失败;
+    (c) 未声明 transitive_headers 时消费者 config 的 libxml2_INCLUDE_DIRS_RELEASE 为空;
+    (d) 未补 comps_types.h 时安装 25 个头、消费者报 'comps_types.h' file not found。

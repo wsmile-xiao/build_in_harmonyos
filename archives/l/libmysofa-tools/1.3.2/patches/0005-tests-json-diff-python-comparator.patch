@@ -1,0 +1,198 @@
+--- a/tests/compare.sh
++++ b/tests/compare.sh
+@@ -1,9 +1,23 @@
+ #!/bin/sh
+ 
+ SCRIPTDIR=${0%/*}
+-NODEJS=$(command -v node nodejs false | head -1)
+ 
+-${MYSOFA2JSON:-${SCRIPTDIR}/../build/src/mysofa2json} -c -s "$1".sofa >tmp1.json 2>tmp1.txt
++# OHOS adaptation: node/V8 crashes on OHOS musl (Signal 5), so the node-based
++# json-diff.js comparator is replaced by a semantic-equivalent python
++# implementation shipped alongside (json_diff_ohos.py).
++# Also: the OHOS sandbox denies open(2) on symlinks for packaged binaries,
++# so a symlinked .sofa input is resolved to its real target first.
++
++SOFA_INPUT="$1".sofa
++if [ -L "$SOFA_INPUT" ]; then
++    _tgt=$(readlink "$SOFA_INPUT") || exit 1
++    case $_tgt in
++        /*) SOFA_INPUT=$_tgt ;;
++        *)  SOFA_INPUT=${1%/*}/$_tgt ;;
++    esac
++fi
++
++${MYSOFA2JSON:-${SCRIPTDIR}/../build/src/mysofa2json} -c -s "$SOFA_INPUT" >tmp1.json 2>tmp1.txt
+ 
+ ret=$?
+ if [ "$ret" != 0 ]; then 
+@@ -12,9 +26,8 @@
+     exit $ret
+ fi
+ 
+-cp -f "${SCRIPTDIR}/json-diff.js" . 2>/dev/null || true
+ bunzip2 -c -k "$1".json.bz2 >./tmp2.json
+-"${NODEJS}" ./json-diff.js ./tmp1.json ./tmp2.json
++python3 "${SCRIPTDIR}/json_diff_ohos.py" ./tmp1.json ./tmp2.json
+ ret=$?
+ if [ "$ret" != 0 ]; then 
+     echo Diff $ret
+@@ -22,4 +35,3 @@
+ fi
+ echo ok
+ rm tmp1.json tmp1.txt tmp2.json
+-
+
+--- a/tests/compareIgnoreNew.sh
++++ b/tests/compareIgnoreNew.sh
+@@ -1,9 +1,23 @@
+ #!/bin/sh
+ 
+ SCRIPTDIR=${0%/*}
+-NODEJS=$(command -v node nodejs false | head -1)
+ 
+-${MYSOFA2JSON:-${SCRIPTDIR}/../build/src/mysofa2json} -c -s "$1".sofa >tmp1.json 2>tmp1.txt
++# OHOS adaptation: node/V8 crashes on OHOS musl (Signal 5), so the node-based
++# json-diff.js comparator is replaced by a semantic-equivalent python
++# implementation shipped alongside (json_diff_ohos.py).
++# Also: the OHOS sandbox denies open(2) on symlinks for packaged binaries,
++# so a symlinked .sofa input is resolved to its real target first.
++
++SOFA_INPUT="$1".sofa
++if [ -L "$SOFA_INPUT" ]; then
++    _tgt=$(readlink "$SOFA_INPUT") || exit 1
++    case $_tgt in
++        /*) SOFA_INPUT=$_tgt ;;
++        *)  SOFA_INPUT=${1%/*}/$_tgt ;;
++    esac
++fi
++
++${MYSOFA2JSON:-${SCRIPTDIR}/../build/src/mysofa2json} -c -s "$SOFA_INPUT" >tmp1.json 2>tmp1.txt
+ 
+ ret=$?
+ if [ "$ret" != 0 ]; then 
+@@ -12,9 +26,8 @@
+     exit $ret
+ fi
+ 
+-cp -f "${SCRIPTDIR}/json-diffIgnoreNew.js" . 2>/dev/null || true
+ bunzip2 -c -k "$1".json.bz2 >./tmp2.json
+-"${NODEJS}" ./json-diffIgnoreNew.js ./tmp1.json ./tmp2.json
++python3 "${SCRIPTDIR}/json_diff_ohos.py" --ignore-new ./tmp1.json ./tmp2.json
+ ret=$?
+ if [ "$ret" != 0 ]; then 
+     echo Diff $ret
+@@ -22,4 +35,3 @@
+ fi
+ echo ok
+ rm tmp1.json tmp1.txt tmp2.json
+-
+
+--- /dev/null
++++ b/tests/json_diff_ohos.py
+@@ -0,0 +1,105 @@
++#!/usr/bin/env python3
++"""json_diff_ohos.py — python equivalent of the node-based json-diff comparators.
++
++Replicates, line-by-line, the semantics of the upstream comparators:
++  - json-diff.js          (strict):    report E(dit beyond tolerance) + D(eleted:
++                                       only in NEW output) + N(ew: only in REF)
++  - json-diffIgnoreNew.js (ignore-new): same, but entries present only in the
++                                       reference JSON are ignored
++Numeric tolerance (json-diff.js line 8 `var e = 0.05`, deepDiff tail):
++  lhs>0:  equal iff lhs*(1-e) < rhs < lhs*(1+e)
++  lhs<=0: equal iff lhs*(1+e) < rhs < lhs*(1-e)
++  JS `lhs === rhs` short-circuit (0.0 === 0); NaN equals NaN; all other
++  types compared strictly. Non-UTF8 bytes are replaced with U+FFFD like
++  Node's utf8 decoding.
++
++Exit 0 = equal, 1 = differences, 2 = usage error.
++"""
++import bz2
++import json
++import math
++import sys
++
++E = 0.05
++
++
++def load(path):
++    if path.endswith(".bz2"):
++        with bz2.open(path, "rt", encoding="utf-8", errors="replace") as fh:
++            return json.load(fh)
++    with open(path, encoding="utf-8", errors="replace") as fh:
++        return json.load(fh)
++
++
++def num_equal(l, r):
++    if l == r:
++        return True
++    if math.isnan(l) and math.isnan(r):
++        return True
++    if l > 0:
++        return l * (1 - E) < r and l * (1 + E) > r
++    return l * (1 - E) > r and l * (1 + E) < r
++
++
++def walk(lhs, rhs, path, out, kind_of_missing_in_new):
++    """kind_of_missing_in_new: kind letter for entries existing only in REF."""
++    if isinstance(lhs, dict) and isinstance(rhs, dict):
++        for k in lhs:
++            if k in rhs:
++                walk(lhs[k], rhs[k], path + "." + str(k), out,
++                     kind_of_missing_in_new)
++            else:
++                out.append(("D", path + "." + str(k)))  # only in NEW
++        for k in rhs:
++            if k not in lhs:
++                out.append((kind_of_missing_in_new, path + "." + str(k)))
++    elif isinstance(lhs, list) and isinstance(rhs, list):
++        for i in range(max(len(lhs), len(rhs))):
++            if i < len(lhs) and i < len(rhs):
++                walk(lhs[i], rhs[i], path + "[%d]" % i, out,
++                     kind_of_missing_in_new)
++            elif i < len(lhs):
++                out.append(("D", "%s[%d]" % (path, i)))  # only in NEW
++            else:
++                out.append((kind_of_missing_in_new, "%s[%d]" % (path, i)))
++    else:
++        lnum = isinstance(lhs, (int, float)) and not isinstance(lhs, bool)
++        rnum = isinstance(rhs, (int, float)) and not isinstance(rhs, bool)
++        if lnum and rnum:
++            if not num_equal(float(lhs), float(rhs)):
++                out.append(("E", "%s  (%r vs %r)" % (path, lhs, rhs)))
++        elif lhs != rhs:
++            out.append(("E", "%s  (%r vs %r)" % (path, lhs, rhs)))
++
++
++def main():
++    args = sys.argv[1:]
++    ignore_new = False
++    while args and args[0].startswith("--"):
++        opt = args.pop(0)
++        if opt == "--ignore-new":
++            ignore_new = True
++        else:
++            print("unknown option: %s" % opt, file=sys.stderr)
++            return 2
++    if len(args) != 2:
++        print("usage: json_diff_ohos.py [--ignore-new] <new.json> <ref.json[.bz2]>",
++              file=sys.stderr)
++        return 2
++    newf, reff = args
++    a, b = load(newf), load(reff)
++    diffs = []
++    # L = new output, R = reference (same argument order as upstream scripts)
++    walk(a, b, "", diffs, "N" if not ignore_new else "SKIP")
++    real = [d for d in diffs if d[0] != "SKIP"]
++    if real:
++        for kind, where in real[:20]:
++            print("%s: %s" % (kind, where))
++        print("total diffs: %d" % len(real))
++        return 1
++    print("ok")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())

@@ -1,0 +1,154 @@
+--- a/tests/ut_libdsme.c
++++ b/tests/ut_libdsme.c
+@@ -38,20 +38,22 @@
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <stdarg.h>
+ #include <unistd.h>
+ #include <errno.h>
+ #include <poll.h>
+ #include <syslog.h>
+ #include <ctype.h>
+ #include <getopt.h>
++#include <stddef.h>
++#include <string.h>
+ 
+ #include <check.h>
+ 
+ /* ------------------------------------------------------------------------- *
+  * Diagnostic Logging
+  * ------------------------------------------------------------------------- */
+ 
+ static int log_level = LOG_WARNING;
+ 
+ static const char * const log_tag[] = {
+@@ -112,21 +114,23 @@
+         log_warning("wait_input() timeout");
+     else if( rc == -1 )
+         log_warning("wait_input() failed: %m");
+     return rc;
+ }
+ 
+ /* ------------------------------------------------------------------------- *
+  * Mock Daemon
+  * ------------------------------------------------------------------------- */
+ 
+-static const char mock_socket[] = "/tmp/ut_libdsme.sock";
++/* Abstract socket name: file system unix sockets can not be created
++ * on OHOS (HMDFS denies bind); abstract sockets avoid the file system. */
++static const char mock_socket[] = "@ut_libdsme";
+ static const char mock_extra[] = "a-reason";
+ 
+ static int daemon_fd = -1;
+ static int daemon_pid = -1;
+ 
+ static bool daemon_handle_message(dsmesock_connection_t *connection)
+ {
+     bool stay_connected = true;
+     dsmemsg_generic_t *msg = dsmesock_receive(connection);
+ 
+@@ -214,40 +218,48 @@
+         if( !daemon_handle_client() )
+             break;
+     }
+     log_error("MOCK: daemon stopped");
+ }
+ 
+ static bool daemon_start(void)
+ {
+     bool success = false;
+ 
+-    if( unlink(mock_socket) == -1 && errno != ENOENT ) {
++    if( mock_socket[0] != '@' && unlink(mock_socket) == -1 && errno != ENOENT ) {
+         log_error("MOCK: unlink(%s) failed: %m", mock_socket);
+         goto bailout;
+     }
+ 
+     if( (daemon_fd = socket(PF_UNIX, SOCK_STREAM, 0)) == -1 ) {
+         log_error("MOCK: socket() failed: %m");
+         goto bailout;
+     }
+ 
+     struct sockaddr_un sa = {
+         .sun_family = AF_UNIX,
+     };
+-    strncat(sa.sun_path, mock_socket, sizeof sa.sun_path - 1);
+-    if( bind(daemon_fd, (struct sockaddr *)&sa, sizeof sa) == -1 ) {
++    socklen_t sa_len;
++    if( mock_socket[0] == '@' ) {
++        size_t name_len = strnlen(mock_socket + 1, sizeof sa.sun_path - 1);
++        memcpy(sa.sun_path + 1, mock_socket + 1, name_len);
++        sa_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + name_len);
++    } else {
++        strncat(sa.sun_path, mock_socket, sizeof sa.sun_path - 1);
++        sa_len = sizeof sa;
++    }
++    if( bind(daemon_fd, (struct sockaddr *)&sa, sa_len) == -1 ) {
+         log_error("MOCK: bind(%s) failed: %m", mock_socket);
+         goto bailout;
+     }
+ 
+-    if( chmod(mock_socket, 0666) == -1 ) {
++    if( mock_socket[0] != '@' && chmod(mock_socket, 0666) == -1 ) {
+         log_error("MOCK: chmod(%s) failed: %m", mock_socket);
+         goto bailout;
+     }
+ 
+     if( listen(daemon_fd, 5) == -1 ) {
+         log_error("MOCK: listen(%s) failed: %m", mock_socket);
+         goto bailout;
+     }
+ 
+     if( (daemon_pid = fork()) == -1 ) {
+@@ -264,21 +276,21 @@
+     }
+ 
+     success = true;
+ 
+ bailout:
+     return success;
+ }
+ 
+ static void daemon_stop(void)
+ {
+-    if( unlink(mock_socket) == -1 && errno != ENOENT )
++    if( mock_socket[0] != '@' && unlink(mock_socket) == -1 && errno != ENOENT )
+         log_warning("MOCK: unlink(%s) failed: %m", mock_socket);
+ 
+     if( daemon_pid != -1 ) {
+         if( kill(daemon_pid, SIGTERM) == -1 )
+             log_warning("MOCK: daemon terminate failed: %m");
+ 
+         int status = 0;
+         int options = 0;
+         if( waitpid(daemon_pid, &status, options) == -1 )
+             log_warning("MOCK: daemon wait failed: %m");
+@@ -367,21 +379,26 @@
+     return suite;
+ }
+ 
+ /* ------------------------------------------------------------------------- *
+  * Test Application
+  * ------------------------------------------------------------------------- */
+ 
+ int main(int argc, char **argv)
+ {
+     int exit_code = EXIT_FAILURE;
+-    const char *output = "/tmp/result.xml";
++    /* TMPDIR-aware default result path: /tmp is read-only on OHOS/HarmonyOS */
++    static char output_buf[256];
++    const char *tmpdir = getenv("TMPDIR");
++    snprintf(output_buf, sizeof output_buf, "%s/result.xml",
++             (tmpdir && *tmpdir) ? tmpdir : "/tmp");
++    const char *output = output_buf;
+ 
+     /* Handle command line options */
+     static const struct option optL[] = {
+         {"help",    no_argument ,      0,  'h' },
+         {"verbose", no_argument,       0,  'v' },
+         {"quiet",   no_argument,       0,  'q' },
+         {"output",  required_argument, 0,  'o' },
+         {0,         0,                 0,   0  }
+     };
+     static const char optS[] = "hvqo:";

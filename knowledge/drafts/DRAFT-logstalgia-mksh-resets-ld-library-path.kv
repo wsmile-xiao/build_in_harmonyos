@@ -1,0 +1,45 @@
+draft: DRAFT-logstalgia-mksh-resets-ld-library-path
+status: pending-editor-review
+title: "OHOS /bin/sh (mksh) 启动时重置 LD_LIBRARY_PATH——conan self.run 的整条 conanbuild 环境链失效"
+category: platform, conan, shell
+match_keywords: >
+  mksh, /bin/sh, LD_LIBRARY_PATH, 重置, libc++_shared.so, conanbuild.sh,
+  cannot run C compiled programs, cannot run C++ compiled programs, E467,
+  conftest, self.run, shell=True
+error_signature: >
+  Error loading shared library libc\+\+_shared\.so.*needed by \./conftest|configure: error: cannot run C\+\+ compiled programs|checking whether we are cross compiling.*configure: error
+root_cause: >
+  OHOS 的 /bin/sh 是 mksh 定制版，进程启动时会重置 LD_LIBRARY_PATH（实测：
+  父进程 env 注入正确值后 /bin/sh -c 'echo $LD_LIBRARY_PATH' 显示原生值，
+  前插条目被吞）。conan 2.x 的 ConanFile.run() 经 command_env_wrapper 生成
+  ". conanbuild.sh && cmd" 并用 subprocess.Popen(shell=True) 执行——
+  POSIX 上 shell=True 就是 /bin/sh，因此 conanbuild*.sh 里 export 的
+  LD_LIBRARY_PATH（含 toolchain environment 注入的依赖 libdirs 与 SDK
+  libc++_shared.so 路径）全部无效 → configure 每个 conftest 运行时报
+  "Error loading shared library libc++_shared.so"（E467 的深层根因之一）。
+  陷阱在于 source 链本身正常、config.log 的环境 dump 看不出变量丢失，
+  极易误判为 conan 环境机制 bug。
+solution: |
+  实验定性（区分 shell 差异）：
+  ```bash
+  # /bin/sh 吞变量、bash 保留——一条命令复现
+  env LD_LIBRARY_PATH=/x /bin/sh -c 'echo $LD_LIBRARY_PATH'   # 原生值（丢失 /x）
+  env LD_LIBRARY_PATH=/x /data/service/hnp/bin/bash -c 'echo $LD_LIBRARY_PATH'  # /x:...（保留）
+  ```
+  修复：configure/make/install 等构建步骤不经 conan 默认 run()，改写
+  run_build_step.sh（内容：source conanbuildenv*.sh + conanautotoolstoolchain.sh
+  + export LD_LIBRARY_PATH=<E467 全量路径>，末尾业务命令），用
+  self.run("<hnp bash> run_build_step.sh", env=None) 显式 bash 驱动
+  （先例：sdcc/4.6.0、ntl/11.6.0；logstalgia/1.1.4 的 _run_bash 助手）。
+  注意 python 侧 os.environ 直改 + subprocess env 传参同样有效（apply()
+  机制），但 /bin/sh 包装层仍会丢弃——凡 self.run 落到 sh 的路径全废。
+fallback: >
+  无法改用 bash 时（如 CI 强制 sh）：把依赖全改静态链接消除对
+  LD_LIBRARY_PATH 的运行时依赖；或 conftest 交叉编译缓存
+  （ac_cv_func_* 预置）跳过运行时探测——均为次选。
+verify_builds: "#42989/#42999（bash 驱动方案全绿）"
+reference_impl: >
+  PR #9149 logstalgia 1.1.4 conanfile.py：_bash()/_run_bash()/_conanbuild_scripts()
+  + E114 config.status mktemp 补丁同锅端；先例 sdcc 4.6.0 umask bash 模式。
+id: TBD（由主编分配）
+doc_file: doc/TBD.md

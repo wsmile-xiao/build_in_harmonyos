@@ -1,0 +1,120 @@
+#====================================================================
+# E547-draft-3028 — 鸿蒙 /system/bin/sh 的 here-document 落盘 /tmp 失败且不中止：
+#   重定向目标被静默写成空文件，下游报出与根因无关的错误
+# 触发事件: clitest 0.5.0 PR #11869 CI 构建 #56023（test_package 7/12 失败）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     E547-draft-3028
+trigger_tool:           test|runtime
+phase:                  testing
+
+error_signature:        \[[0-9]+\]: can't create temporary file /tmp/sh[A-Za-z0-9]+\.tmp: Read-only file system|
+                        can't create temporary file /tmp/sh.*Read-only file system|
+                        can't create temp file for here document
+
+severity:               2
+category:               ohos, shell, testing, tmpdir, hmdfs
+
+match_keywords:         here-document, heredoc, here document, <<EOF, mksh,
+                        /system/bin/sh, can't create temporary file, /tmp/sh,
+                        Read-only file system, TMPDIR, test_package, 空文件,
+                        empty fixture, printf, no test found
+
+title:                  鸿蒙设备上 test_package 脚本经 /system/bin/sh 执行时，每个 here-document 都要在 /tmp 建临时文件；/tmp 只读导致失败，但 shell 不中止脚本，`cat > f <<EOF` 会把 f 静默写成空文件，被测工具随后报出与根因无关的错误。脚本里 export 一个可写 TMPDIR 也救不回来——正确做法是 fixture 一律用 printf 生成并校验非空
+
+root_cause:             CI 构建 #56023（鸿蒙 PC 真机 worker）实测事实：
+                        ① test_package 以 `sh test.sh` 运行，sh 解析为 /system/bin/sh
+                        （报错格式 `script[行号]: can't create temporary file ...` 为 mksh
+                        风格；E435 亦记录鸿蒙 sh 为 mksh）；
+                        ② 每个 here-document 都尝试创建 /tmp/shXXXXXX.tmp，/tmp 只读 → 失败；
+                        ③ 失败**不中止脚本**：`cat > "$WORK/pass.txt" <<'EOF'` 的重定向目标
+                        已被创建，于是留下 0 字节文件，后续逻辑照常执行；
+                        ④ worker 本身提供了可写的 TMPDIR（/data/storage/el2/base/cache），
+                        脚本还在 here-doc 之前 export 了另一个可写 TMPDIR（HMDFS 上的构建
+                        目录），here-doc 依旧写 /tmp；
+                        ⑤ 同一次运行里用 printf 写出的 fixture 正常，被测工具（clitest）
+                        对它的解析、执行、比对、临时目录全部通过——证明被测工具与补丁无恙，
+                        失败面完全在测试脚本的 fixture 构造方式。
+                        机制推断（真机未单独复证）：mksh 只在 TMPDIR 为绝对路径且
+                        access(W_OK|X_OK)==0、且为目录时才采用它，否则回退编译期默认的
+                        /tmp；而 HMDFS 上目录的 X_OK 判定恒为假（R49/E524 已记录），
+                        于是脚本指向 HMDFS 的 TMPDIR 被静默拒用。修法不依赖该推断成立。
+                        下游症状极具误导性：clitest 报 "no test found in input file"，
+                        CI 自动诊断归类为「不要硬编码 /tmp，把临时路径改到 $HOME」——
+                        而脚本根本没有硬编码 /tmp，把 TMPDIR 改到 $HOME（HMDFS）恰恰无效。
+
+affected_scope:         所有在鸿蒙设备上执行的 shell 测试脚本与安装后校验脚本（Conan
+                        test_package 驱动脚本最常见），只要用 here-document 生成输入文件、
+                        配置片段或期望输出；非鸿蒙适配机上同样可用「只读 /tmp 命名空间 +
+                        zsh/bash 驱动」复现同一静默空文件机制。实测样本: clitest 0.5.0。
+
+verification_cmd:       # ① 设备上直接看 here-doc 是否落 /tmp（预期失败）
+                        /system/bin/sh -c 'cat > $HOME/hd.txt <<EOF
+                        x
+                        EOF
+                        wc -c < $HOME/hd.txt'      # 0 → 命中本条
+                        # ② 离线复现静默空文件（非鸿蒙主机）
+                        unshare -rm sh -c 'mount -t tmpfs -o ro,size=1m tmpfs /tmp; \
+                          cd $HOME && zsh -c "cat > f <<EOF
+                        x
+                        EOF"; wc -c < f'            # 0
+                        # ③ 静态定位测试脚本里的 here-doc
+                        grep -n '<<' test_package/*.sh
+
+rec_priority:           1
+rec_approach:           printf-fixtures-with-nonempty-guard
+rec_description:        在设备上运行的脚本里，fixture/配置/期望输出一律用 printf '%s\n' 行参数写文件，不用任何形式的 here-document（<<EOF、<<-EOF、<<'EOF'）；写完立即校验非空，把「静默空文件」变成显式失败
+rec_command:            printf '%s\n' \
+                            "\$ echo ok" \
+                            "ok" \
+                            > "$WORK/pass.txt"
+                        [ -s "$WORK/pass.txt" ] || { echo "FAIL: fixture empty"; exit 1; }
+rec_auto_fix:           false
+rec_impl:               rewrite-heredoc-to-printf
+
+fallback_priority:      2
+fallback_approach:      bundle-fixtures-as-files
+fallback_description:   fixture 较大或含大量特殊字符、printf 转义繁琐时，把它们作为静态文件放进 test_package/ 目录随配方分发，脚本只读取不生成
+fallback_command:       cp "$(dirname "$0")/fixtures/pass.txt" "$WORK/pass.txt"
+fallback_auto_fix:      false
+fallback_impl:          ship-static-fixtures
+
+forbid_1_pattern:       只 export TMPDIR 就继续使用 here-document|
+                        按 CI 诊断把临时路径改到 \$HOME 以修复 here-doc
+forbid_1_reason:        鸿蒙 sh 的 here-doc 临时文件目录不受脚本内设置的 TMPDIR 控制（本次 worker 自带可写 TMPDIR、脚本又 export 了另一个可写 TMPDIR，均无效）
+forbid_1_consequence:   修复看似合理却不生效，同一失败会在下一轮 CI 原样复现，白白消耗一轮修复额度（R44 连续两轮同类即停损）
+
+forbid_2_pattern:       依据下游报错修改被测工具或其补丁
+forbid_2_reason:        下游报错（如 "no test found"、解析失败、比对不一致）只是空输入的结果，被测工具本身无恙
+forbid_2_consequence:   对无辜的工具代码或适配补丁动刀，引入真实回归
+
+principles:
+
+causes:                 []
+caused_by:              [E002]
+similar_to:             [E482, E325]
+conflicts_with:         []
+prerequisite_of:        []
+
+# 关系说明：
+#   E482 — zsh 的 heredoc 走 $TMPPREFIX（默认 /tmp/zsh），修法是设 TMPPREFIX。
+#          本条是鸿蒙 /system/bin/sh，不存在对应的环境变量开关，修法只能是不用 here-doc。
+#   E325 — test_package 的 shell 发现与 mktemp 落 /tmp；本条补上它未覆盖的 here-doc 面，
+#          以及「失败不中止、目标被写成空文件」这一静默特征。
+
+doc_file:               knowledge/drafts/E547-draft-3028.md
+last_updated:           2026-09-23
+source_event:           clitest 0.5.0 PR #11869 CI 构建 #56023：test_package 通用脚本 12 条断言 5 过 7 败，失败的 7 条全部依赖 here-doc 生成的 fixture，唯一用 printf 生成 fixture 的用例（--prefix tab）通过；改为 printf + 非空校验后，本地「只读 /tmp + zsh/bash 驱动」同构场景 12/12、9/9 全过
+
+authors:                nyaco3 <aqjCItYW1QmEJQuF.gcw_XDpqZ8sO@noreply.gitcode.com>
+source_pr:              11869
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-23
+
+draft:                  true
+contributor_id:         3028

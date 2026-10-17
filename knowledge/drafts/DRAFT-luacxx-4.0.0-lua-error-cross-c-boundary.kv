@@ -1,0 +1,68 @@
+#====================================================================
+# DRAFT-luacxx-4.0.0-lua-error-cross-c-boundary — C++ 异常无法穿过
+#   无 unwind tables 的 Lua C 边界时在闭包入口转换为 Lua 错误
+# 触发事件: luacxx 4.0.0 R01 适配（pc7-38, 2026-09-28, 任务 luacxx-4.0.0-r01-pc7-38）
+#   症状: error_support 用例 SIGABRT
+#         libc++abi: terminating due to uncaught exception of type lua::error:
+#         Function expects at least 1 argument but none were given
+#   根因: liblua.a 无 .eh_frame，C++ 异常无法跨纯 C Lua 边界展开
+#====================================================================
+
+id:                     DRAFT-luacxx-4.0.0-lua-error-cross-c-boundary
+status:                 pending-editor-review
+trigger_tool:           clang++|ld
+phase:                  runtime|linking
+error_signature:        terminating due to uncaught exception of type lua::error|
+                         libc\+\+abi: terminating.*lua::error|
+                         Function expects at least 1 argument but none were given|
+                         Signal 11 \(core dumped\)|SIGABRT.*lua::error
+
+severity:               2
+category:               compat, runtime, lua, cpp, portability
+match_keywords:         lua::error, lua_error, invoke_callable, lua_pushcclosure,
+                         .eh_frame, unwind tables, unwinding, Lua C boundary, gnu-unwind,
+                         luacxx, lua 绑定, C++ 异常, exception propagation, musl
+title:                  OHOS 上 C++ 异常无法跨无 unwind tables 的 Lua C 边界时，在 C 闭包入口 try/catch 并以 lua_error() 转换
+
+root_cause: >
+  OHOS musl 生态下 liblua.a（conan 制品仓 lua/5.4.8）为纯 C 编译且未发射
+  .eh_frame/unwind tables（readelf -S liblua.a 无异常展开表）。C++ 绑定库
+  （如 luacxx）用 lua_pushcclosure 把 std::function 包装的调用目标注册为
+  Lua C 函数；该闭包内抛出的 C++ lua::error 需要穿过 lua_pcall/luaD_call
+  的 C 帧回到 C++ 侧，但缺少展开表时 unwinder 无法跨 C 边界 → std::terminate
+  （"uncaught exception"）+ SIGABRT，而非预期的可捕获 lua::error。
+  注意与"栈回溯空帧"现象同根（musl 无 unwind tables）但症状/修复路径不同。
+
+affected_scope:         HarmonyOS PC 上任何把 C++ callable 经 lua_pushcclosure 注入纯 C 编译 Lua 的绑定库；以及 C++ 异常需穿过无 unwind tables 第三方纯 C 库边界的场景。
+verification_cmd:       复现: 注册 push_function<void(bool)> 后以 0 参数调用 lua::call，观察 SIGABRT；修复后重跑上游 error_support 用例 6/6 断言通过、ctest 全量通过。
+
+rec_priority:           1
+rec_approach:           closure-boundary-error-conversion
+rec_description: >
+  在注册为 Lua C 函数的 invoke_callable<RV, Args...> 模板入口加
+  try { ... } catch (lua::error& ex) { lua::push(state, ex); lua_error(state); }
+  把 C++ 异常在原闭包内转换为 Lua 错误（Lua 自身 longjmp 语义），
+  lua_pcall 正常返回 LUA_ERRRUN 后再由封装层抛回 C++ 侧 lua::error。
+  与库自身 lua::callable 路径（convert/callable.cpp）既有模式完全一致，
+  属"补齐缺失边界转换"而非新增平台分支。
+rec_command:            # include/luacxx/convert/callable.hpp invoke_callable
+                        try { ...原逻辑... } catch (lua::error& ex) {
+                            lua::push(state, ex);
+                            lua_error(state);
+                            throw std::logic_error("lua_error must never return");
+                        }
+rec_auto_fix:           true
+rec_impl:               source-template-patch
+
+forbid_1_pattern:       __OHOS__|#ifdef __OHOS__|#if defined\(__OHOS__\)
+forbid_1_reason:        该修复不区分平台：任何无 unwind tables 的 Lua 构建都受益，平台宏掩盖真实机制且违反 R8
+forbid_1_consequence:   平台分支将导致配方在 editor/CI 评审中不能证明其普适性，且真实根因（缺展开表）得不到验证
+
+principles:             P008, P012
+
+similar_to:             DRAFT-E5xx-ohos-musl-unwind-tables-empty-stacktrace, E507
+caused_by:
+prerequisite_of:
+conflicts_with:
+
+doc_file:               DRAFT-luacxx-4.0.0-lua-error-cross-c-boundary.md

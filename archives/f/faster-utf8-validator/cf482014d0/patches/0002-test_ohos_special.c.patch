@@ -1,0 +1,93 @@
+--- /dev/null
++++ b/test_ohos_special.c
+@@ -0,0 +1,90 @@
++/*
++ * HarmonyOS 专项测试 — faster-utf8-validator
++ *
++ * 验证标量回退路径在 OHOS aarch64 上通过公开 API z_validate_utf8()
++ * 正确校验真实业务数据的 UTF-8 合法性与边界拒绝行为：
++ *   - 真实 CJK/emoji/多字节混合文本按预期通过
++ *   - 越界编码、代理对、超 U+10FFFF、截断序列、游离续字节按预期拒绝
++ *   - 长度 0 边界、超长输入（跨多个向量块边界语义）正确
++ *
++ * 这是独立于上游 test.lua 用例的鸿蒙专项用例（业务语义输入驱动），
++ * 通过 CMake 的 test 目标编译并实际运行。
++ */
++#include <stdio.h>
++#include <string.h>
++#include <stdint.h>
++#include "z_validate.h"
++
++static int g_fails = 0;
++static int g_cases = 0;
++
++static void expect(const char *label, const char *data, size_t len, int want) {
++    g_cases++;
++    int got = z_validate_utf8(data, len);
++    if (got != want) {
++        g_fails++;
++        printf("FAIL %s: want=%d got=%d\n", label, want, got);
++    } else {
++        printf("PASS %s\n", label);
++    }
++}
++
++/* 构建一段指定的字节序列（可含 0x00） */
++static void build(char *buf, const unsigned char *seq, size_t n) {
++    memcpy(buf, seq, n);
++}
++
++int main(void) {
++    /* 1) 真实业务文本：中文、日语、emoji、重音混合 */
++    const char *zh = "\xE4\xB8\xAD\xE6\x96\x87";                    /* 中文 */
++    const char *ja = "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E";        /* 日本語 */
++    const char *em = "\xF0\x9F\x98\x80\xF0\x9F\x98\x8D";            /* 😀😍 */
++    const char *mx = "Hello, \xE4\xB8\x96\xE7\x95\x8C! \xF0\x9F\x8C\x8D"; /* Hello, 世界! 🌍 */
++    expect("zh-cjk", zh, strlen(zh), 1);
++    expect("ja-cjk", ja, strlen(ja), 1);
++    expect("emoji-4byte", em, strlen(em), 1);
++    expect("mixed-business", mx, strlen(mx), 1);
++
++    /* 2) 边界拒绝 */
++    expect("overlong-C0", "\xC0\x80", 2, 0);
++    expect("overlong-C1", "\xC1\xBF", 2, 0);
++    expect("overlong-E0-9F", "\xE0\x9F\xBF", 3, 0);
++    expect("overlong-F0-8F", "\xF0\x8F\xBF\xBF", 4, 0);
++    expect("surrogate-ED-A0", "\xED\xA0\x80", 3, 0);
++    expect("above-U10FFFF", "\xF4\x90\x80\x80", 4, 0);
++    expect("F5-lead", "\xF5\x80\x80\x80", 4, 0);
++    expect("stray-cont", "\x80", 1, 0);
++    expect("truncated-2byte", "\xC2", 1, 0);
++    expect("truncated-3byte", "\xE4\xB8", 2, 0);
++    expect("truncated-4byte", "\xF0\x9F\x98", 3, 0);
++
++    /* 3) 边界：空输入与单字节 */
++    expect("empty-len0", "", 0, 1);
++    expect("ascii-single", "A", 1, 1);
++
++    /* 4) 超长输入（跨 32/16 字节向量语义，验证标量无越界） */
++    {
++        char big[4096];
++        for (int i = 0; i < 4096; i++)
++            big[i] = (char)('a' + (i % 26));
++        expect("long-ascii-4096", big, 4096, 1);
++        /* 尾部追加一个合法 3 字节字符（中 = E4 B8 AD，须按正确顺序） */
++        big[4093] = 0xE4; big[4094] = 0xB8; big[4095] = 0xAD;
++        expect("long-ascii-tail-cjk", big, 4096, 1);
++        /* 将某个中间字节改成非法续字节 */
++        big[2000] = 0xC0;
++        expect("long-with-invalid", big, 4096, 0);
++    }
++
++    /* 5) 显式字节序列（含嵌入 NUL 的内部校验） */
++    {
++        char buf[8];
++        build(buf, (const unsigned char[]){0x41, 0x00, 0x42}, 3);
++        expect("embedded-nul", buf, 3, 1);
++        build(buf, (const unsigned char[]){0x41, 0x00, 0xC3}, 3);
++        expect("embedded-nul-trunc", buf, 3, 0);
++    }
++
++    printf("ohos-special: %d cases, %d fails\n", g_cases, g_fails);
++    return g_fails ? 1 : 0;
++}

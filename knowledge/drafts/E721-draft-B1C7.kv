@@ -1,0 +1,73 @@
+#====================================================================
+# E721 draft — OHOS musl <dirent.h> 不传递 <limits.h>：NAME_MAX 未声明
+# 对应文档: knowledge/drafts/E721-draft-B1C7.md
+#====================================================================
+
+# ═══ Layer 0: 错误面 ═══
+id:                     E721
+trigger_tool:           clang|make|configure
+phase:                  compilation|configuration
+error_signature:        use of undeclared identifier 'NAME_MAX'|'NAME_MAX' undeclared|Invalid configuration `aarch64-unknown-linux-ohos': machine `aarch64-unknown-linux' not recognized
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               musl, headers, portability, autotools
+match_keywords:         NAME_MAX, dirent.h, limits.h, direntdup, d_name, scandir, undeclared identifier, musl, transitive include, config.sub 2016, machine aarch64-unknown-linux not recognized
+title:                  OHOS musl 的 <dirent.h> 不传递包含 <limits.h>，源码只 include <dirent.h> 就用 NAME_MAX 会编译失败
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             POSIX 把 NAME_MAX 定义在 <limits.h>。glibc 的 <dirent.h> 经 bits/dirent.h/bits/local_lim.h 间接带出 NAME_MAX，
+                        上游在 glibc/MinGW 上从未显式 include <limits.h> 也能编过；OHOS SDK 的 musl <dirent.h> 只包含
+                        features.h、bits/alltypes.h、bits/dirent.h，NAME_MAX 只在 <limits.h> 第 44 行定义，于是报
+                        use of undeclared identifier 'NAME_MAX'。lfanew 20230825 的 a/direntdup.c（_direntdup 计算 dirent 复制长度）即此形态。
+affected_scope:         用 NAME_MAX（同理 PATH_MAX）计算 struct dirent 大小或文件名缓冲、但只 include <dirent.h>/<stdlib.h>/<string.h> 的 C/C++ 源码；
+                        典型为自带 scandir/direntdup/readdir 兼容层的小工具库。与 E543-draft-2EE3（zpl.h 内 PATH_MAX）同属“musl 无传递包含”族，
+                        本条覆盖 <dirent.h> → NAME_MAX 这一签名。
+verification_cmd:       grep -n "NAME_MAX" $(grep -rl "NAME_MAX" --include=*.c --include=*.h .) ; grep -n "include" <sysroot>/usr/include/dirent.h ; grep -n "NAME_MAX" <sysroot>/usr/include/limits.h
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           include-limits-h-explicitly
+rec_description:        在使用 NAME_MAX 的源文件中显式 #include <limits.h>（一行 portability 补丁，经 refresh-patch --auto 生成），
+                        不加 __OHOS__ 宏、不自定义 NAME_MAX 常量；该改动对 glibc/MinGW 同样正确，可回馈上游。
+rec_command:            sed -i '0,/#include <stddef.h>/s//#include <limits.h>\n#include <stddef.h>/' a/direntdup.c
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      vintage-config-sub-host-override
+fallback_description:   同包伴生问题：随源码分发的 2016 年 config.sub 既不认 conan 的 aarch64-linux-ohos（system `ohos' not recognized），
+                        也不认 aarch64-unknown-linux-ohos（machine `aarch64-unknown-linux' not recognized）。若 configure 无 AC_RUN_IFELSE 类运行期探测，
+                        可不改 config.sub，直接在 generate() 用 tc.update_configure_args({"--host": "aarch64-unknown-linux-musl"})（OHOS libc 即 musl）；
+                        有运行期探测时仍按 E122/E564 系给 config.sub 打补丁。
+                        注意：同代 config.guess 在 HarmonyOS 原生构建机（CI）上 cannot guess build type，必须同时在 settings_build.os == OHOS 时
+                        传 --build=aarch64-unknown-linux-musl（build == host，configure 不进入交叉模式）；只传 --host 在 x86 runner 上能过、上 CI 必红（lfanew PR #13081 首轮）。
+fallback_command:       grep -c "AC_RUN_IFELSE\|AC_TRY_RUN" configure.ac ; ./config.sub aarch64-unknown-linux-musl ; configure --build=aarch64-unknown-linux-musl --host=aarch64-unknown-linux-musl
+fallback_auto_fix:      false
+fallback_impl:          conan-autotools-host-override
+
+# ═══ 禁止策略 ═══
+forbid_1_pattern:       -DNAME_MAX=|#define NAME_MAX 255
+forbid_1_reason:        在命令行或源码里硬编码 NAME_MAX 会与 <limits.h> 的定义冲突（其他翻译单元 include 后产生重定义警告/不一致），且掩盖了缺失的标准头。
+forbid_1_consequence:   不同编译单元对 dirent 复制长度的计算可能不一致，引入越界风险。
+forbid_2_pattern:       #if(def)? __OHOS__.*limits\.h|defined\(__OHOS__\).*NAME_MAX
+forbid_2_reason:        缺的是标准头而不是平台差异，按 R8 补丁中默认禁止 __OHOS__ 宏；无条件 include <limits.h> 在所有 POSIX 平台都正确。
+forbid_2_consequence:   补丁被 PF5 平台宏闸拦截，且无谓地制造平台分叉。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P010
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E543, E122, E544]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E721-draft-B1C7.md
+last_updated:           2026-09-26
+source_event:           lfanew/0-20230825 适配：a/direntdup.c NAME_MAX 未声明（补 <limits.h>），旧 config.sub 以 --host=aarch64-unknown-linux-musl 绕过；test_package 消费者 39/39 经 qemu-aarch64 实跑通过。
+
+draft:                  true
+contributor_id:         B1C7

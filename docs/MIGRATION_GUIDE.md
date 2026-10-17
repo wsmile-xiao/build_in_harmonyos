@@ -1,5 +1,7 @@
 # 旧归档软件迁移指南 (MIGRATION_GUIDE)
 
+> ⚠️ 本文档已由 references/migration-guide.md 取代（单一事实源），仅作历史存档，内容可能与现行流程不一致。
+
 本文档覆盖将旧版本/归档软件迁移到 OHOS 平台时的特殊问题。
 对于全新库的适配，请先阅读 [ADAPTATION_GUIDE.md](ADAPTATION_GUIDE.md)。
 

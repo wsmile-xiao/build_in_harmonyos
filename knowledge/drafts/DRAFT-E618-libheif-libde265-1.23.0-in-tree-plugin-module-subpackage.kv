@@ -1,0 +1,282 @@
+#====================================================================
+# DRAFT-E618-libheif-libde265-1.23.0-in-tree-plugin-module-subpackage
+#   父 tarball 内「插件模块型」子包的识别、依赖归属与交付面判定
+#   （libheif 的 libde265 解码后端 = 树内目标 heif-libde265 → libheif-libde265.so）
+# 来源: feat/libheif-libde265-1.23.0 适配 HarmonyOS PC（积分赛/新包）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-E618-libheif-libde265-1.23.0-in-tree-plugin-module-subpackage
+trigger_tool:           任务分派|tar|cmake|conan|conan-verify
+phase:                  planning|dependency-resolution|recipe-authoring
+error_signature: |
+  任务名 <父>-<组件> 但上游仓库无同名项目|
+  独立 tarball 不存在|
+  find_package(<组件>) 失败|
+  cannot find -l<组件>|
+  no member named 'find' in namespace 'std::ranges'|
+  System is unknown to cmake, create: Platform/HarmonyOS|
+  readelf -d .*lib<组件>.*\.so.* 无 SONAME|
+  NEEDED \.\./lib.*\.so|
+  Error loading shared library .*: Permission denied|
+  Cannot open plugin \(dlopen\)|
+  dlopen.*plugin.*failed|
+  安装前后 sha256 不一致.*\.so|
+  插件目录指向构建时绝对路径|
+  patches.*dict.*静默不应用
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               planning, packaging, subpackage, plugin, dependency-resolution, rule4
+match_keywords: |
+  内树子包, 子模块, 插件模块, MODULE 库, plugin_loading,
+  libheif, libde265, heif-libde265, libheif-libde265,
+  hwy_test, libhwy_test, 父 tarball, 交付面,
+  WITH_<CODEC>_PLUGIN, LIBHEIF_PLUGIN_PATH, FindLIBDE265,
+  __cpp_lib_ranges, std::ranges, libc++ 15004,
+  CMAKE_SYSTEM_NAME, Platform/HarmonyOS, Platform/OHOS.cmake, SONAME,
+  DT_NEEDED 相对路径, 版本化软链,
+  OHOS 代码签名, .note.ohos.ident, .codesign, RUNPATH, cmake --install,
+  llvm-objcopy, binary-sign-tool, Permission denied, dlopen 失败, 安装前后 sha256,
+  依赖主包型, 自含型, R36
+title:                  任务名形如 <父>-<组件> 且父 tarball 内确有同名目标时，按「父 tarball 内子模块」适配：N 取父全量注册面，交付面自包含宿主
+prescan_pattern:        ^archives/[a-z]/(lib|libs)?[a-z0-9_]*(heif|de265|hwy)[a-z0-9_-]*$
+prescan_globs:          archives/*/*libde265*/*/conanfile.py, archives/*/*-*/**/conanfile.py
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: |
+  任务名 <父>-<组件>（例：libheif-libde265、libhwy_test、libnfc-tools）有两类
+  完全不同的来源，必须先判类再动手：
+  ① 发行版拆包子包（<父>-tools/-utils/-cli，见
+     DRAFT-10251-libnfc-tools-…-tools-subpackage-identification）；
+  ② **父 tarball 内的子模块**——上游仓库里根本没有 <组件> 这个项目，但父 tarball
+     的构建系统里有一个同名**目标/产物**。
+  第②类的判定与第①类不同：不看 distro spec，看**父 tarball 里有没有这个目标名**，
+  且包名 = 该目标的产物文件名去掉 lib 前缀与扩展名（libhwy_test ← hwy_test →
+  libhwy_test.a；libheif-libde265 ← heif-${name} → libheif-libde265.so）。
+  判错的代价：把一个父 tarball 内的插件模块当成「父库的编译变体」去适配
+  （只交父库 .so、没有命名产物），或把外部依赖当成树内组件去重建
+  （重复适配、版本漂移、R36 违规）。
+  libheif 的特有陷阱：编解码后端默认「静态编入宿主」，置 WITH_<CODEC>_PLUGIN=ON
+  且 ENABLE_PLUGIN_LOADING=ON 才产生独立 MODULE 目标；而插件**无法脱离宿主**
+  （DT_NEEDED 宿主 + 必须由宿主 dlopen 才注册后端），所以已有的 codec-free 宿主包
+  （libheif/1.22.2，ENABLE_PLUGIN_LOADING=OFF）不能当依赖 → 只能自包含交付
+  同源同版本宿主。另有运行期陷阱：默认插件目录被**编译期钉死**成构建时
+  CMAKE_INSTALL_FULL_LIBDIR/libheif 的绝对路径，Conan 包目录跨缓存/跨机不稳定，
+  必须显式导出 LIBHEIF_PLUGIN_PATH（单数！头文件注释里的复数 PATHS 是过期文档）。
+
+affected_scope: |
+  所有任务名形如 <父库>-<组件> 的第三方库适配。仓内实证同族：
+  libhwy_test 1.3.0（hwy_test ⊂ highway）、libhwy_contrib、
+  libheif-libde265 1.23.0（heif-libde265 ⊂ libheif，插件模块）、
+  libde265（独立库，**不是** libheif 的树内组件——树内只有 Find 模块与插件源码，
+  `find . -iname '*de265*'` 可证）；对照类：<父>-tools 系列见 DRAFT-10251。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           identify-target-in-parent-tarball-then-decide-dependency-and-delivery
+rec_description: |
+  【第一步 判类（3 条命令，全在解包后的父 tarball 根执行）】
+  ① grep -rn "<组件>" --include=CMakeLists.txt .  /
+     grep -rn "add_library(<组件前缀>-\${name}" 找目标名；
+  ② find . -iname '*<组件>*'：同时看**有没有可内树构建的源码树**——
+     只有 Find 模块 + 插件源码 = 外部依赖型组件；
+  ③ tar -tzf <父>-<ver>.tar.gz | head -3 确认顶层是 <父>-<ver>/（不是独立 tarball）。
+
+  【第二步 依赖归属（双向判据，别照搬先例）】
+  · 父 tarball 内有组件源码、且构建系统本来就用它 → 内树构建，不引外部依赖；
+  · 组件是**外部库的适配层**（libheif 的插件只调 libde265 的公开 C API，
+    源码在树内但库在树外）→ 复用仓库既有独立包（本包 = libde265/1.0.18），
+    不在内树重建，继承其平台结论（aarch64 NEON 汇编不可用 → HAVE_NEON=FALSE
+    + C 回退）。
+
+  【第三步 交付面】
+  · 命名产物 = 组件目标产物，必须真出现（否则审方按包名核产物会判交付面不符）；
+  · 组件若不能脱离宿主运行（MODULE 插件 / PUBLIC 依赖），自包含交付宿主
+    （同源同版本），不要 requires 一个功能不匹配的既有宿主包；
+  · 运行期定位用上游**实现里**的 env/接口，不用头文件注释
+    （libheif：代码读 LIBHEIF_PLUGIN_PATH，注释写 PATHS）；
+    Conan 侧在 package_info() 里 self.runenv_info.define(...) 导出，
+    VirtualRunEnv/conanrun 自动生效。
+
+  【第四步 N（rule4，子包红线）】
+  子包的 N **必须按父 tarball 全量注册面**清点，取「用例/注册类」候选口径的最大值：
+  libheif 1.23.0 → Catch2 TEST_CASE 217 是主 N，CTest add_test 39（全开关上限）/
+  测试源文件 41 都远小于它；断言（REQUIRE/CHECK 家族 4016）属**另一单位**，
+  只披露不并入。只按 ctest 口径申报会被脚本化审查判「少报」直接不通过。
+  交付面外的上游用例按 NOT_RUN + 逐项归因记账，不靠压小 N 掩盖，
+  也不为跑它们放开不属于交付面的 build 开关。
+
+  【第五步 并发（共享设备）：工具没有 jobs 旋钮，**配方自己限流**】
+  `finish.py` / `conan_verify.py` **都没有 jobs 旋钮**（grep 0 命中）⇒ 经工具发起的
+  `conan create`，在**配方未自限时**必然按 os.cpu_count()（本设备 20，而 affinity 8）
+  并发。可复用的自限模式（本包实测有效）：
+
+    jobs = self.conf.get("tools.build:jobs", default=None, check_type=int) or 1
+    cmake.build(target=["heif", "heif-libde265"], build_tool_args=[f"-j{jobs}"])
+
+  机制：conan 自己会在 `cmake --build …` 后追加 `-- -j20`，而 `build_tool_args`
+  的内容被追加在**更后面**——GNU make 对重复 `-j` **取最后一个**，故有效并发 = 配方给的值。
+  三条独立取数证据（照抄即可复用）：
+  ① 合成夹具：`printf 'all: a b c d\na b c d:\n\t@sleep 2\n' > Makefile && make -j20 -j1`
+     实测 **8s**（4 个各 2s 串行；若 20 路生效应为 ~2s）；
+  ② 进程表逐字：`ps -ef | grep make` → `make -f Makefile -j20 -j1 heif heif-libde265`；
+  ③ 量级自证：构建日志 `RUN: cmake --build … -- -j20 -j1` + 全量 core+插件+test_package
+     实测 37 分钟（若真 20 路不会是这个量级）。
+  另：调用方若显式给 `-c tools.build:jobs=N`，配方尊重之（`default=None` 分支）。
+  共享设备上还建议外层用 `taskset -c <cpuset>` 做 CPU 硬隔离（槽位制），
+  两者互补：taskset 限核、配方限 make 并发。
+
+  【第六步 补丁声明形态（本轮实测的静默失败）】
+  conandata.yml 的 patches 必须用**列表**形态。Conan 2 的
+  apply_conandata_patches / export_conandata_patches 把 dict 形态解释成
+  {version: [条目…]}（源码：entries = patches.get(str(conanfile.version), [])），
+  用文件名当 key 的 dict 会命中 .get("<版本>", []) → 空列表 →
+  **静默不应用任何补丁**（无告警、无报错）。ARCHIVE-SPEC §4.3 的 dict 示例是
+  Conan 1 时代写法，以 Conan 2 实现为准。本包第一轮 G2 就是这样失败的：
+  补丁写对了、编译错误照旧，日志里连 "Apply patch" 都不出现。
+
+  【第七步 共享库/插件包必须显式钉 CMAKE_SYSTEM_NAME=Linux】
+  设备 uname -s = HarmonyOS，而 SDK CMake 的 Modules/Platform/ 下只有
+  OHOS.cmake、**没有** HarmonyOS.cmake；Conan 默认把 os=OHOS 映射成
+  CMAKE_SYSTEM_NAME=HarmonyOS → CMake 落到「未知平台」通用回退 →
+  **共享库不写 SONAME、也没有版本化文件名**（本机最小探针：不覆盖只有
+  libfoo.so 且 readelf -d 无 SONAME；加 -DCMAKE_SYSTEM_NAME=Linux 后
+  libfoo.so.1.2.3 + SONAME=libfoo.so.1）。
+  对本类包是致命的：MODULE 插件链接宿主时把**相对路径**写进 DT_NEEDED
+  （../libheif.so，含斜杠 ⇒ 按 CWD 解析）→ 运行期 dlopen 失败 →
+  heif_have_decoder_for_format() == 0 → test_package/G2 必红。
+  修法：generate() 里 tc.cache_variables["CMAKE_SYSTEM_NAME"] = "Linux"
+  （Conan 的 GenericSystemBlock 生成 if(NOT DEFINED CMAKE_SYSTEM_NAME)，
+  故 cache 变量优先；编译器/目标仍由 toolchain 决定，产物仍是 OHOS aarch64）。
+  仓库 693 个配方同口径（先例 archives/a/ableton-link/3.1.2）。
+
+  【第八步 插件/宿主类包必须**装后重签**（本类包最隐蔽的一条）】
+  现象：编译/链接/安装全绿，只有运行期 dlopen 报 **Permission denied**（不是
+  not found），heif_init() code=11 → heif_have_decoder_for_format()==0。
+  机制：链接期设备 clang launcher 给 ELF 写入代码签名（readelf -n 可见
+  .note.ohos.ident）；cmake --install 会**就地改写**构建树 RUNPATH（本包插件：
+  安装前 RUNPATH=<build>/libheif/、安装后无 RUNPATH，同尺寸但 sha256 变化，
+  cmp -l 计 182 字节差）→ 字节一变签名失效 → 加载器拒绝映射。
+  **只查宿主会误判**：宿主 libheif.so 不链接同构建树 target，没有构建树 RPATH，
+  安装前后 sha256 完全相同——必须查**插件**产物的安装前后 sha256。
+  处置（先例 archives/o/openh264/2.6.0、archives/f/ffmpeg/8.1.2，均已合并）：
+  package() 在 cmake.install() 之后对 lib/**/*.so* 逐个
+  `llvm-objcopy --remove-section .codesign` +
+  `binary-sign-tool sign -inFile f -outFile f -selfSign 1`（跳软链与非 ELF）。
+  等价路线：tc.variables["CMAKE_BUILD_WITH_INSTALL_RPATH"]=True +
+  tc.variables["CMAKE_INSTALL_RPATH"]=""（从源头不改写，同批 aom 采用）。
+  命中判据：**链接了同一构建树内另一个 target** 的目标才有构建树 RPATH、
+  才会在 install 时被改写 —— 插件包（可执行文件也在列）必查。
+rec_command: |
+  # 判类（在解包后的父 tarball 根）
+  find . -iname '*<组件>*' | head
+  grep -rn "add_library(<组件>\\|plugin_compilation(<组件>" --include=CMakeLists.txt .
+  # 依赖可用性（R35：禁止用 conan list/search 判断）
+  conan install --requires=<依赖>/<版本> --build=never -pr:a ci/conan/profiles/ohos-aarch64
+  # N 清点（父 tarball 全量注册面，取最大值）
+  grep -rho "^TEST_CASE" tests/*.cc | wc -l
+  grep -c "add_.*_test(" tests/CMakeLists.txt
+  # 补丁声明形态自检（必须是 list；dict 会被静默忽略）
+  python3 -c "import yaml;d=yaml.safe_load(open('conandata.yml'));print(type(d['patches']).__name__)"
+  # 交付面验收（包内）
+  find <conan cache path> -name '<命名产物>*' -o -name '<宿主>*' | sort
+rec_auto_fix:           false
+rec_impl:               identify-then-decide-then-self-contain
+
+fallback_priority:      2
+fallback_approach:      ask-upstream-ownership-when-target-not-found
+fallback_description: |
+  若父 tarball 里既没有同名目标、也没有同名源码/目录，则本包多半属 DRAFT-10251
+  的「distro 拆分包」类或任务名有误：不要凭名字猜上游，先按 ① 独立仓库探测
+  ② 父 tarball 目标搜索两条反证留档，再向任务方确认归属。
+fallback_command: |
+  curl -sS -o /dev/null -w '%{http_code}\n' https://api.github.com/repos/<owner>/<组件>
+fallback_auto_fix:      false
+fallback_impl:          human-clarification
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       只交付父库\.so|命名产物.*不需要|包名只是别名
+forbid_1_reason: |
+  包名 = 交付库文件名去掉 lib 前缀与扩展名是本仓惯例（libhwy_test、
+  libheif-libde265 同源同规则）；只交父库 .so 会让包名与产物不符，
+  且把「变体」冒充「子模块」。
+forbid_1_consequence:   交付面与包名不一致，W4/外部审查判交付面不符，返修整轮
+forbid_2_pattern:       内树重建.*libde265|重新下载.*<组件>.*源码编译
+forbid_2_reason: |
+  组件是外部库的适配层时（树内只有 Find 模块 + 插件源码），内树没有可构建的
+  组件源码；且依赖包已发布（R36），重建产出重复制品。
+forbid_2_consequence:   版本漂移、重复适配、aarch64 NEON 结论丢失
+forbid_3_pattern:       requires\("libheif/1\.22\.2"\)|requires\("<已有宿主包>/"
+forbid_3_reason: |
+  宿主必须与插件同源同版本且启用了插件装载；codec-free 宿主
+  （ENABLE_PLUGIN_LOADING=OFF）运行期根本不 dlopen 插件，跨版本插件 ABI 也不保证。
+forbid_3_consequence:   插件装了但永远不被装载（假绿：文件在、功能不在）
+forbid_4_pattern:       只按 ctest|只按 add_test|N\s*=\s*39|N\s*=\s*13
+forbid_4_reason: |
+  rule4 取「上游实测 N」，审方按父 tarball 全量注册面清点；
+  TEST_CASE 217 ≫ add_test 39，按小口径申报即少报。
+forbid_4_consequence:   外部审查 rule4 直接不通过（本批已有 4 例返修，其中 1 例为子包）
+forbid_5_pattern:       patches:\s*$[\s\S]*?^\s{2}"?[0-9]{4}-.*\.patch"?:|patches:\s*\{[^}]*\.patch"
+forbid_5_reason: |
+  conandata.yml 的 patches 用文件名当 key 的 dict 形态会被 Conan 2
+  apply_conandata_patches 静默忽略（它按 {version: [条目]} 解释，
+  .get("<版本>", []) 得空列表），补丁永不生效且没有任何告警。
+forbid_5_consequence:   补丁静默失效 → 编译错误照旧或平台适配丢失（假绿）
+forbid_6_pattern:       共享库.*不设|MODULE.*不设|NEEDED \.\./|只用 CMAKE_SYSTEM_NAME=HarmonyOS
+forbid_6_reason: |
+  os=OHOS 默认映射的 CMAKE_SYSTEM_NAME=HarmonyOS 在本 SDK 的 CMake 里没有对应
+  Platform 文件 → 未知平台回退 → 共享库无 SONAME、无版本化软链 → MODULE 插件把
+  相对路径写进 DT_NEEDED → 运行期 dlopen 必失败（构建期完全看不出来）。
+forbid_6_consequence:   链接期全绿、运行期插件加载失败（假绿：文件在、功能不在）
+forbid_7_pattern:       Permission denied.*不是问题|只查宿主|只对比宿主 sha256
+forbid_7_reason: |
+  cmake --install 改写的只有**链接了同构建树 target** 的目标（插件）；
+  宿主不链接树内 target，安装前后逐字节相同 → 只查宿主必然得出"交付物没问题"
+  的错误结论，而 dlopen 失败恰恰发生在插件上。
+forbid_7_consequence:   漏掉装后重签 → 插件在消费者侧全部无法加载（功能整体不可用）
+forbid_8_pattern:       package\(\).*只有 cmake\.install|不重签.*\.so
+forbid_8_reason: |
+  本类包（插件 + 宿主同源交付）命中率 100%：只要插件链接了同构建树的宿主，
+  install 就会改写 RUNPATH、破坏 OHOS 代码签名。
+forbid_8_consequence:   本机 test_package/G2 必红（Permission denied），CI 同样红
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to: |
+  DRAFT-10251-libnfc-tools-1.8.0-tools-subpackage-identification（<父>-tools 拆分包判类）、
+  E542（provider 配方复用父制品）、
+  archives/l/libhwy_test/1.3.0（同批同族子包先例）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd: |
+  cd "$TASK_DIR/upstream/libheif-1.23.0" && \
+  grep -rn "add_library(heif-\${name}" libheif/plugins/CMakeLists.txt && \
+  grep -rho "^TEST_CASE" tests/*.cc | wc -l && \
+  find . -iname '*de265*'
+  # SONAME 探针（判定是否必须钉 CMAKE_SYSTEM_NAME）
+  cmake -S probe -B probe/b -DCMAKE_TOOLCHAIN_FILE=<build>/generators/conan_toolchain.cmake && \
+  cmake --build probe/b && readelf -d probe/b/libfoo.so | grep SONAME
+doc_file:               knowledge/drafts/DRAFT-E618-libheif-libde265-1.23.0-in-tree-plugin-module-subpackage.md
+last_updated:           2026-09-20
+source_event: |
+  feat/libheif-libde265-1.23.0 适配 HarmonyOS PC
+  （libheif 1.23.0 树内 libde265 解码后端插件模块，
+  产物 lib/libheif/libheif-libde265.so；自包含交付插件装载版宿主；
+  复用独立包 libde265/1.0.18；父全量注册面 N=217）
+authors:                SunShine_06
+source_pr:              "<待填：本任务 PR 编号>"
+source_commit:          "<待填：本任务最终 SHA>"
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-20

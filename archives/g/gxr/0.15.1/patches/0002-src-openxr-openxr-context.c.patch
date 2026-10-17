@@ -1,0 +1,184 @@
+--- a/src/openxr/openxr-context.c
++++ b/src/openxr/openxr-context.c
+@@ -313,30 +313,32 @@
+     {
+       g_print("Couldn't get required VR View Configuration %s from Runtime!\n",
+                 viewport_config_name);
+       return FALSE;
+     }
+ 
+   result = xrEnumerateViewConfigurationViews (self->instance, self->system_id,
+                                               self->view_config_type, 0,
+                                               &self->view_count, NULL);
+ 
+-  self->views = g_malloc (sizeof(XrView) * self->view_count);
++  self->views = g_malloc0 (sizeof(XrView) * self->view_count);
+   for (uint32_t i = 0; i < self->view_count; i++)
+     self->views[i].type = XR_TYPE_VIEW;
+ 
+   if (!_check_xr_result (result,
+       "Failed to get view configuration view count!"))
+     return FALSE;
+ 
+   self->configuration_views =
+-    malloc(sizeof(XrViewConfigurationView) * self->view_count);
++    g_malloc0 (sizeof(XrViewConfigurationView) * self->view_count);
++  for (uint32_t i = 0; i < self->view_count; i++)
++    self->configuration_views[i].type = XR_TYPE_VIEW_CONFIGURATION_VIEW;
+ 
+   result = xrEnumerateViewConfigurationViews(
+     self->instance, self->system_id, self->view_config_type, self->view_count,
+     &self->view_count, self->configuration_views);
+   if (!_check_xr_result
+       (result, "Failed to enumerate view configuration views!"))
+     return FALSE;
+ 
+   return TRUE;
+ }
+@@ -1009,20 +1011,42 @@
+ }
+ 
+ static gboolean
+ _init_session (GxrContext *context)
+ {
+   OpenXRContext *self = OPENXR_CONTEXT (context);
+ 
+   GulkanClient *gc = gxr_context_get_gulkan (context);
+   GulkanDevice *gd = gulkan_client_get_device (gc);
+   GulkanQueue *queue = gulkan_device_get_graphics_queue (gd);
++
++  PFN_xrGetVulkanGraphicsDeviceKHR get_vulkan_graphics_device = NULL;
++  XrResult result = xrGetInstanceProcAddr (
++    self->instance, "xrGetVulkanGraphicsDeviceKHR",
++    (PFN_xrVoidFunction *) &get_vulkan_graphics_device);
++  if (!_check_xr_result (result,
++        "Failed to retrieve xrGetVulkanGraphicsDeviceKHR"))
++    return FALSE;
++
++  VkPhysicalDevice runtime_device = VK_NULL_HANDLE;
++  result = get_vulkan_graphics_device (
++    self->instance, self->system_id,
++    gulkan_client_get_instance_handle (gc), &runtime_device);
++  if (!_check_xr_result (result,
++        "Failed to get the runtime Vulkan physical device"))
++    return FALSE;
++
++  if (runtime_device != gulkan_device_get_physical_handle (gd))
++    {
++      g_printerr ("OpenXR runtime selected a different Vulkan device.\n");
++      return FALSE;
++    }
+ 
+   uint32_t family_index = gulkan_queue_get_family_index (queue);
+ 
+   self->graphics_binding = (XrGraphicsBindingVulkanKHR){
+     .type = XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR,
+     .instance = gulkan_client_get_instance_handle (gc),
+     .physicalDevice = gulkan_device_get_physical_handle (gd),
+     .device = gulkan_device_get_handle (gd),
+     .queueFamilyIndex = family_index,
+     .queueIndex = 0,
+@@ -1558,33 +1582,97 @@
+ _request_quit (GxrContext *context)
+ {
+   OpenXRContext *self = OPENXR_CONTEXT (context);
+   /* _poll_event will send quit event once session is in STOPPING state */
+   xrRequestExitSession (self->session);
+ }
+ 
+ static gboolean
+ _get_instance_extensions (GxrContext *self, GSList **out_list)
+ {
+-  (void) self;
+-  (void) out_list;
+-  g_print ("Stub: get instance extensions\n");
++  OpenXRContext *openxr = OPENXR_CONTEXT (self);
++  PFN_xrGetVulkanInstanceExtensionsKHR get_extensions = NULL;
++  XrResult result = xrGetInstanceProcAddr (
++    openxr->instance, "xrGetVulkanInstanceExtensionsKHR",
++    (PFN_xrVoidFunction *) &get_extensions);
++  if (!_check_xr_result (result,
++        "Failed to retrieve xrGetVulkanInstanceExtensionsKHR"))
++    return FALSE;
++
++  uint32_t size = 0;
++  result = get_extensions (openxr->instance, openxr->system_id,
++                           0, &size, NULL);
++  if (!_check_xr_result (result,
++        "Failed to query required Vulkan instance extensions"))
++    return FALSE;
++
++  if (size > 1)
++    {
++      gchar *extensions = g_malloc0 (size);
++      result = get_extensions (openxr->instance, openxr->system_id,
++                               size, &size, extensions);
++      if (!_check_xr_result (result,
++            "Failed to get required Vulkan instance extensions"))
++        {
++          g_free (extensions);
++          return FALSE;
++        }
++
++      gchar **array = g_strsplit (extensions, " ", 0);
++      for (guint i = 0; array[i] != NULL; i++)
++        if (array[i][0] != '\0')
++          *out_list = g_slist_append (*out_list, g_strdup (array[i]));
++      g_strfreev (array);
++      g_free (extensions);
++    }
+   return TRUE;
+ }
+ 
+ static gboolean
+ _get_device_extensions (GxrContext *self, GulkanClient *gc, GSList **out_list)
+ {
+-  (void) self;
++  OpenXRContext *openxr = OPENXR_CONTEXT (self);
+   (void) gc;
+-  (void) out_list;
+-  g_print ("Stub: get device extensions\n");
++  PFN_xrGetVulkanDeviceExtensionsKHR get_extensions = NULL;
++  XrResult result = xrGetInstanceProcAddr (
++    openxr->instance, "xrGetVulkanDeviceExtensionsKHR",
++    (PFN_xrVoidFunction *) &get_extensions);
++  if (!_check_xr_result (result,
++        "Failed to retrieve xrGetVulkanDeviceExtensionsKHR"))
++    return FALSE;
++
++  uint32_t size = 0;
++  result = get_extensions (openxr->instance, openxr->system_id,
++                           0, &size, NULL);
++  if (!_check_xr_result (result,
++        "Failed to query required Vulkan device extensions"))
++    return FALSE;
++
++  if (size > 1)
++    {
++      gchar *extensions = g_malloc0 (size);
++      result = get_extensions (openxr->instance, openxr->system_id,
++                               size, &size, extensions);
++      if (!_check_xr_result (result,
++            "Failed to get required Vulkan device extensions"))
++        {
++          g_free (extensions);
++          return FALSE;
++        }
++
++      gchar **array = g_strsplit (extensions, " ", 0);
++      for (guint i = 0; array[i] != NULL; i++)
++        if (array[i][0] != '\0')
++          *out_list = g_slist_append (*out_list, g_strdup (array[i]));
++      g_strfreev (array);
++      g_free (extensions);
++    }
+   return TRUE;
+ }
+ 
+ XrTime
+ openxr_context_get_predicted_display_time (OpenXRContext *self)
+ {
+   return self->predicted_display_time;
+ }
+ 
+ static uint32_t

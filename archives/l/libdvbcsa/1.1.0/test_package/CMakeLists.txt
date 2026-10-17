@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_libdvbcsa C)
+find_package(libdvbcsa CONFIG REQUIRED)
+add_executable(test_libdvbcsa test_libdvbcsa.c)
+target_link_libraries(test_libdvbcsa PRIVATE libdvbcsa::libdvbcsa)

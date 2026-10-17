@@ -1,0 +1,72 @@
+# ═══ Draft knowledge entry — musl CMSG_NXTHDR 宏符号比较缺陷（-Werror -Wsign-compare 误伤） ═══
+# Timestamp: 2026-09-17
+# Software: msquic 2.6.1（复用于一切使用 CMSG_NXTHDR 遍历辅助数据的应用层网络库）
+# Gate: G2 conan create / 编译期
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the content below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+
+id: DRAFT-msquic-2.6.1-musl-cmsg-nxthdr-sign-compare
+draft: DRAFT-msquic-2.6.1-musl-cmsg-nxthdr-sign-compare
+status: pending-editor-review
+title: "musl CMSG_NXTHDR 宏内部 size_t/ptrdiff_t 混用，在 -Werror -Wsign-compare 工程的宏展开处误伤（glibc 无此问题）"
+
+severity: 2
+category: compat, libc, headers
+trigger_tool: cc|clang|cmake|make
+phase: compilation
+approach: pragma-diagnostic-scope
+
+keywords: CMSG_NXTHDR, cmsghdr, sign-compare, -Werror, musl, glibc, ctrl data,
+  ancillary data, sendmmsg, recvmsg, UDP GSO, control message, __CMSG_LEN,
+  __MHDR_END, ptrdiff_t, size_t, 宏展开, 误伤, warning-to-error
+
+match_keywords: CMSG_NXTHDR, sign-compare, cmsghdr, musl, Werror, ancillary
+
+error_signature: >
+  error: comparison of integers of different signs.+CMSG_NXTHDR|
+  CMSG_NXTHDR.+[-]Wsign[-]compare|
+  warning: comparison of integers of different signs: 'unsigned long' and 'long'.*__MHDR_END
+
+root_cause: >
+  musl sys/socket.h 的 CMSG_NXTHDR 实现为
+  `__CMSG_LEN(cmsg) + sizeof(struct cmsghdr) >= __MHDR_END(mhdr) - (unsigned char*)(cmsg)`：
+  左侧是 size_t（unsigned long），右侧是指针减法结果 ptrdiff_t（long）。
+  调用方代码本身没有任何符号比较，但宏展开把混型比较带进了**用户编译单元**——
+  对开了 -Werror -Wsign-compare 的工程（协议栈/内核旁路库常用），编译在
+  `CMsg = CMSG_NXTHDR(...)` 一行直接判死。glibc 的同名宏对操作数做了 cast 清理，
+  所以同一份代码在 glibc Linux 上从来不会触发——这是 musl 专属的"健康代码误伤"类坑。
+
+solution: |
+  对触发宏展开的**编译单元**（不是全局）加作用域诊断屏蔽，不改任何调用逻辑：
+  ```c
+  // datapath_linux.c / datapath_epoll.c 头部（msquic 0002/0003 补丁）
+  #if defined(__OHOS__)
+  // musl's CMSG_NXTHDR mixes size_t and ptrdiff_t operands inside the macro,
+  // triggering -Werror -Wsign-compare in the expansion (not in our code).
+  #pragma clang diagnostic ignored "-Wsign-compare"
+  #endif
+  ```
+  要点：
+  1. 先数清楚哪些 TU 用了 CMSG_NXTHDR（grep -l），Linux datapath 通常是
+     datapath_linux.c + datapath_epoll.c 两个（kqueue 是 BSD、iouring 默认不编）；
+  2. 只在 __OHOS__ 守卫内加 pragma——glibc 环境保持原样，不影响上游可回归性；
+  3. 禁止改 musl 系统头，也禁止全局 CFLAGS 关 -Wsign-compare（会掩盖库自身真实问题）。
+
+fallback: >
+  若工程允许降警告：configure/cmake 层针对 OHOS 追加 -Wno-error=sign-compare
+  （比全局关 -Wsign-compare 窄），或 -Wno-sign-compare 仅追加到受影响 TU 的
+  COMPILE_OPTIONS。上游若接受，可提交同款 pragma 上游化（msquic 对 __ANDROID__
+  已有同类平台分支先例）。
+
+verify_builds: msquic/2.6.1 本地 conan create 全绿（test_msquic 1/1 PASS）；上游 CI 构建号待 PR 合入后回填
+reference_impl: >
+  msquic 2.6.1 patches/0002-datapath-linux-musl-cmsg-sign-compare.patch +
+  0003-datapath-epoll-musl-cmsg-sign-compare.patch
+  （https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos feat/msquic-2.6.1）
+
+id_ambiguous: E-next
+doc_file: drafts/DRAFT-msquic-2.6.1-musl-cmsg-nxthdr-sign-compare.md

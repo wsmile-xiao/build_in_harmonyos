@@ -1,0 +1,114 @@
+#====================================================================
+# DRAFT — rutabaga 0.1.80（crates.io `rutabaga_gfx`）纯 Rust rlib 在 OHOS 上
+# 的构建/链接/签名组合适配：未签名 ELF + 符号链接 rustlib + cargo 的 OpenSSL
+# 版本门 + SDK clang 包装脚本不可作 linker
+# 触发事件: rutabaga 0.1.80 HarmonyOS PC 适配（2026-10-01）
+#
+# 与既有条目的关系（增量说明）:
+#   DRAFT-below-ohos-unsigned-rust-toolchain：已覆盖「预编译工具链 bin 与
+#     librustc_driver 的 exec/dlopen 签名 + cargo 运行库/CA」——本条不重复，
+#     本条增量是四项：① rustlib 若为**符号链接**（而非实体目录）rustc 直接
+#     报 E0463 can't find crate for `std`，与签名无关；② cargo 1.97 需要
+#     `SSL_get0_group_name@OPENSSL_3.2.0`，设备镜像自带 OpenSSL 过旧会
+#     `symbol not found`，且旧配方引用的 harmonybrew zlib bottle 已 404，
+#     libz 应回退平台 /system/lib64/platformsdk；③ SDK 的
+#     `aarch64-unknown-linux-ohos-clang` 是 /bin/sh **包装脚本**，作为 rustc
+#     linker 会 Permission denied 或推导出错误 sysroot（Scrt1.o/-lc 找不到），
+#     必须用同目录 `clang-15` ELF + 显式 `--target/--sysroot/-D__MUSL__`；
+#     conan profile 的 tools.build:compiler_executables.c 正指向该包装脚本，
+#     配方必须自行 glob 覆盖；④ HMDFS 上新建 build script 立即 exec 偶发
+#     `Text file busy (os error 26)`，cargo 调用需重试。
+#   E105/E154 = rustup 不识别 HarmonyOS（工具链来源事实）
+#   E318/E509 = 其它未签名 ELF / harmonybrew OpenSSL 场景
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     rutabaga-0.1.80-rust-ohos-rlib-adaptation
+trigger_tool:           cargo|rustc|conan|binary-sign-tool|ld
+phase:                  configuration|compilation|linking|testing
+error_signature:        'can.t find crate for .(std|core).|may not be installed|SSL_get0_group_name: symbol not found|Error loading shared library libssl\.so|Permission denied \(os error 13\).*bin/cargo|could not exec the linker|ld\.lld: error: cannot open Scrt1\.o|unable to find library -lc|Text file busy \(os error 26\)|Package type is .library., but no .shared. option declared|BadZipFile: File is not a zip file|NotFoundException: Not found: https://harmonybrew\.atomgit\.com/bottles/zlib'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               rust, cargo, ohos, toolchain, unsigned-elf, openssl, linker, conan, build-system
+match_keywords:         cargo, rustc, rustlib, E0463, can't find crate for std, SSL_get0_group_name, OPENSSL_3.2.0, libssl.so, Permission denied os error 13, binary-sign-tool, selfSign, clang-15, aarch64-unknown-linux-ohos-clang, --sysroot, -D__MUSL__, Scrt1.o, -lc, Text file busy, os error 26, rust-toolchain/1.97.1, rlib, package_type library shared option, BadZipFile, crates.io download endpoint, harmonybrew zlib bottle 404
+title:                  纯 Rust rlib 库的 OHOS 适配组合拳：工具链/运行库签名 + rustlib 实体复制 + cargo 的 OpenSSL≥3.5 门 + 用 clang-15 ELF 取代 SDK 包装脚本作 linker
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             五个互相独立、按暴露顺序出现的问题，全部源于「cargo 工程 × OHOS loader/签名策略 × SDK 包装脚本」：
+                        (1) 未签名 ELF 被 OHOS loader 拒绝——错误表现为 `Permission denied (os error 13)`（exec）或
+                        `Error loading shared library`（dlopen），会误导为路径/权限问题；cargo/rustc 与
+                        librustc_driver*.so、cargo 运行期 libssl/libcrypto 都要 binary-sign-tool -selfSign 1。
+                        (2) rust-toolchain 包内 `lib/rustlib` 以**符号链接**落到 build folder 时，rustc 找不到
+                        aarch64-unknown-linux-ohos 的 std/core，报 E0463；必须 copytree 实体复制。
+                        (3) cargo 1.97 动态链 OpenSSL 且需要 `SSL_get0_group_name@OPENSSL_3.2.0`；设备镜像自带
+                        libssl.so.3 无该符号（symbol not found），需 harmonybrew openssl@3-3.6.4 bottle；
+                        libz 取平台 /system/lib64/platformsdk（旧 harmonybrew zlib bottle 已 404）。
+                        (4) SDK 的 aarch64-unknown-linux-ohos-clang 是 /bin/sh 包装脚本：
+                        a) 作为 rustc linker 时 exec 会 `Permission denied`；b) 即便可执行，其
+                        `dirname/readlink` 在受限 PATH 下失败 → sysroot 推导错误 → `ld.lld: error: cannot open
+                        Scrt1.o / unable to find library -lc`。必须改用同目录 `clang-15` ELF 并显式传
+                        `--target aarch64-linux-ohos --sysroot=<sdk>/native/sysroot -D__MUSL__`；
+                        conan profile 的 tools.build:compiler_executables.c 正指向包装脚本，配方须自行 glob 覆盖。
+                        (5) HMDFS 上新写入的 build script 立刻被 exec 偶发 `Text file busy (os error 26)`，需重试。
+affected_scope:         所有以 cargo 构建、且以 conan tool_requires rust-toolchain 在 OHOS 设备上构建的 Rust 库/命令行包
+verification_cmd:       rustc --print sysroot; cargo --version; readelf -d <bin> | head; rustc --print cfg --target aarch64-unknown-linux-ohos
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           stage-signed-toolchain-real-rustlib-clang15-elf-linker
+rec_description:        在 build folder 内自建签名工具链（copytree rustlib + 签名 bin/so），cargo config 指定
+                        `linker = <sdk>/…/llvm/bin/clang-15` 与 link-args（--target/--sysroot/-D__MUSL__），
+                        LD_LIBRARY_PATH = 工具链 lib + harmonybrew openssl3 lib + /system/lib64/platformsdk，
+                        cargo 调用在 ETXTBSY 时重试 3 次
+rec_command:            binary-sign-tool sign -inFile <bin> -outFile <bin>.signed -selfSign 1; cp -a <toolchain>/lib/rustlib <build>/rust-toolchain/lib/rustlib; cargo build --release --target aarch64-unknown-linux-ohos
+rec_auto_fix:           false
+rec_impl:               recipe-staged-toolchain
+
+fallback_priority:      2
+fallback_approach:      use-toolchain-bin-rebuild-cargo-or-supply-prebuilt-openssl
+fallback_description:   若 harmonybrew bottle 不可达，可用 openssl/3.5+ conan 包（需其提供 SSL_get0_group_name，
+                        避免 conancenter 同名遮蔽导致 on-device 重建）+ 平台 libz；
+                        或改用 cargo 系统包（OHOS 设备若预置 rust 工具链则免签名）
+fallback_command:       conan install --requires=openssl/3.5.x -r=ohpcd
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       linker\s*=\s*['"]?/data/service/hnp/(bin|ohos-sdk\.org/[^'"]*/llvm/bin)/(aarch64-unknown-linux-ohos-clang|clang)['"]?
+forbid_1_reason:        该路径是 /bin/sh 包装脚本，rustc exec 会 Permission denied，或包装脚本内 readlink/dirname
+                        在受限 PATH 下失败导致 sysroot 推导错误（Scrt1.o/-lc 找不到）
+forbid_1_consequence:   链接阶段失败；若侥幸绕过则生成错误 sysroot 的目标文件
+forbid_2_pattern:       lib/rustlib -> .*(符号链接|symlink)
+forbid_2_reason:        rustc 不解析符号链接的 sysroot 子树，直接报 E0463 can't find crate for `std`
+forbid_2_consequence:   所有 crate 编译失败
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P001, P015
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-below-ohos-unsigned-rust-toolchain
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/rutabaga-0.1.80-rust-ohos-rlib-adaptation.md
+last_updated:           2026-10-01
+source_event:           rutabaga 0.1.80 (crates.io rutabaga_gfx) HarmonyOS PC 适配，conan create / W3 通过
+
+# ═══ 知识协作 ═══
+authors:                GaoPengqiang <GaoPengqiang@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+# ═══ 草稿标记 ═══
+draft:                  true
+contributor_id:         AB38

@@ -1,0 +1,99 @@
+#====================================================================
+# E544 — OHOS hmdfs(hmmac) 设备端构建工具链 exec/加载三重限制
+#   conan 解压丢可执行位、posix_spawn 拒 exec 用户文件、加载器拒挂载 .so
+# 来源: feat(wmmisc): 1.2 适配 HarmonyOS PC（设备端本地构建 + W3 本地 CI 模拟实证）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E544
+trigger_tool:           configure|cmake|meson|make|gcc|clang|ld|python|pip|install|test|runtime
+phase:                  configuration|compilation|linking|installation|testing|runtime
+error_signature: PermissionError.*install-sh|Permission denied.*zsh|unable to find library -l|Error loading shared library|SAFE_DELETE_BULK_GUARD_ERROR
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 2
+category: packaging,runtime,toolchain
+match_keywords:         install-sh, Permission denied, EACCES, RC=126, bad interpreter,
+                        hmmac, hmdfs, use_task, posix_spawn, execve, chmod 770, setgid,
+                        conan, conan create, zsh, SAFE_DELETE_BULK_GUARD, PYTHONPATH,
+                        sitecustomize, BASH_ENV, linker-view, MKDIR_P, unable to find library,
+                        Error loading shared library, LD_LIBRARY_PATH
+title: ohos-hmdfs-python-exec-and-loader-mount-quirks
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: OHOS hmdfs(hmmac=use_task) 三重限制: 1) conan 解压丢失可执行位且 chmod 被 setgid 强制 770; 2) python posix_spawn 只能 exec 预装二进制(用户创建的脚本/链接/ELF 一律 EACCES)且不按 PATH 搜索裸命令名; 3) 动态加载器无法打开 hmdfs/网络挂载上的 .so; 另: 会话 PATH 中 rm 被 safe-delete 垫片劫持、PYTHONPATH 注入 sitecustomize 会在 conan 批量删临时目录时抛 PermissionError 杀死 conan
+affected_scope:         一切在设备端 hmdfs 工作区进行的本地构建/本地 CI 模拟(W3)/conan 操作:
+                        autotools 辅助脚本(install-sh/compile/missing/depcomp)被 make 直接
+                        exec 时报 Permission denied 或 "bad interpreter"; conan 包装脚本
+                        execve 间歇性 EACCES(hmdfs label 翻转, 同一命令时好时坏, RC=126);
+                        链接/运行期报 unable to find library -l<name> 或
+                        Error loading shared library; zsh 不可用且 W3 的 zsh 调用被
+                        hmmac 拦截。不命中上游 CI worker 环境(其工作区无此限制)。
+verification_cmd:       PYTHONPATH=<conan-libexec> python3 <conan-libexec>/bin/conan --version   # conan 经「python3 读取入口脚本」执行应稳定输出版本号(绕 execve); 对照: 直接 exec 同一脚本间歇性 RC=126 → 证实 label 翻转而非缺包
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           relocate-conan-home-to-local-fs-and-probe-exec
+rec_description:        把受 FS 限制影响的执行/加载面整体迁到应用沙箱本地 FS(el2), 并用
+                        「读取执行」与 make 变量覆盖绕开 execve 限制:
+                        1) CONAN_HOME 指向本地 FS(加载器/链接器即可读 .so);
+                        2) 配方 build() 前对 autotools 辅助脚本 chmod+exec 探针重试
+                        (_restore_exec_bits 模式, hmdfs 属性缓存有秒级滞后);
+                        3) make 用 MKDIR_P='/system/bin/mkdir -p' 覆盖, 绕开对
+                        install-sh 的直接 exec(语义等价, 同 libdockapp 先例);
+                        4) 依赖库复制进构建目录 linker-view, 显式传
+                        LDFLAGS=-L<linker-view>(在 OHOS configure 参数里, 非
+                        generate() 的 toolchain 上——后者不进 OHOS 路径);
+                        5) conan 调用统一 env -u PYTHONPATH(sitecustomize 会杀 conan);
+                        6) conan 本体用 bash -c 内联 + python3「读取」入口脚本执行,
+                        规避 hmdfs execve label 翻转; 注意外部命令(timeout/env/xargs)
+                        会绕过 shell 函数 hook, 必须在 argv 层面重写;
+                        7) 设备无 zsh: 本地 W3 需把 CI 脚本 zsh 专有语法 bash 化或
+                        交由 CI worker 执行(其环境无此限制)。
+rec_command:            CONAN_HOME=/data/storage/el2/base/cache/conan2 env -u PYTHONPATH python3 scripts/ohc-run.py finish <pkg> <ver> built
+rec_auto_fix:           false
+rec_impl:
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:      defer-to-ci-worker
+fallback_description:   设备端无法稳定复现/修复时, 把构建与测试整体交由平台 CI worker
+                        执行(其工作区不受 hmmac 限制), 本地仅保留静态核验。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+forbid_1_pattern:       conan\s+(create|install).*--build=missing
+forbid_1_reason:        依赖不可消费(R36)时 --build=missing 会静默本地编译掩盖问题
+forbid_1_consequence:   依赖断供风险被隐藏, PR 审查判定为违规绕过
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E544.md
+last_updated: 2026-09-27
+source_event:           wmmisc/1.2 设备端本地构建与 W3 本地 CI 模拟
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors: SunShine_06 <apYppkJJLBwLbnc6.SunShine_06@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used: 2026-09-27
+
+draft: true
+contributor_id: 37CC

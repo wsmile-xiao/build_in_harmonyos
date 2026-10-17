@@ -1,0 +1,122 @@
+--- a/storage/innobase/fil/fil0fil.cc
++++ b/storage/innobase/fil/fil0fil.cc
+@@ -35,6 +35,7 @@
+ 
+ #include <errno.h>
+ #include <fcntl.h>
++#include <unistd.h>
+ #include <sys/types.h>
+ 
+ #include <scope_guard.h>
+@@ -4233,7 +4234,14 @@
+   }
+ 
+   if (lower_case_file_system) {
+-    Fil_path::to_lower(real_path);
++    /* Some filesystems make file names case insensitive while keeping
++    directory components case sensitive. Keep the real path if lowering
++    the complete path makes it inaccessible. */
++    std::string lowered_path(real_path);
++    Fil_path::to_lower(lowered_path);
++    if (lowered_path == real_path || os_file_exists(lowered_path.c_str())) {
++      real_path = std::move(lowered_path);
++    }
+   }
+ 
+   /* Try to consistently end a directory name with a separator.
+@@ -5445,10 +5453,21 @@
+     if (ret == 0) {
+       success = true;
+     } else {
+-      /* If posix_fallocate() fails for any reason, issue only a warning
+-      and then fall back to os_file_set_size() */
+-      ib::warn(ER_IB_MSG_303, path, ulonglong{size_in_bytes}, ret,
+-               strerror(errno));
++      /* Some sandboxes (e.g. HarmonyOS) deny posix_fallocate() with EPERM.
++      Fall back to a sparse extension (ftruncate + one byte at the end),
++      which is functionally equivalent. */
++      if ((ret == EPERM || ret == ENOSYS || ret == EINVAL) &&
++          size_in_bytes > 0 &&
++          ftruncate(file.m_file, static_cast<off_t>(size_in_bytes)) == 0 &&
++          pwrite(file.m_file, "", 1,
++                 static_cast<off_t>(size_in_bytes) - 1) == 1) {
++        success = true;
++      } else {
++        /* If posix_fallocate() fails for any reason, issue only a warning
++        and then fall back to os_file_set_size() */
++        ib::warn(ER_IB_MSG_303, path, ulonglong{size_in_bytes}, ret,
++                 strerror(errno));
++      }
+     }
+   }
+ #endif /* UNIV_LINUX */
+@@ -6604,6 +6623,18 @@
+ 
+     DBUG_EXECUTE_IF("ib_posix_fallocate_fail_einval", ret = EINVAL;);
+ 
++    if (ret != 0 && (ret == EPERM || ret == ENOSYS)) {
++      /* Some sandboxes (e.g. HarmonyOS) deny posix_fallocate() with EPERM.
++      Extend as a sparse file instead. */
++      os_offset_t end_offset = node_start + len;
++      if (end_offset > 0 &&
++          ftruncate(file->handle.m_file, static_cast<off_t>(end_offset)) == 0 &&
++          pwrite(file->handle.m_file, "", 1,
++                 static_cast<off_t>(end_offset) - 1) == 1) {
++        ret = 0;
++      }
++    }
++
+     if (ret != 0) {
+       /* We already pass the valid offset and len in, if EINVAL
+       is returned, it could only mean that the file system doesn't
+--- a/mysys/my_fallocator.cc
++++ b/mysys/my_fallocator.cc
+@@ -35,6 +35,7 @@
+ #include <cerrno>
+ #ifdef HAVE_POSIX_FALLOCATE
+ #include <fcntl.h>
++#include <unistd.h>
+ #endif
+ #include <cstring>
+ 
+@@ -81,6 +82,14 @@
+     return 0;
+ #elif defined(HAVE_POSIX_FALLOCATE)
+     if (posix_fallocate(fd, 0, newlength) != 0) {
++      /* Some sandboxes (e.g. HarmonyOS) deny posix_fallocate() with EPERM.
++      Fall back to a sparse extension, which is functionally equivalent. */
++      if (newlength > 0 &&
++          (errno == EPERM || errno == ENOSYS || errno == EINVAL) &&
++          ftruncate(fd, static_cast<off_t>(newlength)) == 0 &&
++          pwrite(fd, "", 1, static_cast<off_t>(newlength) - 1) == 1) {
++        return 0;
++      }
+       set_my_errno(errno);
+       goto err;
+     }
+--- a/sql/conn_handler/socket_connection.cc
++++ b/sql/conn_handler/socket_connection.cc
+@@ -1292,10 +1292,19 @@
+     Unix_socket unix_socket(&m_unix_sockname, m_backlog);
+ 
+     MYSQL_SOCKET mysql_socket = unix_socket.get_listener_socket();
+-    if (mysql_socket.fd == INVALID_SOCKET) return true;
+-    Listen_socket s(mysql_socket, Socket_type::UNIX_SOCKET);
+-    m_socket_vector.push_back(s);
+-    m_unlink_sockname = true;
++    if (mysql_socket.fd == INVALID_SOCKET) {
++      /* Some sandboxes (e.g. HarmonyOS) deny bind() on Unix socket
++      paths. Degrade gracefully to TCP-only listening instead of
++      aborting the server. */
++      LogErr(WARNING_LEVEL, ER_CONN_UNIX_NO_BIND_NO_START,
++             strerror(socket_errno));
++      LogErr(WARNING_LEVEL, ER_CONN_UNIX_IS_THERE_ANOTHER_USING_SOCKET,
++             m_unix_sockname.c_str());
++    } else {
++      Listen_socket s(mysql_socket, Socket_type::UNIX_SOCKET);
++      m_socket_vector.push_back(s);
++      m_unlink_sockname = true;
++    }
+   }
+ #endif /* HAVE_SYS_UN_H */
+ 

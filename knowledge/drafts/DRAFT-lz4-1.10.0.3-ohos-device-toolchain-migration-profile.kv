@@ -1,0 +1,110 @@
+# ═══ Draft knowledge entry — 真机工具链迁移 profile 失配 + 远端作业三坑 ═══
+# Timestamp: 2026-09-10
+# Software: lz4 1.10.0.3（环境知识，适用一切真机隔离作业；同源 1.10.0.1 迭代期发现）
+# Gate: PR !9359 / 真机 frp 隧道隔离作业
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-lz4-1.10.0.3-ohos-device-toolchain-migration-profile
+trigger_tool:           conan|cmake|ssh|tar|sed|grep
+phase:                  environment|test_package|remote-ops
+error_signature:        is not a full path to an existing compiler tool|
+                         The C compiler identification is unknown|
+                         Problem parsing /proc/meminfo|
+                         make: cc: No such file or directory
+
+severity:               2
+category:               environment|toolchain-migration|profile-mismatch|cmake|remote-workflow|payload-regression|ssh-race|toybox
+match_keywords:         usr/local/bin/clang 迁移, hnp/bin 仅 git, compiler_executables 失配,
+                         conan_toolchain.cmake 编译器路径不存在, System is unknown to cmake HarmonyOS,
+                         隔离 profile 副本 sed, tar 解包覆盖热修, RUN: make 实际命令行核对,
+                         ssh cat 后台竞态 0 字节脚本, 分两次 ssh 传输启动,
+                         toybox grep 无 BRE 交替 grep -E, /tmp 只读 TMPDIR HOME
+
+title:                  2026-09 真机工具链迁移：clang/cmake 已在 ~/usr/local/bin 而 profile compiler_executables 仍指 /data/service/hnp/bin/clang，纯 Makefile 主包不炸、test_package 的 CMakeToolchain 必炸；附远端作业三坑（payload tar 解包回滚热修、ssh 整链后台化截断脚本、toybox grep 无 \| 交替）
+
+root_cause: >
+  1) 设备布局迁移：clang/clang++/cmake(4.1.2 vanilla) 现位于
+     /storage/Users/currentUser/usr/local/bin；/data/service/hnp/bin 仅剩 git
+     系列（旧会话记录"该目录含 clang/make/ar"已过时）。共享
+     ~/.conan2/profiles/ohos-aarch64 的 tools.build:compiler_executables 仍
+     指向 CI 路径；纯 Makefile 配方显式 CC=clang 走 PATH 不受影响，
+     CMakeToolchain 把失配绝对路径写进 conan_toolchain.cmake，test_package
+     configure 报 "is not a full path to an existing compiler tool"。
+  2) 构建脚本首步 tar xzf payload.tar.gz：每次重跑都用 tar 内旧文件覆盖
+     payload/ 下被热修的文件，cp 到 PKG 的也是旧版——热修必须重打 tar。
+  3) ssh 'cat > f && nohup sh f & echo' 整链被 & 后台化：echo 立即返回、
+     会话关闭，stdin 传输截断，远端脚本 0 字节、log 空。
+  4) toybox grep 的 BRE 不支持 \| 交替，静默无匹配，易误判文件不存在。
+
+affected_scope:         一切真机（frp 隧道/10.62.134.118）隔离 Conan 作业，
+                        尤其带 CMakeToolchain test_package 的库；复用
+                        botan3/chaiscript 会话模板但未感知工具链迁移的流程；
+                        远端脚本分发/热修/后台启动工作流。
+
+verification_cmd:       ls /data/service/hnp/bin/clang（应不存在）；command -v clang
+                        cmake（应落 ~/usr/local/bin）；grep compiler_executables
+                        ~/.conan2/profiles/ohos-aarch64（看是否仍指 hnp）；
+                        修正后 conan create 走到 test_package 且
+                        "The C compiler identification is Clang"。
+
+rec_priority:           1
+rec_approach:           isolated-profile-sed-remote-ops-hygiene
+rec_description: >
+  1) 隔离作业复制 profiles 后对副本 sed 修正编译器路径到
+     /storage/Users/currentUser/usr/local/bin，绝不动共享 ~/.conan2。
+  2) 热修远端文件改打包源重传（tar 会覆盖解包副本）；以 conan 日志
+     "RUN: ..." 实际命令行核对热修是否生效。
+  3) 远端传输与后台启动分两次 ssh：前台 cat>+sed 去 CRLF+wc -c 校验字节，
+     再单独 nohup 启动。
+  4) 远端 grep 一律 grep -E；测试命令显式 CC=clang（tests/Makefile 裸 cc）。
+  5) 设备迁移问题建议反馈维护者更新共享 profile（本流程只修副本）。
+rec_command:            sed -i "s|/data/service/hnp/bin/clang|$HOME/usr/local/bin/clang|g" $CH/profiles/ohos-aarch64
+rec_auto_fix:           false
+rec_impl:               isolated-conan-home-device-202609
+
+fallback_priority:      2
+fallback_approach:      export-CC-in-run-script
+fallback_description:   不改 profile 时，在作业脚本里 export CC/CXX 绝对路径：
+                        对 Makefile 配方有效，但 CMakeToolchain 仍读 profile 的
+                        compiler_executables（conf 优先级高于环境变量），test_package
+                        依旧会炸——只适用于纯 Makefile 且无 CMake test_package 的库。
+fallback_command:       export CC=$HOME/usr/local/bin/clang CXX=$HOME/usr/local/bin/clang++
+fallback_auto_fix:      false
+fallback_impl:          env-override-only
+
+forbid_1_pattern:       sed -i .*\.conan2/profiles
+forbid_1_reason:        共享 ~/.conan2 被多会话/多分支共用，直改影响他人作业
+forbid_1_consequence:   其他会话 profile 行为漂移，难以归因
+
+forbid_2_pattern:       ssh .*'cat > .*&&.*nohup.*&'
+forbid_2_reason:        整链后台化产生 stdin 截断竞态，远端脚本 0 字节
+forbid_2_consequence:   任务"已启动"实则空跑，log 全空，排障时间浪费
+
+forbid_3_pattern:       (tar xzf .*payload.*\n.*cp ).*(conanfile|recipe)
+forbid_3_reason:        解包步骤会覆盖 payload/ 下热修过的文件，热修静默回滚
+forbid_3_consequence:   修改不生效，重复失败同签名，误判为修复无效
+
+principles:             P001, P005
+similar_to:             E132, DRAFT-8958, E999-DRAFT-8945
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-lz4-1.10.0.3-ohos-device-toolchain-migration-profile.md
+last_updated:           2026-09-10
+source_event:           PR !9359 【知识库扩展】feat(lz4): 1.10.0.3 编译完成；
+                        真机 frp 隧道隔离作业（profile 失配 → 热修回滚 →
+                        ssh 竞态 → 双绿）
+authors:                gcw_6YxinkyD
+source_pr:              9359
+source_commit:          53d5a84808
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-10

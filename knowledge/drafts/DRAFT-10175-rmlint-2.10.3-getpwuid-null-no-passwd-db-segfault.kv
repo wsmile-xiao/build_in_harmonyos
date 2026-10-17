@@ -1,0 +1,43 @@
+#====================================================================
+# Draft: getpwuid(3) returns NULL on OHOS (no passwd DB entry for app
+#        uids) - NULL-deref SIGSEGV in rm_util_get_groupname() and the
+#        "every file is a Bad UID" default-finder poisoning
+#        (rmlint 2.10.3; pattern applies to any getpwuid/getgrgid caller)
+#====================================================================
+
+id:                     DRAFT-10175-RMLINT-GETPWUID-NULL-NO-PASSWD-DB-SEGFAULT
+trigger_tool:           rmlint|clang|c
+phase:                  testing|runtime
+error_signature:        signal received: Segmentation fault|Aborting due to a fatal error|redefinition of 'sockaddr_storage'|Bad UID\(s\)|chown \(null\)
+
+severity:               1
+category:               ohos, libc, runtime, testing
+match_keywords:         getpwuid, getgrgid, pw_gid, NULL dereference, SIGSEGV, signal handler loop, passwd DB, baduid, chown (null), -T types, SA_RESETHAND, dup.out
+
+title:                  On OHOS getpwuid(geteuid()) returns NULL because app uids have no passwd DB entry: code paths dereferencing the result segfault (rmlint rm_util_get_groupname -> user->pw_gid), the signal handler loops printing "Aborting due to a fatal error" forever instead of terminating, and tools whose default finder/classifier flags unknown-uid files become useless until the type is deselected
+
+root_cause:             Three independently measured OHOS facts: (1) HarmonyOS has no passwd entry for application uids (e.g. 20001006), so getpwuid(3) legitimately returns NULL - any code that dereferences it without a check crashes; rmlint 2.10.3 lib/utilities.c rm_util_get_groupname() checks getgrgid's result but not getpwuid's (its sibling rm_util_get_username() does check). The crash fires in the "pretty" formatter INIT callback, i.e. before any scan output. (2) rmlint's SIGSEGV handler prints two lines and returns, relying on SA_RESETHAND to terminate; on the OHOS kernel the handler instead re-delivers endlessly, so one crash wrote ~2.9 GB of "Aborting due to a fatal error (signal received: Segmentation fault)" into redirected stderr within minutes. (3) With the crash fixed, the default type set still flags every scanned file as "Bad UID" (chown (null) ...) because the uid has no name, which starves the duplicate finder: a two-file duplicate fixture reports "0 duplicates" and exit 0. rmlint 2.x also exits 0 after a successful scan regardless of findings, so tests must assert report text, not exit codes.
+
+affected_scope:         Any package calling getpwuid/getgrgid/getpwnam on HarmonyOS PC (user-name lookup, quota/ownership display, "bad uid" finders, ls-style tools). Verified with rmlint 2.10.3 on the B machine: crash + handler loop + baduid poisoning + exit-code semantics all reproduced and fixed. Related platform fact: the same session showed psutil 7.2.2 cannot even be built for the upstream pytest suite (OHOS sysroot linux/socket.h:23 redefines sockaddr_storage against musl's), so pytest-based suites stay collection-blocked.
+
+verification_cmd:       ./rmlint -T df <dir-with-2-identical-files>   # expect: "1 are duplicates in 1 groups", exit 0; default type set instead reports "Bad UID(s): chown (null)" per file
+
+rec_priority:           1
+rec_approach:           null-check-getpwuid-plus-deselect-badid-finder
+rec_description:        (a) Patch the dereference site: guard rm_util_get_groupname() with if(!user) return NULL; mirroring rm_util_get_username() - a plain POSIX-correct NULL check, no platform macros (patch 0001 in archives/r/rmlint/2.10.3/patches, patch_type portability). (b) In consumer tests/CI invocation use -T df (duplicates only) or otherwise deselect the badid finder on OHOS, and document that default scans on this platform label every file "Bad UID" - it is a passwd-DB absence, not a build defect. (c) Assert scan findings via report text ("are duplicates in", twin paths), never via exit code: rmlint 2.x returns EXIT_SUCCESS for any successful scan. (d) For diagnostics without ptrace (gdb is blocked on-device): bisect with fprintf(stderr) probes across main -> rm_cmd_main -> rm_fmt_set_state -> handler callbacks and rebuild from a debug copy under ~/tmp.
+rec_command:            diff -u lib/utilities.c.orig lib/utilities.c   # shows the minimal if(!user) return NULL; guard
+rec_auto_fix:           false
+rec_impl:               archives/r/rmlint/2.10.3/patches/0001-lib-utilities-null-check-getpwuid.patch
+
+fallback_priority:      2
+fallback_approach:      avoid-user-lookup-entirely
+fallback_description:   If the call site cannot be patched, avoid executing the user-lookup path: for rmlint-like tools select finder types that skip ownership classification; for libraries stub the caller (never libc) with a NULL-returning wrapper and document the capability loss.
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       #ifdef __OHOS__ return NULL patch|fake passwd entry|LD_PRELOAD getpwuid stub|assert exit 1 in tests
+forbid_1_reason:        Platform macros in patches are PF5-blocked (a plain NULL check is POSIX-correct everywhere); faking passwd entries or LD_PRELOAD stubs mask the platform truth; asserting exit 1 contradicts rmlint 2.x measured semantics and would fake a pass.
+forbid_1_consequence:   Preflight PF5 hard block, R8/R9 deceptive-adaptation finding, upstream suite results that can never reproduce.
+
+principles:             real-evidence-over-assumption, posix-correct-minimal-patch, honest-test-accounting, no-platform-macros-in-patches

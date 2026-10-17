@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_soxr C)
+find_package(soxr REQUIRED)
+add_executable(test_soxr test.c)
+target_link_libraries(test_soxr soxr::soxr)
+enable_testing()
+add_test(NAME test_soxr COMMAND test_soxr)

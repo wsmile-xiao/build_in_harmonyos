@@ -1,0 +1,30 @@
+#====================================================================
+# Draft: PR 分支 fork 点上残留他人提交的仓库根目录文件时，PR diff 会携带
+#        一个对该文件的「删除」补丁；CI 的 shallow clone 上该补丁无法 apply
+#        （pr_body_final.md: does not exist in index）→ checkout-pr 阶段硬失败，
+#        且现象与配方代码完全无关，极易被误判为"CI 平台坏了"
+#   Stem: devmem2-0.2-prdiff-root-file-deletion-apply-fail — pairs with same-stem .md
+#====================================================================
+
+id:                     DRAFT-DEVMEM2-PRDIFF-ROOT-FILE-DELETION-APPLY-FAIL
+trigger_tool:           ci
+phase:                  checkout
+error_signature:        does not exist in index|error: .*\.md$|checkout-pr|diff 无法应用|git apply --3way|PR 与 main 分支存在冲突
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               ci-mechanism, git-diff, shallow-clone
+match_keywords:         checkout-pr, git apply, 3way, shallow clone, depth=1, merge-base, fork point, 根目录白名单, G0e, pr_body_final, .diff, GitCode PR diff
+
+title:                  PR 分支 fork 点残留他人根目录文件时，diff 会带上「删除该文件」的补丁 —— CI shallow clone 上 apply 必然失败（does not exist in index）
+
+root_cause:             CI 的 checkout-pr 步骤不是 checkout 分支，而是「clone 默认分支 → git reset --hard HEAD && git clean -fdx → curl <PR>.diff → git apply / git apply --3way / patch -p1」。PR diff 由 GitCode 以「分支 fork 点 (merge-base) → 分支 tip」计算。若 fork 点上有某个根目录临时文件（实测为他人 PR 误合并进 main 的 nanoflann 用 pr_body_final.md），而分支 tip 上该文件已被删除（例如分支上曾 add 后又 rm），diff 就会包含一条 `deleted file mode` 补丁；但 worker 的工作树是**当前 main tip**（该文件已不存在），于是 git apply 因找不到待删文件而失败，--3way 因 shallow clone 里没有该 blob 报 "does not exist in index"，patch -p1 亦失败 —— checkout-pr 阶段 exit 1。现象与配方内容零关系：L0/L1 全部不会执行，日志只显示 checkout-pr ❌。
+affected_scope:         任何在「fork 点含后来被 main 删除的根目录文件」的分支上开发的 PR；尤其常见于分支曾被他人根目录临时文件（PR 草稿 .md）污染、或分支上出现过 add→rm 序列的情况。由于失败发生在 checkout-pr（早于所有 conan 门禁），排查者往往误判为 CI 平台故障或网络问题（该步骤同时含 curl，容易与超时混淆）。
+verification_cmd:       curl -sSL https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/pull/<PR>.diff | grep -n 'deleted file mode' -B2 | head    # 看 diff 是否携带根目录文件的删除补丁
+
+# ═══ Layer 2: 决策层 ═══
+rec_priority:           1
+rec_approach:           rebuild-branch-on-current-main
+rec_description:        不要试图"重试 CI"（网络型的 checkout-pr 失败重试即可恢复，但本条是确定性的 apply 冲突，重试必然复现）。正确处置是**把分支重建到当前 main tip**，让 merge-base 前移、diff 只含本次新增文件：git checkout -B <branch> origin/main → 从旧 tip 只取本次要交付的文件（如 git checkout <old-tip> -- archives/<l>/<名>/）→ 重新 commit → 强制推送。重建后 diff 不再携带任何删除补丁，checkout-pr 随即通过（实测同一 PR：失败 build #43373/#43388 → 重建后 #43394 起进入 conan 阶段）。附带收益：重建同时消除与 main 的落后，避免后续 rebase 冲突。防复发：不要在仓库根目录放任何临时文件（CI G0e 根目录白名单只允许 .gitignore/.gitattributes/BUILD.gn/CONTRIBUTING.md/KNOW_YOUR_WHY.md/LICENSE/README.md/SKILL.md/SUMMARY.md/oh-package.json），PR 草稿写进 PR 描述或 archives/<l>/<名>/ 下。
+rec_command:            git fetch --depth=1 origin main && git checkout -B <branch> origin/main && git checkout <old-tip> -- archives/<l>/<名>/ && git commit -m "chore: rebuild branch on current main" && git push -f origin <branch>
+rec_auto_fix:           false

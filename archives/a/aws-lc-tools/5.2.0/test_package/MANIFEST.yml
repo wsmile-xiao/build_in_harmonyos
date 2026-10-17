@@ -1,0 +1,84 @@
+# test_package/MANIFEST.yml
+# 上游官方测试声明文件
+# CI 脚本 (build_and_test.sh L0e) 强制要求此文件存在
+# 详见: docs/TEST_QUALITY_SPEC.md
+
+package: aws-lc-tools/5.2.0
+homepage: "https://github.com/aws/aws-lc"
+
+# 上游测试命令分析
+#
+# aws-lc 的官方测试运行器是 Go 程序 `go run util/all_tests.go`（读取
+# util/all_tests.json 清单）。鸿蒙无 Go 工具链，上游自身提供的无 Go 回退是
+# CMake 目标 run_minimal_tests：直接执行 crypto/crypto_test、crypto/urandom_test、
+# ssl/ssl_test 三个 gtest 二进制。本配方按同一语义直接执行 all_tests.json 中
+# aarch64 适用条目并聚合 gtest 结果。
+upstream_check_command: "go run util/all_tests.go -build-dir <build> (upstream official runner); without Go: direct execution of util/all_tests.json gtest binaries"
+
+# conanfile.py build() 方法中是否已集成上游测试
+upstream_test_in_build: true
+upstream_test_command: >
+  per-suite sharded execution of upstream gtest binaries driven by
+  --gtest_list_tests: crypto/crypto_test (all suites + DISABLED-member groups
+  BNTest.DISABLED_WycheproofPrimality / VmUbeGenerationTest.*),
+  ssl/ssl_test, crypto/mem_test, crypto/mem_set_test,
+  crypto/rand_isolated_test (per suite), crypto/tree_drbg_jitter_entropy_isolated_test
+  (per suite), crypto/rwlock_static_init (standalone PASS harness),
+  tool-openssl/tool_openssl_test (per suite). Verdicts parsed from each run's
+  gtest XML report (--gtest_output=xml).
+
+# 上游实际运行的测试程序（all_tests.json aarch64 适用条目）
+upstream_tests:
+  - file: crypto/crypto_test
+    source: aws-lc-5.2.0/util/all_tests.json
+    description: "libcrypto 全量 gtest 套件，按 --gtest_list_tests 清单逐套件分片执行（崩溃隔离）；另加 all_tests.json 的 --gtest_also_run_disabled_tests 组（BNTest.DISABLED_WycheproofPrimality、VmUbeGenerationTest.*）"
+    command: "./crypto/crypto_test --gtest_filter=<suite>.* [--gtest_also_run_disabled_tests groups]"
+  - file: ssl/ssl_test
+    source: aws-lc-5.2.0/ssl/ssl_test.cc
+    description: "libssl 全量 gtest 套件（内嵌 kSSLTestParams，无外部数据文件）"
+    command: "./ssl/ssl_test"
+  - file: crypto/mem_test + crypto/mem_set_test
+    source: aws-lc-5.2.0/crypto/mem_test.cc
+    description: "内存分配覆盖/CRYPTO_set_mem_functions 测试"
+    command: "./crypto/mem_test; ./crypto/mem_set_test"
+  - file: crypto/rand_isolated_test + crypto/tree_drbg_jitter_entropy_isolated_test
+    source: aws-lc-5.2.0/crypto/fipsmodule/rand
+    description: "fork/进程隔离随机性测试（gtest death tests / forkAndRunTest），逐套件分片执行；鸿蒙内核上信号中止的套件按证据记录为平台排除"
+    command: "./crypto/rand_isolated_test --gtest_filter=<suite>.*; ./crypto/tree_drbg_jitter_entropy_isolated_test --gtest_filter=<suite>.*"
+  - file: crypto/rwlock_static_init
+    source: aws-lc-5.2.0/crypto/rwlock_static_init.cc
+    description: "独立 main() 测试：16 线程并发 RAND_bytes 全部成功后打印 PASS（rc=0 即 16 个真实断言全过）"
+    command: "./crypto/rwlock_static_init"
+  - file: tool-openssl/tool_openssl_test
+    source: aws-lc-5.2.0/tool-openssl
+    description: "openssl CLI 工具自身 gtest 套件（ca/req/genrsa/x509/rsa 等），逐套件分片执行；AWSLC_TOOL_PATH/OPENSSL_TOOL_PATH 指向本构建产出的 openssl（OHOS 无系统 OpenSSL，比较对象为自身一致性，已在 PR 补充说明披露）；RSA_TEST_THREADS_LIMIT=32 使用上游为资源受限平台预留的旋钮"
+    command: "./tool-openssl/tool_openssl_test --gtest_filter=<suite>.*"
+
+# 未纳入执行集的条目及原因（配方 _INERT_UPSTREAM_ENTRIES 同步维护，
+# 每次预检结果 JSON hmbs_upstream_result.json 中带 evidence 输出）：
+# - crypto/dynamic_loading_test: 需要 -DLIBCRYPTO_PATH 指向共享 libcrypto.so；
+#   R26 静态构建下上游 #else 分支退化为无条件打印 PASS 的空转桩。
+# - crypto/urandom_test: 测试体被 X86_64 && USE_NR_getrandom 宏族包裹，
+#   aarch64 构建走 #else 分支 = int main(){printf("PASS");} 无断言桩
+#   （真机日志 rc=0 无任何 gtest 输出佐证）。
+# - crypto/crypto_test --gtest_filter=RandTest.*（两条）: 上游清单大小写笔误，
+#   v5.2.0 套件名为小写 randTest，该过滤器在任何平台都选中 0 个用例；
+#   其意图覆盖改由正确大小写的逐套件分片完成。
+# - crypto/crypto_test --gtest_also_run_disabled_tests
+#   --gtest_filter=RSATest.DISABLED_BlindingCacheConcurrency: 该 TEST 被
+#   #if defined(OPENSSL_TSAN) || (X86_64 && !FREEBSD) 包裹（rsa_test.cc L1681/L1757），
+#   aarch64 构建中不存在，过滤器选中 0 个用例。
+# - all_tests.json 中 target_arch=x86 / arm(32) 条目：平台不适用。
+# - ssl/test/runner（Go TLS 握手 runner）与 go test：依赖 Go，鸿蒙无 Go。
+# - ssl/ssl_test 内约 49 个 GTEST_SKIP 用例：上游参数化组合矩阵固有的
+#   "版本×证书类型不适用"跳过（如 ED25519<TLS1.2、ML-DSA 仅 TLS1.3），
+#   任何平台同样跳过；逐个记录于结果 JSON excluded_skipped 并在 PR 补充说明披露。
+
+# test_package 中自带的测试 (消费者视角验证)
+test_package_tests:
+  - file: test.sh
+    description: "安装后的 bssl/openssl 真实功能冒烟：version、SHA-256 已知值摘要（bssl sha256sum 与 openssl dgst 交叉验证）、rand -hex 32 长度/字符集、genrsa RSA 私钥 PEM 生成、openssl rsa 解析与 -pubout 导出"
+    command: "bash test.sh"
+
+# 测试断言总数 (近似值, 用于质量评估)
+assertion_count: 8

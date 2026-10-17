@@ -1,0 +1,44 @@
+id: DRAFT-libftp-1.5.0-openssl-flat-cmakedeps-target-rename
+draft: true
+contributor_id: ATOMCODE
+title: Flat openssl 包在 CMakeDeps 下只暴露 openssl::openssl，上游 find_package(OpenSSL)+OpenSSL::SSL 目标名重映射
+trigger_tool: cmake|conan|CMakeDeps
+phase: configuration|link
+error_signature: Target ".*" links to:.*OpenSSL::SSL.*but the target was not found|openssl::openssl.*OpenSSL::SSL|CMake Error.*target_link_libraries
+severity: 2
+category: ohos,cmake,conan,openssl,dependency-contract
+match_keywords: OpenSSL::SSL, openssl::openssl, cmake_target_name, flat package, CMakeDeps, set_property, find_package(OpenSSL), transitive_headers
+root_cause: 制品仓 openssl/3.5.6.1.1 是 flat 包（package_info 仅声明 cpp_info.libs = ssl,crypto，无 components、无 cmake_file_name/cmake_target_name 属性）。Conan 2 CMakeDeps 对无导出属性的包按包名生成默认目标 openssl::openssl；而 libftp 上游 CMakeLists.txt 使用 find_package(OpenSSL REQUIRED) + target_link_libraries(OpenSSL::SSL)。CMake 配置期报 Target "ftp" links to: OpenSSL::SSL but the target was not found。此外 libftp 公共头（client.hpp→boost/asio/ssl）在编译期 include <openssl/conf.h>，需要 openssl 头文件可见性传递（transitive_headers=True），否则下游 test_package 编译报 openssl/conf.h file not found。
+affected_scope: 消费 flat openssl（或任一无 CMake 导出属性的 flat 包）且上游 CMakeLists 使用 find_package(OpenSSL)+OpenSSL::SSL 目标名的 OHOS/CMake 项目；以及公共头暴露 openssl 头文件的下游消费者。
+verification_cmd: |
+  conan create . -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+  # 期望：配置期无 "Target ... OpenSSL::SSL ... not found"；test_package 能编译包含
+  # <ftp/client.hpp> 的消费者测试（openssl/conf.h 可找到）
+rec_priority: 1
+rec_approach: cmakedeps-cmake-target-name-remap-plus-transitive-headers
+rec_description: 在消费方 conanfile.py 的 generate() 中调用 deps.set_property("openssl", "cmake_target_name", "OpenSSL::SSL")，让 CMakeDeps 直接以 OpenSSL::SSL 为目标名生成 openssl config（config 模式优先于内置 FindOpenSSL 模块，OPENSSL_ROOT_DIR 缓存变量不会生效）；同时在 requirements() 中对 openssl 声明 transitive_headers=True，使 openssl 头文件路径沿依赖链传递到下游 test_package。无需改动 openssl 配方，也不改上游源码。
+rec_command: |
+  from conan.tools.cmake import CMake, CMakeToolchain, CMakeDeps, cmake_layout
+  def requirements(self):
+      self.requires("openssl/3.5.6.1.1", transitive_headers=True)
+  def generate(self):
+      deps = CMakeDeps(self)
+      deps.set_property("openssl", "cmake_target_name", "OpenSSL::SSL")
+      deps.generate()
+      tc = CMakeToolchain(self)
+      tc.generate()
+rec_auto_fix: false
+rec_impl: manual-conanfile-generate
+fallback_priority: 2
+fallback_approach: cpr-cache-vars-style
+fallback_description: 按 cpr/cpp-jwt 先例给内置 FindOpenSSL 模块设置 OPENSSL_ROOT_DIR/OPENSSL_INCLUDE_DIR/OPENSSL_SSL_LIBRARY/OPENSSL_CRYPTO_LIBRARY 缓存变量（仅当 CMakeDeps config 模式不可用时用于自身构建）；但下游消费者仍需要 transitive_headers 或同等 include 传递。
+fallback_command: |
+  tc.cache_variables["OPENSSL_ROOT_DIR"] = self.dependencies["openssl"].package_folder
+  tc.cache_variables["OPENSSL_SSL_LIBRARY"] = <pkg>/lib/libssl.a
+  tc.cache_variables["OPENSSL_CRYPTO_LIBRARY"] = <pkg>/lib/libcrypto.a
+  tc.cache_variables["OPENSSL_USE_STATIC_LIBS"] = True
+fallback_auto_fix: false
+kb_ref: E473, E092, E216
+last_updated: 2026-09-23
+source_lib: libftp-1.5.0
+notes: 与 E473（WebP::webpdemux 缺失注入）同属"CMakeDeps 目标名与上游期望不符"类的不同子问题：E473 目标缺失需 build-module 注入，本条目目标名不符可直接 set_property 重映射，优先重映射而非注入。

@@ -1,0 +1,55 @@
+# ═══ Draft knowledge entry — OCaml 字节码工具链 shebang/OCAMLLIB 失效路径 ═══
+# Timestamp: 2026-09-16
+# Software: libnbd 1.9.6（tool_requires ocaml/4.14.1.1.4）
+# Gate: 首轮适配（task libnbd-1.9.6-r01-pc1-38）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-libnbd-1.9.6-ocaml-bytecode-cache-shebang
+trigger_tool:           ocamlc|ocamlrun|ocamldoc|make|conan|autoreconf
+phase:                  building|testing|runtime
+error_signature:        Unbound module Stdlib|
+                         bad interpreter:.*\.cache/conan2/.*ocamlrun: No such file|
+                         ocamldoc.*bad interpreter.*No such file|
+                         dllcamlstr\.so: No such file or directory
+
+severity:               2
+category:               toolchain, ocaml, conan, shebang, bytecode, cache-path
+match_keywords:         OCAMLLIB, CAML_LD_LIBRARY_PATH, OCAMLDOC, ocamlrun, ocamlc.opt,
+                         bytecode, shebang, bad interpreter, .cache/conan2, stublibs,
+                         dllcamlstr.so, dllunix.so, stamp-generator, generator.ml,
+                         Unbound module Stdlib, tool_requires, ocaml
+title:                  OCaml 工具链（tool_requires）字节码程序内嵌构建期缓存路径失效：OCAMLLIB/CAML_LD_LIBRARY_PATH 注入 + shebang 就地改写
+
+root_cause: >
+  ocaml 配方的 ocamlc/ocamldoc/ocamlrun 为字节码程序，其 #! shebang 内嵌了
+  编译期 prefix（构建机 .cache/conan2/p/b/ocamlXXXX/p/bin/ocamlrun）；配方
+  导出/重新缓存后该路径不存在 → "bad interpreter"。同时 ocamlc 通过
+  OCAMLLIB 定位 stdlib.cmi（未设时报 Unbound module Stdlib），字节码运行
+  需 CAML_LD_LIBRARY_PATH 定位 stublibs（dllcamlstr.so/dllunix.so）。
+  libnbd 的 OCaml 生成器（generator/*.ml → lib/api.c、lib/states*.c、
+  include/nbd.h）在 make 阶段由 stamp-generator 规则执行，直接触发上述全部三处。
+
+rec_priority:           1
+rec_approach: >
+  1) build() 内直接注入环境（勿走 conan env 脚本，避免环境脚本膨胀/printenv E2BIG）:
+     os.environ["OCAMLLIB"] = <ocaml_pkg>/lib/ocaml
+     os.environ["CAML_LD_LIBRARY_PATH"] = <ocaml_pkg>/lib/ocaml/stublibs
+     os.environ["OCAMLDOC"] = "no"   # 跳过仅 OCaml 绑定需要的 manpages（字节码 shebang 失效）
+  2) 生成器/字节码二进制就地改写 shebang 首行为当前 ocamlrun 绝对路径:
+     with open(gen, "r+b") as f: f.write(b"#!" + ocamlrun.encode() + b"\n")
+  3) 若 configure 的 HAVE_OCAMLC 依赖 enable_ocaml=yes，勿传 --disable-ocaml
+     （libnbd configure.ac L378-381：HAVE_OCAMLC 同时要求 enable_ocaml=yes，
+     禁用它会让生成器整体禁用）。
+  验证命令: conan create archives/l/libnbd/1.9.6 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+
+verification_cmd:       conan create archives/l/libnbd/1.9.6 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+verification_result:    全链路 conan create 通过（生成器正常产出 lib/api.c 等，test_package 2/2 通过）
+
+affected_scope:         所有以 ocaml 为 tool_requires、构建期运行字节码生成器/ocamlc 的三方库（libnbd 类 OCaml 生成器项目、ocaml 绑定包）
+applicable_boundary:    若 ocaml 配方改为原生编译（ocamlopt .opt）或 prefix 不移动则不触发；本地未移缓存时也不触发，CI/跨机重建时必现

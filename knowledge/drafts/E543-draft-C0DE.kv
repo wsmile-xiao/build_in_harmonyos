@@ -1,0 +1,79 @@
+#====================================================================
+# E543-draft-C0DE — cek 0.2.0 纯 Go CLI 的 OHOS 工作区、签名测试与测试分层
+#
+# 本条目是路径 B 知识库扩展草稿，必须与同 stem 的 .md 成对审核。
+# 它不宣称替换 E124/E134/E077/E250/E318，而是记录 cek 适配中把这些
+# 平台约束组合成可复用 Conan 交付流程，并保留真实上游测试证据的方法。
+#====================================================================
+
+id:                     E543
+trigger_tool:           go|go build|go test|binary-sign-tool|conan
+phase:                  compilation|linking|testing|packaging
+error_signature:        link: mapping output file failed: permission denied|go test.*(fork/exec|exec).*(permission denied|operation not permitted|exec format error)|binary-sign-tool.*(sign|selfSign)|index\.docker\.io/v2.*(timeout|timed out)|gcr\.io/v2.*(timeout|timed out)
+
+severity:               3
+category:               ohos|hmdfs|go|linking|testing
+match_keywords:         cek, Go 1.25.7, GOOS=linux, GOARCH=arm64, CGO_ENABLED=0,
+                        HarmonyOS, OHOS, HMDFS, Go linker, mmap, link output,
+                        OHOS_GO_WORKDIR, OHOS_GO_EXEC_WORKDIR, GOTOOLCHAIN=local,
+                        go test -exec, signed test ELF, binary-sign-tool,
+                        .codesign, Conan, test_package, smoke test, full test,
+                        OCI registry, index.docker.io, gcr.io, external timeout
+title:                  cek 0.2.0 在 OHOS 上的 Go linker 工作区、测试 ELF 签名与网络测试分层
+
+root_cause:              纯 Go CLI 在 HarmonyOS 上同时受到三个不同阶段的约束：Go linker 在 HMDFS 工作区 mmap 链接输出可能返回 permission denied；Go test 生成的包级测试 ELF 和 Go SDK 内部工具在首次执行前没有 OHOS 签名时会被系统拒绝；上游 OCI registry 测试依赖 index.docker.io、gcr.io 或 daemon，网络不可达时会失败。只把最终 CLI 放到可执行目录、只 chmod、或把网络失败隐藏成 smoke 通过，都不能证明包已正确适配。
+affected_scope:          在 OHOS arm64 上通过 Conan 构建并运行 Go 语言工具的包，尤其是构建期会生成并立即执行 Go 工具或测试 ELF、构建目录位于 HMDFS、且上游测试同时包含 hermetic 与 registry-backed 用例的纯 Go CLI。普通 C/C++ 包、从不执行生成物的交叉编译包，以及不访问外部 OCI 服务的 Go 测试不需要完整套用本条。
+verification_cmd:        CI_PACKAGES="archives/c/cek/0.2.0" zsh ci/conan/build_and_test.sh；复核 reports/test-report.md、package/res/upstream_test_result.json 和 test_package/test.sh 的计数，并确认 Shadow CI #43472 的 L0/L1 通过。
+
+rec_priority:           1
+rec_approach:           ohos-go-workdir-sign-and-test-tiering
+rec_description:         先固定 OHOS 目标为 GOOS=linux、GOARCH=arm64、CGO_ENABLED=0、GOTOOLCHAIN=local，缺失时下载并校验固定版本的官方 Go SDK；把 GOTMPDIR、GOCACHE、GOMODCACHE、测试 wrapper、签名临时文件和最终 link output 统一迁移到可执行的 OHOS 工作区；对 Go SDK ELF、生成的测试 ELF 和最终 CLI 在首次执行前使用 binary-sign-tool 自签；go test 在 OHOS 上按 package、-p 1、-vet=off 执行，并通过 /bin/sh 启动签名 wrapper；将不依赖外部服务的测试作为默认 smoke 门禁，完整 go list/go test 保留为显式 full 模式并记录真实计数；最后用 Conan test_package 直接消费安装后的 bin/cek。
+rec_command:             export GOOS=linux GOARCH=arm64 CGO_ENABLED=0 GOTOOLCHAIN=local; export OHOS_GO_WORKDIR=/data/storage/el2/base/haps/entry/files/cek-conan-go; export OHOS_GO_EXEC_WORKDIR=/data/storage/el2/base/cache/cek-conan-go; bootstrap and sign Go 1.25.7 when absent; go list ./...; run smoke with go test -p 1 -vet=off -exec '/bin/sh <signed-wrapper>'; sign linked output; run CEK_UPSTREAM_TEST_MODE=full only when index.docker.io and gcr.io are reachable; run Conan test_package.
+rec_auto_fix:           false
+rec_impl:               conan-ohos-go-workspace-signed-test-wrapper
+
+fallback_priority:      2
+fallback_approach:      staged-go-build-and-package-signing
+fallback_description:   如果构建系统不能注入统一环境脚本，则显式为 go build、go list 和每个 go test package 传递独立的 TMPDIR/GOTMPDIR/GOCACHE/GOMODCACHE，并在每次生成测试 ELF 后立即签名；阶段边界完成后再扫描并签名最终 CLI，但必须保留独立的 smoke/full 结果和安装后消费者测试。
+fallback_command:       create external OHOS workdirs; go test each package with -p 1; sign each generated ELF; run test_package
+fallback_auto_fix:      false
+fallback_impl:          manual-ohos-go-staging
+
+forbid_1_pattern:       (go|go build).*link.*(HMDFS|/data/storage).*permission|link: mapping output file failed|only.*TMPDIR
+forbid_1_reason:        HMDFS linker mmap 限制不是普通 /tmp 权限问题；只调整 TMPDIR 或反复重试不会改变输出文件所在文件系统的行为。
+forbid_1_consequence:   Go linker 在构建阶段失败，后续签名和 test_package 根本不会执行。
+
+forbid_2_pattern:       go test.*-exec.*(direct|wrapper)|chmod.*(test|wrapper)|sign.*only.*(final|package)
+forbid_2_reason:        OHOS 校验的是实际被加载执行的 ELF；直接执行未签名测试 ELF、仅 chmod 脚本，或把签名推迟到 package() 都无法覆盖 Go test 和 Go SDK 工具的首次执行。
+forbid_2_consequence:   测试在进入测试代码前以 Permission denied、Operation not permitted 或 Exec format error 失败。
+
+forbid_3_pattern:       (skip|delete|remove).*OCI.*test|mark.*full.*pass.*(timeout|registry)|smoke.*replace.*full
+forbid_3_reason:        默认 smoke 只是网络受限环境的确定性门禁，不等价于完整上游覆盖；外部服务失败必须保留为可重试的 full 结果并说明原因。
+forbid_3_consequence:   测试计数被篡改，无法区分代码回归、运行环境限制和未覆盖能力。
+
+forbid_4_pattern:       binary-sign-tool.*(all|everything|\.a|\.o)|sign.*without.*ELF.*check|chmod.*777.*sign
+forbid_4_reason:        签名对象应限定为实际会被 OHOS 加载的 ELF；盲目处理静态库、目标文件或用权限放大代替签名会污染产物并掩盖交付错误。
+forbid_4_consequence:   包内非执行产物被错误改写，或最终二进制仍因缺少有效签名而不能启动。
+
+principles:             P005, P013, P017, P019
+causes:                 []
+caused_by:              []
+similar_to:             [E077, E124, E134, E250, E318]
+conflicts_with:         []
+prerequisite_of:        pure-Go CLI Conan packages that execute generated Go ELF on OHOS
+
+doc_file:               knowledge/drafts/E543-draft-C0DE.md
+last_updated:           2026-09-10
+source_event:           cek/0.2.0 HarmonyOS PC adaptation; Shadow CI task #43472
+
+authors:                AtomCode
+source_pr:               9322
+source_commit:           6dbcfbbea2
+
+metrics_success_count:  1
+metrics_fail_count:     3
+metrics_confidence:     0.25
+metrics_last_used:      2026-09-10
+
+draft:                  true
+contributor_id:         C0DE

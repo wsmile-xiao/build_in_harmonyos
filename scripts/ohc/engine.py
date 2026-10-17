@@ -143,6 +143,8 @@ def _phase_a_dual(
     """
     raw_cands = _phase_a(error_text, index_entries, min_score, top_n, gdir)
     norm_cands = _phase_a(normalized, index_entries, min_score, top_n, gdir)
+    _tr(f"[A] raw   top: {[(c.entry.id, c.score) for c in raw_cands]}")
+    _tr(f"[A] norm  top: {[(c.entry.id, c.score) for c in norm_cands]}")
 
     if not raw_cands and not norm_cands:
         return []
@@ -209,6 +211,18 @@ def _phase_a_legacy(
 
 
 # ═══════════════════════════════════════════════════════
+# Retrieval trace (v12.4: --trace 检索轨迹，借鉴 OpenViking 可观测检索)
+# ═══════════════════════════════════════════════════════
+
+_trace_buf: list[str] | None = None
+
+
+def _tr(msg: str) -> None:
+    if _trace_buf is not None:
+        _trace_buf.append(msg)
+
+
+# ═══════════════════════════════════════════════════════
 # Phase context markers (for phase-aware score dampening)
 # ═══════════════════════════════════════════════════════
 
@@ -269,6 +283,7 @@ def _phase_b(
                 pattern = pattern.strip().lower()
                 if pattern and pattern in error_lower:
                     match_score += sig_bonus
+                    _tr(f"[B] {cand.entry.id}: signature 命中 {pattern!r} (+{sig_bonus})")
                     break  # Same as build-driver inline: first match only
 
         # match_keywords bonus (+1 each)
@@ -288,6 +303,7 @@ def _phase_b(
             if entry_phases and error_phase_context and not (entry_phases & error_phase_context):
                 match_score = max(0, match_score - 2)  # dampen mismatched phase
 
+        _tr(f"[B] {cand.entry.id}: match={match_score} (phaseA={cand.score})")
         if match_score > best_b:
             best_b = match_score
             best_id = cand.entry.id
@@ -341,6 +357,7 @@ def _phase_b_plus(
 
     # Add related entries as candidates (low score, Phase B regex can boost)
     existing_ids = {c.entry.id for c in candidates}
+    _tr(f"[B+] {best_id} 关联扩展: {sorted(related_ids)}")
     for rid in sorted(related_ids):
         if rid not in existing_ids:
             entry = _find_entry_by_id(index_entries, rid)
@@ -567,6 +584,111 @@ def format_inline(result: MatchResult) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _sidecar_path(gdir: str) -> str:
+    return os.path.join(os.path.dirname(gdir.rstrip("/\\")),
+                        ".metrics-local.json")
+
+
+def _sidecar_load(path: str) -> dict:
+    """读 sidecar 并归一为 v2 结构；兼容 v1 顶层 {eid: "date"}。"""
+    import json
+    data = {}
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    entries = {}
+    raw = data.get("entries")
+    if isinstance(raw, dict):
+        entries = {k: v for k, v in raw.items() if isinstance(v, dict)}
+    else:
+        for k, v in data.items():
+            if k in ("entries", "pending"):
+                continue
+            if isinstance(v, str):
+                entries[k] = {"last": v}
+    pending = data.get("pending")
+    if not isinstance(pending, list):
+        pending = []
+    return {"entries": entries,
+            "pending": [p for p in pending if isinstance(p, str)]}
+
+
+def _sidecar_save(path: str, sc: dict) -> None:
+    import json
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(sc, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
+def _touch_metrics(eid: str, gdir: str) -> None:
+    """v12.20: 命中记录写入本地 sidecar v2（gitignored），不写共享 .kv。
+
+    设计修正：直接改 .kv 会让每个包 PR 携带知识文件 diff，与并发 PR
+    在同一 E 条目上产生合并冲突（社区规模必现）。sidecar 本地聚合、
+    零污染；kb-report 同时读 sidecar 与 .kv 遗留字段。
+
+    v2 结构：{"entries": {eid: {"last": date, "s": n, "f": n}},
+              "pending": [eid, ...]}。
+    命中即入 pending，等待构建终局结算（settle_pending_outcomes）。
+    """
+    try:
+        from datetime import date
+        path = _sidecar_path(gdir)
+        sc = _sidecar_load(path)
+        ent = sc["entries"].setdefault(eid, {})
+        ent["last"] = date.today().isoformat()
+        if eid not in sc["pending"]:
+            sc["pending"].append(eid)
+        _sidecar_save(path, sc)
+    except Exception:
+        pass  # 度量回写永不阻塞匹配
+
+
+def _record_outcome(eid: str, gdir: str, success: bool) -> None:
+    """v12.20: 单条即时记账（auto-retry 成败），并移出 pending。
+
+    替代 kb_metrics.record_result 直写共享 .kv 的旧路径（PR 污染）。
+    """
+    try:
+        from datetime import date
+        path = _sidecar_path(gdir)
+        sc = _sidecar_load(path)
+        ent = sc["entries"].setdefault(eid, {})
+        ent["last"] = date.today().isoformat()
+        key = "s" if success else "f"
+        ent[key] = int(ent.get(key, 0)) + 1
+        if eid in sc["pending"]:
+            sc["pending"].remove(eid)
+        _sidecar_save(path, sc)
+    except Exception:
+        pass
+
+
+def settle_pending_outcomes(gdir: str, success: bool) -> None:
+    """v12.20: 构建终局结算 —— pending 中全部命中条目按本次构建成败记账。
+
+    driver 全绿出口 settle(True)；_emit_handoff / build_cli 失败出口
+    settle(False)。幂等：pending 清空后重复调用无副作用。
+    """
+    try:
+        from datetime import date
+        path = _sidecar_path(gdir)
+        sc = _sidecar_load(path)
+        if not sc["pending"]:
+            return
+        today = date.today().isoformat()
+        key = "s" if success else "f"
+        for eid in sc["pending"]:
+            ent = sc["entries"].setdefault(eid, {})
+            ent["last"] = today
+            ent[key] = int(ent.get(key, 0)) + 1
+        sc["pending"] = []
+        _sidecar_save(path, sc)
+    except Exception:
+        pass
+
+
 # ═══════════════════════════════════════════════════════
 # Public API: run engine
 # ═══════════════════════════════════════════════════════
@@ -591,6 +713,8 @@ def run_engine(
     gdir = graph_dir(project_dir)
     if not os.path.isdir(gdir):
         return MatchResult()
+
+    _tr(f"[engine] 输入 {len(error_text)} 字符, 索引 {len(parse_index_tsv(os.path.join(gdir, 'index.tsv'))) if os.path.isfile(os.path.join(gdir, 'index.tsv')) else 0} 条")
 
     # Load data
     index_file = os.path.join(gdir, "index.tsv")
@@ -622,10 +746,14 @@ def run_engine(
     if not entry:
         return MatchResult()
 
+    # v12.5: 命中度量回写（知识库使用反馈闭环）
+    _touch_metrics(match_id, gdir)
+
     # Phase D: principle lookup
     p_names = _phase_d(entry, principles)
 
     total = a_score + b_score
+    _tr(f"[result] 选中 {match_id}: phaseA={a_score} phaseB={b_score} total={total}")
     return MatchResult(
         matched=True,
         match_id=match_id,
@@ -657,6 +785,8 @@ def engine_cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--project-dir", help="Project root directory")
     parser.add_argument("--file", metavar="PATH", help="Read error text from file")
     parser.add_argument("--top-n", type=int, default=5, help="Phase A top-N candidates (default 5)")
+    parser.add_argument("--trace", action="store_true",
+                        help="输出检索轨迹（Phase A/B 打分明细）到 stderr，调试误匹配用")
 
     args = parser.parse_args(argv)
 
@@ -701,7 +831,14 @@ def engine_cli(argv: list[str] | None = None) -> int:
         with open(args.file, "r", encoding="utf-8") as f:
             error_text = f.read()
 
+    global _trace_buf
+    if args.trace:
+        _trace_buf = []
     result = run_engine(error_text, project_dir=args.project_dir, top_n=args.top_n)
+    if args.trace:
+        for line in _trace_buf:
+            print(line, file=sys.stderr)
+        _trace_buf = None
 
     if args.json:
         print(format_json(result), end="")

@@ -1,23 +1,25 @@
-# libXext
+# libxext
 
-## 简介
-libXext 是 X11 的杂项扩展库，提供 SHAPE、SHM、SYNC、DBE 等扩展功能。
+libXext is the X.Org client library for miscellaneous X11 extensions,
+including SHAPE, MIT-SHM, SYNC, DBE, DPMS, and XTEST-related interfaces.
 
-## OHOS 适配
-- **构建系统**: autotools configure 在 HarmonyOS 上受限，采用手动编译
-- **依赖链**: 需要 xorgproto → xcb-proto → libXau → libxcb → xtrans → libX11（8层依赖）
-- **编译选项**: 必须使用 `-fPIC` 确保位置无关代码
+## OHOS adaptation
 
-## 依赖
-- libX11 1.8.7
-- libxcb 1.16
-- xorgproto 2024.1
+- Builds the official release with its generated Autotools files.
+- Keeps upstream source behavior and the `libXext.so.6` ABI unchanged.
+- Uses package-relative pkg-config metadata and omits the obsolete `.la` file.
+- Runs the upstream `make check` target, which has zero registered entries.
+- Runs installed-package consumers for display-independent XSync operations
+  and the extension registry/error-handler lifecycle.
 
-## 功能验证
-```bash
-pkg-config --modversion xext  # 期望输出: 1.7.0
-```
+## Dependencies
 
-## 参考
-- 官网: https://www.x.org/
-- 源码: https://gitlab.freedesktop.org/xorg/lib/libxext
+- `libx11/1.8.13` supplies Xlib and the linked client runtime.
+- `xorgproto/2025.1` supplies xproto and xextproto headers.
+
+libxcb and xtrans remain transitive dependencies of libX11.
+
+## References
+
+- https://gitlab.freedesktop.org/xorg/lib/libxext
+- https://xorg.freedesktop.org/archive/individual/lib/

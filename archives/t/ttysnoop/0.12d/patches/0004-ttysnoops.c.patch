@@ -1,0 +1,420 @@
+--- a/ttysnoops.c
++++ b/ttysnoops.c
+@@ -16,29 +16,31 @@
+ 	v0.12b	6-3-96 Carl Declerck	- minor cleanups
+ 	v0.12c 21-3-96 Carl Declerck	- fixed bug to exit when telnetd exits
+ 	v0.12d  8-4-98 Carl Declerck	- updated #includes a bit
+ */
+ 
+ #include <sys/types.h>
+ #include <sys/stat.h>
+ #include <sys/ioctl.h>
+ #include <sys/socket.h>
+ #include <sys/syslog.h>
++#include <sys/wait.h>
+ #include <sys/un.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <stdarg.h>
+ #include <ctype.h>
+ #include <unistd.h>
+ #include <signal.h>
+ #include <fcntl.h>
+ #include <termios.h>
++#include <time.h>
+ #include <grp.h>
+ #include <pwd.h>
+ #include <utmp.h>
+ #include <errno.h>
+ #include <string.h>
+ #include <crypt.h>
+ #ifdef SHADOW_PWD
+ #include <shadow.h>
+ #endif
+ #include "config.h"
+@@ -46,20 +48,21 @@
+ 
+ 
+ #define BUFF_SIZE	256
+ 
+ char buff[BUFF_SIZE];
+ 
+ int snoopfd = -1, authfd = -1;
+ int pgmpid = -1, authpid = -1, servpid = -1;
+ int use_socket = 0, fdmax = 0, proctype = DEAD_PROCESS;
+ char snoopdev[32], ptynam[32], childproc[128], sockname[128];
++char *short_ptynam, *shorter_ptynam;
+ 
+ 
+ /* read a single line from a stream, ignoring all irrelevant stuff */
+ 
+ int  read_line (char *buff, FILE *f)
+ {
+     int b, i;
+ 
+     *buff = 0;
+     do
+@@ -104,23 +107,24 @@
+ 
+ 	return (j ? buff + i : NULL);
+ }
+ 
+ /* process the snooptab file */
+ 
+ int process_snooptab (void)
+ {
+ 	FILE *f;
+ 	char line[1024], arg[128], tty[16], *tail;
+-	
+-	if ((f = fopen(SNOOPTAB, "r")) == NULL)
+-		errorf ("can't open %s\n", SNOOPTAB);
++	const char *snooptab = conf_path("TTYSNOOP_SNOOPTAB", SNOOPTAB);
++	
++	if ((f = fopen(snooptab, "r")) == NULL)
++		errorf ("can't open %s\n", snooptab);
+ 	
+ 	strcpy (tty, leafname(ttyname(STDIN_FILENO)));
+ 	
+ 	while (read_line(line, f))
+ 	{
+ 		tail = parse_arg(arg, line);
+ 		
+ 		if ((strcmp(arg, tty) == 0) || (*arg == '*'))
+ 		{
+ 			tail = parse_arg(snoopdev, tail);
+@@ -136,24 +140,36 @@
+ 				
+ 			if (strcmp(snoopdev, "socket") == 0)
+ 				use_socket = 1;
+ 				
+ 			fclose (f);
+ 			return (1);
+ 		}
+ 	}
+ 			
+ 	fclose (f);
+-	errorf ("no entry for %s in %s\n", tty, SNOOPTAB);
++	errorf ("no entry for %s in %s\n", tty, snooptab);
+ }
+ 
+ /* find & open a pty to be used by the pty-master */
++
++int open_unix98_master (char *ptyname)
++{
++	int fd = posix_openpt(O_RDWR);
++	char *name = "unknown";
++
++	if (fd >= 0)
++		name = ptsname(fd);
++	if (name)
++		strcpy(ptyname, name);
++	return fd;
++}
+ 
+ int find_ptyxx (char *ptyname)
+ {
+ 	int fd, i, j;
+ 	static char *s1 = "pqrs", *s2 = "0123456789abcdef";
+ 	
+ 	strcpy (ptyname, "/dev/ptyxx");
+ 	
+ 	for (i = 0; s1[i]; i++)
+ 	{
+@@ -172,66 +188,103 @@
+ 			if (errno == ENOENT)
+ 				return (-1);
+ 		}
+ 	}
+ 	
+ 	return (-1);
+ }
+ 
+ /* find & open a pty (tty) to be used by pty-client */
+ 
++int open_unix98_slave (int ptyfd)
++{
++	int fd;
++	char *name = ptsname(ptyfd);
++
++	grantpt(ptyfd);
++	unlockpt(ptyfd);
++
++	if ((fd = open(name, O_RDWR)) >= 0)
++	{
++#ifdef TIOCSCTTY
++		(void) ioctl(fd, TIOCSCTTY, 0);
++#endif
++		return fd;
++	}
++
++	close(ptyfd);
++	return -1;
++}
++
+ int find_ttyxx (char *ttyname, int ptyfd)
+ {
+ 	struct group *grp;
+ 	int gid, fd;
+ 	
+ 	if ((grp = getgrnam("tty")) != NULL)
+ 		gid = grp->gr_gid;
+ 	else
+ 		gid = -1;
+ 	
+ 	chown (ttyname, getuid(), gid);
+ 	chmod (ttyname, S_IRUSR | S_IWUSR | S_IWGRP);
+ 	
+ 	if ((fd = open(ttyname, O_RDWR)) >= 0)
+ 		return (fd);
+ 	
+ 	close (ptyfd);
+ 	return (-1);
+ }
+ 
++void abbreviate_ptyname (char *name, char **shortname, char **shortername)
++{
++	*shortname = *shortername = name;
++	if (!name)
++		return;
++	if (strncmp(name, "/dev/", 5))
++		return;
++	*shortname = *shortername = name + 5;
++	if (!strncmp(name, "/dev/tty", 8))
++		*shortername = name + 8;
++	else if (!strncmp(name, "/dev/pts/", 9))
++		*shortername = name + 9;
++}
++
+ /* fork off the pty-client and redirect its stdin/out/err to the pty */
+ 
+ int fork_pty (int *ptyfd, char *ttynam)
+ {
+ 	struct termios term;
+ 	struct winsize twin;
+-	int ttyfd, pid;
+-	char name[32];
++	int ttyfd, pid, is_unix98 = 0;
+ 	
+ 	tcgetattr (STDIN_FILENO, &term);
+ 	ioctl (STDIN_FILENO, TIOCGWINSZ, (char *) &twin);
+ 
+-	if ((*ptyfd = find_ptyxx(name)) < 0)
++	if ((*ptyfd = open_unix98_master(ttynam)) >= 0)
++		is_unix98 = 1;
++	else if ((*ptyfd = find_ptyxx(ttynam)) < 0)
+ 		errorf ("can't open pty\n");
+-	
+-	strcpy (ttynam, leafname(name));
+ 	
+ 	if ((pid = fork()) < 0)
+ 		errorf ("can't fork\n");
+ 	
+ 	if (pid == 0)       /* child */
+ 	{
+ 		if (setsid() < 0)
+ 			errorf ("setsid failed\n");
+-		
+-		if ((ttyfd = find_ttyxx(name, *ptyfd)) < 0)
++
++		if (is_unix98)
++			ttyfd = open_unix98_slave(*ptyfd);
++		else
++			ttyfd = find_ttyxx(ttynam, *ptyfd);
++		if (ttyfd < 0)
+ 			errorf ("can't open tty\n");
+ 			
+ 		close (*ptyfd);
+ 
+ 		if (tcsetattr(ttyfd, TCSANOW, &term) < 0)
+ 			errorf ("can't set termios\n");
+ 		
+ 		if (ioctl(ttyfd, TIOCSWINSZ, &twin) < 0)
+ 			errorf ("can't set winsize\n");
+ 		
+@@ -320,26 +373,27 @@
+ 	char buff[16], *pwbuff;
+ 
+ 	if ((authpid = fork()) == 0)	/* authentication child */
+ 	{
+ 		dup2 (fd, STDIN_FILENO);
+ 		dup2 (fd, STDOUT_FILENO);
+ 		dup2 (fd, STDERR_FILENO);
+ 		if (fd > STDERR_FILENO)
+ 			close (fd);
+ 
++		/* exit status 1 means "verified" to sigchld(): fail closed */
+ 		if ((pw = getpwnam(SNOOPUSER)) == NULL)
+-			exit (1);
++			exit (0);
+ 
+ #ifdef SHADOW_PWD
+ 		if ((spw = getspnam(SNOOPUSER)) == NULL)
+-		    exit(1);
++		    exit(0);
+ #endif
+ 
+ 		printf ("Connected to %s snoop server...\r\n", ptynam);
+ 		printf ("%s (ASCII %d) to suspend, %s (ASCII %d) to terminate.\r\n",
+ 			SC_STRING, SUSP_CHAR, TC_STRING, TERM_CHAR);
+ 		printf ("Snoop password:"); fflush (stdout);
+ 		if (inputs(buff, 16, stdin) == 0)
+ 		{
+ #ifndef SHADOW_PWD
+ 			if (strcmp(pw->pw_passwd, crypt(buff, pw->pw_passwd)) == 0)
+@@ -359,36 +413,46 @@
+ 	}
+ }
+ 
+ /* This function added by Josh Bailey, josh@tutor.co.nz, 6 Aug 1995.
+    Previous versions of ttysnoop did not remove the pseudo-terminal
+    entry from utmp after log out... Meaning people showed up as still
+    logged in when they weren't. */
+ 
+ void cleanup_utmp (char ptynam[])
+ {
+-	struct utmp utmp;
+-	
++	struct utmp *ut, utmp;
++	
++	if (ptynam == NULL)
++		return;
++
++	/* getutline() is not available in every libc, and returns NULL
++	   when there is no matching entry: scan with getutent() instead */
+ 	setutent ();
+-	strcpy (utmp.ut_line, ptynam);
+-	utmp = *(getutline(&utmp));
+-	*utmp.ut_user = 0;
+-	pututline (&utmp);
++	while ((ut = getutent()) != NULL)
++		if ((ut->ut_type == LOGIN_PROCESS || ut->ut_type == USER_PROCESS)
++		    && strncmp(ut->ut_line, ptynam, sizeof(ut->ut_line)) == 0)
++		{
++			utmp = *ut;
++			*utmp.ut_user = 0;
++			pututline (&utmp);
++			break;
++		}
+ 	endutent ();
+ }
+ 
+ /* do a graceful closedown */
+ 
+ void closedown (void)
+ {
+ 	if (servpid == getpid())	/* only server must clear utmp entry */
+-		cleanup_utmp (ptynam);
++		cleanup_utmp (short_ptynam);
+ 	stty_orig ();
+ }
+ 
+ /* signal handlers */
+ 
+ void sighup (int sig)
+ {
+ 	sig = sig;
+ 	closedown ();
+ }
+@@ -426,47 +490,50 @@
+ 	signal (SIGCHLD, sigchld);
+ }
+ 
+ /* main program */
+ 
+ int main (int argc, char *argv[])
+ {
+ 	struct sockaddr_un serv_addr, cli_addr;
+ 	fd_set readset;
+ 	struct utmp utmp;
+-	int ptyfd, servfd, len, n, sel, susp = 0;
++	int ptyfd, servfd, n, sel, susp = 0;
++	socklen_t len;
+ 
+ 	if (!isatty(STDIN_FILENO))
+ 		errorf ("stdin is not a tty\n");
+ 
+ 	/* do init stuff */
+ 
+ 	servpid = getpid();
+ 	*sockname = 0;
+ 	signal (SIGPIPE, sigpipe);
+ 	signal (SIGCHLD, sigchld);
+ 	signal (SIGHUP, sighup);
+ 	stty_initstore ();
+ 	process_snooptab ();
+ 	openlog ("ttysnoops", LOG_PID, LOG_AUTH);
+ 	atexit (closedown);
+ 	
+ 	/* fork off the client and load the new image */
+ 	
+-	if ((pgmpid = fork_pty(&ptyfd, ptynam)) == 0)    /* child */
++	pgmpid = fork_pty(&ptyfd, ptynam);
++	abbreviate_ptyname(ptynam, &short_ptynam, &shorter_ptynam);
++	if (pgmpid == 0)    /* child */
+ 	{
+ 		/* should we update utmp to reflect the change to ttypX ? */
+ 
+ 		if (proctype == LOGIN_PROCESS)
+ 		{
+-			strncopy (utmp.ut_line, ptynam);
+-			strncopy (utmp.ut_id, ptynam + 3);
++			strncopy (utmp.ut_line, short_ptynam);
++			strncopy (utmp.ut_id, shorter_ptynam);
+ 			*utmp.ut_host = 0;
+ 			utmp.ut_addr = 0;
+ 			strncopy (utmp.ut_user, "LOGIN");
+ 			utmp.ut_pid = getpid();
+ 			utmp.ut_type = proctype;
+ 			utmp.ut_time = time(NULL);
+ 			pututline (&utmp);
+ 		}
+ 		
+ 		/* exec the real pty-client program */
+@@ -487,21 +554,24 @@
+ 
+ 	/* is the snoop-device a socket or tty ? */
+ 	
+ 	if (use_socket)
+ 	{
+ 		/* create the main server socket */
+ 		
+ 		if ((servfd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0)
+ 			errorf ("can't create server socket\n");
+ 		
+-		sprintf (sockname, "%s/%s", SPOOLDIR, ptynam);
++		if (snprintf (sockname, sizeof(sockname), "%s/%s",
++			      conf_path("TTYSNOOP_SPOOLDIR", SPOOLDIR), shorter_ptynam)
++		    >= (int) sizeof(serv_addr.sun_path))
++			errorf ("socket path too long (%s)\n", sockname);
+ 		unlink (sockname);
+ 		serv_addr.sun_family = AF_UNIX;
+ 		strncopy (serv_addr.sun_path, sockname);
+ 		if (bind(servfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0)
+ 			errorf ("can't bind server socket (%s)\n", sockname);
+ 			
+ 		if (listen(servfd, 5) < 0)
+ 			errorf ("can't set up listen buffers for server socket\n");
+ 		
+ 		/* update fdmax */
+@@ -578,20 +648,21 @@
+ 				
+ 			write (STDOUT_FILENO, buff, n);
+ 			if (!susp && (snoopfd >= 0))
+ 				write (snoopfd, buff, n);
+ 		}
+ 
+ 		if (use_socket && (snoopfd < 0) && (authfd < 0) && FD_ISSET(servfd, &readset))
+ 		{
+ 			/* a ttysnoop client wants to connect, create socket */
+ 			
++			len = sizeof(cli_addr);
+ 			if ((authfd = accept(servfd, (struct sockaddr *) &cli_addr, &len)) < 0)
+ 				errorf ("can't accept on server socket\n");
+ 			else
+ 			{
+ 				susp = 0;
+ 				authenticate (authfd);
+ 			}
+ 
+ 			/* update fdmax */
+ 			

@@ -1,0 +1,19 @@
+id: DRAFT-flatbuffers-locale-macro-export-consistency
+error_signature: undefined symbol: flatbuffers::ClassicLocale::instance_|parser_test.cpp.*invalid number: "0x|TEST FAILED.*error_.c_str
+match_keywords: add_definitions,FLATBUFFERS_LOCALE_INDEPENDENT,ClassicLocale,strtod_l,hex-float,undefined-symbol,header-default-macro,_XOPEN_VERSION,locale_t
+category: conan,linking,ohos
+severity: medium
+root_cause: 上游 CMake 以目录级 add_definitions 注入探测得到的编译宏（FLATBUFFERS_LOCALE_INDEPENDENT，check_cxx_symbol_exists 探测 strtof_l），目录级定义不随 cmake install 导出；库内按探测值（本工具链为 0）编译，消费者头文件经 base.h 的 #ifndef 平台默认分支（OHOS _XOPEN_VERSION>=700 取 1）引用仅在宏>0 时编译的静态数据成员 ClassicLocale::instance_ → 消费者链接失败。反向强制宏=1 又触发 OHOS libc 平台缺陷：strtod_l 传入 ClassicLocale 创建的 locale_t 对象时 hex-float 字面量在 0x 处停止解析（返回 0），而裸 strtod 与 newlocale 新建对象均正常解析。
+rec_approach: 配方 generate() 用 tc.variables 显式定值宏为与上游探测一致的落点（本例 OFF），package_info() 用 cpp_info.defines 导出同一宏值，库与消费者强制同走 plain strtod 路径；跨仓库审计点：头文件 #ifndef 平台默认 + 源文件 #if 条件编译符号 + CMake add_definitions 注入的组合必须核查宏是否随安装导出且两侧一致。验证手段：同源文件双宏值编译 × ClassicLocale/新建 locale/裸 strtod 三对照微观探针。
+solution_cmds: |
+  # conanfile.py generate()
+  tc.variables["FLATBUFFERS_LOCALE_INDEPENDENT"] = "OFF"
+  # package_info()
+  self.cpp_info.defines = ["FLATBUFFERS_LOCALE_INDEPENDENT=0"]
+  # 探针定位（locale 对象来源对照）
+  clang++ -DFLATBUFFERS_LOCALE_INDEPENDENT=1 probe.cpp util.cpp -o p && ./p
+verification: flatbuffers/25.12.19 PR !9046：探针显示 strtod_l(ClassicLocale 对象) 解析 0x12.34p-1 得 0 且 end 停在 x12.34p-1，新建 locale/裸 strtod 均得 9.1015625；修复后上游测试 105/105（直接调用层）、消费者 1/1、CI #42577 绿。
+fallback: 若下游业务必须 locale-independent 路径，需向 libc/上游反馈 strtod_l+locale 对象缺陷，解除前保持宏=0 并在消费者侧约定不得覆盖。
+doc_refs: E003,E004
+applies_to: flatbuffers,any-header-only-default-macro-library,locale-sensitive-parsing
+last_updated: 2026-09-09

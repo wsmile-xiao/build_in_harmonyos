@@ -1,0 +1,141 @@
+# DRAFT-conan-application-blocks-transitive-runenv-info
+#   Conan 2：package_type="application" 使依赖在消费者图中被判 Skipped binaries，
+#   该依赖的 runenv_info（PERL5LIB/PATH 等）**不会**传播到消费者环境
+# 触发事件: debarchiver 0.11.7 适配（test_package 报 Can't locate OpaL/action.pm）
+
+id:                     DRAFT-conan-application-blocks-transitive-runenv-info
+trigger_tool:           conan
+phase:                  runtime
+error_signature:        Can't locate .*\.pm in \@INC|
+                         Skipped binaries.*dependency|
+                         dep\.package_folder.*None
+
+severity:               2
+category:               conan, dependency-graph, runtime-env
+match_keywords:         package_type application, runenv_info, PERL5LIB,
+                         Skipped binaries, VirtualRunEnv, transitive dependency,
+                         传递依赖, 环境变量不传播, package_folder None,
+                         append_path, 运行期依赖
+title:                  Conan 2 的 application 型包会把依赖判为 Skipped binaries——该依赖 runenv_info 声明的环境变量（如 PERL5LIB）不传播到消费者，须由消费者直接声明该依赖
+
+topic: >
+  debarchiver（package_type="application"）依赖 opalmod，而 opalmod 用
+  `runenv_info.append_path("PERL5LIB", ...)` 声明其 Perl 模块路径。
+  实测消费者环境中**完全没有** opalmod 的 PERL5LIB 条目，导致被测程序运行时报
+  `Can't locate OpaL/action.pm in @INC`。
+
+root_cause:             实测行为（conan 2.29.1）：当中间包为
+                        `package_type = "application"` 时，其依赖在消费者图里被标为
+                        **Skipped binaries**（`conan install` 日志可见），该依赖的
+                        `package_folder` 为 None，其 `runenv_info` 声明的环境变量
+                        **不会**进入消费者的聚合 runenv 文件。
+                        ⚠️ 机制推断（未逐行追 Conan 源码）：application/executable
+                        类包的 headers/libs trait 为 False，Conan 认为消费者不需要
+                        其依赖的二进制，于是跳过该依赖；但 **runenv_info 属运行期
+                        环境，与 headers/libs 无关**——被一并跳过即造成本问题。
+                        对照实验（同一工具链，唯一变量为中间包 package_type）：
+                          中间包 static-library → 消费者 runenv 含依赖路径 **2** 条
+                          中间包 application     → 消费者 runenv 含依赖路径 **0** 条
+                                                 且 Skipped binaries 含该依赖
+
+durable_solution: >
+  消费者侧**直接声明**该运行期依赖（不必依赖中间包的传递）：
+      # conanfile.py / conanfile.txt
+      self.requires("<mid-pkg>")      # application 型包本身
+      self.requires("<runtime-dep>")  # ★ 显式再声明其运行期依赖
+  实测效果（debarchiver + opalmod 场景）：
+      仅声明 debarchiver            → 消费者 runenv 中 opalmod 路径数 = 0
+      debarchiver + opalmod 直接声明 → 8  → 问题消失
+  对 test_package 尤其重要：test_package 本就需要被测程序的全部运行期依赖，
+  直接声明是**语义正确**的做法，不是 workaround。
+  ⚠️ 不要在中间包的 `package_info()` 里用 `self.dependencies[...]` 自行补
+  （见 forbid_2）。
+
+impact: >
+  debarchiver 0.11.7：test_package 4 项失败（OpaL 未解析、--help/--version 均
+  `Can't locate OpaL/action.pm`），修正后 **9/9** 全部通过。
+
+recovery: >
+  任何 `package_type = "application"`（或 executable）且带**运行期**依赖的包，
+  其消费者/测试若依赖该运行期依赖的环境（PERL5LIB / PATH / PYTHONPATH / LD_LIBRARY_PATH
+  等由 runenv_info 声明者），都需在消费者图中直接声明。排查：
+    conan install ... -g VirtualRunEnv
+    grep -c "<dep-path>" conanrunenv-*.sh      # 0 = 未传播
+    grep -A3 "Skipped binaries" <install 日志> # 该依赖是否被 skip
+
+evidence_chain: >
+  task debarchiver-0.11.7 适配（feat/debarchiver-0.11.7，PR #9710）
+    - test_package 报 Can't locate OpaL/action.pm in @INC（4 项失败）
+    - 查 conan 生成的 runenv：`conan install --requires=debarchiver/0.11.7
+      -g VirtualRunEnv` → 只有 perl 的 PERL5LIB，opalmod 路径数 = **0**，
+      且日志中 `Skipped binaries` 含 opalmod/0.2.2.1
+    - 对照：`conan install --requires=opalmod/0.2.2.1 -g VirtualRunEnv`
+      → opalmod 路径数 = **2**（证明 opalmod 自身声明有效）
+    - 对照：消费者同时直接声明 debarchiver + opalmod → 路径数 = **8**，测试通过
+    - ★ 隔离实验（合成包，唯一变量为中间包 package_type）：
+        env3-libmid(static-library) → opalmod 路径 **2**，Skipped 不含 opalmod
+        env3-appmid(application)    → opalmod 路径 **0**，Skipped 含 opalmod
+    - 修正后 test_package 9/9 通过
+
+verification_cmd: >
+  # ① 消费者环境中该依赖路径是否传播（0 = 未传播）
+  conan install . -pr:h=<ohos-profile> -pr:b=<ohos-profile> -g VirtualRunEnv
+  grep -o 'export PERL5LIB=.*' conanrunenv-*.sh | tr ':' '\n' | grep -c '<dep-name>'
+  # ② 该依赖是否被 skip
+  grep -A4 'Skipped binaries' <install 输出> | grep '<dep-name>'
+  # ③ 隔离验证（唯一变量为中间包 package_type）
+  #    static-library 中间包 → 路径数 >0；application 中间包 → =0
+
+limitations: >
+  ① 结论基于 **conan 2.29.1** 实测；不同版本行为可能变化，升级后应复核。
+  ② 仅在「中间包 package_type=application」时观察到；同一实验里
+     static-library 中间包正常传播（2 条）。无 package_type 的普通包
+     （默认 library）实测亦正常传播（1 条）。
+  ③ 机制解释（trait/是否需要依赖二进制）为**推断**，未逐行追 Conan 源码；
+     本条目的事实部分为可复现的实测行为。
+  ④ 若中间包改成 library 类（package_type 调整）可让传播恢复，但那会改变包的
+     语义（application 才是正确类型），因此**不推荐**；正确做法是消费者直接声明。
+
+rec_priority:           1
+rec_approach:           consumer-declares-runtime-dependency-directly
+rec_description: >
+  在需要运行该 application 的消费者（含 test_package）的依赖图中，**直接声明**
+  其运行期依赖，使该依赖的 runenv_info 正常聚合到消费者环境；不要在中间包的
+  package_info() 里绕过（该阶段拿不到被 skip 依赖的 package_folder）。
+rec_command:            # conanfile.py 的 requirements()
+                         #   self.requires("<mid-application-pkg>")
+                         #   self.requires("<runtime-dep>")   # ★ 显式补上
+rec_auto_fix:           false
+rec_impl:               consumer-graph-declares-runtime-dep
+
+affected_scope:         `package_type = "application"`（及同类 executable）且带运行期
+                        依赖的 Conan 包，其消费者依赖该运行期依赖声明的环境变量
+                        （runenv_info：PERL5LIB/PATH/LD_LIBRARY_PATH/PYTHONPATH…）。
+                        test_package 属典型消费者，受影响最直接。
+
+forbid_1_pattern:       把中间包的 package_type 从 application 改成 library 让传播恢复
+forbid_1_reason:        application 是该包的**正确**类型（它确实是可执行程序）；
+                        为绕开环境问题而改类型会误导下游并破坏包的语义
+forbid_1_consequence:   包类型失真，消费者按库使用会拿到错误的 headers/libs 语义；
+                        问题被"修"了但引入更隐蔽的语义错误
+forbid_2_pattern:       在中间包 package_info() 里用 self.dependencies["<dep>"] 自行补 runenv_info
+forbid_2_reason:        实测该阶段取不到被 skip 依赖的 package_folder（输出
+                        WARN "未取到 <dep> 的 package_folder"），依赖已被跳过
+forbid_2_consequence:   配方看似处理了，实际路径仍为空，问题原样保留且在 CI 才暴露
+
+doc_file:               knowledge/drafts/DRAFT-conan-application-blocks-transitive-runenv-info.md
+last_updated:           2026-09-12
+source_event:           debarchiver 0.11.7 适配：test_package 因 opalmod 的 PERL5LIB 未传播而报 Can't locate OpaL/action.pm
+authors:                atomcode-executor
+source_pr:              9710
+source_commit:
+
+similar_to:             DRAFT-conan-skipped-binaries-package-folder-null-guard, DRAFT-conan-shared-pkgconfig-requires-drop
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-12
+
+draft:                  true
+contributor_id:         ffieldd22_-

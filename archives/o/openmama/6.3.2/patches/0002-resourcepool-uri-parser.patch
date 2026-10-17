@@ -1,0 +1,200 @@
+--- a/mama/c_cpp/src/c/resourcepool.h
++++ b/mama/c_cpp/src/c/resourcepool.h
+@@ -5,6 +5,9 @@
+ #include "mama/types.h"
+ #include "mama/log.h"
+ 
++#include <apr_pools.h>
++#include <apr_strings.h>
++
+ 
+ #if defined(__cplusplus)
+ extern "C" {
+@@ -41,6 +44,35 @@
+     mamaResourcePoolOptionsImpl* options
+ );
+ 
++/* Minimal URI parser standing in for APR-util's apr_uri_parse.
++ *
++ * APR-util is not published for this platform, and the resource pool only
++ * needs the scheme, authority, path and query of URIs of the form
++ *
++ *     <scheme>://<authority>/<path>?<query>
++ *
++ * so a small local implementation replaces the whole library. As with
++ * apr_uri_parse the members below are owned by the given APR pool and stay
++ * valid for as long as it does. Members that the URI does not carry are
++ * NULL, except mPath which is always set (empty when there is no path).
++ */
++typedef struct mamaResourcePoolUri_
++{
++    char* mScheme;    /* e.g. "mama"        - NULL when absent              */
++    char* mAuthority; /* e.g. "transport"   - NULL when absent              */
++    char* mPath;      /* leading '/', e.g. "/topic" - "" when absent        */
++    char* mQuery;     /* e.g. "option=value" - NULL when absent             */
++} mamaResourcePoolUri;
++
++/* Returns 0 on success and non-zero when the URI has no usable scheme. */
++MAMAExpDLL
++extern int
++mamaResourcePoolUri_parse (
++    apr_pool_t* pool,
++    const char* uri,
++    mamaResourcePoolUri* parsed
++);
++
+ #if defined(__cplusplus)
+ }
+ #endif
+--- a/mama/c_cpp/src/c/resourcepool.c
++++ b/mama/c_cpp/src/c/resourcepool.c
+@@ -6,10 +6,94 @@
+ #include "mama/regexchannelfilter.h"
+ #include "strutils.h"
+ #include <apr_pools.h>
+-#include <apr_uri.h>
++#include <ctype.h>
+ #include <mama/resourcepool.h>
+ #include <wombat/wtable.h>
+ 
++int
++mamaResourcePoolUri_parse (
++    apr_pool_t* pool,
++    const char* uri,
++    mamaResourcePoolUri* parsed
++)
++{
++    const char* cursor = NULL;
++    const char* end    = NULL;
++    const char* limit  = NULL;
++    char*       scheme = NULL;
++    char*       lower  = NULL;
++
++    if (NULL == pool || NULL == uri || NULL == parsed)
++    {
++        return -1;
++    }
++
++    memset (parsed, 0, sizeof (mamaResourcePoolUri));
++
++    /* Everything from the fragment delimiter on is not used by the resource
++     * pool, but it does bound the query when the two are both present. */
++    limit = strchr (uri, '#');
++    if (NULL == limit)
++    {
++        limit = uri + strlen (uri);
++    }
++
++    /* The scheme must be present and non empty. Like apr_uri_parse it is
++     * reported lower case (RFC 3986 section 3.1). */
++    cursor = strchr (uri, ':');
++    if (NULL == cursor || cursor == uri || cursor > limit)
++    {
++        return -1;
++    }
++
++    scheme = apr_pstrmemdup (pool, uri, cursor - uri);
++    if (NULL == scheme)
++    {
++        return -1;
++    }
++    for (lower = scheme; '\0' != *lower; lower++)
++    {
++        *lower = (char) tolower ((unsigned char) *lower);
++    }
++    parsed->mScheme = scheme;
++    cursor++;
++
++    /* An authority is only present for "<scheme>://<authority>"; it runs up
++     * to the path, the query or the end of the URI. As with apr_uri_parse
++     * every component is its own copy of the pool, so the delimiters stay
++     * where they are instead of being overwritten in place. */
++    if ('/' == cursor[0] && '/' == cursor[1])
++    {
++        const char* authority = cursor + 2;
++
++        end = strpbrk (authority, "/?");
++        if (NULL != end && end > limit)
++        {
++            end = limit;
++        }
++        parsed->mAuthority = apr_pstrmemdup (pool, authority,
++                                             (NULL == end ? limit : end) - authority);
++        cursor = (NULL == end) ? limit : end;
++    }
++
++    /* The path is always set, but empty when the URI has none: it may end
++     * with the authority, or carry a query straight away. */
++    end = strchr (cursor, '?');
++    if (NULL != end && end > limit)
++    {
++        end = NULL;
++    }
++    parsed->mPath = apr_pstrmemdup (pool, cursor,
++                                    (NULL == end ? limit : end) - cursor);
++
++    if (NULL != end)
++    {
++        parsed->mQuery = apr_pstrmemdup (pool, end + 1, limit - (end + 1));
++    }
++
++    return 0;
++}
++
+ /*=========================================================================
+  =                Typedefs, structs, enums and globals                   =
+  =========================================================================*/
+@@ -679,8 +763,7 @@
+     // pool table. A mama resource pool's bridges should be known at
+     // construction time and from that point should be immutable.
+     mamaResourcePoolImpl* impl = (mamaResourcePoolImpl*) resourcePool;
+-    apr_uri_t parsedUri;
+-    apr_status_t aprStatus;
++    mamaResourcePoolUri parsedUri;
+     mama_status status;
+     const char* bridgeName = NULL;
+     const char* transportName = NULL;
+@@ -701,8 +784,7 @@
+     }
+ 
+     wthread_mutex_lock (&impl->mLock);
+-    aprStatus = apr_uri_parse (impl->mAprPool, uri, &parsedUri);
+-    if (APR_SUCCESS != aprStatus) {
++    if (0 != mamaResourcePoolUri_parse (impl->mAprPool, uri, &parsedUri)) {
+         mama_log (MAMA_LOG_LEVEL_WARN,
+                   "Could not parse url %s - is it correctly formed?",
+                   uri);
+@@ -711,7 +793,7 @@
+     }
+ 
+     // The bridge is the scheme
+-    bridgeName = parsedUri.scheme;
++    bridgeName = parsedUri.mScheme;
+     if (NULL == bridgeName) {
+         mama_log (MAMA_LOG_LEVEL_WARN,
+                   "Could not parse url %s - could not find a valid bridge.",
+@@ -721,7 +803,7 @@
+     }
+ 
+     // The transport is the authority / hostname
+-    transportName = parsedUri.hostname;
++    transportName = parsedUri.mAuthority;
+     if (NULL == transportName) {
+         mama_log (MAMA_LOG_LEVEL_WARN,
+                   "Could not parse url %s - could not find a valid transport.",
+@@ -757,12 +839,12 @@
+     subscriptionOptions = impl->mDefaultOptions;
+ 
+     // Apply the overrides from the query string
+-    mamaResourcePoolImpl_applyOptionsFromQueryString (parsedUri.query,
++    mamaResourcePoolImpl_applyOptionsFromQueryString (parsedUri.mQuery,
+                                                       &subscriptionOptions);
+ 
+     // All the paths begin with a "/" so this will simply skip past that
+-    originalPathLength = strlen (parsedUri.path);
+-    sourceName         = strtok (parsedUri.path, "/");
++    originalPathLength = strlen (parsedUri.mPath);
++    sourceName         = strtok (parsedUri.mPath, "/");
+     topicName          = NULL;
+     // Fully qualified name is used for regex matching so source is considered
+     if (NULL == sourceName) {

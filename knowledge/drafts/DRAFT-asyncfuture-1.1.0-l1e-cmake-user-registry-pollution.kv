@@ -1,0 +1,71 @@
+#====================================================================
+# DRAFT-asyncfuture-1.1.0-l1e-cmake-user-registry-pollution — W3/L1e 破坏性反测被 CMake 用户包注册表污染误判 fake test
+# 触发事件: asyncfuture 1.1.0 适配（W3 L1e sabotage lib/include 后 conan test 仍 RC=0 → fake test detected）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-asyncfuture-1.1.0-l1e-cmake-user-registry-pollution
+trigger_tool:           build_and_test.sh|conan test|L1e
+phase:                  ci_gate|test_package
+error_signature:        L1e: test passed WITHOUT package artifacts — fake test detected|
+                         test does not depend on .* — must call its API or execute its binary
+
+severity:               2
+category:               conan|cmake|testing|gate|false-positive
+match_keywords:         L1e, destructive negative test, fake test, sabotage, export(PACKAGE),
+                         ~/.cmake/packages, user package registry, find_package, header-only,
+                         INTERFACE IMPORTED, E225, $TMP, CMakeCache, stale build tree
+title:                  When W3/L1e false-positives "fake test" after sabotaging lib/include, purge stale ~/.cmake/packages/<name> registry entries left by manual export(PACKAGE) builds before blaming the test_package
+
+topic: >
+  W3 的 L1e 破坏性反测把被测包产物（bin/lib/include）临时移走后再跑
+  conan test，预期构建/链接/运行失败；若仍 PASS 判定 test 不依赖包
+  （fake test，R34）。header-only 库（asyncfuture 等）上游 CMakeLists 常
+  含 `export(PACKAGE)`/`install(EXPORT)`，手动在 /tmp 或构建树跑过一次
+  cmake 后，`~/.cmake/packages/<name>/<hash>` 会写入一条指向该旧构建
+  树的用户包注册表条目。后续 find_package(<name>) 优先命中注册表（旧
+  树里 config 与头文件都还在），于是 sabotage 包内 include/lib 后
+  conan test 依然解析到旧树 → 测试照常通过 → L1e 误判 fake test。
+  E225（test_package build_folder="$TMP"）只解决 conan 构建目录缓存
+  复用，管不到 CMake 用户注册表这一独立污染源。
+
+root_cause: >
+  1) 上游 CMakeLists `export(PACKAGE <name>)`（或 install(EXPORT) +
+     export(PACKAGE)）把当前构建树注册进 ~/.cmake/packages/<name>/；
+  2) find_package(<name>) 的查找顺序含用户包注册表，命中的 config 指向
+     旧构建树（/tmp 或手工目录），其 include/lib 完好；
+  3) L1e 只 sabotage conan 缓存包目录（PKG_CACHE），未清理注册表 → 反测
+     解析到未破坏的旧树 → 测试通过 → 误报 fake test；
+  4) 与 E225 的缓存复用不同：E225 管 conan 自己的 build 目录，本条是
+     CMake 跨进程的用户级注册表残留，CI 干净环境不出现，仅本机手动
+     构建/调试残留触发。
+
+durable_solution: >
+  1) 先反证确属注册表污染：`ls ~/.cmake/packages/<name>/` 有条目 →
+     `cat` 看是否指向 /tmp 或非 conan 缓存路径；
+  2) 删除陈旧条目 `rm -rf ~/.cmake/packages/<name>` 后重跑
+     build_and_test.sh（或 finish W3）；
+  3) 与 E225 组合双保险：test_package 用 cmake_layout(build_folder="$TMP")
+     强制 conan test 每次全新临时构建目录（防 conan 侧缓存复用）；
+  4) 回归确认 L1e 显示 [ok] Negative test confirmed、W3 EXIT:0。
+
+affected_scope: >
+  header-only 及普通库凡上游 CMakeLists 含 export(PACKAGE)/install(EXPORT)
+  且本机残留过手动构建树的适配任务；W3/L1e 反测可信性受影响的场景。
+  复现边界：本机（worker/设备）曾手工 cmake 配置过该库源码；CI 干净
+  环境无此问题。
+
+verification_cmd: >
+  ls ~/.cmake/packages/asyncfuture/ && rm -rf ~/.cmake/packages/asyncfuture &&
+  JUNK_PR_DIFF=$PWD/pr.diff zsh ci/conan/build_and_test.sh archives/a/asyncfuture/1.1.0
+  # 预期: L1e [ok] Negative test confirmed, Build Summary 1/1
+
+forbid_1_pattern: >
+  (mark|report).*(L1e|fake test).*(fail|passed).*(without|before).*(purge|remove).*(registry|~/.cmake/packages)|
+  skip.*L1e|disable.*(L1e|destructive|negative).*test
+
+relationship: >
+  similar_to=E225 (test_package 临时布局——同族缓存失真，不同机制)
+  caused_by=export(PACKAGE) 手工构建残留用户包注册表
+  prerequisite_of=W3/L1e 反测可信性
+  conflicts_with=none

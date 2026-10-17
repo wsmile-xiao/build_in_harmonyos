@@ -1,0 +1,57 @@
+udns 0.5: fix the inet_pton()/inet_ntop() configure probe prototypes
+
+`configure` decides whether the C library provides inet_pton()/inet_ntop()
+by compiling and linking a probe program.  In 0.5 that probe passes a
+`long *` where inet_pton() expects a `const char *` and returns the
+`const char *` of inet_ntop() from an `int` main(), so it is ill-formed:
+
+    int main() {
+      char buf[64];
+      long x = 0;
+      inet_pton(AF_INET, &x, buf);
+      return inet_ntop(AF_INET, &x, buf, sizeof(buf));
+    }
+
+clang rejects this outright ("incompatible pointer to integer conversion
+returning (const char *) from a function with result type (int)" is a hard
+error, not a downgradable warning), so the probe fails and configure
+writes NO `#define HAVE_INET_PTON_NTOP 1` into config.h.
+
+The consequence is a silently broken library: udns_XtoX.c only defines
+the public `dns_ntop()`/`dns_pton()` entry points inside the
+`#ifdef HAVE_INET_PTON_NTOP` branch.  Without the define it falls back to
+
+    #define inet_XtoX_prefix udns_
+    #include "inet_XtoX.c"
+
+which builds `udns_ntop()`/`udns_pton()` instead, although udns.h still
+declares `dns_ntop()`/`dns_pton()`.  libudns.a then ships a symbol set
+that does not match its own header and every consumer fails to link:
+
+    ld.lld: error: undefined symbol: dns_pton
+    >>> referenced by test.c
+    >>> referenced by udns_resolver.c: udns_resolver.o:(dns_add_serv)
+    ld.lld: error: undefined symbol: dns_ntop
+
+Upstream fixed the probe in 0.6, which is why the same recipe builds and
+links cleanly for udns 0.6 but not for 0.5.
+
+Fix: use the corrected probe from upstream 0.6, whose argument and return
+types match the C library declarations.  With the probe passing,
+configure defines HAVE_INET_PTON_NTOP and udns_XtoX.c provides the
+declared `dns_ntop()`/`dns_pton()` wrappers.
+
+--- a/configure	2026-09-30 18:42:58.581579510 +0800
++++ b/configure	2026-09-30 18:42:58.603579518 +0800
+@@ -94,8 +94,9 @@
+ int main() {
+   char buf[64];
+   long x = 0;
+-  inet_pton(AF_INET, &x, buf);
+-  return inet_ntop(AF_INET, &x, buf, sizeof(buf));
++  inet_ntop(AF_INET, &x, buf, sizeof(buf));
++  inet_pton(AF_INET, buf, &x);
++  return x;
+ } 
+ EOF
+ 

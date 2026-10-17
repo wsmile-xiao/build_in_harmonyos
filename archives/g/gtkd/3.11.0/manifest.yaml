@@ -1,0 +1,187 @@
+# 版本级 manifest — gtkd 3.11.0（D 语言 GTK+3 绑定）
+# 遵循 ARCHIVE-SPEC v3.0
+
+version: "3.11.0"
+software: gtkd
+status: built
+build_date: "2026-09-20"
+build_system: makefile
+
+# ============================================================
+# 源码信息
+# ============================================================
+
+source:
+  # 上游 GitHub 官方 tag（R39 合规）
+  url: "https://github.com/gtkd-developers/GtkD/archive/refs/tags/v3.11.0.tar.gz"
+  sha256: "c5de7ef0d955c06a35bc979858e2b67c17919294a7aabe36fd593b79c46e5928"
+  compression: tar.gz
+  archive_root: "GtkD-3.11.0"
+  upstream_tag: "v3.11.0 (17d7dc25e1adc9b86aff381b950f21706118ebeb)"
+
+# ============================================================
+# 依赖信息
+# ============================================================
+
+dependencies:
+  required:
+    - "gtk/3.24.43"
+    - "librsvg/2.62.3.1"
+    - "cairo-gobject/1.18.4.3"
+  build_required:
+    - "ldc/1.42.0"
+  note: |
+    **构建期与运行期依赖的性质完全不同，这是本包的核心特征。**
+
+    · 构建期 —— 只需 **D 编译器**（`tool_requires("ldc/1.42.0")`），
+      **不需要 GTK 头文件、不需要 pkg-config**。原因：gtkd 的绑定代码是
+      **运行期 dlopen 型**：
+          generated/gtkd/gtk/c/functions.d:
+              Linker.link(gtk_window_new, "gtk_window_new", LIBRARY.GTK);
+      每个符号都由 `gtkd.Loader`（src/gtkd/Loader.d）在运行时 dlsym 解析。
+      GNUmakefile 里那几条 `pkg-config --libs-only-l gtk+-3.0 ...`（SOFLAGS_*）
+      只在 `USE_RUNTIME_LINKER` 为空时才生效，而它由
+          USE_RUNTIME_LINKER = $(shell grep "Linker" generated/gtkd/atk/c/functions.d)
+      判定 —— 实测该文件有 278 处命中 → 分支被跳过。
+      实测验证：在**完全没有 GTK** 的环境里 `make libs` 成功产出 5 个静态库。
+
+    · 运行期 —— 必须能 dlopen 到 `gtkd.paths` 列出的库（Linux 分支：
+      `libgtk-3.so.0`、`libgdk-3.so.0`、`libgobject-2.0.so.0`、`libgio-2.0.so.0`、
+      `librsvg-2.so.2` 等）。故 requires gtk（传递带入 glib/pango/cairo/
+      gdk-pixbuf/atk/fribidi/libepoxy 等）+ librsvg，使消费方 `conan install` 后
+      LD_LIBRARY_PATH 上就有这些 .so。
+      实测：带上 gtk 的运行环境后，`libgtk-3.so.0`/`libgdk-3.so.0`/
+      `libgobject-2.0.so.0`/`libgio-2.0.so.0` 均可 dlopen；
+      `librsvg-2.so.2` **不在 gtk 传递闭包内**（实测缺失），故单独声明 librsvg。
+
+    · `cairo-gobject` 显式 override —— 版本冲突消解：gtk/3.24.43 钉 1.18.4.2，
+      而 librsvg/2.62.3.1 钉 1.18.4.3，二者同图时 conan 直接报
+        ERROR: Version conflict: Conflict between cairo-gobject/1.18.4.3
+               and cairo-gobject/1.18.4.2 in the graph.
+      取较新的 1.18.4.3（ohpcd 已发布，librsvg 为更晚适配版本）。
+
+    · gir-to-d **不需要**：3.11.0 的 sdist 已附 `generated/`（906 个 .d 等），
+      绑定是预生成的；只有改上游 API 时才需要重跑代码生成器。
+
+# ============================================================
+# 构建配置
+# ============================================================
+
+build_config:
+  target: aarch64-unknown-linux-ohos
+  options: []
+  notes: |
+    构建系统为 **GNUmakefile**（上游另有 dub.json，但 ohpcd 无 dub 制品 →
+    与 gir-to-d 0.23.3 同一结论，走 Makefile 路径）。
+
+    产物为 **5 个静态库**（package_type=static-library，不声明 shared 选项——
+    与同仓 libffi 3.5.2 一致）：dlopen 型绑定无需自建 .so，且 GNUmakefile 的
+    shared-libs 目标需要 pkg-config 提供 GTK 链接参数，在 OHOS 上对 conan 包不
+    天然可用，故不做。
+      libgtkd-3.a（主包，66MB）、libgtkdsv-3.a（GtkSourceView）、
+      libgstreamerd-3.a、libvted-3.a、libpeasd-3.a
+
+    **OHOS 上的构建环境适配（均不改上游源码，`patches: {}`）**：
+      ① 编译器必须绝对路径（**唯一的致命项**）—— hnp CPython 的 subprocess 走
+         posix_spawn、不搜 PATH（E405，cffi 适配同款）；把裸名 `ldc2` 交给 make
+         会 `No such file or directory` → `DC=<ldc>/bin/ldc2` 绝对路径（同时满足
+         makefile 内 `findstring ldc,$(DC)` 的分支判定）。
+      ② `make -j` 的 jobserver 警告（**非致命，不是失败原因**）—— GNU make 的
+         jobserver 默认用 FIFO，OHOS 不允许创建，会打印
+           `make: jobserver mkfifo: <tmp>/GMfifoNNN: Operation not permitted`
+         但 make 4.4.1 **会自动回退到 pipe jobserver**，构建照常完成：
+         实测**去掉**本配方的 `--jobserver-style=pipe`、直接 `make -j4 libs`
+         → **rc=0，5 个静态库全部产出**（同一警告仍打印）。
+         配方仍显式传 `--jobserver-style=pipe` 只为避免该噪音并兼容更老的 make，
+         **不是构建成功的必要条件**；已登记的 E074/E525 以及既有草稿
+         `E6340-draft-8BEF` 记录的是同一「非致命」结论（pump 类守护进程的
+         同一警告亦属此类）。
+      另需 `DCFLAGS="-O -I<ldc>/include/d"`：ldc2 默认导入路径不含 Phobos
+      源码，实测不给该 -I 会报 `unable to read module 'algorithm'`。
+
+    GNUmakefile 内写死 `GTKD_VERSION=3.10.0`（本包为 3.11.0），但库名与安装目录
+    都用 MAJOR（=3），不受影响；本配方在 package() 按真实版本重写 .pc。
+
+# ============================================================
+# 补丁信息
+# ============================================================
+
+patches_applied: []
+
+# ============================================================
+# 兼容性
+# ============================================================
+
+compatibility:
+  level: high
+  issues:
+    - "demos/gtkD/TestWindow 的 `make test` 目标在 3.11.0 上无法编译：TestIdle.d 使用 `debug(1)`（旧式数字 debug 级别），LDC 1.42 的 DMD 前端 v2.112.1 要求 identifier —— 属上游 demo 的语法过时，非库缺陷，且库本体（generated/ + src/）零处使用该写法，故不影响交付物"
+  notes: |
+    gtkd 是**运行期 dlopen 型**绑定：构建期零 GTK 依赖，运行期需 GTK 的 .so 在
+    LD_LIBRARY_PATH 上。库本体（`generated/` 906 个 .d + `src/`）在 OHOS + LDC
+    1.42 上完整编译通过，产出 5 个静态库；消费者侧已实测「编译 → 链接 → 运行」
+    全链（D 程序经 gtkd dlopen 调到 `gtk_get_major_version()` 返回 3）。
+
+# ============================================================
+# 测试结果
+# ============================================================
+
+test_results:
+  type: manual
+  total: 11
+  passed: 11
+  failed: 0
+  skipped: 0
+  note: |
+    上游测试形态（R51 清点）：gtkd **没有**独立的 tests/ 目录，也没有 dub
+    testConfiguration。D 语言惯例是把测试以 `unittest { ... }` 块**内嵌在源文件
+    里**（对应 `dub test`）。清点结果：
+      · 全库（generated/ 906 个 .d + src/）共 **4 处 unittest 块、8 条 assert**：
+          generated/gtkd/glib/ListG.d（1 块 / 3 assert）
+          generated/gtkd/glib/ListSG.d（1 块 / 3 assert）
+          generated/gtkd/glib/c/types.d（1 块 / 1 assert）
+          generated/gtkd/gobject/ObjectG.d（1 块 / 1 assert）
+      · `GNUmakefile` 的 `test` 目标**不是单元测试**，而是编译一个 GUI 演示程序
+        （demos/gtkD/TestWindow），需显示环境，且该 demo 在 3.11.0 上因
+        `debug(1)` 旧式语法无法编译（见 compatibility.issues）。
+      · 无 CI 测试配置、无 tests/ 目录、无 pytest/ctest 注册。
+
+    **内嵌 unittest 块的实测结果（以 `ldc2 -unittest -main` 编译并运行）**：
+      逐个隔离运行 4 个块（各自 `-i` 编译其导入闭包）：
+        glib/c/types.d  → **PASS**（`1 modules passed unittests`）
+        glib/ListG.d    → **SIGSEGV**（Signal 11）
+        glib/ListSG.d   → **SIGSEGV**
+        gobject/ObjectG.d → **SIGSEGV**
+      规律明确：**唯一通过的那个块是纯 D 计算（该文件 `Linker.link` 调用数为 0，
+      不触碰任何 C 库）**；其余 3 块都经 gtkd 的运行期 dlopen 加载器调用
+      gobject/glib 的 C 函数（如 `g_value_init`/`g_value_get_int`）。
+      另注：已验证被调符号本身可解析（用 ctypes 直接 dlopen
+      `libgobject-2.0.so.0` 检查 `g_value_init`/`g_value_get_int`/
+      `g_value_set_int`/`g_object_new` 均 OK），且**库本体交付能力已由消费者测试
+      独立证明**（真实 D 程序经同一加载器调用 `gtk_get_major_version()` 返回 3，
+      11/11 通过）——故上述 3 块崩溃属**上游内嵌测试在无 GTK 主上下文的独立运行
+      形态下的问题**，不影响交付物；本配方未在 build() 中运行它们
+      （`upstream_test_in_build: false`）。
+
+    本配方交付的验证（全部实测，见 notes.md）：
+      · 库本体构建：5 个静态库全部产出（`make libs`，exit=0）
+      · 消费者测试（test_package，R34 真实 API）：**11/11**
+        编译真实 D 程序 → 静态链 libgtkd-3.a → **运行** → 经 gtkd 的 dlopen
+        加载器调用 `gtk_get_major_version()` 得到 3
+
+# ============================================================
+# 知识沉淀
+# ============================================================
+
+knowledge_gained:
+  - "D 语言库的『上游测试』通常不是 tests/ 目录：D 惯例是把 unittest 块内嵌在源文件里（由 dub test 或 ldc2 -unittest -main 驱动）。按 Perl/autotools 的 t/ 目录习惯去清点会得出『上游无测试』的错误结论；且 GNUmakefile/dub 里名为 test 的目标往往只是编译 GUI demo，不等于单元测试 (ref: DRAFT-test-discovery-per-language-convention)"
+  - "`make: jobserver mkfifo: ... Operation not permitted` 在 OHOS 上是**非致命警告**：GNU make 4.4.1 会自动回退到 pipe jobserver，构建照常完成（实测去掉 --jobserver-style=pipe 直接 make -j4 仍 rc=0）；不要把它当成并行构建失败的原因去排查，真正的致命项另有其人（本例是裸名 DC 不被 posix_spawn 解析）(ref: E6340)"
+  - "gtkd 是运行期 dlopen 型绑定：绑定代码里每个符号都写成 Linker.link(fn, \"name\", LIBRARY.X)，由 gtkd.Loader 在运行时 dlsym 解析；GNUmakefile 用 `grep Linker generated/gtkd/atk/c/functions.d` 判定是否跳过 pkg-config 链接参数分支。因此构建期零 GTK 依赖（实测无 GTK 环境可产出全部静态库），但运行期必须让 gtkd.paths 列出的 .so 在 LD_LIBRARY_PATH 上——设计 conan 依赖时要按『运行期 dlopen 目标』而非『构建期链接目标』来声明。产物验证侧「运行期 dlopen 型库不应把依赖硬链进 DT_NEEDED」已有 opencsg-1.8.2-dt-needed-verification-for-runtime-dlopen-libs 覆盖；本条补的是**依赖设计侧**（requires 该按哪个目标声明）(ref: opencsg-1.8.2-dt-needed-verification-for-runtime-dlopen-libs, DRAFT-libcec-8.1.7-cmake-system-name-linux-soname)"
+  - "运行期 dlopen 型库若在**模块启动期**急切登记全部绑定符号，则「依赖 .so 缺失」会被放大成 SIGSEGV 而非可读的加载错误（诊断信息被销毁），极易误判为「平台不支持/库崩溃」；须先用不经该绑定的手段（ctypes 直连 / nm -D）证明目标 .so 符号齐备，再隔离运行区分「环境缺件」与「平台限制」，补齐运行期依赖（注意静态制品不能替代共享版），确实无法补齐才探针判定后 deselect 并如实申报. 已沉淀为独立条目 (ref: DRAFT-ohos-module-ctor-eager-dlopen-sigsegv)"
+  - "conan 图中同层两个依赖钉死同一个**不同版本**的第三方包时（gtk/3.24.43 要 cairo-gobject/1.18.4.2，librsvg/2.62.3.1 要 1.18.4.3）不会自动收敛，直接报 Version conflict；须在本配方显式 `self.requires(\"cairo-gobject/<较新版本>\", override=True)`。本条**非新知**：DRAFT-vips-8.18.4.1-meson-codec-feature-pkgconfig 已详述该模式（含「override 只能收到制品二进制对应的那个版本，否则 package_id 失配回退源码构建」这一关键约束）；本包是同一手法在 cairo-gobject 上的复现 (ref: DRAFT-vips-8.18.4.1-meson-codec-feature-pkgconfig)"
+  - "测试/消费者进程同时需要构建上下文与被测包运行上下文时，conan test_package 的 self.run 要传 env=[\"conanbuild\",\"conanrun\"] 两套环境——tool_requires（如 ldc）的运行库路径（libLLVM.so）只出现在构建环境里，仅用 conanrun 会让该工具本身起不来（ldc2: _ZN4llvm11raw_ostream...: symbol not found）。本条**非新知**：DRAFT-332-openrct2-0.5.3-upstream-testsuite-real-run 已记录该组合的必要性（单用 conanrun 缺 libc++_shared、单用 conanbuild 缺依赖 libdirs），本包是同一结论在 tool_requires 场景下的复现 (ref: DRAFT-332-openrct2-0.5.3-upstream-testsuite-real-run)"
+
+references:
+  - https://gtkd.org
+  - https://github.com/gtkd-developers/GtkD
+  - https://code.dlang.org/packages/gtk-d

@@ -14,7 +14,7 @@
 4. 运行 configure：`./configure --prefix=$DEFAULT_PREFIX --host=aarch64-linux-ohos LDFLAGS="-fuse-ld=bfd"`（使用 --host 绕过 conftest 执行问题）
 5. 编译：`make -j2`
 6. 安装到 staging：`make install DESTDIR=$TEST_PREFIX`
-7. 测试：`make check`（无测试套件，仅有空目标）
+7. 上游测试：执行源码 `test/` 目录中的 `TEST.mdf`、`TEST2.mdf` 两组 MDF/MDS 转换素材，并校验生成 ISO 尺寸均为 370688 字节
 8. 预编译包制作：`ohc-run.py package mdf2iso 0.3.1`
 9. 本地安装验证：`make install`（不带 DESTDIR）
 10. 功能验证：`mdf2iso --help` 输出正确

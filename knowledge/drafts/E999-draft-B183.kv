@@ -1,0 +1,92 @@
+#====================================================================
+# E999-draft-B183 — 消费者测试遇「未初始化链表节点」缺陷
+#   SIGSEGV 随 ASLR 漂移时的栈外定位手法 + 桩层清零分配后端处置
+# 来源: kamailio-presence/6.0.6 适配（18 个 presence 家族模块，OHOS aarch64）
+# 状态: 草稿，等待主编审核（未 promote）
+#====================================================================
+
+id:                     E999-draft-B183
+trigger_tool:           clang|ld|test|runtime
+phase:                  testing|runtime
+error_signature:        sig=11 si_addr=0x[0-9a-f]+|si_addr=0x40000018|Segmentation fault.*(kam_chain|node_sel|ns_list)|\[FAULT\] sig=11.*\(unknown\)
+
+# ═══ Layer 1: 识别层 ═══
+severity:               warning
+category:               测试策略, stub, 内存, runtime
+match_keywords:         未初始化链表节点, ns->next 未赋值, pkg_malloc 非零初始化, SIGSEGV ASLR 漂移,
+                        kam_chain_len_steps, 消费者测试清零分配, 桩层 calloc 后端,
+                        dladdr 定位崩溃, ptrace Permission denied, get_node_selector
+title:                  消费者测试遇「未初始化链表节点」：SIGSEGV 随 ASLR 漂移的栈外定位与桩层清零分配后端
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             被测库存在**未初始化链表节点**缺陷时，消费者测试会观测到"随机崩溃"而非确定失败。
+                        实测案例：kamailio 6.0.6 src/modules/xcap_client/xcap_functions.c 的
+                        xcapNodeSelAddStep 在 :193-207 分配 ns_list_t 新节点后只设置了前驱的 next，
+                        **未给新节点的 ns->next 赋值**（同文件 :186 的 step_t 分支有 s->next = NULL，
+                        ns 分支漏写）；而 kamailio 的 pkg_malloc 后端**不保证清零**（默认 qm_malloc 亦不保证）。
+                        于是 ns_list 链尾是堆垃圾，任何遍历该链的调用方（本包 e2e 的 kam_chain_len_steps、
+                        模块自身的 get_node_selector）都会读野指针 → SIGSEGV；崩溃地址随 ASLR/堆布局
+                        漂移（实测 si_addr=0x40000018、pc=0x0），且故障点在"测试桩"调用栈内呈现，
+                        极易被误判为桩层缺陷或用例写错。
+affected_scope:         所有以 dlopen+契约/行为用例方式验证 C 库的消费者测试；以及真机上使用
+                        非清零分配后端（kamailio 默认 pkg/shm 分配器）时走同一链表路径的调用方。
+                        非平台相关问题（宿主 Linux 同样复现），但 OHOS 侧因 gdb/lldb ptrace 受限
+                        而放大定位难度。
+verification_cmd:       ./test_presence_modules_e2e <modules_dir>   # 桩层清零后端下连跑 3 次应确定性全绿；
+                        # 把后端换回 malloc 后端可复现随机 SIGSEGV（判缺陷在上游而非桩层）
+                        # `cat /proc/sys/kernel/randomize_va_space` 与 `gdb ./x` 报
+                        # "ptrace: Permission denied" 用于判定是否需走栈外定位手法
+
+# ═══ Layer 3: 方案层 ★ ═══
+rec_priority:           1
+rec_approach:           consumer-test-zeroing-alloc
+rec_description:        桩/测试层的内存后端改用清零分配（calloc 语义），使上游未初始化的 next 字段
+                        为 NULL，链遍历自然终止 → 被测路径恢复确定可复现。
+rec_command:            kam_stub_xmallocxz(size) { return calloc(1, size); }   # 桩层 pkg/shm 后端
+rec_auto_fix:           false
+rec_impl:
+
+fallback_priority:      2
+fallback_approach:      dladdr-probe-bisect
+fallback_description:   ptrace 不可用（OHOS 设备 gdb/lldb 报 ptrace: Permission denied）时：
+                        ① 用例内装 SIGSEGV 处理器，用 backtrace/dladdr 打印出错符号与偏移；
+                        ② 写独立最小探针（只调被测函数、不加载其他模块）二分，先排除桩侧；
+                        ③ stderr 无缓冲输出绕过 stdout 缓冲导致日志丢失。
+fallback_command:       探针示例：probe_addstep.c（直接调用 xcapInitNodeSel/xcapNodeSelAddStep，
+                        打印 size/ns_no/step 内容，证桩侧分配正常后再回到用例层定位）
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       崩溃点固定|桩层一定有 bug|用例写错
+forbid_1_reason:        未初始化字段的崩溃地址随 ASLR/堆布局漂移，据此断言"崩溃点固定"或直接归因
+                        桩层/用例会掩盖上游缺陷，导致错误修复方向（改桩/删用例而非清零后端）。
+forbid_1_consequence:   反复重写用例或桩层仍随机红绿；真机部署后同一路径在用户侧崩溃。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E999.md
+last_updated:           2026-09-30
+source_event:           kamailio-presence/6.0.6 e2e 首次运行 RUN_RC=139（[FAULT] sig=11 si_addr=0x40000018）
+
+# ═══ 知识协作 ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: B183

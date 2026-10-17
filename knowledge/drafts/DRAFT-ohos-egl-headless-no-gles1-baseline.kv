@@ -1,0 +1,216 @@
+# ═══ Draft knowledge entry — OHOS 无窗口系统但 EGL 离屏可用（窗口工具库移植基线）═══
+# Timestamp: 2026-09-15
+# Software: freeglut 3.6.0（结论适用于任何"窗口系统 + GL 上下文"型的工具库/框架）
+# Gate: PR #10168 / 本地 conan create 实测（EGL 探针 + 46 函数平台层契约清点）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-ohos-egl-headless-no-gles1-baseline
+trigger_tool:           cmake|meson|configure|conan|clang|ld
+phase:                  configure|build|link|runtime
+error_signature:        fatal error: 'X11/Xlib\.h' file not found|
+                           fatal error: 'wayland-client\.h' file not found|
+                           Could NOT find OpenGL \(missing: OPENGL_egl_LIBRARY|
+                           Could not find GLES1_LIBRARY using the following names: GLESv1_CM|
+                           fatal error: 'GLES/gl\.h' file not found|
+                           Unknown linker\(s\): \[\['llvm-ar-15'\]|
+
+severity:               2
+category:               graphics, egl, opengl-gles, platform, porting, cmake, ohos
+match_keywords:         EGL_DEFAULT_DISPLAY, EGL_KHR_surfaceless_context, EGL_PBUFFER_BIT,
+                           eglCreatePbufferSurface, 无窗口系统, no window system, libGLESv2.so,
+                           GLES2/gl2.h, GLES/gl.h, libGLESv1_CM, GLESv1, 固定管线,
+                           fgPlatform, 平台后端, X11/Xlib.h, wayland-client, 离屏渲染
+title:                  OHOS 无 X11/Wayland/Android-glue，但普通原生进程即可用 EGL 离屏（EGL_DEFAULT_DISPLAY + EGL_KHR_surfaceless_context + pbuffer）——窗口工具库可据此移植；同时 OHOS 无 GLES1，固定管线入口须自备桩
+
+root_cause: >
+  OHOS 没有 X11、没有 Wayland、也没有 Android 的 native_app_glue。任何「窗口系统 +
+  GL 上下文」型的工具库/框架（freeglut、GLUT 系、部分 GUI 工具包），其上游各平台后端
+  都绑定某一个具体窗口系统，因此在 OHOS 上**没有任何一个上游后端可用**，表现为
+  configure/编译期直接报头文件缺失：
+
+    fatal error: 'X11/Xlib.h' file not found        （上游默认落入 X11 分支）
+    fatal error: 'wayland-client.h' file not found  （FREEGLUT_WAYLAND=ON 时）
+    fatal error: 'GLES/gl.h' file not found         （OHOS 无 GLES1 头）
+
+  常见误判：看到「没有窗口系统」就下结论「不可适配」，或以为「自带 EGL 后端」
+  就够用。两者都不对：
+
+  ① **EGL 后端 ≠ 窗口系统**。以 freeglut 为例，其平台层契约是 46 个 fgPlatform* 函数，
+     而 src/egl/ 只实现 3 个（fgPlatformSetWindow / fgPlatformDestroyContext /
+     fgPlatformGlutSwapBuffers）—— EGL 层只负责「渲染上下文管理」，不负责窗口、
+     事件循环、光标、状态查询等。其余全部由各平台后端（x11/wayland/android/
+     blackberry/mswin/ogc）实现。
+  ② **但 OHOS 的 EGL 在普通原生进程里就可用，无需窗口系统**。实测探针：
+       eglGetDisplay(EGL_DEFAULT_DISPLAY)  -> 有效
+       EGL 1.4  vendor=OpenHarmony  client apis=OpenGL_ES  configs=25
+       extensions 含 EGL_KHR_surfaceless_context
+       eglChooseConfig(EGL_PBUFFER_BIT) -> eglCreatePbufferSurface -> eglCreateContext(GLES2)
+       全部成功；eglMakeCurrent 成功；GL_VERSION="OpenGL ES 3.2 B301"，
+       GL_RENDERER="Maleoon 916"，glClear+glReadPixels 得到真实像素。
+
+  故正确结论是：**必须新写一个 OHOS 平台后端，且可以基于 EGL pbuffer 离屏表面实现**。
+
+  另一条独立基线：**OHOS 无 GLES1**。只有 GLES2/GLES3（GLES2/gl2.h、libGLESv2.so），
+  无 GLES/gl.h、无 libGLESv1_CM。上游若仍引用固定管线入口（glBegin/glEnd/
+  glVertex3fv/glNormal3fv/glTexCoord2fv/glColor4fv），消费者链接期直接失败
+  （undefined reference due to --no-allow-shlib-undefined: glBegin），需自备桩。
+  （符号获取路径问题另见 DRAFT-ohos-gl-symbols-are-dispatcher-stubs。）
+
+  第三类可预期的移植摩擦（与窗口系统无关，但同批出现）：交叉编译工具链的
+  binutils 不在 PATH 上，CMake 的 ar/ranlib 探测失败
+  （Unknown linker(s): [['llvm-ar-15'], ['llvm-ar'], ['ar'], ['gar']]）；
+  CMake 的 FindOpenGL 只搜宿主不搜交叉 sysroot，需显式传库/头路径。
+
+affected_scope: >
+  所有在 OHOS 上适配「窗口系统 + GL 上下文」型库/框架的工作：
+  freeglut / GLUT 系、部分 GUI 工具包、图形工具库、游戏引擎的窗口层。
+  典型特征：上游有「每平台一个后端目录」的结构（x11/ wayland/ android/ mswin/ …）。
+  不适用：纯计算库；已自带 OHOS 后端的库；纯 shader/GLES2 且不自建窗口的应用。
+
+verification_cmd:       # ① 最小 EGL 离屏探针（不依赖任何三方库，直接判定平台能力）
+                           eglGetDisplay(EGL_DEFAULT_DISPLAY) -> eglInitialize
+                           打印 eglQueryString(d, EGL_VERSION / EGL_CLIENT_APIS / EGL_EXTENSIONS)
+                           # 期望含 "EGL_KHR_surfaceless_context"
+                           eglChooseConfig({EGL_SURFACE_TYPE,EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE,EGL_OPENGL_ES2_BIT})
+                           eglCreatePbufferSurface -> eglCreateContext -> eglMakeCurrent
+                           printf "%s / %s\n", glGetString(GL_VERSION), glGetString(GL_RENDERER);
+                           # 期望 "OpenGL ES 3.2 B301" / "Maleoon 916"
+                           glClearColor(1,0,0,1); glClear(GL_COLOR_BUFFER_BIT);
+                           glReadPixels(0,0,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);
+                           # 期望 px=255,0,0,255（真渲染，非空桩）
+                           # ② 清点平台层契约（决定移植工作量，比猜更可靠）
+                           grep -rhoE '\bfgPlatform[A-Za-z_0-9]+\b' src/*.c | sort -u | wc -l   # 契约函数总数
+                           grep -rhoE '\bfgPlatform[A-Za-z_0-9]+\b' src/egl/*.c | sort -u | wc -l  # EGL 层已提供数
+                           # ③ 确认 OHOS 是否提供 GLES1
+                           ls $SDK/usr/include/GLES/gl.h ; ls $SDK/usr/lib/aarch64-linux-ohos/libGLESv1_CM*
+                           # 均应不存在 → 固定管线需自备桩
+
+rec_priority:           1
+rec_approach:           write-ohos-platform-backend-on-egl-pbuffer-keep-upstream-backends-untouched
+rec_description: >
+  为库新写一个 OHOS 平台后端（独立目录，如 src/ohos/），**不去改动/复用任何一个上游
+  平台后端**，并基于 **EGL pbuffer 离屏表面**实现。步骤：
+
+  ① 用上面的探针确认 OHOS EGL 离屏可用（这是可行性的前提，必须先验）；
+  ② 用 grep 清点平台层契约函数总数与 EGL 层已提供数，差值即实际工作量
+     （freeglut 实测：契约 46 个，EGL 层 3 个 → 需实现约 43 个）；
+  ③ 实现平台内部头（定义 SFG_PlatformDisplay / SFG_PlatformContext 等），
+     参照 android 或 blackberry 后端的内部头结构，但去掉所有原生窗口依赖；
+  ④ 在构建系统里按平台名选择源码目录（CMake 用 CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS"；
+     OHOS 上 CMakeToolchain 会把 OHOS 映射为 HarmonyOS）；**平台标识由构建系统注入抽象宏**
+     （本 PR 实际采用：CMake `ADD_DEFINITIONS(-DTARGET_HOST_OHOS)`，公共头用
+     `__has_include(<GLES/gl.h>)` 判定），**禁止在 patches/ 里裸用 `__OHOS__`**（R8，
+     见下方 forbid 说明）；
+  ⑤ 语义取舍必须如实声明：无窗口系统 → glutCreateWindow() 实际创建的是「请求尺寸的
+     离屏渲染目标」；位置/标题/图标化/光标/gamemode 等请求被接受并记录但无视觉效果
+     （无合成器响应）；无输入事件源 → 事件循环为空，输入需宿主应用转发。
+
+  同时处理同批的移植摩擦：
+    · GLES1 固定管线入口 → no-op 桩 + 一次性告警；
+    · CMake 的 FindOpenGL 不搜交叉 sysroot → 显式传 OPENGL_egl_LIBRARY /
+      OPENGL_gles2_LIBRARY / OPENGL_*_INCLUDE_DIR；
+    · FIND_LIBRARY(GLES1_LIBRARY ... REQUIRED) → 对 HarmonyOS 置空并豁免；
+    · GLES 分支若引用桌面 GL 组件（如 OpenGL::OpenGL）→ 对 HarmonyOS 从 LIBS 移除。
+
+  参考实现：freeglut 适配的 src/ohos/{fg_internal_ohos.h, fg_ohos.c}（PR #10168）。
+rec_command:            # ① CMake 平台分支（源码选择）
+                           #   ELSEIF(CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS")
+                           #       LIST(APPEND FREEGLUT_SRCS src/ohos/fg_internal_ohos.h
+                           #                                  src/ohos/fg_ohos.c)
+                           # ② 平台标识由构建系统注入抽象宏（R8：禁止在 patches/ 裸用 __OHOS__）
+                           #   CMakeLists.txt:  ADD_DEFINITIONS(-DTARGET_HOST_OHOS)
+                           #   源码:            #if TARGET_HOST_OHOS   （fg_internal.h 已含）
+                           #   公共头(装给消费者): #if defined(__has_include) && __has_include(<GLES/gl.h>)
+                           # ③ 配方显式传交叉 sysroot 下的 GL 路径
+                           #   tc.variables["OPENGL_egl_LIBRARY"]   = "<sysroot>/usr/lib/aarch64-linux-ohos/libEGL.so"
+                           #   tc.variables["OPENGL_gles2_LIBRARY"] = "<sysroot>/usr/lib/aarch64-linux-ohos/libGLESv2.so"
+                           #   tc.variables["OPENGL_EGL_INCLUDE_DIR"]   = "<sysroot>/usr/include"
+                           #   tc.variables["OPENGL_GLES2_INCLUDE_DIR"] = "<sysroot>/usr/include"
+                           # ④ 平台层必须置初始化标志（漏了会报 "called without first calling glutInit"）
+                           #   fgState.Initialised = GL_TRUE;  atexit(fgDeinitialize);
+                           # ⑤ 验证：离屏渲染出具体像素
+                           #   glClearColor(0,0,1,1)+glClear+glReadPixels -> pixel=0,0,255,255
+rec_auto_fix:           false
+rec_impl:               manual-recipe-edit
+
+fallback_priority:      2
+fallback_approach:      headless-only-build-with-gui-paths-stubbed-and-declared
+fallback_description: >
+  若没预算实现完整平台后端（43 个函数确实不小），可退为「只满足编译与纯计算路径」：
+  为框架契约函数提供最小空实现（窗口创建返回 dummy、事件循环为空、状态查询返回
+  合理默认值），使库能编译并被链接，同时**在 README/notes 与 test_package 里如实声明
+  「无窗口/无事件，GUI 路径不可用」**。
+  代价：该库在本平台仅能作为「可链接的依赖」存在，不能真正渲染；调用方若期望窗口
+  行为会静默失效。**不得把空实现包装成「适配完成」** —— E471 已明确禁止把显示依赖
+  测试写成通过。
+fallback_command:       # 为每个契约函数提供空实现，编译期即可暴露全部缺口
+                           # for f in $(grep -rhoE '\bfgPlatform[A-Za-z_0-9]+\b' src/*.c | sort -u); do
+                           #   grep -rq "$f" src/ohos/ || echo "缺: $f"; done
+fallback_auto_fix:      false
+fallback_impl:          manual-recipe-edit
+
+forbid_1_pattern:       没有窗口系统.*所以.*不可适配|无 X11.*不可适配|no window system.*unsupported
+forbid_1_reason:        「无窗口系统」不等于「不能渲染」。OHOS 的 EGL 在普通原生进程里
+                          可用 EGL_DEFAULT_DISPLAY + EGL_KHR_surfaceless_context + pbuffer，
+                          实测能创建 GLES2 上下文并真实渲染（GL_VERSION=OpenGL ES 3.2）。
+                          正确结论是「需新写平台后端」，不是「不可适配」。
+forbid_1_consequence:   把一个可适配的库误判为不可适配，错失适配或错误走上【无法适配】流程。
+
+forbid_2_pattern:       有.*EGL.*后端.*可以直接用|自带.*egl.*够了|复用.*egl.*后端即可
+forbid_2_reason:        EGL 后端只提供渲染上下文管理，不提供窗口系统。以 freeglut 为例，
+                          平台层契约 46 个函数里 src/egl/ 只实现 3 个，其余仍需平台后端补齐。
+                          以为「有 EGL 就能直接用」会低估到一个数量级。
+forbid_2_consequence:   按「打补丁」估工时，实际做到一半发现缺 40 多个函数实现，
+                          要么返工要么被迫放弃。
+
+forbid_3_pattern:       用.*GLES2.*替代.*GLES1|GLESv1.*用.*GLESv2.*顶|GLES2.*固定管线
+forbid_3_reason:        OHOS 无 GLES1（无 GLES/gl.h、无 libGLESv1_CM），而 GLES2/GLES3 里
+                          根本没有 glBegin/glEnd/glVertex3fv 等固定管线入口。二者是
+                          「有/无」关系而非「版本高低」，不能相互替代。
+                          （符号获取路径另见 DRAFT-ohos-gl-symbols-are-dispatcher-stubs。）
+forbid_3_consequence:   期望 GLES2 顶上固定管线 → 链接期 undefined reference 或运行期崩溃。
+
+forbid_4_pattern:       改动.*上游.*x11.*后端.*适配|改.*wayland.*后端.*给.*OHOS|patch.*x11.*backend
+forbid_4_reason:        上游各平台后端都绑定具体窗口系统（X11/Wayland/Android/BlackBerry），
+                          改造成本远高于新写一个独立后端目录，且会造成与上游的长期合并冲突。
+                          正确做法是新增独立平台目录（src/ohos/），上游文件零改动。
+forbid_4_consequence:   补丁体积膨胀、后续上游升级必然冲突、且改出来的后端语义混乱。
+
+forbid_5_pattern:       空实现.*即.*适配完成|stub.*适配完成|无窗口.*也算.*适配通过
+forbid_5_reason:        用空实现换取编译通过只是**过渡手段**，不是适配完成。必须如实声明
+                          实际不可用的功能面（E471 同款原则：不得把显示依赖测试写成通过、
+                          不得强行 headless 假装通过）。
+forbid_5_consequence:   把不可用功能报成可用，下游消费者按「有窗口」使用会静默失效，
+                          最终问题在下游爆发且难以归因。
+
+principles:             判定可行性要用最小密闭探针（EGL 探针约 66 行）先验平台能力，
+                        不要凭「有没有窗口系统」直觉下结论；工作量要用工具清点
+                        （grep 契约函数数 − EGL 层已实现数），不要凭印象估算；
+                        语义取舍（无窗口/无输入）必须在文档与测试里如实声明。
+similar_to:             E321, E471, E527, DRAFT-ohos-gl-symbols-are-dispatcher-stubs
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-ohos-egl-headless-no-gles1-baseline.md
+last_updated:           2026-09-15
+source_event:           freeglut 3.6.0 适配（PR #10168）：上游 5 个平台后端在 OHOS 全部不可用
+                        （默认报 'X11/Xlib.h' file not found）；EGL 探针证明普通进程可用
+                        EGL_DEFAULT_DISPLAY + EGL_KHR_surfaceless_context + pbuffer 并真渲染
+                        （EGL 1.4 OpenHarmony / GL_VERSION=OpenGL ES 3.2 B301 /
+                        GL_RENDERER=Maleoon 916 / pixel=255,0,0,255）；
+                        平台层契约清点：46 个 fgPlatform*，EGL 层仅 3 个；
+                        另确认 OHOS 无 GLES1（GLES/gl.h 与 libGLESv1_CM 均不存在）。
+authors:                jumping_ggjjkk
+source_pr:              10168
+source_commit:          ea8d3c781
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-15

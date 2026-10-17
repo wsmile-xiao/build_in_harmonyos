@@ -1,0 +1,24 @@
+#====================================================================
+# Draft: kmc 3.2.4 - OHOS/libc++ 移植三连：<ext/algorithm> 的 std 化、
+#        捆绑 zlib 子模块 gcc 探测绕行（CC=clang 预构建跳过上游规则）、
+#        以及 py_kmc_api 因 pybind11 2.3.dev × Python>=3.11 的 NOT_RUN 判据
+#====================================================================
+
+id: DRAFT-E672
+trigger_tool: conan|clang|make
+phase: compilation|testing
+error_signature: ext/algorithm|__gnu_cxx|copy_n|Compiler error reporting is too harsh|No rule to make target 'libz.a'|Package type is 'library', but no 'shared' option|compiler_executables:c' does not exist|PyFrameObject|PYBIND11_VERSION_MINOR
+severity: '2'
+category: portability|libcxx|build-system|bundled-deps|test-coverage
+match_keywords: kmc, KMC, ext/algorithm, __gnu_cxx, copy_n, libc++, libstdc++, zlib, cloudflare, dependencies-zlib, submodule, CONFIG_SHELL, g++, CC override, compiler_executables, pybind11, PyFrameObject, py_kmc_api, static-library, libkmc_core, NEON, raduls_neon, kmc_runner.h
+title: KMC（及同族裸 Makefile 捆绑 zlib 项目）OHOS 适配三连：libstdc++ 专属 <ext/algorithm> 用 std 标准算法收敛即可（copy_n 本是标准算法）；上游 Makefile 规则里 `cd <submodule>; ./configure; make libz.a` 探测的是裸 gcc，设备/CI 无 g++/gcc 时须 CC=<clang 绝对路径> 预构建让该无依赖规则被 make 跳过；捆绑 pybind11 2.3.dev 与 Python>=3.11 不兼容（PyFrameObject 不透明化）时按上游发行物/上游 CI 是否包含该产物判 NOT_RUN 而非硬修
+root_cause: (1) <ext/algorithm> 是 libstdc++ 的 GNU 扩展头，OHOS NDK 全线 libc++ 无此头；kmc 把 `using __gnu_cxx::copy_n;` 放进 kmc_core/defs.h 与 kmc_api/kmer_defs.h，但 copy_n 本身自 C++98 起就在 <algorithm>/std 命名空间里，且该符号在全仓 0 调用点（死引用），因此两文件三行 std 化即可，不需要任何行为级补丁。(2) kmc 顶层 Makefile 的 `$(LIB_ZLIB)` 规则是无依赖规则（`cd 3rd_party/cloudflare; ./configure; make libz.a`），zlib configure 默认 CC=gcc；设备与 CI worker 都只有 clang（gcc/g++ 不存在），configure 在编译探测阶段即 abort（"Compiler error reporting is too harsh"），而 `make CC=clang++` 只覆盖顶层 C++ 编译器，configure 是独立 shell 进程不吃 make 变量。出路是配方层先 `CC=<profile clang> <CONFIG_SHELL> ./configure && make libz.a -j1` 预构建——无依赖规则看到目标文件已存在即跳过，上游 Makefile 一个字都不用改。(3) py_kmc_api 目标捆绑 pybind11 2.3.dev（2015 年代），Python 3.11 把 PyFrameObject 变为不透明类型后 `member access into incomplete type 'PyFrameObject'` 9 连错，设备 python 3.12.9/3.13.15 无旧版可退。判 NOT_RUN 的硬依据：上游官方发行物（KMC3.2.4.linux.arm64.tar.gz）不含 py_kmc_api.so、上游 GitHub CI 的 make 目标也不含 py_kmc_api——该产物本就不在上游交付面，不该为它返修源码；替代验证用 test_package 以底层 kmc_runner.h（py_kmc_api 的底层 API）做等价消费断言。
+affected_scope: 所有「裸 Makefile + 捆绑 zlib/ autotools 风格子模块 configure」的项目在 OHOS 的首次构建；所有引用 <ext/algorithm>/__gnu_cxx 的老 C++ 代码在 libc++ 下的移植；所有捆绑老 pybind11（<2.11）的 Python 绑定在 py>=3.11 的判定；另含 conan 模板坑：tools.build:compiler_executables 在本机 conan 2.29 是整个 JSON dict，`self.conf.get("tools.build:compiler_executables:c")` 深取直接抛 "does not exist in configuration list"（模板注释里的写法与现场实现不符），须先取 dict 再按键 c/cpp；package_type 声明 "library" 而上游只有静态产物时 conan 拒绝（no 'shared' option），应声明 "static-library" 而不是加空开关 shared 选项。
+verification_cmd: cd "$HOME/tmp/kmc-3.2.4/src/KMC-3.2.4" && grep -rn "ext/algorithm" --include=*.h . | wc -l && cd "$HOME/tmp/kmc-3.2.4" && grep -c "ALL 4 upstream workflow test steps PASS" conan-create-4.log && nm "$(conan cache path 'kmc/3.2.4:*' 2>/dev/null || echo .)/../../p/b/*/lib/libkmc_core.a" 2>/dev/null | grep -c RadixSortMSD_NEON
+rec_priority: '1'
+rec_approach: std-collapsing-include-fix-plus-clang-prebuild-of-bundled-zlib
+rec_description: '四步定式：① 遇 `fatal error: ''ext/algorithm'' file not found` 先 grep `__gnu_cxx` 与调用点——有调用点且仅 copy_n/类似标准算法时直接 <algorithm>+std:: 命名空间收敛（portability 补丁、最小 diff、注明"死引用"）；② 遇捆绑 zlib 子模块 configure 探 gcc 失败，不要改上游 Makefile，配方 build() 里用 profile 的 tools.build:compiler_executables dict 里的 c 键 `CC=<clang> <CONFIG_SHELL> ./configure` 预构建 libz.a，让上游无依赖规则自动跳过；③ libkmc_core 类静态库若 nm -u 显示 inflate/deflate 引用，必须把同一份捆绑 libz.a 打进包 lib/ 并在 cpp_info.libs 里按 ["kmc_core","z"] 顺序排列（引用者在前），否则下游消费者链接必挂（官方发行物不带 libz.a 是上游假设消费者自备，Conan 包要自包含）；④ 老 pybind11 构建失败先对照上游发行物与上游 CI 的 make 目标——上游交付面本就不含该产物时按 NOT_RUN + 替代验证记录，不要为它升级第三方依赖。'
+rec_command: conan create "$HOME/ws/worktrees/kmc-3.2.4/archives/k/kmc/3.2.4" -pr:h="$HOME/ws/worktrees/kmc-3.2.4/ci/conan/profiles/ohos-aarch64" -pr:b="$HOME/ws/worktrees/kmc-3.2.4/ci/conan/profiles/ohos-aarch64" -c tools.build:jobs=2
+rec_auto_fix: 'false'
+source_pr: '0'
+source_commit: '0'

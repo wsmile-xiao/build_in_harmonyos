@@ -1,0 +1,137 @@
+#====================================================================
+# DRAFT-libexplain-1.4.d001-ohos-musl-kernel-socket-header-dual-definition
+#   OHOS SDK 内核 uapi socket 头与 musl sys/socket.h 双向不互认：
+#   同一 TU 必重定义 sockaddr_storage，include 顺序与 __UAPI_DEF_* 均救不了
+# 来源: libexplain 1.4.d001 适配（本配方 PR；触发文件
+#       libexplain/buffer/ifreq_data/hwtstamp_config.c）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+# 证据: 设备实测 4 组合探针（T1-T4，见 md），全量 conan create 通过
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-libexplain-1.4.d001-ohos-musl-kernel-socket-header-dual-definition
+trigger_tool:           clang|make|cmake|meson
+phase:                  compilation
+error_signature:        redefinition of '(struct )?sockaddr_storage'|
+                        previous definition is here.*linux/socket\.h|
+                        previous definition is here.*sys/socket\.h
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               platform-headers, musl, uapi, socket, dual-definition
+match_keywords:         sockaddr_storage, sockaddr, redefinition, linux/socket.h,
+                        sys/socket.h, libc-compat, net_tstamp, ifreq, musl,
+                        内核头, 双向不认, 重复定义, OHOS SDK, sysroot, uapi
+title:                  OHOS SDK 内核 linux/socket.h 与 musl sys/socket.h 双向不互认：同 TU 必重定义 sockaddr_storage，须预定义内核守卫 _UAPI_LINUX_SOCKET_H 抑制内核副本
+prescan_pattern:        redefinition of .*sockaddr|linux/socket\.h|sys/socket\.h
+prescan_globs:          **/*.c, **/*.h, **/*.cpp
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             平台 sysroot 同时自带两份 socket 头：musl libc 的
+                        sys/socket.h（sockaddr_storage 在 377 行附近）与内核
+                        uapi 快照的 linux/socket.h（同结构在 23 行附近）。内核
+                        头的防重机制依赖 linux/libc-compat.h 与 **glibc** 的
+                        握手——它逐个探测 glibc 专有宏（__GLIBC__/_SYS_SOCKET_H
+                        组合等）决定 __UAPI_DEF_* 系列开关；musl 的守卫体系
+                        （sys/socket.h 直接展开、无同名守卫宏，经
+                        bits/alltypes.h 的 __NEED_* 机制供型）不在其识别表里，
+                        握手永远不触发。于是两份头**无论谁先谁后**都各自展开
+                        sockaddr_storage——include 顺序调整无效（与"守卫宏同名
+                        防重"的直觉相反：这里两份头守卫宏根本不同名
+                        （_UAPI_LINUX_SOCKET_H vs musl 无守卫），#include 防重
+                        在不同守卫名面前失效）。内核头内容 musl 已全覆盖，抑制
+                        内核副本无语义损失。
+
+affected_scope:         任何在同一 TU 同时可见 musl sys/socket.h 与 SDK 内核
+                        <linux/*.h> 网络头（linux/socket.h、linux/net_tstamp.h、
+                        linux/if_ether.h 等传递引入）的工程。本题实证：
+                        libexplain 的 buffer/ifreq_data/hwtstamp_config.c 经
+                        libexplain/ac/net/if.h（→sys/socket.h）与
+                        libexplain/ac/linux/net_tstamp.h（→内核链）双路径交汇。
+                        触发不需链接 socket 库，纯头文件交汇即炸。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           global-predefine-kernel-guard
+rec_description:        全局编译旗标预定义内核头自身守卫，令内核副本整体失活：
+                        CPPFLAGS 追加 -D_UAPI_LINUX_SOCKET_H=1，并把 musl 头
+                        排到内核头之前（消费源码 include 顺序补丁）——顺序在
+                        语义上仍值得固定（先 libc 后内核是两份头共存的唯一
+                        合理次序），但真正起效的是预定义（T3 vs T2 对照）。
+                        全局注入在本场景**安全**：被抑制对象是平台 libc 的
+                        冗余副本，不存在"内核副本是唯一来源"的 TU——这与
+                        uapi-copy-guard 条目禁止全局 -D 的场景（制品内嵌旧
+                        拷贝可能是部分 TU 的唯一来源）本质不同。
+                        判别三行：
+                        ① clang -print-sysroot 后 grep -n "ifndef" 内核
+                           linux/socket.h，确认守卫名带 _UAPI_ 前缀；
+                        ② 错误行对（note: previous definition）分别落在
+                           sys/socket.h 与 linux/socket.h 即本条；
+                        ③ 复现最小 TU 只含两个 include + 引用
+                           struct sockaddr_storage。
+rec_command:            CPPFLAGS="-D_UAPI_LINUX_SOCKET_H=1 ${CPPFLAGS}"
+rec_auto_fix:           false
+rec_impl:               conan-cppflags-inject
+
+fallback_priority:      2
+fallback_approach:      per-tu-guard-predefine-in-source
+fallback_description:   不便动全局旗标时，在交汇 TU 的内核头 include 前写
+                        #ifndef _UAPI_LINUX_SOCKET_H / #define _UAPI_LINUX_SOCKET_H
+                        / #endif 守卫块（幂等三行）。逐 TU 落位，其余 TU 不受
+                        影响；代价是每个交汇 TU 都要补一处，漏一处即复发。
+fallback_command:       补丁：交汇 TU include 块前置守卫三行
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       -D__UAPI_DEF_SOCKADDR=0|__UAPI_DEF_.*=0.*解决|UAPI_DEF 开关注入
+forbid_1_reason:        实测无效（T4 对照）：__UAPI_DEF_* 开关只有在 glibc
+                        握手把 libc-compat.h 激活后才被读；musl 下
+                        libc-compat.h 的握手分支根本不进，开关默认全"要定义"。
+                        写进配方只会制造"已处理"的错觉。
+forbid_1_consequence:   构建依旧报 redefinition，且错误面被旗标噪声拉长，
+                        排查时间翻倍
+forbid_2_pattern:       改.*sysroot.*内核头|删.*linux/socket\.h|patch.*sysroot
+forbid_2_reason:        sysroot 是平台共享资产，改/删内核头影响所有消费者且
+                        下次 SDK 升级即被冲掉（G3 同名隔离精神、制品边界）
+forbid_2_consequence:   平台级污染与不可复现构建
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+# ⚠️ 与 DRAFT-uapi-copy-guard-name-collision-predefine-package-guard 是
+# **同族不同案**，关键分野在"两份头的所有权"：
+#   那条 = sysroot uapi 副本 vs **依赖制品内嵌**旧拷贝 → 制品拷贝可能是部分
+#          TU 唯一来源 → 只许逐 TU 抑制、**禁止全局 -D**；
+#   本条 = sysroot uapi 副本 vs **musl libc 自带** sys/socket.h → musl 是
+#          全平台每个 TU 的 libc，内核副本恒为冗余 → 全局 -D 恒安全且必要。
+#   两条结论表面相反，判据统一为"被抑制副本是否可能是某 TU 的唯一来源"。
+similar_to:             DRAFT-uapi-copy-guard-name-collision-predefine-package-guard
+                        （守卫宏不同名致 #include 防重失效，同族；所有权不同，
+                        全局/逐 TU 结论相反）、libevdev-1.13.7-meson-harmonyos-
+                        uapi-header-probe（uapi 头探测，构建期配置面）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       printf '#include <sys/socket.h>\n#include <linux/socket.h>\nint main(void){ struct sockaddr_storage s; return (int)sizeof(s); }\n' > t.c && clang -D_UAPI_LINUX_SOCKET_H=1 -o t t.c && ./t; echo $?
+                        # 期望：输出 128（musl 版 sockaddr_storage 尺寸），退出码 128
+doc_file:               knowledge/drafts/DRAFT-libexplain-1.4.d001-ohos-musl-kernel-socket-header-dual-definition.md
+last_updated:           2026-09-21
+source_event:           libexplain 1.4.d001 适配：hwtstamp_config.c 双头交汇重定义；
+                        0006 补丁调整 include 顺序 + 配方注入
+                        -D_UAPI_LINUX_SOCKET_H=1 后全量 conan create 通过；
+                        设备 4 组合探针（T1 内核先败/T2 libc 先仍败/
+                        T3 预定义过/T4 __UAPI_DEF 开关无效）定案
+authors:                sunjunyang
+source_pr:              本 PR（libexplain 1.4.d001 配方 PR，合并后回填编号）
+source_commit:          本分支 HEAD
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-21

@@ -1,0 +1,70 @@
+# ═══ Draft knowledge entry — 上游 combine-static-libs 脚本在非 .o 平台、进程 cwd 不可读与重复调用三种条件下静默或延迟失 ═══
+# Timestamp: 2026-09-17
+# Software: filament 1.76.1
+# Gate: HarmonyOS PC conan create（pass 1 + pass 2 + package + test_package 全链路）
+# Status: DRAFT — 需人工/AI 审核后 promote 为 E-entry
+#
+# To promote:
+#   1. 审核 error_excerpt 与实际验证
+#   2. 改名为 E0XX.kv 并移动到 knowledge/graph/
+#   3. 在 knowledge/graph/index.tsv 添加一行
+#   4. 编写 knowledge/doc/E0XX.md
+
+id:                     DRAFT-filament-1.76.1-static-archive-combine-portability
+trigger_tool:           cmake|ar|make|clang++|conan
+phase:                  build|package|linking
+error_signature:        mv: bad '?[^']*\.o'?|
+make\[[0-9]+\]: \*\*\* \[[^\]]*libfilamat\.a[^\]]*\].*Error 1|
+File name too long|ENAMETOOLONG
+
+severity:               3
+category:               portability|build-system|static-archive|conan
+match_keywords:         combine-static-libs, ar -x, ar -qc, .obj, .o, object file extension, duplicate archive member, scratch directory, stale scratch, ENAMETOOLONG, NAME_MAX, mv bad, idempotency, repeated invocation, getcwd, ENOTSUP, POST_BUILD, static library combine
+title:                  上游 combine-static-libs 脚本在非 .o 平台、进程 cwd 不可读与重复调用三种条件下静默或延迟失败：扩展名、绝对路径 scratch、每轮清理与参数转发四项修复
+
+root_cause: >
+  上游 `build/linux/combine-static-libs.sh` 用 `ar -x` 把多个静态库解到 scratch 再 `ar -qc` 合成一个。该脚本隐含三个未言明的前提，OHOS/aarch64 上全部不成立：
+    (1) 成员扩展名恒为 `*.o` —— CMake 在 ELF 平台产出 `.obj`，`ar -x` 成功但随后的重命名循环找不到任何匹配，以 `mv: bad '*.o'` 结束；
+    (2) scratch 目录相对当前目录、且解包前 `cd` 进去 —— 该设备上 filamat 的 POST_BUILD 阶段进程 cwd 可能变得不可读（`getcwd` 报 ENOTSUP），相对路径与 `$(pwd)` 同时失效；
+    (3) scratch 目录名由**输出库名**派生 —— 同一条 combine 每次调用复用同一目录，而脚本只做 `mkdir -p`。一轮中途失败会把已解出的对象留在原地，下一轮的重命名循环给它们**再叠一层 `<dir>_` 前缀**；成员名较长的归档率先撞上 `NAME_MAX`(255)，`mv` 以 ENAMETOOLONG 失败。
+    (4) 另有一处静默失效：辅助函数 `object_files() { find "$1" ...; }` 不转发多余参数，因此 `object_files "$dir" -delete` 里的 `-delete` 被丢弃，**归档后的清理从未发生且没有任何报错**。
+
+trigger_condition: >
+  上游构建脚本把多份静态库解包合并成一个；该脚本硬编码对象文件扩展名、依赖进程 cwd、并用输出名派生可复用的暂存目录；或脚本通过封装函数向外部工具传递清理类选项时。
+
+solution: >
+  四处最小修复，均不改归档语义（同一个 ar、同样的解包/重命名/建包顺序）：
+    1. 扩展名从归档实际内容推导，`find` 同时匹配 `*.o` 与 `*.obj`；
+    2. 全部路径绝对化：`COMBINE_WORK_ROOT="${COMBINE_WORK_ROOT:-${TMPDIR:-/tmp}}"`，用 `ar -x --output=DIR` 显式指定输出目录，完全不 `cd`；
+    3. 在**处理归档列表之前**对暂存目录执行一次清理（整轮清一次，不是每个归档各清各的），并加守卫拒绝清理非预期路径：`case "$dir" in "$ROOT"/_?*) rm -rf "$dir";; *) exit 1;; esac`；
+    4. `object_files() { local dir="$1"; shift; find "$dir" -type f \( -name '*.o' -o -name '*.obj' \) "$@"; }`
+  刻意**不加**「文件名已带前缀就跳过」的规则：实测真实输入归档中没有任何成员以该前缀开头，加那条只会掩盖 stale scratch 而非根治。
+
+verification: >
+  旧脚本会把残留对象原样并入归档并二次加前缀；新脚本每次产出确定的同一成员集。
+    T1 干净起点 -> rc=0, mv:bad=0, members=269, maxlen=68
+    T2 先播种 60 个'上轮残留'对象 -> rc=0, members=269, 双重前缀=0, 残留泄漏=0, 与 T1 成员表完全一致
+    T3 再播种并连跑两次 -> rc=0, members=269, 与 T1 一致
+    判别组：同样播种 + 旧脚本 -> members=329（多 60）, maxlen=83, 双重前缀=60
+    `-delete` 对照（3 个临时对象）：新写法 before=3 after=0 rc=0；旧写法 before=3 after=3
+
+applicability: >
+  所有把多份静态库合并成单库的上游构建脚本（Filament、Chromium 系的 combine 脚本），以及任何硬编码对象扩展名、依赖进程 cwd、或用输出名派生可复用暂存目录的构建辅助脚本。
+
+counterexample: >
+  若上游已经用绝对路径 + 每次 `mktemp -d` 派生唯一暂存目录，则 (2)(3) 两条不适用；若平台只有 `*.o`（GNU/Linux 常见），(1) 不触发但仍应保留兼容写法。
+
+recovery_condition: >
+  撤掉每轮清理后，残留对象会再次被二次加前缀，长成员名归档将重现 ENAMETOOLONG。
+
+doc_file:               knowledge/draft/DRAFT-filament-1.76.1-static-archive-combine-portability.md
+last_updated:           2026-09-17
+source_event:           filament 1.76.1 HarmonyOS PC 适配 (PR #10480)
+
+authors:                ohos-farm
+source_pr:              10480
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-17

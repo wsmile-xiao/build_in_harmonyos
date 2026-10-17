@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.15)
+project(qdirstat_consumer LANGUAGES CXX)
+add_executable(qdirstat_consumer test.cpp)
+target_compile_features(qdirstat_consumer PRIVATE cxx_std_17)
+enable_testing()
+add_test(NAME qdirstat_consumer COMMAND qdirstat_consumer)

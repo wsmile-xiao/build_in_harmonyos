@@ -1,0 +1,68 @@
+#====================================================================
+# DRAFT-autotools-config-sub-silent-ohos-triplet.kv
+# 只补 config.guess 时 config.sub 会把 OHOS 三元组静默规范化成
+# <machine>-unknown-linux-gnu-ohos（configure/make 全绿、host_os=linux-gnu-ohos）；
+# 并澄清 Conan 只在 cross_building() 为真时才注入 --host/--build。
+# 完整叙事、自我更正与实测证据见同目录 .md
+#====================================================================
+
+id:                     DRAFT (最终编号由知识库主编确认)
+trigger_tool:           config.sub|config.guess|configure|AutotoolsToolchain
+phase:                  configuration
+error_signature:        aarch64-unknown-linux-gnu-ohos|linux-gnu-ohos|S["host_os"]="linux-gnu-ohos"
+severity:               2
+category:               autotools, config.sub, config.guess, conan, ohos, native-build, silent-false-green
+match_keywords:         config.sub, config.guess, aarch64-unknown-linux-gnu-ohos, linux-gnu-ohos, host_os, 静默规范化, silent, E007, E122, linux-ohos, HarmonyOS, AutotoolsToolchain, cross_building, --host, --build, update_configure_args, 三元组, 原生构建
+title:                  只补 config.guess 时 config.sub 会把 OHOS 三元组静默规范化成 <machine>-unknown-linux-gnu-ohos（configure/make 全绿、host_os=linux-gnu-ohos）；Conan 仅在 cross_building() 为真时注入三元组，剪枝不是通用修复
+root_cause:             机理链（GNU config 脚本 timestamp 2020-01-01 + Conan 2.29.1 实测；hunk 隔离实验见 verification_cmd）：(1) config.guess 补丁输出 4 段 aarch64-unknown-linux-ohos，该版 config.sub 由 case $1 in 的两条分支处理——4 段走 *-*-*-*（config.sub 125-128 行，位置在 ambiguous 分支之上）得到 basic_machine=aarch64-unknown / os=linux-ohos，3 段（Conan 注入形态）走 *-*-*) ambiguous 分支（129-150 行）；(2) 两条分支最终都受 OS 列表（1357 行 `-linux-gnu* | -linux-android*` 那一行）管辖：白名单没有 linux-ohos* 时，1397 行的 OS 归一化 case 中具名分支 linux*) 的 os=`echo $os | sed -e 's|linux|linux-gnu|'` 把 os 静默改写成 os=linux-gnu-ohos（最终完整三元组为 aarch64-unknown-linux-gnu-ohos），rc 恒为 0、无任何告警；(3) hunk 分工（拆开应用 0002 的两个 hunk 实测）：只应用 134 行 ambiguous 列表 hunk 时 4 段仍被静默改写成 -gnu-ohos（说明该 hunk 对 4 段无效）；只应用 1357 行 OS 列表 hunk 时 4 段正确、3 段响亮报 Invalid configuration ... system `ohos' not recognized（rc=1）；两个 hunk 齐备时两种形态都得到 aarch64-unknown-linux-ohos；(4) 错误身份被 configure 全盘采信并落盘，形态为 config.status 中的 S["host_os"]="linux-gnu-ohos"（注意不是 shell 赋值语法），任何 case $host_os in *-gnu*|linux-gnu*) 分支会被错误命中、linux-ohos 分支永不命中；因为 configure/make 全绿且产物可运行，该缺陷只能靠 config.sub "$(config.guess)" 原样返回与 S["host_os"] 断言发现，不能用「configure 是否通过」替代。(5) 附带澄清：AutotoolsToolchain 的三元组生成被 if self._is_cross_building: 包住（_is_cross_building = not is_universal_arch and cross_building(self)），本仓库 CI 把同一 profile 传给 -pr:h 与 -pr:b 故 cross_building() 为 False、不注入任何 --host/--build，configure 会自行调用 config.guess；只有异构 build profile 才出现 --host=aarch64-linux-ohos --build=x86_64-linux-gnu
+affected_scope:         所有自带/autoreconf 生成 GNU config.guess+config.sub 且按 E007 只补了 config.guess 的 autotools 配方（uname -s 不在 GNU 名单的平台，如 HarmonyOS）；后果严重度取决于上游是否按 host_os 做 *-gnu* 分支
+verification_cmd:       # 1) 两条脚本必须互相对齐（核心判据）
+                        sh acscripts/config.guess                                # 期望 aarch64-unknown-linux-ohos
+                        sh acscripts/config.sub "$(sh acscripts/config.guess)"    # 必须原样返回同一串
+                        # 只补 config.guess 时返回 aarch64-unknown-linux-gnu-ohos（rc=0，无告警）
+                        # 2) hunk 隔离实验（证明两处 hunk 缺一不可、分工不同）
+                        #    只应用 ambiguous 列表 hunk：4 段 → -gnu-ohos（静默错）
+                        #    只应用 OS 列表 hunk      ：4 段 → 正确；3 段 → Invalid configuration（响亮 rc=1）
+                        sh acscripts/config.sub aarch64-linux-ohos               # Conan 注入形态，期望 aarch64-unknown-linux-ohos
+                        # 3) configure 落盘的平台身份（注意 config.status 是 S["host_os"]=... 形态）
+                        ./configure --prefix=$P >/dev/null 2>&1 && grep -o 'S\["host_os"\]=[^ ]*' config.status
+                        # 期望 S["host_os"]="linux-ohos"；错误形态 S["host_os"]="linux-gnu-ohos"
+                        # 反例：grep '^host_os=' config.status 恒为 rc=1 且无输出，不可用作判据
+                        # 4) Conan 注入条件（trip-probe：只打印 configure_args 的最小配方）
+                        conan create . -pr:h="$OHOS_PROFILE" -pr:b="$OHOS_PROFILE"   # 期望无 --host/--build
+                        conan create . -pr:h="$OHOS_PROFILE" -pr:b=./linux-x86_64    # 期望 --host=aarch64-linux-ohos --build=x86_64-linux-gnu
+                        实跑（2026-09-11 HarmonyOS aarch64 / HongMeng Kernel 1.12.0 / Conan 2.29.1）：config.sub aarch64-unknown-linux-ohos → aarch64-unknown-linux-gnu-ohos（缺补丁 0002，rc=0）／→ aarch64-unknown-linux-ohos（补丁就位）；hunk 隔离：只补 ambiguous 列表 hunk 时 4 段仍为 -gnu-ohos、只补 OS 列表 hunk 时 3 段响亮 rc=1、两个 hunk 齐备时两种形态都正确；config.sub aarch64-linux-ohos → aarch64-unknown-linux-ohos；仅 0001+0003 的树 configure rc=0、make rc=0、./src/digup -V 正常、S["host_os"]="linux-gnu-ohos"；同构 profile ARGS_BEFORE==ARGS_AFTER、异构 profile 出现 --host/--build
+rec_priority:           1
+rec_approach:           pair-gnuconfig-patches-and-assert-roundtrip
+rec_description:        把 config.guess 与 config.sub 的 OHOS 补丁作为**一个原子改动**成对补齐：config.guess 增加 HarmonyOS 分支（按脚本代际选 echo+exit 或 GUESS= 形态），config.sub 的两处 hunk 都要补 —— ambiguous 三元组列表（该版 134 行）与 OS 列表（1357 行）各加 linux-ohos*。两处缺一不可且分工不同（hunk 隔离实验实测）：4 段形态 <machine>-unknown-linux-ohos（config.guess 产出）走 *-*-*-* 分支，只由 OS 列表 hunk 放行（只补 ambiguous 列表时它仍被静默改写成 <machine>-unknown-linux-gnu-ohos）；3 段形态 <machine>-linux-ohos（Conan 注入）走 ambiguous 分支，两个 hunk 都缺一不可（缺 ambiguous 列表 → 落 *) 兜底被拆错；缺 OS 列表 → 仍被静默改写）。真正的静默改写是该版 1397 行 OS 列表兜底的 os=`echo $os | sed -e 's|linux|linux-gnu|'`，rc 恒为 0。补完后必须显式断言 config.sub "$(config.guess)" 与 config.guess 输出逐字节相同（不能用「configure 是否通过」替代），并核验 config.status 中 S["host_os"] 为 linux-ohos 而非 linux-gnu-ohos（注意是 S["host_os"]=... 形态，grep '^host_os=' 恒为空）。不要为了「让 config.guess 生效」去剪掉 Conan 的 --host/--build：同构 profile（本仓库 CI）下本来就没有三元组，剪枝是空操作；异构 profile 下剪枝会让 configure 在构建机上判定平台
+rec_command:            sh config.guess; sh config.sub "$(sh config.guess)"   # 两者必须输出同一三元组
+rec_auto_fix:           false
+rec_impl:               manual-patch
+fallback_priority:      2
+fallback_approach:      assert-only-without-fixing-config-sub
+fallback_description:   若因故不能补 config.sub（例如上游脚本被其他机制覆盖），至少要在配方里加断言让静默错误变成响亮失败：configure 后校验 config.status 的 host_os 等于期望值，不等则 raise。诚实权衡：这只是把静默错误暴露出来，平台身份仍然是错的，不能替代补齐 config.sub
+fallback_command:       grep -q 'S\["host_os"\]="linux-ohos"' config.status || (echo 'OHOS triplet mis-normalized'; exit 1)   # 实测：补丁齐全的正确树 rc=0、缺 config.sub 补丁的树 rc=1；旧写法 grep -q "^host_os='" 在两种树上都失败，已废弃
+fallback_auto_fix:      false
+fallback_impl:          recipe-assertion
+forbid_1_pattern:       只补 config.guess 而不同步补 config.sub（或只补 config.sub 两处 hunk 中的一处），并以「configure 通过 / make 成功 / 产物可运行」作为三元组正确的证据
+forbid_1_reason:        该组合下 config.sub 会把 aarch64-unknown-linux-ohos 静默规范化成 aarch64-unknown-linux-gnu-ohos（rc=0、无告警），configure/make 全绿但 host_os 是 linux-gnu-ohos，平台身份被写错
+forbid_1_consequence:   任何 case $host_os in *-gnu*|linux-gnu*) 分支被错误命中、linux-ohos 分支永不命中；缺陷在构建全绿中静默传播到下游配方。只补 ambiguous 列表 hunk 时 4 段形态仍静默错成 <machine>-unknown-linux-gnu-ohos（hunk 隔离实验实测）
+forbid_2_pattern:       为让 config.guess 生效而在 generate() 里无条件剪掉 --host/--build（update_configure_args({"--host": None, "--build": None})）并宣称这是通用修复
+forbid_2_reason:        同构 profile（本仓库 CI 把同一 profile 传给 -pr:h/-pr:b）下 AutotoolsToolchain 本来就不注入三元组，剪枝是空操作；异构 profile 下剪枝会让 configure 在构建机上跑 config.guess 并静默选到构建机架构
+forbid_2_consequence:   在真实交叉场景下静默产出错误架构的产物；在非交叉场景则制造「关键修复」的假象，误导后续配方维护者
+principles:             [P-AUTOTOOLS-001]
+causes:                 []
+caused_by:              []
+similar_to:             [E007, E122, DRAFT-E564-oldstyle-config-guess-ohos-reanchor, DRAFT-config-guess-era-echo-exit]
+conflicts_with:         []
+prerequisite_of:        []
+doc_file:               DRAFT-autotools-config-sub-silent-ohos-triplet.md
+last_updated:           2026-09-11
+source_event:           digup 0.6.57 OHOS PC 适配（Conan 2.29.1 + OHOS profile；GNU config 脚本 timestamp 2020-01-01）；本条取代未合入的前一版 DRAFT-conan-autotools-triplets-mask-config-guess（其结论经 W4 独立审计证伪）
+authors:                Awstme
+source_pr:              pending（feat/digup-0.6.57 交付 PR）
+source_commit:          pending（随 PR 交付后回填）
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-11

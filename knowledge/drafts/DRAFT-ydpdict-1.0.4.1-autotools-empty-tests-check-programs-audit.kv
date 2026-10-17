@@ -1,0 +1,93 @@
+#====================================================================
+# DRAFT-ydpdict-1.0.4.1-autotools-empty-tests-check-programs-audit
+#   上游 TESTS 变量为空时 make check 只构建、不运行：
+#   测试清点必须下探到 check_PROGRAMS（以及 check_SCRIPTS / TESTS 里的脚本入口），
+#   否则会误报 N=0，或把"构建成功"当成"测试通过"。
+#   来源：PR !13886 feat(libydpdict) 1.0.4.1
+#         （1.0.4 清点误报 N=0 → 修正 N=4 并逐个真实执行）
+#====================================================================
+
+id:                     DRAFT-ydpdict-1.0.4.1-autotools-empty-tests-check-programs-audit
+trigger_tool:           make|automake|configure|conan|sh
+phase:                  testing|verification|configure
+error_signature:        Nothing to be done for ['"]?check|#\s*TOTAL:\s*0|#\s*PASS:\s*0|
+                        make check.*(只构建|不运行|no tests)|上游测试.*N\s*=\s*0|
+                        check_PROGRAMS.*TESTS
+severity:               2
+category:               testing, autotools, automake, test-counting, false-pass, ohos, conan
+match_keywords:         check_PROGRAMS, TESTS 变量, check_SCRIPTS, check_LTLIBRARIES,
+                        make check, automake, check-am, 上游测试清点, 测试清点, N=0,
+                        误报, 只构建不运行, 假通过, 空测试套件, 逐程序真实执行,
+                        DICT_PATH, ydptest_SOURCES, mkdict.py, libydpdict, rule4, R51
+title:                  autotools 上游 TESTS 变量为空时 make check 只构建不运行：测试清点必须下探到 check_PROGRAMS 并逐个真实执行，否则误报 N=0 或把"构建成功"当"测试通过"
+
+root_cause:             automake 里有两个语义完全不同的变量：TESTS 是"要执行的测试"列表，check_PROGRAMS 只是"要构建的测试程序"列表。libydpdict 1.0.4 官方 release tarball（40 个成员，无 tests/ 目录）的 misc/Makefile.am 第 1 行只有 check_PROGRAMS = ydpstress ydptest ydpxml gentable，全树 src/include/misc 三个 Makefile.am 均无 TESTS；生成后的 misc/Makefile.in 因此只有 "check-am: all-am" + "$(MAKE) $(AM_MAKEFLAGS) $(check_PROGRAMS)"，没有 $(TEST_LOGS)/$(TEST_SUITE_LOG) —— make check 把 4 个程序编译出来就结束，退出码 0 只表示"构建成功"，一个用例都没跑。两类后果：(1) 清点误报——以"是否存在 tests/ 目录 / 是否有 TESTS 变量 / 是否有 ctest-pytest 注册项"三面判据清点，三面全 0，于是 1.0.4 的申报写成"上游无 check_PROGRAMS、测试总数 N=0"；实际下探 check_PROGRAMS 得 N=4（其中 ydptest_SOURCES=ydpstress.c，与 ydpstress 同源、独立二进制）。(2) 假通过——把 make check 的退出码 0 当成"上游测试通过率 100%"，此时测试程序连运行都没运行；"只构建不执行就宣称已执行"是同一类误报。本条与 DRAFT-10251-libnfc-tools-1.8.0-autotools-test-framework-guard（configure 守卫把套件整体排除，TOTAL: 0）、DRAFT-mpsolve-3.2.3-make-check-green-is-not-deliverable-green（check 只链构建树私有库、SKIP 计入 TOTAL）同属"退出码/汇总面不等于执行面"，但根因是变量语义被混淆：TESTS 空 ≠ 没有测试资产。
+affected_scope:         所有以 autotools/automake 发布的上游（含 release tarball 里预生成 Makefile.in、不重跑 autoreconf 的包）；所有按"测试目录 / TESTS 变量 / 框架注册项"三面判据做上游测试清点（rule4 / R51 口径）的流程；以及所有拿 make check 退出码当测试证据的 CI 门禁与 PR/Issue 申报表。典型命中形态：check_PROGRAMS 非空而 TESTS 为空；测试程序是"批处理式校验器 / 转换表生成器 / 压力程序"而非断言库用例，因此上游从未为它们写 automake 测试驱动。
+verification_cmd:       # 1) 建树面：确认发布包内没有 tests/ 目录
+                        tar -tzf libydpdict-1.0.4.tar.gz | grep -c '/tests\?/'          # 0
+                        # 2) 变量面：TESTS 为空、check_PROGRAMS 非空（三个 Makefile.am 都要查）
+                        grep -n 'TESTS\|check_PROGRAMS\|check_SCRIPTS' src/Makefile.am include/Makefile.am misc/Makefile.am
+                        #   → misc/Makefile.am:1:check_PROGRAMS = ydpstress ydptest ydpxml gentable
+                        # 3) 生成面：确认 make check 只 build 不 run（无 TEST_LOGS / TEST_SUITE_LOG）
+                        awk '/^check-am:/,/^$/' misc/Makefile.in
+                        #   → check-am: all-am
+                        #         $(MAKE) $(AM_MAKEFLAGS) $(check_PROGRAMS)
+                        # 4) 执行面：构建后逐个真实执行，不经 automake 测试驱动
+                        make -C misc check
+                        for p in ydpstress ydptest ydpxml gentable; do ./misc/$p || exit 1; done
+                        #   可写环境 4/4 PASS；只读根文件系统下 3 个数据依赖程序必须显式标注 skip 并在日志写明原因，gentable 照常执行
+
+rec_priority:           1
+rec_approach:           enumerate-check-programs-then-execute-each
+rec_description:        清点与执行分两步、都不依赖 TESTS：第一步清点"注册面"——同时检查 check_PROGRAMS、check_SCRIPTS、check_LTLIBRARIES、TESTS 与各框架注册项，任一非空都计入 N，并展开 *_SOURCES 识别同源多二进制（ydptest_SOURCES=ydpstress.c 按 2 例计）、确认程序是否依赖外部测试数据（如 DICT_PATH）；第二步执行——make -C <dir> check 只负责构建，随后逐个直接运行每个 check 程序，逐个记录退出码与原始输出，任一非 0 即让构建失败。数据依赖不可分发时按上游自带合成工具造等价测试数据（libydpdict 用上游 EXTRA_DIST 的 misc/mkdict.py 格式合成 4 本词典），测试程序源码与判定逻辑零改动；环境确实无法提供数据（只读根文件系统）时，必须逐个打印 "skip (no corpus at ...)" 之类的显式理由，绝不允许静默跳过或把跳过计入通过数。
+rec_command:            # 清点（可复现）
+                        grep -n 'check_PROGRAMS\|check_SCRIPTS\|check_LTLIBRARIES\|^TESTS' misc/Makefile.am src/Makefile.am include/Makefile.am
+                        # 构建 + 逐个真实执行（conanfile build() 内）
+                        make -C misc check
+                        for program in ydpstress ydptest ydpxml gentable; do
+                          test -x "misc/$program" || { echo "missing check program: misc/$program"; exit 1; }
+                          ./misc/$program || exit 1
+                        done
+rec_auto_fix:           false
+rec_impl:               conanfile-upstream-check-runner
+
+fallback_priority:      2
+fallback_approach:      declare-skip-with-explicit-reason
+fallback_description:   若某环境确实无法让 check 程序真实执行（平台 CI worker 根文件系统只读，/usr/local/share/ydpdict 建不出来），允许降级为"显式跳过 + 说明"：逐个程序打印 skip 与具体技术原因、在 PR 描述与日志里写明哪几个没跑、并给出在可写环境（本地 qemu + OHOS musl 运行根或真机）的真实执行证据；无数据依赖的程序（gentable）必须照常执行。诚实权衡：平台 CI 的覆盖率下降，但清点数字与通过率不掺假；反过来用 make check 的退出码 0 冒充 4/4 通过会污染申报数据。
+fallback_command:       # 配方内显式跳过（禁止静默）
+                        #   self.output.info("skip (no corpus at %s): misc/%s" % (DICT_PATH, program))
+                        # 可写环境复跑（本地）
+                        bash outputs/local-validate-recipe.sh archives/l/libydpdict/1.0.4.1
+                        #   → conan create rc=0；misc/ydpstress ydptest ydpxml gentable 全部 PASS（4/4）
+fallback_auto_fix:      false
+fallback_impl:          conanfile-explicit-skip
+
+forbid_1_pattern:       grep.*TESTS.*(无|0|空).*(N\s*=\s*0|无测试|没有测试)|(无|没有).*check_PROGRAMS.*(推出|判定|结论)
+forbid_1_reason:        只查 TESTS 变量或只看有没有 tests/ 目录就下结论，会把 check_PROGRAMS 里的测试资产整体漏掉；libydpdict 1.0.4 的 N=0 就是这样误报出来的。
+forbid_1_consequence:   申报表少报上游用例（rule4 判少报/清点不实），后续所有用例数对比与覆盖率推导全部建立在错误基数上。
+
+forbid_2_pattern:       make check.*(退出码|exit code|rc).{0,8}0.{0,20}(全|都)?通过|make check.*(100%|全绿).*(通过|PASS)
+forbid_2_reason:        TESTS 为空时 make check 只构建不执行，退出码 0 是构建结论，不是测试结论。
+forbid_2_consequence:   把"编译出来了"写成"上游测试通过率 100%"，属于证据造假；一旦审核方在可写环境复跑，4 个程序或全部未跑、或跑出失败。
+
+forbid_3_pattern:       (删除|注释掉|disable).*(check_PROGRAMS|ydpstress|ydptest|ydpxml|gentable)|rm .*misc/(ydpstress|ydptest|ydpxml|gentable)
+forbid_3_reason:        为了让构建变绿而删改上游 check 程序，违反 R51"上游测试原样执行"；数据缺失应显式跳过并说明，而不是消灭测试资产。
+forbid_3_consequence:   上游测试证据链断裂，制品仓归档与评测数据被污染，后续版本无法复核。
+principles:             P-BUILD-001
+causes:                 []
+caused_by:              []
+similar_to:             [DRAFT-10251-libnfc-tools-1.8.0-autotools-test-framework-guard, DRAFT-mpsolve-3.2.3-make-check-green-is-not-deliverable-green, DRAFT-no-upstream-tests-drive-real-interface]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ydpdict-1.0.4.1-autotools-empty-tests-check-programs-audit.md
+last_updated:           2026-09-30
+source_event:           libydpdict 1.0.4.1（PR !13886）：1.0.4（!12876）按"tests/ 目录 + TESTS 变量 + ctest/pytest 注册项"清点得 N=0；1.0.4.1 下探 misc/Makefile.am 的 check_PROGRAMS 修正为 N=4，并以 make -C misc check 构建 + 逐个真实执行的方式在可写环境 4/4 PASS（本地 qemu-user + OHOS musl 运行根）、DAYU200 真机消费者用例 23/23 通过
+authors:                Quas
+source_pr:              13886
+source_commit:          32a2b96c885f608a50271783000b8c6902b09690
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:      2026-09-30

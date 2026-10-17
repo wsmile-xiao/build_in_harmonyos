@@ -79,3 +79,24 @@
 
 **编译结束**: 2026-06-03 15:49
 **最终状态**: built
+
+---
+
+## Conan 配方创建 (2026-07-14)
+
+**目标**: 为 CI 流水线生成标准的 Conan 配方，支持 `conan create` 自动构建。
+
+### 变更内容
+- **conanfile.py**: 基于 MesonToolchain 的标准配方
+  - `default_library=static` — 静态库（嵌入式风格小库）
+  - `with_INIReader=false` — 不编译 C++ 封装（纯 C 消费）
+- **conandata.yml**: 官方 GitHub release URL + SHA256 校验
+- **test_package/**: 完整的 CMake 消费者测试
+  - 测试 `ini_parse_string()` 的 6 组功能：基本解析/多 section/注释/错误检测/空输入/section 无值
+  - 符合 R34：实质调用被测库 API
+- **patches/**: 空目录（无补丁需要）
+
+### 状态
+- 版本级 status: `built` → `published`
+- URL: Gitee 镜像 → GitHub 官方源 (R39)
+- 等待 CI 流水线 `conan create` 验证后上传到制品仓

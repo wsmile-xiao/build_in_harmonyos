@@ -1,0 +1,54 @@
+--- a/src/librecast.c
++++ b/src/librecast.c
+@@ -455,6 +455,12 @@
+ 
+ static void lc_close_nack_logger(lc_channel_logging_t *logging)
+ {
++#if defined(__linux__) && !defined(__GLIBC__)
++	/* musl: no pthread_cancel — close the socket to unblock the poll/recv loop;
++	 * nack_thread() breaks out of its loop on recv error, then joins. */
++	close(logging->sock_nack->sock);
++	logging->sock_nack->sock = -1;
++#endif
+ 	pthread_cancel(logging->nack_thread);
+ 	pthread_join(logging->nack_thread, NULL);
+ 	pthread_mutex_destroy(&logging->mutex);
+@@ -1387,6 +1393,11 @@
+ int lc_socket_listen_cancel(lc_socket_t *sock)
+ {
+ 	if (sock->thread) {
++#if defined(__linux__) && !defined(__GLIBC__)
++		/* musl: close fd to unblock recvmsg; thread exits on EBADF */
++		close(sock->sock);
++		sock->sock = -1;
++#endif
+ 		if (pthread_cancel(sock->thread))
+ 			return LC_ERROR_THREAD_CANCEL;
+ 		if (pthread_join(sock->thread, NULL))
+@@ -2063,6 +2074,10 @@
+ 		if (len < 0) {
+ 			lc_msg_free(&msg);
+ 			if (sc->callback_err) sc->callback_err(len);
++#if defined(__linux__) && !defined(__GLIBC__)
++			/* musl: lc_socket_listen_cancel() closed the fd to stop us */
++			if (errno == EBADF) break;
++#endif
+ 		}
+ 		lc_msg_free(&msg);
+ 	}
+@@ -2604,6 +2619,7 @@
+ int lc_ctx_qpool_free(lc_ctx_t *ctx)
+ {
+ 	int err = 0, rc = 0;
++	q_pool_stop(ctx->q, ctx->nthreads);
+ 	if (q_pool_destroy(ctx->tid, ctx->nthreads))
+ 		err = errno, rc = -1;
+ 	free(ctx->tid); ctx->tid = NULL;
+@@ -2619,6 +2635,7 @@
+ 	if (nthreads == ctx->nthreads) return 0;
+ 	if (nthreads < ctx->nthreads) {
+ 		newtids = ctx->nthreads - nthreads;
++		q_pool_stop(ctx->q, newtids);
+ 		rc = q_pool_destroy(&ctx->tid[nthreads], newtids);
+ 		if (rc) return -1;
+ 		ctx->nthreads = nthreads;

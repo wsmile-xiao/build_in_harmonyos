@@ -1,0 +1,105 @@
+#====================================================================
+# Draft knowledge entry - axel-family hand-written configure aborts on
+# compiler name probe (OHOS clang-only); PATH gcc shim satisfies the probe,
+# make CC= pins the real compiler
+# Source package: rotix/0.83 (configure derived from axel, author credit in
+# upstream README; same probe pattern in third-party bundled sub-configures,
+# e.g. zlib's "Checking for gcc..." seen in kmc/3.2.4 adaptation)
+#====================================================================
+
+id:                     DRAFT-rotix-0.83-handwritten-configure-gcc-probe-shim
+trigger_tool:           configure|make
+phase:                  configuration
+error_signature:        Cannot find a C compiler, aborting|make: 0: (No such file|command not found)|Checking for gcc\.\.\..*aborting
+
+severity:               2
+category:               build-system|configure|toolchain|ohos
+match_keywords:         hand-written configure, 自写 configure, type gcc, type cc, Cannot find a C compiler, aborting, Makefile.settings, CC=gcc, PATH shim, gcc shim, compiler probe, 编译器探测, STRIP=0, STRIP=true, ifdef STRIP, NO_GETOPT_LONG, uname -s, HarmonyOS, This architecture is not tested, axel, rotix, bundled zlib, Checking for gcc
+
+title:                  手写 configure 按名字探测编译器并中止（axel 系）：PATH gcc shim 满足探测 + make CC= 钉真实编译器；同族 STRIP=0 被当命令执行需 STRIP=true 中和
+
+root_cause:             >
+    一批 2000 年代 C 工具的 ./configure 是手写 POSIX shell（rotix 的 configure 源自
+    axel，Wilmer van der Gaast 所写），用 `type gcc` / `type cc` 按"可执行文件名字"
+    探测编译器，都失败则 `Cannot find a C compiler, aborting.` 直接 exit 1——发生在
+    写出 Makefile.settings 之前。OHOS PC 只有 clang（无 gcc/cc），名字对不上 ≠ 能力
+    缺失。此时 Makefile 本身用 $(CC)、`make CC=clang` 本可生效，但流程根本走不到 make，
+    所以命令行覆盖无效。正确解法是给探测阶段供给环境：build 目录私有 gcc shim
+    （exec target clang）前置 PATH 使探测命中，再以 make CC= 把实际编译钉到 profile
+    指定的编译器（双保险）。同族陷阱：configure 找不到 strip 时写 STRIP=0（本意禁用），
+    而 Makefile `ifdef STRIP` + `$(STRIP) target` 把 0 当命令执行（`make: 0: No such
+    file or directory`），需 `make STRIP=true` 中和。另：`case $(uname -s)` 无
+    HarmonyOS 分支落入默认（Compiling for: HarmonyOS / This architecture is not
+    tested!），默认分支可能静默写入降级兼容宏（rotix 写 NO_GETOPT_LONG=1，而 OHOS
+    getopt.h 实际有 getopt_long），需审计默认分支语义、留证接受（平台识别补丁另见
+    E007/E160）。
+
+affected_scope:         所有自带手写 configure 且按可执行文件名探测编译器的 C/C++ 包
+                        （axel 系及其衍生；第三方捆绑子项目的子 configure 同样命中，
+                        如 kmc 捆绑 zlib 的 "Checking for gcc..."）。Makefile 用
+                        $(CC) 的 raw makefile 包也常伴随 STRIP=0 同族问题。
+
+verification_cmd:       |
+  # 本机两态（无需 OHOS）：
+  sh ./configure --i18n=0 --strip=0                 # 期望 exit 1: Cannot find a C compiler, aborting.
+  PATH=<shim目录>:$PATH sh ./configure --i18n=0 --strip=0
+  #    期望 exit 0，且 Makefile.settings 出现 CC=gcc 与 STRIP=0
+  grep -E "CC=|STRIP=" Makefile.settings
+  # 真机证据（rotix/0.83 r1，2026-09-27）：conan create 成功、构建日志链接行后出现
+  # "true rotix"（STRIP=true 中和生效）、test_package 13/13、exit 0
+
+rec_priority:           1
+rec_approach:           gcc-shim-configure-probe-plus-make-cc-override
+rec_description:        >
+    在 conanfile build() 里把编译器解析自 profile conf（R33：
+    tools.build:compiler_executables 字典取 c 键），在 self.build_folder/build-bin/
+    写私有 gcc shim（shebang 指向 CONFIG_SHELL，内容 exec "<cc>" "$@"，chmod 0755）
+    并前置 PATH，使 configure 的 type gcc 探测命中；随后
+    `bash ./configure --prefix=...`（R5）+ `make CC="<cc>" -j1`（E392：必须
+    cwd=self.source_folder）。strip 同族问题加 STRIP=true。零上游源码补丁。
+rec_command:            |
+  # 配方内：shim 满足探测 + CC 钉编译器 + STRIP 中和（三者各管一段）
+  os.environ["PATH"] = shim_dir + os.pathsep + os.environ.get("PATH", "")
+  self.run(f'{config_shell} ./configure --prefix="{prefix}" ...', cwd=self.source_folder)
+  self.run(f'make CC="{cc}" STRIP=true -j1 <目标>', cwd=self.source_folder)
+rec_auto_fix:           false
+rec_impl:               conanfile-edit
+
+fallback_priority:      2
+fallback_approach:      patch-configure-probe
+fallback_description:   >
+    打补丁把 configure 的探测分支改为 clang/或注入 CC 环境变量——不推荐：为环境
+    缺口修改上游脚本引入补丁面，且 PF/审查对非必要补丁敏感；shim 方案零源码改动、
+    可移植（任何 clang-only 环境同样适用）。仅当 configure 探测逻辑同时影响构建
+    结果（如按编译器名分支加 flags）且 shim 无法表达时才考虑。
+fallback_command:       ""
+fallback_auto_fix:      false
+fallback_impl:          patch-configure-script
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       self\.run\(.make CC=.*\)(?!.*shim)   # 配方只有 make CC= 而无 shim 供给（configure 已中止时无效）
+forbid_1_reason:        axel 系 configure 在生成 Makefile.settings 前即退出，命令行 CC= 覆盖没有生效机会。
+forbid_1_consequence:   build() 在 configure 步骤 exit 1，配方构建失败。
+
+forbid_2_pattern:       os\.environ\[.PATH.\]\s*=.*(\/usr\/local|SYS_PREFIX)   # shim 写入共享系统前缀
+forbid_2_reason:        编译器 shim 属构建期私有供给，写入共享前缀会污染 worker 全局环境（R26/E524 同源）。
+forbid_2_consequence:   跨包/跨任务编译器串扰，且 HMDFS 权限模型下可能不可执行。
+
+forbid_3_pattern:       make STRIP=0   # 试图用 STRIP=0 关闭剥离
+forbid_3_reason:        configure 写出的 STRIP=0 正是本坑根源：Makefile ifdef STRIP 后 $(STRIP) 会把 0 当命令执行。
+forbid_3_consequence:   make: 0: No such file or directory，构建失败。
+
+# Relations
+similar_to:             DRAFT-cnrbtree-0.3-makefile-recipe-gcc-hardcode, DRAFT-cohomcalg-0.32-makefile-gxx-override, DRAFT-ffc.h-26.07.01-makefile-uname-gcc-hardcode
+caused_by:              ""
+prerequisite_of:        ""
+conflicts_with:         ""
+complement:             E007, E160, E384, E392, E264
+
+# Provenance
+source_package:         rotix/0.83
+source_event:           rotix 0.83 first OHOS adaptation, device shadow CI r1 (2026-09-27)
+authors:                rotix 适配会话（worktree feat/rotix-0.83）
+source_pr: ""
+source_commit: ""
+last_updated: 2026-09-27

@@ -1,0 +1,130 @@
+#====================================================================
+# DRAFT-E683-sc-im-0.8.5-pkgconfig-libdir-optional-feature-off
+#   配方可选依赖不在制品仓时的「缺省禁用」定式：PKG_CONFIG_PATH/PKG_CONFIG_LIBDIR
+#   双钉 + 产物编译开关自证（sc-im xlsx/ods 一族禁用实证）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-E683-sc-im-0.8.5-pkgconfig-libdir-optional-feature-off
+trigger_tool:           conan create|pkg-config|make|configure
+phase:                  configuration|build
+error_signature:        pkg-config --exists|
+                         PKG_CHECK_MODULES|
+                         conan list .*Found 0 pkg/version recipes|
+                         Cannot find package file|No package .* found
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan-recipe, optional-dependency, pkg-config, registry-gap,
+                        reproducibility, ohos
+match_keywords:         可选依赖, 不在档, 缺省禁用, xlsx, xlsxio, libxlsxwriter,
+                        pkg-config, PKG_CONFIG_PATH, PKG_CONFIG_LIBDIR, --exists,
+                        条件编译开关, -DXLSX, -DODS, 系统 .pc, pc 路径泄漏,
+                        功能时有时无, 构建不一致, PF4, W0
+title:                  可选功能靠 pkg-config 探测的包：依赖不在制品仓时用「PATH+LIBDIR 双钉」把开关钉成缺省禁用，并用产物自报的编译开关当回归锚点
+prescan_pattern:        pkg-config --exists|PKG_CHECK_MODULES|--exists .* echo no|
+                        pkg-config --cflags|\.pc$
+prescan_globs:          Makefile, */Makefile, configure, configure.ac, *.mk, conanfile.py
+
+# ═══ Layer 2: 诊断层 (Detection) ═══
+root_cause:             探测型可选功能的两条独立风险，方向相反但都要在动手前定性：
+                        ① 泄漏风险（本条主症）。Makefile/configure 用
+                        `pkg-config --exists foo` 决定要不要编某段功能，探测面是
+                        **pkg-config 的默认搜索路径 ∪ PKG_CONFIG_PATH**。配方只声明
+                        了 requires 的 .pc（PkgConfigDeps 生成到生成目录），但系统
+                        默认 pc 路径仍然可达 —— 设备上它指向不存在的宿主路径（实测
+                        空集，看起来安全），而 worker/其他镜像可能真的有 libxml2、
+                        libzip 之类的 .pc。结果是**同一份配方在不同机器上编出不同
+                        功能面的二进制**：本机没接 xlsx、CI 接了（然后链接期才炸，
+                        或反过来），属最难排查的「设备绿 CI 红」。
+                        ② 缺档风险。功能依赖在制品仓 `conan list -r=ohpcd` 为 0 条
+                        （sc-im 实测 xlsxio 与 libxlsxwriter 均 0 条），而 PF4 依赖闸
+                        禁止捎带适配依赖 ⇒ 该功能必须**明确禁用**，不是「先试试看」。
+                        定性判据（W0）：若该功能是**无失败分支的硬依赖**（如
+                        PKG_CHECK_MODULES 无条件报错、或头文件被无条件 include），
+                        则按 W0-2 止损上报，不写配方；若探测本身带失败分支
+                        （sc-im 的三条 `ifneq ($(shell pkg-config --exists … || echo no), no)`），
+                        则属缺省可选依赖处置 —— 禁用即可，不算止损。
+affected_scope:         所有「可选功能靠 pkg-config/autoconf 探测」的包，且所需依赖
+                        在制品仓缺失（或只想要确定性最小功能面）。sc-im 0.8.5 实证；
+                        任何单包任务在 W0/配方阶段都要走这套定性。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           declare-only-what-exists-plus-pkgconfig-double-pin
+rec_description:        【第一步 W0 定性（动手前）】
+                        对每条可选依赖跑 `conan list <name>* -r=ohpcd`（在档判据用
+                        `conan download --only-recipe` 复核），分三类：
+                        在档 → 声明 requires 并纳入组合验证；
+                        不在档且探测有失败分支 → 缺省禁用（禁用事实进 notes/PR 正文，
+                        并写明受影响的测试项）；
+                        不在档且无失败分支（硬依赖）→ W0-2 止损，附证据，不写配方。
+                        组合可解必须**真跑** `conan install --build=missing` 且
+                        `-pr:h` 与 `-pr:b` 双传（单 -pr= 实测 rc=6 settings.os.version 未定义）；
+                        list 在档 ≠ 组合可解（sollya/gmp force 冲突先例）。
+                        【第二步 配方里把开关钉死（本条核心）】
+                        build() 中把两个变量一起钉到 PkgConfigDeps 的生成目录：
+                            pcdir = self.generators_folder
+                            os.environ["PKG_CONFIG_PATH"]  = pcdir   ← 已声明依赖可见
+                            os.environ["PKG_CONFIG_LIBDIR"] = pcdir   ← **排除系统默认 pc 搜索路径**
+                        只设 PATH 不够：LIBDIR 才是 pkg-config 的「默认目录」变量，
+                        设成生成目录后系统 /usr/lib/pkgconfig 等一律不可达，
+                        未声明依赖的 `--exists` 在任何机器上都是 false ⇒ 功能面与机器无关。
+                        二者要在 `self.run(..., env="conanbuild")` **之前**写入
+                        os.environ（conanbuild 只前置它自己声明的 PKG_CONFIG_PATH，
+                        LIBDIR 会被原样保留）。
+                        【第三步 产物自证（回归锚点，必须留）】
+                        让被测产物自己把开关打出来 —— sc-im 的 `--version` 会打印全部
+                        编译宏，于是：
+                        - build() 冒烟直接跑 `src/sc-im --version`（rc=0 即构建面成立）；
+                        - test_package 断言「出现 -DXLS/-DNCURSES」+「**不出现**
+                          -DXLSX/-DODS/-DXLSX_EXPORT」。
+                        这样禁用不再是注释里的一句话，而是一条会被 CI 每轮复跑的断言；
+                        将来有人给配方补了 xlsx requires，测试当场变红。
+                        若被测程序不自报开关，用 `grep -c` 对二进制做符号/字符串断言
+                        （如 `readelf -p .rodata` 或对 build 目录 `.o` 反查宏）。
+                        【第四步 记录口径】notes + PR 正文写三件套：
+                        禁用事实（依赖名 + conan list 0 条的命令与输出）、
+                        开关名/机制（此处为 pkg-config 条件分支，非 configure 开关）、
+                        受影响的测试项（哪些上游用例因此 NOT_RUN/SKIP）。
+rec_command:            ※ 在档定性（sc-im 实测均 0 条）
+                        conan list "xlsxio*" -r=ohpcd; conan list "libxlsxwriter*" -r=ohpcd
+                        ※ 组合可解必须真跑（-pr:h 与 -pr:b 双传）
+                        conan install --requires=ncurses/6.6 --requires=libxls/1.6.3 \
+                          -pr:h=$TARGET_REPO/ci/conan/profiles/ohos-aarch64 \
+                          -pr:b=$TARGET_REPO/ci/conan/profiles/ohos-aarch64 --build=missing
+                        ※ 产物自证开关（test_package 断言 4 的同一判据）
+                        "$PKG/bin/sc-im" --version 2>&1 | grep -cE "-DXLSX|-DODS|-DXLSX_EXPORT"
+rec_auto_fix:           false
+rec_impl:               recipe-env-pin + product-self-assert
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       tool_requires\("xlsxio|requires\("libxlsxwriter|捎带.*依赖
+forbid_1_reason:         依赖不在制品仓时 PF4 依赖闸会直接拦建 PR；捎带适配依赖被明令封死
+forbid_1_consequence:   PF4 硬拦或 CI 才发现依赖缺失，浪费整轮构建（≈6h 队尾）
+forbid_2_pattern:       系统没有.*所以不用管|设备上探测不到.*就安全
+forbid_2_reason:         只钉 PKG_CONFIG_PATH 不钉 LIBDIR 时系统默认 pc 路径仍可达；
+                        不同镜像功能面不同 → 设备绿 CI 红的不可复现形态
+forbid_2_consequence:   链接期缺库或功能面漂移，属可复现性缺陷（W4 P1 档）
+forbid_3_pattern:       无失败分支的硬依赖.*直接改配方绕过|注释掉.*#include.*xlsx
+forbid_3_reason:         硬依赖无失败分支属 W0-2 止损情形，应带证据上报而不是改源码硬绕
+forbid_3_consequence:   隐蔽的功能缺失 + 未披露的源码改动，审查判隐瞒
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             DRAFT-E572-removed-config-script-pkgconfig-migration（同为 pkg-config 面的迁移问题，彼条讲 .pc 被移除，本条讲探测面的确定性）
+caused_by:              任务卡 W0 生死关「依赖不在档必须用开关禁用对应功能」（sc-im 10412 的 xlsxio 风险项）
+conflicts_with:
+prerequisite_of:        W0 依赖发布检查 / PF4 依赖闸 / R51 上游测试计数（禁用后的 NOT_RUN 归因）
+
+# ═══ 元数据 ═══
+verification_cmd:       conan list "xlsxio*" -r=ohpcd | grep -c "Found 0" ; \
+                        "$PKG/bin/sc-im" --version 2>&1 | grep -cE "-DXLSX|-DODS|-DXLSX_EXPORT"
+                        ※ 期望 两者均为 0（前者 1 表示 Found 0 pkg，后者 0 表示开关缺席）
+doc_file:               knowledge/drafts/DRAFT-E683-sc-im-0.8.5-pkgconfig-libdir-optional-feature-off.md
+last_updated:           2026-09-23
+source_event:           sc-im 0.8.5 适配（任务卡 10412「xlsxio 不在档必须禁 xlsx」风险处置）

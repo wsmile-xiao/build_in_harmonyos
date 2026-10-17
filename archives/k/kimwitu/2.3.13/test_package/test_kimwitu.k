@@ -1,0 +1,5 @@
+%{
+%}
+Tree:
+	Leaf( child: Tree )
+	{};

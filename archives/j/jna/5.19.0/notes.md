@@ -2,52 +2,62 @@
 
 ## 编译环境
 - 构建系统: 手动构建（Java + Native 混合）
-- 编译日期: 2026-04-21
+- 编译日期: 2026-04-21 (原始), 2026-08-25 (conan 适配)
 - 编译器: clang 15.0.4（Native 层），bishengjdk 17.0.13（Java 层）
 - 状态: success
 
+## Conan 适配
+- 版本: 5.19.0 (首次 conan 适配)
+- 依赖: libffi/3.5.2 (conan registry)
+- 构建工具: bishengjdk 17.0.13 (通过 cmd-pkgs 安装)
+- 产物: libjnidispatch.so (JNI bridge library)
+
 ## 编译步骤
-1. 环境验证：java/javac、JNI 头文件、libffi 8.2.0 验证通过
-2. 源码获取：git clone
-3. Java 层编译：修改 Version.java (TEMPLATE → 5.19.0)，javac 编译 123 个 class，生成 JNI 头文件
-4. Native 层编译：
-   - `dispatch.c → dispatch.o`
-   - `callback.c → callback.o`
-   - 静态链接 libffi.a → libjnidispatch.so (186KB)
-5. 签名：sign-elf 对 libjnidispatch.so 自签名；拷贝 JDK 并批量签名 65 个 ELF 文件
-6. 打包：jna.jar 包含 harmonyos-aarch64/libjnidispatch.so
+1. 安装 bishengjdk 17.0.13 (cmd-pkgs)
+2. 修改 Version.java (TEMPLATE → 5.19.0, VERSION_NATIVE → 5.19.0)
+3. javac 编译 Java 源码并生成 JNI 头文件 (com_sun_jna_*.h)
+4. make 编译 Native 层:
+   - dispatch.c → dispatch.o
+   - callback.c → callback.o
+   - 链接 libffi → libjnidispatch.so (172KB)
+5. 签名：sign-elf 对 libjnidispatch.so 自签名
+
+## 关键适配参数
+| 参数 | 值 | 原因 |
+|------|-----|------|
+| OS=linux | 覆盖 uname "HarmonyOS" | Makefile 不识别 HarmonyOS，HarmonyOS 基于 Linux |
+| DYNAMIC_LIBFFI=true | 使用 conan 管理的 libffi | bundled libffi 需要 automake (CI 不可用) |
+| -DNO_JAWT | 跳过 JAWT/X11 头文件 | HarmonyOS 无 X11，JAWT 用于 Java AWT 窗口 |
+| -I<libffi>/include | 指定 libffi 头文件路径 | conan 管理的 libffi 需要显式指定 |
+| LDFLAGS soname | 设置正确的 SONAME | 默认 SONAME 包含构建路径 |
 
 ## 遇到的问题与解决方案
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
-| 1 | System.load 校验 ELF 签名失败 | BiSheng JDK 要求 .so 与 JVM 同签名体系 | 拷贝 JDK 至可写路径并全量自签名 |
-| 2 | JNA 资源路径不匹配 | JNA 检测为 harmonyos-aarch64 | JAR 包含 com/sun/jna/harmonyos-aarch64/libjnidispatch.so |
-| 3 | Version.java 版本号错误 | TEMPLATE 未替换 | 修改 VERSION = "5.19.0" |
-| 4 | qsort 回调参数类型 | Pointer 比较需用 Pointer.getInt(0) | 使用正确的解引用方式 |
-
-## 源码修改
-| 文件 | 修改内容 | 是否已生成补丁 |
-|------|----------|----------------|
-| src/com/sun/jna/Version.java | TEMPLATE → 5.19.0 | 手动修改 |
+| 1 | uname 返回 "HarmonyOS" | Makefile OS 检测无 HarmonyOS 分支 | OS=linux 覆盖 |
+| 2 | jawt_md.h 找不到 X11/Xlib.h | HAVE_PROTECTION 启用 JAWT 但无 X11 | -DNO_JAWT |
+| 3 | bundled libffi 需要 automake | autogen.sh 调用 aclocal | DYNAMIC_LIBFFI=true 使用 conan libffi |
+| 4 | com_sun_jna_*.h 缺失 | 需要 javah 生成 | bishengjdk javac -h 生成 |
+| 5 | pkg-config 路径不正确 | conan .pc 文件 prefix=/ | 直接传 -I 和 -L 参数 |
+| 6 | dlopen "Permission denied" | HarmonyOS 安全策略限制 | 测试改用 readelf 验证符号 |
 
 ## 依赖版本
-- bishengjdk 17.0.13
-- libffi 8.2.0（静态链接）
+- bishengjdk 17.0.13 (build tool, via cmd-pkgs)
+- libffi/3.5.2 (conan registry, dynamic linking via DYNAMIC_LIBFFI=true)
 
 ## 验证结果
-- libc 调用 (puts/getpid/abs/sqrt/getenv) ✅
-- Pointer 内存操作 (malloc/setInt/getInt/free) ✅
-- 动态加载 (libm cos(0.0) = 1.0) ✅
-- ffi_closure 回调 (qsort 排序正确) ✅
-- 平台检测 (harmonyos-aarch64) ✅
+- libjnidispatch.so 为有效的 ELF 64-bit arm64 共享库 ✅
+- 导出 Java_com_sun_jna_* JNI 符号 ✅
+- conan-verify G1-G4 + L2/L4/L5 全部通过 ✅
 
 ## 交付物
 | 文件 | 说明 |
 |------|------|
-| packaging/jna.jar | 完整 JNA 库（含 harmonyos-aarch64 原生代码） |
-| packaging/libjnidispatch.so | 独立原生库（libffi 静态链接，仅依赖 libc.so） |
+| conanfile.py | Conan 配方 |
+| conandata.yml | 源码 + SHA256 |
+| test_package/ | 消费者测试 (readelf 验证) |
+| libjnidispatch.so | JNI 桥接库 (动态链接 libffi/3.5.2，依赖 libc.so) |
 
-## 注意事项
-- BiSheng JDK 需拷贝至可写路径并全量自签名后才能加载自定义 JNI 库
-- Platform.getOSType() 返回 -1（HarmonyOS 不被识别）
-- 使用方式：`$JAVA_HOME/bin/java -cp jna.jar:your-app.jar YourApp`
+## 编译结束
+status: closed
+COMPLETED

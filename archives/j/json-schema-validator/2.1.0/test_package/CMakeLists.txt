@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_json_schema_validator CXX)
+
+find_package(nlohmann_json_schema_validator REQUIRED)
+find_package(nlohmann_json REQUIRED)
+
+add_executable(test_json_schema_validator test_json_schema_validator.cpp)
+target_link_libraries(test_json_schema_validator nlohmann_json_schema_validator::nlohmann_json_schema_validator nlohmann_json::nlohmann_json)
+set_target_properties(test_json_schema_validator PROPERTIES CXX_STANDARD 11)
+
+enable_testing()
+add_test(NAME test_json_schema_validator COMMAND test_json_schema_validator)

@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(rplay_consumer C)
+find_package(rplay CONFIG REQUIRED)
+add_executable(test_rplay test_rplay.c)
+target_link_libraries(test_rplay PRIVATE rplay::rplay)

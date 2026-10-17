@@ -1,0 +1,66 @@
+# ═══ Draft knowledge entry — 只读 /tmp 平台下的“代码级”临时文件 ═══
+# Timestamp: 2026-09-24
+# Software: tboot 1.10.5（lcptools-v2/lcp2_mlehash；手写 Makefile + OpenSSL/zlib）
+# Gate: 本地 make + conan create 实测（工具功能静默失效 → 修复后可用）
+# Status: DRAFT — 待人工/AI 审核后 promote 为 E-entry
+#
+# To promote:
+#   1. 复核下方 error_signature 与 rec_approach
+#   2. 重命名为 E0XX.kv 移入 knowledge/graph/
+#   3. 在 knowledge/graph/index.tsv 增加一行
+#   4. 编写 knowledge/doc/E0XX.md（本目录同名 .md 可直接复用）
+
+id:                     DRAFT-code-level-tmpfile-readonly-tmp
+trigger_tool:           make|test|runtime|conan
+phase:                  compilation|testing|runtime
+error_signature:        creating a temporary file to uncompress.*failed|
+                         tmpfile\(\)|
+                         Read-only file system|
+                         Unable to create temporary file|
+                         cannot open /tmp/.*: Read-only file system
+severity:               2
+category:               portability, filesystem, libc, runtime, environment
+match_keywords:         tmpfile, TMPDIR, P_tmpdir, /tmp, read-only, Read-only file system,
+                         mkstemp, unlink, fdopen, temporary file, gzopen
+title:                  上游代码用 tmpfile()/硬编码 /tmp 建临时文件：在只读 /tmp 的平台上功能静默失效，需改走 $TMPDIR
+
+root_cause:             libc 的 tmpfile() 固定使用 P_tmpdir（OHOS 即 "/tmp"），不读 TMPDIR 环境变量；
+                        OHOS 的 /tmp 是只读挂载（E002），tmpfile() 必然返回 NULL；
+                        上游代码通常只判 NULL 后 goto error / return false，表现为“功能静默失效”
+                        （调用方退出码甚至仍为 0），排查时容易被误判为输入数据问题；
+                        E002 的 TMPDIR 修法只覆盖构建脚本（configure/make 自己的临时文件），
+                        覆盖不到包内 C/C++ 代码里的 tmpfile()/硬编码 "/tmp"。
+affected_scope:         任何在 C/C++ 代码里使用 tmpfile() 或硬编码 "/tmp" 的包；
+                        典型场景：解压/解包后落盘、原子写文件、缓存中间结果、把输入转成临时文件再读；
+                        构建期工具与运行期工具都算。
+verification_cmd:       TMPDIR=/tmp <tool> … | grep -i "temporary file"（复现失败）；
+                        TMPDIR=$(pwd) <tool> … | grep -i "temporary file"（成功）；
+                        TMPDIR=$(pwd)/does-not-exist <tool> …（必须失败，证明代码确实使用 $TMPDIR）
+
+rec_priority:           1
+rec_approach:           source-patch
+rec_description:        把 tmpfile() 换成在 $TMPDIR 下 mkstemp()+unlink() 的匿名临时流（$TMPDIR 未设置时回落 "/tmp"，与原行为一致）
+rec_command:            tmpdir = getenv("TMPDIR")（为空回落 "/tmp"）→ snprintf(path, "%s/xxx-XXXXXX", tmpdir)
+                        → mkstemp(path) → unlink(path)（立即匿名化）→ fdopen(fd, "w+b")；
+                        完整实现见 archives/t/tboot/1.10.5/patches/0004-lcptools-v2-mlehash.c.patch
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      mount-or-replace-tool
+fallback_description:   无代码修改权时：① 系统层提供可写 /tmp（bind mount / tmpfs，需要 root，CI 不可行）；② 改用支持显式输出目录的等价工具或上游新版本。二者都受限，故仅作回退
+fallback_command:       mount -t tmpfs tmpfs /tmp   # 仅本地调试；CI worker 无权限，不要写进配方
+fallback_auto_fix:      false
+
+prescan_pattern:        tmpfile\s*\(|["']/tmp/
+prescan_globs:          *.c, *.h, *.cc, *.cpp, *.cxx, *.sh
+
+# ═══ 现网证据（本条目来源）═══
+# 软件：tboot 1.10.5 → lcptools-v2/lcp2_mlehash（mlehash.c:300 fdecompressed = tmpfile();）
+# 复现：TMPDIR=/tmp … → "creating a temporary file to uncompress ... : failed!"
+#       touch /tmp/xx   → "Read-only file system"
+# 修复：archives/t/tboot/1.10.5/patches/0004-lcptools-v2-mlehash.c.patch
+# 回归：archives/t/tboot/1.10.5/test_package/test.sh 的 OH-1/OH-2 两条断言
+#       （TMPDIR 可写 → succeeded；TMPDIR 指向不存在目录 → failed）
+#
+# 关联：E002（/tmp 只读，TMPDIR 环境变量层）——本条目是其“代码层”补充

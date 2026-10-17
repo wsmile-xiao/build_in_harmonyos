@@ -1,0 +1,56 @@
+id: DRAFT-indi-aok-plugin-subproject-monorepo-cmake
+category: cmake, build-system, packaging, portability
+severity: medium
+error_signature: |
+  Could not find INDI include directory
+  CMake Error at cmake_modules/FindINDI.cmake:... (find_package):
+    By not providing "FindINDI.cmake" ... / Could not find a package configuration file ...
+  Could not find a package configuration file provided by "Nova" with any of the
+  following names: NovaConfig.cmake nova-config.cmake
+root_cause: |
+  单体仓（indi-3rdparty）里的插件式子项目靠「仓库级 ../cmake_modules/ 的手写 Find*.cmake」
+  以模块模式定位依赖，而依赖在制品仓里是 conan 预编译包，三条共性断点：
+  1) 模块文件使用的探测提示变量（INDI_ROOT）不会自动存在 —— conan CMakeDeps 生成的是
+     libindi-config.cmake（包名），而子项目 find_package(INDI COMPONENTS driver lx200) 请求的是模块名，
+     模块模式与 config 模式互不回落 → 配置阶段直接失败；
+  2) 部分 find_package(<Name> REQUIRED) 在源码树内没有 Find<Name>.cmake（样例 Nova 在 v2.2.2 树内缺失），
+     依赖包也不安装 <Name>Config.cmake（libnova 只装 include/、lib/）→ 两种模式都无 finder；
+  3) 制品仓可得的预编译依赖代次与子项目源码代次不匹配（样例：仅有 libindi 2.2.2.1，而 2.0 代驱动源码
+     面向 libindi 1.9 属性 API 且仓库级 CMakeCommon.cmake 仍是 CMAKE_CXX_STANDARD 14，libindi 2.2.2
+     头文件用 std::any 需 C++17），R8 禁止改被编译源码 → 只能在「代次对齐」与「改构建脚本」间取舍。
+  另注：该驱动是插件式可执行文件（主程序 dlopen，share/indi/*.xml 登记），编译通过 ≠ 可运行：
+  样例 libindilx200.so 未声明 NEEDED libindidriver，符号由后者提供，运行期闭包不完整即报
+  Error loading shared library libindidriver.so.2。
+rec_approach: |
+  S1 配方 generate() 注入探测提示：tc.variables["INDI_ROOT"] = self.dependencies["libindi"].package_folder
+     （验证：配置日志出现 Found INDI: .../libindidriver.so;.../libindilx200.so (found version "2.2.2")）。
+  S2 在 generators_folder（构建目录内，绝不落源码树）生成最小私有 config 包，并用 Nova_DIR 指向它：
+     NOVA_FOUND/Nova_FOUND/NOVA_INCLUDE_DIR/NOVA_INCLUDE_DIRS/NOVA_LIBRARIES 全部取自 libnova 的 cpp_info，
+     静态库给 libnova.a 绝对路径（变量名须与子项目 CMakeLists 使用者完全同形，R49 禁注入共享前缀）。
+  S3 源码 ref 对齐到与预编译依赖同代的上游提交（indi-3rdparty v2.2.2 = 945fbe12...）：该代自带
+     CMakeCommon C++17 与 cmake_minimum_required 3.16，被编译源码零改动（R8）。
+  S4 仅当运行期闭包不全时对构建脚本打一处补丁（样例）：find_package(INDI COMPONENTS driver client lx200
+     REQUIRED) —— 使 libindiclient 进入 DT_NEEDED（原只请求 driver/lx200，符号仅在链接期经同级 .so
+     间接解析，宿主加载期报 symbol not found）；补丁不含平台宏（PF5），不改被编译源码（R8）。
+  S5 test_package 4 项断言：①产物形态（ELF/aarch64/非空）②XML↔bin 交叉引用
+     ③**DT_NEEDED 静态审计（确定性闸门）**：INDI 核心库（libindiclient/libindidriver/libindilx200）
+     齐备、均为裸 soname、且存在于依赖包内 —— 判据不依赖宿主能否真加载
+     ④宿主加载器探针 env="conanrun" 兜底：宿主拒绝（FUSE 下 musl 无法 mmap PROT_EXEC OHOS 共享库、
+     未签名 ELF）→ SKIP 并打印加载器原文；15s 超时仍存活 → PASS（长驻驱动）；缺产物/缺 soname 由
+     ①②③ 拦下；保留「删除 bin/<driver> 即 FAIL」的反向特性（满足 CI L1e 破坏性验证）。
+match_keywords:
+  - "Could not find INDI include directory"
+  - "FindINDI.cmake"
+  - "Could not find a package configuration file provided by \"Nova\""
+  - "NovaConfig.cmake"
+  - "../cmake_modules"
+  - "INDI_ROOT"
+  - "NOVA_LIBRARIES"
+  - "libnova.a"
+  - "indi_lx200aok"
+  - "Error loading shared library libindidriver.so"
+prescan_pattern: "find_package\\([A-Za-z0-9_-]+[^)]*REQUIRED"
+verified_on: indi-aok/2.0-20221222093242 (HarmonyOS PC aarch64, clang 15.0.4, CMake 4.1.2; 1 patch = build script only, 4 consumer assertions)
+doc: knowledge/drafts/DRAFT-indi-aok-plugin-subproject-monorepo-cmake.md
+status: draft
+last_updated: "2026-10-01"

@@ -1,0 +1,71 @@
+# test_package/MANIFEST.yml — db5.3 5.3.28 上游测试与消费者测试声明
+#
+# 上游测试来源（db-5.3.28.tar.gz）：
+#   test/c/cutest + test/c/suites/*.c  — CuTest C 单元测试套件（`make cutest` → ./cutest）
+#                                        9 suites / 38 cases + 3 个宏子套件（TestChannel 96、
+#                                        TestQueue 68、TestPartial 68 个元素操作）
+#   test/tcl/                          — 上游官方 Tcl 测试套件（483 个 .tcl；TESTS 注册 500+ 名），
+#                                        由 test/tcl/test.tcl 驱动（`r <subsystem>`），需要
+#                                        --enable-tcl 编出的 libdb_tcl-5.3.so 供 tclsh `load`
+#   上游 dist/Makefile.in 的 `check:` 原本只有 `@echo "make: $@ target not available"`
+#   （实测原文桩）；本包用 patches/0003 把它拆成真目标 `check: cutest` → `./cutest`，
+#   所以 build() 里的 `make check` 是**真跑上游 CuTest**（失败即构建失败）。
+#   Tcl 套件用上游自己的驱动 test/tcl/test.tcl 跑。
+package: db5.3/5.3.28
+homepage: "https://www.oracle.com/database/technologies/related/berkeleydb.html"
+
+# 上游“检查目标”的真实情况 + 实际使用的入口
+upstream_check_command: "make cutest && ./cutest  ／  tclsh: source test/tcl/test.tcl; r <subsystem>"
+upstream_test_in_build: true
+upstream_test_command: "make cutest CUTEST_FLAGS='$(CFLAGS) -O0 …' && ./cutest ; 每个子系统: printf 'source ../test/tcl/test.tcl\\nr <sub>\\nexit 0\\n' | <tcl>/bin/tclsh8.6"
+
+upstream_tests:
+  - file: test/c/suites/TestQueue.c (+TestChannel/TestDbHotBackup/TestDbTuner/TestEncryption/TestEnvConfig/TestEnvMethod/TestKeyExistErrorReturn/TestPartial)
+    source: db-5.3.28/test/c/cutest/*.c + test/c/suites/*.c
+    description: >-
+      CuTest 套件，9 suites / 38 cases + 3 个宏子套件（96/68/68 个元素操作）。
+      **测试对象必须以 -O0 编**：TestQueue 用 SH_LIST_* 相对偏移宏操作 malloc 对象，
+      跨对象指针相减是 UB，GCC -O1/-O2 把 link 字段写入当死存储删掉（实测 -O0
+      next=-1/prev=-800，-O1 next=0/prev=0）→ 自环 + 缓冲越界 SIGSEGV。
+      本机实测：本地手工构建（--enable-static --enable-shared）9/9 suite 全绿；
+      conan 构建（--disable-static --prefix=/ + conan 的 -DNDEBUG）下 TestChannel
+      （repmgr TCP 通道异步消息计数）失败，其余 8 suite 全绿 —— 见 notes.md 的
+      “TestChannel 已知问题”一节（如实声明，不掩盖）。
+    command: "make check（= check: cutest → ./cutest）+ ./cutest（再跑一次抓逐 suite 结果）"
+  - file: test/tcl/test.tcl（驱动）+ test/tcl/{env,log,lock,mutex,txn,rsrc,byte,dbm,ndbm,hsearch,archive,backup}*.tcl
+    source: db-5.3.28/test/tcl/
+    description: >-
+      上游官方 Tcl 测试套件，按其自身 run_std 的跑法逐个子系统起 tclsh。本机 x86_64/glibc
+      实测 12 个子系统共 70 个测试 0 FAIL（env 21 / txn 14 / log 9 / byte 9 / lock 6 /
+      rsrc 4 / mutex 2 / dbm 1 / ndbm 1 / hsearch 1 / archive 1 / backup 1）；另行扫过
+      全部 19 个本地子系统（含 memp/sdb/sindex/compressed）也是 0 FAIL。
+      跑通前提是 configure 探测正确 → HAVE_64BIT_TYPES 必须被定义，否则
+      libdb_tcl-5.3.so 里 _SetListElemWideInt 缺失，tclsh `load` 直接失败。
+    command: "printf 'source ../test/tcl/test.tcl\\nr env\\nexit 0\\n' | <tcl_pkg>/bin/tclsh8.6"
+
+test_package_tests:
+  - file: test_db5.c
+    description: >-
+      C API 消费者（只用交付的 include/db.h + libdb-5.3.so，经 CMakeDeps 的
+      db5_3::db5_3 链接）：事务型环境 → 事务提交写入 5 条 → 读回逐条比对 →
+      游标全量遍历（条数 + 键的字典序）→ 事务内删除 → 事务回滚（写入必须消失）。
+      共 14 项可核对结果。
+    command: "./test_db5"
+  - file: test_cli.py
+    description: >-
+      CLI 端到端链路（rule12）：db_load 装载文本数据 → db_dump -p 逐行比对 →
+      db_stat -d 条数比对 → db_verify 必须成功；再加负例（损坏文件 / 非 DB 文件 /
+      不存在的目录）。共 15 项可核对结果；**执行被平台拒绝时**（OHOS 不接受包目录里
+      安装态 ELF 的 execve，见 conanfile.py `_sign_ohos_elfs` 的 4 轮 CI 实证）本脚本
+      显式打印平台限制说明并只保留交付形态检查 —— 此时 CLI 端到端链路由 build() 里
+      的 `_run_cli_chain`（日志 `HMBS_CLI_CHAIN`，5 项）承担。
+    command: "python3 test_cli.py <package_folder>"
+  - file: test_layout.py
+    description: >-
+      适配自检（M）：库是 ELF ET_DYN 且导出 db_create/db_env_create/db_version、
+      无版本号链接、include/db.h(+db_cxx.h)、14 个 db_* CLI 工具（ELF+可执行位，
+      与 commands.json 清单一致）、licenses/LICENSE、无 .la/静态残留、Tcl 绑定未进包、
+      docs/ 已剔除、无隐藏文件。共 19 项。
+    command: "python3 test_layout.py <package_folder>"
+
+assertion_count: 14

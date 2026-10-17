@@ -1,0 +1,86 @@
+diff --git a/processcore/processes_linux_p.cpp b/processcore/processes_linux_p.cpp
+index b8c9701..fabb765 100644
+--- a/processcore/processes_linux_p.cpp
++++ b/processcore/processes_linux_p.cpp
+@@ -37,6 +37,16 @@
+ 
+ #include <thread>
+ 
++#if defined(__cpp_lib_jthread)
++// C++20 jthread support available (std::stop_token / std::stop_source).
++#define KSYSGUARD_HAVE_JTHREAD 1
++#else
++// C++17-compatible fallback: plain std::thread plus an atomic stop flag
++// (the standard library in use does not provide std::jthread).
++#define KSYSGUARD_HAVE_JTHREAD 0
++#include <atomic>
++#endif
++
+ #define PROCESS_BUFFER_SIZE 1000
+ 
+ /* For ionice */
+@@ -116,13 +126,22 @@ public:
+     inline bool getNiceness(long pid, Process *process);
+     inline bool getIOStatistics(const QString &dir, Process *process);
+ 
++#if KSYSGUARD_HAVE_JTHREAD
+     static void smapsThreadFunction(std::stop_token stopToken, ProcessesLocal *processes);
++#else
++    static void smapsThreadFunction(const std::atomic<bool> &stopFlag, ProcessesLocal *processes);
++#endif
+ 
+     QFile mFile;
+     QByteArray mBuffer;
+     DIR *mProcDir;
+ 
++#if KSYSGUARD_HAVE_JTHREAD
+     std::unique_ptr<std::jthread> smapsThread = nullptr;
++#else
++    std::unique_ptr<std::thread> smapsThread = nullptr;
++    std::atomic<bool> smapsThreadStop{false};
++#endif
+     QQueue<long> smapsQueue;
+     std::mutex smapsQueueMutex;
+ };
+@@ -130,15 +149,28 @@ public:
+ ProcessesLocal::Private::~Private()
+ {
+     if (smapsThread) {
++#if KSYSGUARD_HAVE_JTHREAD
+         smapsThread->request_stop();
+         smapsThread->join();
++#else
++        smapsThreadStop.store(true);
++        smapsThread->join();
++#endif
+     }
+     closedir(mProcDir);
+ }
+ 
++#if KSYSGUARD_HAVE_JTHREAD
+ void ProcessesLocal::Private::smapsThreadFunction(std::stop_token stopToken, ProcessesLocal *processes)
++#else
++void ProcessesLocal::Private::smapsThreadFunction(const std::atomic<bool> &stopFlag, ProcessesLocal *processes)
++#endif
+ {
++#if KSYSGUARD_HAVE_JTHREAD
+     while (!stopToken.stop_requested()) {
++#else
++    while (!stopFlag.load()) {
++#endif
+         std::this_thread::sleep_for(SmapsThreadDelay);
+ 
+         std::vector<long> pids;
+@@ -666,7 +698,12 @@ bool ProcessesLocal::updateProcessInfo(long pid, Process *process)
+ 
+     if (mUpdateFlags.testFlag(Processes::Smaps)) {
+         if (!d->smapsThread) {
++#if KSYSGUARD_HAVE_JTHREAD
+             d->smapsThread = std::make_unique<std::jthread>(Private::smapsThreadFunction, this);
++#else
++            d->smapsThreadStop.store(false);
++            d->smapsThread = std::make_unique<std::thread>(Private::smapsThreadFunction, &d->smapsThreadStop, this);
++#endif
+         }
+ 
+         if (std::chrono::steady_clock::now() - process->memoryInfo()->precise.lastUpdate >= PreciseUpdateInterval) {

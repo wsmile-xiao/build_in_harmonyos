@@ -15,11 +15,11 @@ odbc-cpp-wrapper 是 SAP 开发的 ODBC C++ 包装库，提供面向对象的 AP
 
 - 最新版本: 1.6
 - 构建系统: cmake
-- 编译状态: built
+- 编译状态: published
 
 ## 依赖
 
-- unixODBC 或 iODBC（必需）
+- libiodbc 3.52.16（cmd-pkgs 安装）
 
 ## 使用方式
 
@@ -28,7 +28,7 @@ odbc-cpp-wrapper 是 SAP 开发的 ODBC C++ 包装库，提供面向对象的 AP
 #include <odbc/Connection.h>
 
 // 创建环境
-odbc::Environment env = odbc::Environment::create();
+auto env = odbc::Environment::create();
 
 // 连接数据库
 odbc::Connection conn = env.createConnection("DSN=mydb");
@@ -38,4 +38,4 @@ odbc::Connection conn = env.createConnection("DSN=mydb");
 
 | 版本 | 状态 | 日期 | 产物 |
 |------|------|------|------|
-| 1.6 | built | 2026-06-02 | odbc-cpp-wrapper-1.6-ohos-aarch64.tar.gz |
+| 1.6 | published | 2026-08-07 | libodbccpp.a (静态库) |

@@ -1,71 +1,51 @@
-# openfortivpn 1.24.1 适配笔记
+# openfortivpn 1.24.1 Conan 适配笔记
 
 ## 编译环境
-- 构建系统: autotools
-- 编译日期: 2026-05-28
-- 编译器: clang/clang++
-- 状态: published
+- 构建系统: autotools (configure.ac + Makefile.am, git archive — no pre-generated configure)
+- 编译日期: 2026-08-07
+- 编译器: clang/clang++ (aarch64-unknown-linux-ohos)
+- 状态: built (conan adaptation complete)
 
-## 编译步骤
+## 源码
+- URL: https://github.com/adrienverge/openfortivpn/archive/refs/tags/v1.24.1.tar.gz
+- SHA256: c40d33acd97b89c2e943bfd839c19b69e5a7a5997052e2fc9a595602745c0465
+- 注意: GitHub release tarball (releases/download/v1.24.1/...) 不可用，
+  使用 git archive (archive/refs/tags/v1.24.1.tar.gz) 替代。两者内容
+  相同但 archive 版本不含预生成的 configure 脚本，需要 autoreconf -fi。
 
-### 步骤1：使用TMPDIR workaround
-由于HMDFS文件系统限制config.status在源码目录创建临时文件，本次使用TMPDIR workaround方案：
-- 将源码解压到$TMPDIR/build-openfortivpn-1.24.1
-- 在TMPDIR中执行configure和编译
-- 避免在HMDFS上创建临时文件
+## Conan 配方
 
-### 步骤2：修复automake Perl模块问题
-- 设置PERL5LIB="/storage/Users/currentUser/usr/local/share/automake-1.16:$PERL5LIB"
-- 设置AUTOCONF="/data/service/hnp/bin/autoconf"
-- 运行autoreconf -fi生成configure脚本
+### 依赖
+- runtime: openssl/3.5.6 (libssl + libcrypto)
+- build: automake/1.18, libtool/2.5.4 (autoreconf -fi)
+- system: autoconf 2.72, pkg-config 0.29.2, m4 (from /data/service/hnp/bin)
 
-### 步骤3：修复E011问题
-- 修改configure脚本中的umask 077为umask 022
-- 命令：sed -i 's/umask 077/umask 022/g' configure
+### 平台适配
 
-### 步骤4：修复E051问题
-- 修改configure.ac，移除pthread_cancel的检查
-- 修改src/io.c，使用#ifdef __OHOS__守卫跳过pthread_cancel调用
+1. **E051: pthread_cancel 不可用**
+   - 补丁 0001: configure.ac 移除 pthread_cancel 的 AC_CHECK_FUNCS 检查
+   - 补丁 0002: src/io.c 用 #ifndef __OHOS__ 守卫包裹 5 个 pthread_cancel() 调用
+   - 鸿蒙平台线程取消功能不可用，使用 sem 信号让线程自然退出
 
-### 步骤5：编译和安装
-```bash
-export DEFAULT_PREFIX="$HOME/usr/local"
-export PKG_CONFIG_PATH="$HOME/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
-./configure --prefix=$DEFAULT_PREFIX
-make -j2
-make install DESTDIR=$TEST_PREFIX
-make install
-```
+2. **OpenSSL .pc 文件路径问题**
+   - conan openssl 包的 libssl.pc/libcrypto.pc 指向 build profile 路径 (/b/opens...)
+   - 该路径在运行时不存在
+   - 解决方案: 在 generate() 中设置 OPENSSL_CFLAGS/OPENSSL_LIBS 环境变量
+   - configure 的 PKG_CHECK_MODULES 使用环境变量值，不调用 pkg-config
 
-## 遇到的问题与解决方案
+3. **E011: HMDFS umask 077**
+   - autoconf 2.72 在 configure 脚本顶部设置 `umask 077`
+   - HMDFS 上该权限模式导致 config.status 临时目录权限不足
+   - 解决方案: _fix_configure_umask() 将 umask 077 改为 022
+   - _fix_config_status() 移除 config.status 中的 umask 077 前缀
 
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-| 1 | automake Perl模块找不到 | automake模块路径不在Perl @INC中 | 设置PERL5LIB环境变量包含automake-1.16目录 |
-| 2 | configure Permission denied | HMDFS umask 077导致临时目录不可写 | 修改configure中的umask 077为umask 022 (E011) |
-| 3 | pthread_cancel not found | HarmonyOS不支持pthread_cancel syscall | 使用#ifdef __OHOS__守卫跳过pthread_cancel调用 (E051) |
+4. **OHOS triplet 识别**
+   - autoreconf 生成的 config.sub/guess 可能不识别 ohos triplet
+   - _patch_config_for_ohos() 添加 ohos-linux 映射
 
-## 源码修改
-
-### configure.ac
-- 移除pthread_cancel的AC_CHECK_FUNCS检查
-- 位置：configure.ac第130行
-
-### src/io.c
-- 添加#ifdef __OHOS__守卫，跳过pthread_cancel调用
-- 位置：src/io.c第718-743行
-- 在鸿蒙平台上，线程取消功能不可用，使用pthread_join等待线程自然结束
-
-### configure
-- 修改umask 077为umask 022
-- 位置：configure脚本多处
-
-## 依赖版本
-
-- openssl: 3.5.6
-- pkg-config: 0.29.2
-- automake: 1.16.5
-- autoconf: 2.72
+5. **ELF 签名**
+   - OHOS XPM 要求可执行文件必须签名
+   - _sign_binaries() 使用 binary-sign-tool 对 bin/ 下的 ELF 签名
 
 ## 验证结果
 
@@ -74,14 +54,19 @@ $ openfortivpn --version
 1.24.1
 ```
 
-## 交付物
-
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| openfortivpn-1.24.1-ohos-aarch64.tar.gz | 281K | 预编译包 |
+- ELF: 64-bit arm64, dynamic (libc.so), PIE enabled
+- make check: passed (no upstream test suite)
+- conan create: passed
 
 ## 注意事项
 
-- 本次编译使用TMPDIR workaround，必须在$TMPDIR中构建，不能在默认的builds目录构建
-- 这是绕过HMDFS权限限制的关键方案
-- pthread_cancel在鸿蒙平台不可用，该功能已禁用，可能影响VPN连接断开时的线程清理效率
+- 源码使用 git archive (非 release tarball)，需 autoreconf -fi
+- pthread_cancel 在鸿蒙平台不可用，线程取消功能已禁用
+- pppd 默认路径 /usr/sbin/pppd 在鸿蒙上不存在，但编译不受影响
+  (HAVE_USR_SBIN_PPPD=1, PPP_PATH=/usr/sbin/pppd)
+- resolvconf 默认禁用 (RESOLVCONF_PATH=DISABLED)
+- systemd 支持自动禁用 (无 systemd.pc)
+---
+
+**编译结束**: 2026-08-07 07:30
+**最终状态**: built

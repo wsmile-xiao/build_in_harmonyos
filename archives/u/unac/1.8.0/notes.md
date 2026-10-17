@@ -5,7 +5,7 @@
 - 编译日期: 2026-06-16
 - 编译器: clang 15.0.4 / clang++
 - 操作系统: OpenHarmony (aarch64)
-- 状态: published
+- 状态: built
 
 ## 编译步骤（真实执行记录）
 
@@ -125,8 +125,7 @@ unaccent:
 - unaccent 不支持 `--version` 选项，版本信息需通过不带参数运行查看
 - 需设置 `LD_LIBRARY_PATH` 包含 `$DEFAULT_PREFIX/lib` 或依赖 RPATH 自动加载
 - 首次编译若遇到 HMDFS 软链接问题，clean 后重编即可
-
 ---
 
-**编译结束**: 2026-06-16
-**最终状态**: published
+**编译结束**: 2026-07-21 12:15
+**最终状态**: built

@@ -1,11 +1,11 @@
 # eot-utils 1.1 适配笔记
 
 ## 编译环境
-- 构建系统: autotools (autoconf 2.68，构建时自动升级至 2.72)
-- 编译日期: 2026-06-18
+- 构建系统: autotools (autoconf 2.68)
+- 编译日期: 2026-08-06
 - 编译器: clang 15.0.4
 - 编译参数: `-fPIC -O2`
-- 状态: published
+- 状态: built (Conan 适配完成)
 
 ## 编译步骤
 
@@ -73,8 +73,7 @@ $ readelf -d bin/eotinfo → 无 NEEDED 条目（无外部库依赖）
 - eotinfo 从 stdin 或文件参数读取 EOT 字体数据
 - mkeot 第一个参数为 OTF/TTF 字体文件，后续参数为 URL 列表
 - 二进制为 PIE（Position-Independent Executable），无外部库依赖
-
 ---
 
-**编译结束**: 2026-06-18
-**最终状态**: published
+**编译结束**: 2026-08-06 09:08
+**最终状态**: built

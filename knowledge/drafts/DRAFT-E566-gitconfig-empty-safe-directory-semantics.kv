@@ -1,0 +1,100 @@
+# ═══ Draft knowledge entry — gitconfig 内空值 safe.directory 的失效语义、误导性症状与静默写入来源 ═══
+# Timestamp: 2026-09-10
+# Software: tiny-aes 1.0.0（设备工作区层问题，与具体被测软件无关）
+# Gate: 阶段 A（建立 worktree 基线）— 所有 git 命令
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#
+# 与既有条目 E101 的关系（本条的定位是**补强而非否定**）：
+#   E101 覆盖「HMDFS UID 映射 → dubious ownership」并提供三个修复方案，本条目经实测确认
+#   E101 的方案在本形态下**依然有效**（追加条目会落在空值之后，git 2.45.2 对空值之后的条目
+#   重新置 is_safe=1，故追加后立即恢复正常）。本条的增量不在"换修复"，而在于：
+#   ① 症状误导性：配置文件里明明列出了目标路径，git 仍拒绝执行，且提示只会让人再 `--add`
+#      一条——若不明白空值语义，会误判为"E101 的修复无效"而转向错误方向；
+#   ② 读取顺序语义：空值会**重置**已累积的安全状态，只有**在其之后被读取**的条目才能重新
+#      建立安全状态；因此追加到"后读"的来源（同一文件段尾、或 global 相对 system）有效，
+#      而把有效条目放在"先读"的来源（system 相对 global）则无效——这是决定"追加是否有用"
+#      的关键判据，E101 未涉及；
+#   ③ 根因与预防：该空值来自 `git config --add safe.directory "$VAR"` 在 $VAR 为空时的**静默**
+#      写入，加一条前置非空校验即可根治。
+
+id: DRAFT-E566-gitconfig-empty-safe-directory-semantics
+severity: 2
+category: git|config|build-environment
+trigger_tool: git|git config|worktree
+phase: setup|build|verify
+approach: 症状出现时先执行 `git config --file "$GIT_CONFIG_GLOBAL" --get-all safe.directory | grep -n '^$'`
+  判定是否存在空值条目；存在则按读取顺序处置——追加到后读来源（如 `git config --global --add
+  safe.directory <path>`，会落在段尾）即可恢复；或删除空值行（幂等）。若需完全不改共享配置，
+  用命令行层注入 GIT_CONFIG_COUNT/GIT_CONFIG_KEY_0/GIT_CONFIG_VALUE_0（优先级高于所有文件层）
+
+keywords: dubious ownership, safe.directory, 空值, empty value, gitconfig, 失效,
+  GIT_CONFIG_GLOBAL, GIT_CONFIG_COUNT, GIT_CONFIG_SYSTEM, 读取顺序, 静默写入, 假症状,
+  detected dubious ownership in repository, 配置已存在却仍报错
+
+error_signature: detected dubious ownership in repository at|to add an exception for this directory|safe.directory
+match_keywords: dubious ownership, safe.directory, 空值 safe.directory, gitconfig 失效, 读取顺序, GIT_CONFIG_COUNT, 静默写入
+
+root_cause: git 对 [safe] 段的 safe.directory 是「按读取顺序累积」求值：遇到空值条目会把当前
+  累积状态重置为"不安全"，其后读取到的**匹配当前仓库**的条目再重新置为安全（不匹配的条目
+  不会重建安全状态，实测 f1/f2 失败、f3 的 '*' 成功）。因此空值条目的实际效果是「使其之前
+  读取到、且未被其后匹配条目重新建立的条目失效」。配置读取顺序为 system → global → local →
+  命令行层。该空值条目由 `git config --file <cfg> --add safe.directory "$VAR"` 在 $VAR 为空时
+  静默写入（git 不校验空值），而本项目工作区规则把 GIT_CONFIG_GLOBAL 指向共享 .gitconfig 并
+  依赖其 safe.directory，一次误写即影响所有 worktree 与并发任务
+affected_scope: 所有把 GIT_CONFIG_GLOBAL 指向共享 gitconfig 并依赖其 safe.directory 的多
+  worktree 工作区（本仓库设备单端模式的 §3.1/§3.2 默认形态）；CI 无该文件、不受影响。
+  典型症状是"配置文件里已有目标路径，git 仍报 dubious ownership"
+
+rec_priority: 1
+rec_approach: 三步——① 先判空值：`git config --file "$GIT_CONFIG_GLOBAL" --get-all safe.directory
+  | grep -n '^$'`；② 有则按读取顺序修复：追加条目（`git config --global --add safe.directory`
+  会落段尾 → 有效，即 E101 方案 A 在本形态下可用）或删除空值行；③ 需要完全不改共享配置时
+  用命令行层注入 GIT_CONFIG_COUNT=1/GIT_CONFIG_KEY_0=safe.directory/GIT_CONFIG_VALUE_0=<绝对路径>
+  （实测有效，多任务并发安全）。预防：`git config --add` 前加 `test -n "$VAR" &&` 非空校验
+rec_description: 先判定空值条目再按读取顺序修复；不改共享配置时用命令行层注入
+rec_command: 'git config --file "$GIT_CONFIG_GLOBAL" --get-all safe.directory | grep -n "^$" ; GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$REPO" git -C "$REPO" rev-parse --short HEAD'
+rec_auto_fix: false
+rec_impl: diagnose-empty-value-then-order-aware-fix
+
+verification_cmd: 'git config --file "$GIT_CONFIG_GLOBAL" --get-all safe.directory | grep -n "^$" && echo "存在空值条目" || echo "无空值条目"'
+
+doc_file: knowledge/drafts/DRAFT-E566-gitconfig-empty-safe-directory-semantics.md
+
+principles: P010
+
+# ── Error excerpt (relevant lines) ──
+error_text_excerpt: |
+  $ git -C /storage/Users/currentUser/ws/build_in_harmonyos rev-parse HEAD
+  fatal: detected dubious ownership in repository at '/storage/Users/currentUser/ws/build_in_harmonyos'
+  To add an exception for this directory, call:
+          git config --global --add safe.directory /storage/Users/currentUser/ws/build_in_harmonyos
+
+  而 GIT_CONFIG_GLOBAL 指向的文件内**已经**列出该路径，形成自相矛盾症状。
+
+  最小复现（3 份 2-3 行配置 + 1 份分半快照，均以 GIT_CONFIG_NOSYSTEM=1 且清除命令行层注入后实测）：
+    A: [safe] + "directory = <repo>"                          -> 7c11b6c082  成功
+    B: [safe] + "directory = <repo>" + "directory = "（空值在段尾）-> fatal: dubious ownership  失败
+    C: [safe] + "directory = "（空值在前） + "directory = <repo>"  -> 7c11b6c082  成功
+    D: [safe] + 仅空值条目                                      -> fatal: dubious ownership  失败
+  即：空值使其**之前**读取到的条目失效；其**之后**读取到、且**匹配当前仓库**的条目才能重建安全。
+
+  匹配性验证（目标仓库固定为 MAIN，OTHER 为另一路径）：
+    f1: OTHER, 空值, OTHER（两条均不匹配 MAIN）        -> 失败
+    f2: 空值, OTHER（不匹配 MAIN）                     -> 失败
+    f3: OTHER, 空值, '*'（'*' 匹配 MAIN）              -> 7c11b6c082  成功
+  故不是"空值之后任意条目即可救活"，而是"空值之后必须有匹配该仓库的条目"。
+
+  读取顺序语义（关键判据）：
+    - 污染文件为 global + 有效条目在 system（system 先读）  -> 失败
+    - 污染文件为 system + 有效条目在 global（global 后读） -> 7c11b6c082  成功
+  因 `git config --add` 总是追加到段尾（后读位置），故 E101 方案 A 在本形态下**有效**：
+    在 B 形态文件上执行 `git config --global --add safe.directory '*'` 后重测 -> 7c11b6c082 成功
+
+  冻结快照：污染现场为 $MAIN_REPO/.gitconfig（空值条目在第 75 行；该文件事后已被维护方清理，
+  现值 76 行全为有效条目、md5=056096a225cc6d4b99220a2d9d490378），复现副本：
+  $HOME/tmp/tiny-aes-1.0.0/{repro-A,repro-B,repro-C,bisect-73,bisect-76}.gitconfig

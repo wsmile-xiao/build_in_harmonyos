@@ -93,8 +93,7 @@ bin/pacvim, share/pacvim-maps/map0~9.txt（11个文件）
 - 项目实际为纯 Makefile 构建（无 configure 脚本），虽任务标注为 autotools，实际按 makefile 方式处理
 - 编译有 format-security 警告（3处 printw/mvprintw 参数），不影响功能
 - 依赖 ncurses 需通过预编译包安装，否则编译找不到头文件和库
-
 ---
 
-**编译结束**: 2026-06-15 22:59
+**编译结束**: 2026-07-21 11:55
 **最终状态**: built

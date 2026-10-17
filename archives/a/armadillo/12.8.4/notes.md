@@ -41,7 +41,7 @@
 - cmake 4.1.2
 - clang 15.0.4
 
-无外部库依赖（BLAS/LAPACK未找到，但不阻塞编译）。
+依赖: openblas/0.3.34（提供BLAS和LAPACK，使armadillo支持solve/inv/eig_sym/svd等高级功能）。
 
 ## 验证结果
 
@@ -100,13 +100,14 @@ LD_LIBRARY_PATH=~/usr/local/lib ./test
 | 元素访问 | ✅ PASS | (i,j), row(), col() 正常 |
 | 特殊矩阵 | ✅ PASS | zeros, ones, eye 正常 |
 | 矩阵遍历 | ✅ PASS | accu, 迭代器正常 |
-| solve() | ⚠️ 需LAPACK | 无LAPACK时抛出 runtime_error |
-| eig_sym() | ⚠️ 需LAPACK | 无LAPACK时抛出 runtime_error |
-| inv() | ⚠️ 需LAPACK | 无LAPACK时抛出 runtime_error |
+| solve() | ✅ PASS | openblas提供LAPACK，solve()正常工作 |
+| eig_sym() | ✅ PASS | openblas提供LAPACK，eig_sym()正常工作 |
+| inv() | ✅ PASS | openblas提供LAPACK，inv()正常工作 |
+| svd() | ✅ PASS | openblas提供LAPACK，svd()正常工作 |
 
 ### 结论
 - ✅ 基本功能全部可用（不依赖LAPACK的运算）
-- ⚠️ 高级功能需要LAPACK支持（solve, eig_sym, inv等）
+- ✅ 高级功能通过openblas提供LAPACK支持（solve, eig_sym, inv, svd全部通过测试）
 - ✅ pkg-config 配置正确，编译链接正常
 - ✅ 预编译包可用于部署
 
@@ -114,11 +115,11 @@ LD_LIBRARY_PATH=~/usr/local/lib ./test
 
 1. **必须使用 BUILD_SHARED_LIBS=ON**: armadillo默认编译静态库(.a)，需要显式指定 `-DBUILD_SHARED_LIBS=ON` 来编译共享库(.so)
 2. configure脚本只是wrapper: 实际需要cmake构建系统
-3. 无BLAS/LAPACK时功能受限: 可以编译和基本使用，但性能和功能受限
+3. **无BLAS/LAPACK时功能受限**: ~~可以编译和基本使用，但性能和功能受限~~ 已修复：通过添加openblas/0.3.34依赖，BLAS和LAPACK均可用，支持solve/inv/eig_sym/svd等全部高级功能。
 4. 编译产物是wrapper库: libarmadillo.so很小（18K），因为它只是header-only库的wrapper
 5. 需要cmake >= 3.10版本（CMake < 3.10兼容性警告）**编译命令**: cmake -DCMAKE_INSTALL_PREFIX=$HOME/usr/local -DBUILD_SHARED_LIBS=ON .. && make -j2 && make install DESTDIR=$HOME/tmp/test-install-armadillo-12.8.4
 **关键发现**: BUILD_SHARED_LIBS=ON 必须显式指定，否则默认编译静态库
 ---
 
-**编译结束**: 2026-05-21 16:11
-**最终状态**: built
+**编译结束**: 2026-09-05 02:34
+**最终状态**: published

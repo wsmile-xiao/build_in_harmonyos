@@ -1,0 +1,112 @@
+#====================================================================
+# E624.kv — 交付 dlopen 插件模块的 Conan 子包：导出面拆分与消费者双面验证
+# 触发事件: libheif-jpeg 1.23.0 HarmonyOS PC 适配
+#   （archives/l/libheif-jpeg/1.23.0；同族 libheif-libde265/openh264/openjpeg/
+#     svtenc/aom/dav1d 六个子包共用同一 tarball 与同一交付形态）
+# 与 E618 的分工: E618 管「任务名 → 父 tarball 内子模块的判类与自包含交付」；
+#   本条目管**判类之后的导出面与验证面**——package_info 该导出什么、
+#   消费者怎么证「既链上了宿主又装载了插件」、依赖的 Find 模块怎么被命中。
+#====================================================================
+
+id:                     E624
+trigger_tool:           conan|conan create|conan-verify|cmake|CMakeToolchain|runtime|dlopen
+phase:                  recipe-authoring|packaging|testing|runtime
+error_signature:        dlsym[^\n]*plugin_info|Could NOT find (JPEG|OPENJPEG)|plugin_info.*(undefined symbol|not found)|heif_have_(decoder|encoder)_for_format\([^)]*\)\s*==\s*0
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               packaging, conan, plugin, cmake, runtime, dlopen
+prescan_pattern:        (LIBHEIF_PLUGIN_DIRECTORY|PLUGIN_INSTALL_DIRECTORY|PLUGIN_DIRECTORY)
+prescan_globs:          CMakeLists.txt, *.cmake, *.h.in, *.h, *.cc, *.cpp
+match_keywords:         dlopen, MODULE plugin, runenv_info, LIBHEIF_PLUGIN_PATH, package_info,
+                        cpp_info.libs, find_package MODULE, CMAKE_LIBRARY_PATH, CMAKE_INCLUDE_PATH,
+                        FindJPEG, test_package, 消费者验证, 反证, 子包, subpackage,
+                        heif_have_decoder_for_format, plugin_info, dlsym
+title:                  交付 dlopen 插件模块的 Conan 子包：package_info 只导出宿主（链接面）、插件目录走 runenv_info（运行面），消费者 test_package 必须同时证「链接宿主 + 装载插件 + 未交付后端为 0」
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  「宿主 + 可 dlopen 插件」的包，交付面是**两个不同层面**，混为一谈会同时踩两类错：
+  ① 链接面/发布面 = 宿主库。插件是 MODULE（不是 SHARED），不可被 target_link_libraries
+     链接，因此 cpp_info.libs 只能列宿主（libs=["heif"]），消费者侧 find_package 也必须
+     解析到宿主（cmake_file_name/cmake_target_name/pkg_config_name 都取宿主名，与 Conan
+     包名不同——包名 libheif-jpeg 的消费者写 find_package(libheif)）。把插件名塞进
+     cpp_info.libs 会让下游链接一个 MODULE 而失败。
+  ② 运行面 = 插件目录。上游把默认插件目录在**编译期钉死**成绝对路径
+     （heif_version.h 的 LIBHEIF_PLUGIN_DIRECTORY = 构建时 ${CMAKE_INSTALL_FULL_LIBDIR}/libheif，
+     即 Conan 缓存里那一次构建的路径），跨缓存/跨机必然失效；必须用
+     package_info() 的 runenv_info 导出环境变量（libheif 读单数 LIBHEIF_PLUGIN_PATH，
+     上游头文件注释里的复数 PATHS 是过期文档），由 VirtualRunEnv 在 conanrun 环境注入。
+  另一类隐蔽错在**依赖探测**：上游用 CMake **内建 MODULE 包** find_package(JPEG)（不是
+  CONFIG 模式，也没有自带 FindJPEG.cmake）。它之所以能在 Conan 构建里命中依赖包，是因为
+  CMakeToolchain 会把每个依赖的 <pkg>/include、<pkg>/lib 写进 CMAKE_INCLUDE_PATH /
+  CMAKE_LIBRARY_PATH，FindJPEG 的 find_path/find_library 因此解析到 Conan 缓存路径
+  （实测读数 Found JPEG: <conan cache>/p/libjp*/p/lib/libjpeg.so (found version "62")）。
+  不写 CMakeDeps、不手钉 JPEG_INCLUDE_DIR/JPEG_LIBRARY 也能成立；但正因为这条链是
+  「目录搜索」而非「目标解析」，依赖漏声明时会静默命中**设备系统库**（构建能过、
+  制品却链到 /usr/lib），所以必须回读解析出的绝对路径是否落在 Conan 缓存内。
+
+affected_scope: >
+  所有「宿主库 + 运行期 dlopen 的插件模块」形态的 Conan 包：libheif 各 codec 子包
+  （jpeg/libde265/openh264/openjpeg/svtenc/aom/dav1d）、以及同类的
+  gdk-pixbuf loader、libpeas、GStreamer 插件、ImageMagick coder 等；
+  以及所有「上游用 CMake 内建 MODULE 包（FindXXX.cmake）找依赖」的配方。
+
+verification_cmd: >
+  # 0) 复现构建（任务目录内，设备上可直接跑）
+  conan create $PACKAGE_DIR -pr:h=$HOST_PROFILE -pr:b=$HOST_PROFILE -c tools.build:jobs=1
+  # 1) 依赖确实来自 Conan 而不是系统库（回读绝对路径）
+  grep -n "Found JPEG" $TASK_DIR/logs/w3-create-*.log
+  # 2) 交付面形态：两个插件都必须是 separate plugin，且没被静态编入宿主
+  grep -n -A3 "Summary of compiled codecs" $TASK_DIR/logs/w3-create-*.log
+  # 3) 消费者侧双面验证（test_package 在 conan create 的 test 阶段自动跑）
+  #    链接宿主 + dlopen 插件 + 反证未交付后端为 0，逐条 [ok]/[FAIL] 与 RESULT 行
+  grep -n "RESULT:\|\[FAIL\]" $TASK_DIR/logs/w3-create-*.log
+
+fix_approach: >
+  配方三件事，缺一不可：
+  (a) package_info() 只导出宿主：cpp_info.libs=["heif"]、includedirs、cmake_file_name/
+      cmake_target_name/pkg_config_name 取宿主名（与 Conan 包名解耦）；
+  (b) runenv_info.define("<PLUGIN_PATH 变量>", os.path.join(self.package_folder, "lib", "<插件子目录>"))
+      导出运行面；不开 cpp_info.libdirs 到插件目录（会诱导下游链接 MODULE）；
+  (c) test_package 里用 generators=CMakeDeps+CMakeToolchain+VirtualRunEnv，
+      self.run(<test 程序>, env="conanrun")，断言分三层：
+      ① 链接面：find_package(<宿主>) + target_link_libraries(<宿主>::<宿主>)；
+      ② 运行面：宿主 API 报「该后端可用」（libheif: heif_have_decoder_for_format == 1
+         且 heif_have_encoder_for_format == 1；这同时证明 dlopen 成功与 plugin_info 可见）；
+      ③ 反证：本包**没交付**的后端必须为 0（HEVC/AV1/JPEG2000 == 0），
+         否则说明命中了系统/其它包的 libheif 或插件被静态编入；
+      再补一条端到端往返（编码→写文件→解码→尺寸/像素一致）证明不是「只在册不可用」。
+  若 WITH_REDUCED_VISIBILITY=ON（上游 release preset 默认就是这个组合），插件导出符号
+  plugin_info 仍可用：plugins/*.h 用 MAYBE_UNUSED LIBHEIF_API extern 声明，
+  LIBHEIF_API 展开为 visibility("default")，宏由 plugin_compilation() 注入
+  LIBHEIF_EXPORTS+HAVE_VISIBILITY —— 但这一条必须由上面的断言②实测，不接受推断。
+
+rec_priority:           1
+rec_approach:           split-link-surface-and-runtime-surface-export
+rec_description:        宿主进 cpp_info、插件目录进 runenv_info；消费者 test_package 用 conanrun 环境同时证链接、装载与反证
+rec_command:            self.runenv_info.define("LIBHEIF_PLUGIN_PATH", os.path.join(self.package_folder, "lib", "libheif"))
+rec_auto_fix:           false
+rec_impl:
+
+fallback_priority:      2
+fallback_approach:      bake-relative-plugin-dir-via-cmake-override
+fallback_description:   若某些消费者不经 conanrun 环境（直接拷 .so 部署），可另在 generate() 里把上游 PLUGIN_DIRECTORY 覆盖成 $ORIGIN 相对形式；但会改上游语义，且需自证 OHOS 上 dlopen 接受该路径
+fallback_command:       tc.cache_variables["PLUGIN_DIRECTORY"] = "$ORIGIN/libheif"   # 未采用，仅备选
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       cpp_info\.libs\s*=\s*\[[^\]]*jpeg(dec|enc)[^\]]*\]
+forbid_1_reason:        插件是 MODULE 目标，不能作为链接面导出；消费者链接它会直接失败
+forbid_1_consequence:   下游 target_link_libraries 报 cannot find -lheif-jpegdec，且掩盖真正的宿主依赖
+
+principles:             R34, R1
+
+causes:                 []
+caused_by:              []
+similar_to:             [E618]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+# draft: 待审；来源任务 libheif-jpeg 1.23.0（2026-09-20）

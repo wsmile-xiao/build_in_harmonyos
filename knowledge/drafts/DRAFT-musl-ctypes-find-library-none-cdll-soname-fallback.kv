@@ -1,0 +1,79 @@
+#====================================================================
+# DRAFT-musl-ctypes-find-library-none-cdll-soname-fallback -
+# musl 平台 ctypes.util.find_library() 恒返回 None —— ctypes 纯 Python 库
+# 应在 find_library 失败后按确切 SONAME CDLL 兜底并显式注入依赖 lib 目录
+# （案例: legacycrypt 0.3 @ libxcrypt）。
+#
+# 场景: 任何经 ctypes.util.find_library（或等价机制）在运行期定位 C 共享库
+#       的纯 Python 库，在 OHOS/musl 上 import 期即失败：
+#       find_library('xcrypt')/find_library('crypt') 全 None →
+#       ImportError: libcrypt / libxcrypt missing（legacycrypt 0.3 真机实测）。
+# 适用: musl/OHOS 平台 ctypes 定位运行时 C 库的纯 Python 库（crypt/kerberos/
+#       数据库驱动等）及为其提供 C 依赖的 conan 配方。
+#
+# 注: 本文件所有字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-musl-ctypes-find-library-none-cdll-soname-fallback
+source_lib:             legacycrypt 0.3（案例，运行时依赖 libxcrypt 4.5.2）
+trigger_tool:           python|ctypes|runtime
+phase:                  runtime
+error_signature:        ImportError: libcrypt / libxcrypt missing|find_library.*None.*ImportError|OSError: Error loading shared library .*: No such file or directory
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               compat, python, runtime, musl
+match_keywords:         find_library, ctypes.util, ctypes, CDLL, musl, ldconfig, SONAME, LD_LIBRARY_PATH, shared, libxcrypt, libcrypt, ImportError
+title:                  musl 平台 ctypes.util.find_library() 恒返回 None —— ctypes 纯 Python 库应在 find_library 失败后按确切 SONAME CDLL 兜底并显式注入依赖 lib 目录（案例: legacycrypt 0.3 @ libxcrypt）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             musl 发行版（含 OHOS）无 /sbin/ldconfig 且无 gcc/objdump，ctypes.util.find_library() 三条探测路径（_findSoname_ldconfig/_findLib_gcc/_findLib_ld）全部不可用，对任何库——包括设备上真实存在的共享库——恒返回 None；上游按 glibc 生态假设写死的 find_library('crypt') 加载链全失败后在 import 期抛 ImportError。修复在消费库侧：全失败后按确切 SONAME try CDLL（SONAME 用 readelf 实测依赖包产物，如 libxcrypt shared 产物为 libcrypt.so.2，NEEDED 仅 libc.so），且依赖必须以 shared=True 提供（静态归档无法 dlopen）；conan 依赖图不会为 ctypes/dlopen 式消费注入 LD_LIBRARY_PATH，build()/test_package 须显式注入依赖 cpp_info.libdirs。
+affected_scope:         任何在 musl/OHOS 平台运行、经 ctypes.util.find_library（或等价机制）定位运行时 C 库的纯 Python 库（crypt/kerberos/数据库驱动等），以及为其提供 C 依赖的 conan 配方。
+verification_cmd:       PY=$(command -v python3 || echo /storage/Users/currentUser/usr/local/bin/python3); XP=$(find /storage/Users/currentUser/.conan2/p -maxdepth 5 -name libcrypt.so.2 2>/dev/null | head -1 | xargs dirname); $PY -c "import ctypes.util as u; print(u.find_library('crypt'), u.find_library('m'))"   # → None None; $PY -c "import ctypes; ctypes.CDLL('libcrypt.so.2')"; echo rc=$?   # 无注入时 → OSError（预期，库不在 loader 搜索路径）; LD_LIBRARY_PATH=$XP $PY -c "import ctypes; print(ctypes.CDLL('libcrypt.so.2'))"   # → <CDLL 'libcrypt.so.2'> CDLL OK; readelf -d $XP/libcrypt.so.2.0.0 | grep SONAME   # → libcrypt.so.2
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           source-patch-cdll-soname-fallback
+rec_description:        补丁在上游 find_library 全失败的 except OSError 分支加探测式 fallback：先按 libxcrypt 的 crypt_data 布局选实现，再 try CDLL('<实测 SONAME>')，仍失败才抛 ImportError；配方侧 requires 依赖并 default_options 强制 shared=True；build() 与 test_package 显式将依赖 cpp_info.libdirs 前置注入 LD_LIBRARY_PATH（conan 只为链接器/生成器铺路径，不感知 dlopen）。
+rec_command:            补丁随配方交付（conandata.yml patches → apply_conandata_patches），见 archives/l/legacycrypt/0.3/patches/0001-legacycrypt-ohos-fallback-load.patch
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      embedded-python-launcher（E465 模式，worker dlopen 受限时）或预装系统 libcrypt；权衡：launcher 需编译 C 垫片且仅解决测试运行不解决库交付，属退路。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       if.*OHOS|if.*musl.*CDLL\('<平台硬编码路径>'\)
+forbid_1_reason:        平台名硬编码把"探测语义"换成"平台假设"，掩盖真实失败点
+forbid_1_consequence:   平台行为变化（如未来 musl 提供 ldconfig 缓存）时静默走错分支
+forbid_2_pattern:       CDLL\('libcrypt\.so'\)|依赖 static 归档|依赖.*shared: False
+forbid_2_reason:        开发符号链接不会随包交付；静态归档无法被 dlopen，CDLL 必失败
+forbid_2_consequence:   配方在静态制品上"看似接好"，运行期 ImportError
+
+principles:             P-RUNTIME-002, P-ENV-001
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              [E068]
+similar_to:             [E068, E465, E502]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-musl-ctypes-find-library-none-cdll-soname-fallback.md
+last_updated:           2026-09-26
+source_event:           archives/l/legacycrypt/0.3/manifest.yaml knowledge_gained[1]
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-26

@@ -55,8 +55,7 @@ python3 ohc-run.py verify-build docker-completion 29.5.2
 2. 需要 bash-completion 包才能生效（在用户的 .bashrc 中 source）
 3. Docker CLI 源码包含 Go 代码，但 completion 脚本是纯 bash，无需 Go 环境
 4. 此软件特殊：无 configure/make 流程，直接复制安装即可
-
 ---
 
-**编译结束**: 2026-05-26 21:56
+**编译结束**: 2026-08-06 07:32
 **最终状态**: built

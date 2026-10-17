@@ -1,0 +1,75 @@
+# 版本级 manifest — kamailio-cpl 6.0.6
+# 遵循 ARCHIVE-SPEC v2.0
+
+# ============================================================
+# 必须字段
+# ============================================================
+
+version: "6.0.6"
+software: "kamailio-cpl"
+status: built
+build_date: "2026-09-29"
+build_system: makefile                # kamailio 经典 Makefile 体系（非 autotools/cmake）
+
+# ============================================================
+# 源码信息
+# ============================================================
+
+source:
+  url: "https://www.kamailio.org/pub/kamailio/6.0.6/src/kamailio-6.0.6_src.tar.gz"
+  sha256: "32e4290c6813c9d0289abe9ec2de9138e12e0381179218a7fed374ad813ecc48"
+  tar_format: tar.gz
+
+# ============================================================
+# 构建配置
+# ============================================================
+
+build:
+  system: makefile
+  configure_options:
+    - "make cfg include_modules=cplc LOCALBASE=<libxml2 package_folder> XML2CFG= extra_defs='<platform defs>'"
+    - "make modules modules=modules/cplc -j1 LOCALBASE=<libxml2 package_folder> XML2CFG= extra_defs='<platform defs>'"
+  dependencies:
+    - libxml2/2.15.3.1
+  cc: clang
+  cxx: clang++
+
+# ============================================================
+# 补丁信息
+# ============================================================
+
+# 上游 6.0.6 源码包原生识别 aarch64-unknown-linux-ohos，未应用任何补丁；
+# 平台探测宏与依赖探测全部经 make 命令行注入（见 notes.md），无需改源码
+patches_applied: []
+
+# ============================================================
+# 产物
+# ============================================================
+
+artifacts:
+  module: "lib/kamailio/modules/cplc.so"
+  data:
+    - "lib/kamailio/modules/cpl-06.dtd"    # cpl_dtd_file 参数所指向的 CPL DTD
+  license: "licenses/COPYING"
+
+# ============================================================
+# 知识沉淀
+# ============================================================
+
+knowledge_gained:
+  - "任务名 kamailio-cpl 对应的模块源码目录是 src/modules/cplc（产物 cplc.so），不是历史文档中出现过的 cpl-c；kamailio 模块族任务命名与实际模块名可不一致（另见 kamailio-xml → xmlops）"
+  - "OS=harmonyos 不在 Makefile.defs 的 linux/solaris/freebsd/darwin 任一分支 → HAVE_GETHOSTBYNAME2/HAVE_SCHED_YIELD 等平台探测宏全部缺失，core 头 resolve.h/sched_yield.h 直接 #error。解法与 kamailio-tls 同：make 命令行 extra_defs 注入 linux 分支等价宏集（-D_GNU_SOURCE -DHAVE_GETHOSTBYNAME2 -DHAVE_SCHED_YIELD -DHAVE_MSG_NOSIGNAL -DHAVE_MSGHDR_MSG_CONTROL -DHAVE_ALLOCA_H -DHAVE_TIMEGM -DHAVE_SCHED_SETSCHEDULER -DHAVE_IP_MREQN），每宏均对照 OHOS SDK sysroot 头文件实证存在（musl 语义）"
+  - "cplc 模块 Makefile 的 libxml2 探测链：XML2CFG 非空 → 执行 $(XML2CFG) --cflags；否则 CROSS_COMPILE 为空时用构建机 xml2-config / pkg-config 探测；未命中回退 LOCALBASE。conan 交叉编译下必须显式传 XML2CFG=（make 命令行变量优先于 Makefile 内部赋值）使探测为空、钉死 LOCALBASE 回退分支并指向 conan libxml2 包目录——否则会链到构建机系统 libxml2"
+  - "OHOS libc 为 musl，动态加载器无 lazy binding：ELF 中所有 UND 符号必须在 dlopen 时解析。而 kamailio 模块 .so 有意把 kamailio core 符号（find_export/register_procs/run_top_route/db_bind_mod/pv_parse_spec2 等 49 个）留作 UND，由核心二进制在运行时提供 → 独立宿主（无 kamailio 核心）中直接 dlopen 必失败。验证手段：构建仅含这些 core 符号的桩 .so，以 LD_PRELOAD 注入子进程（符号进入全局作用域；进程内 RTLD_GLOBAL 在 musl 下不足），即可成功 dlopen 并解析 exports.name（本包 check_cplc_runtime.py 即此法）"
+  - "cplc 的 CPL 校验走 libxml2 内存缓冲区接口：init_CPL_parser() 用 xmlParseDTD(NULL, dtd_file) 载入 cpl_dtd_file；encodeCPL() 用 xmlParseDoc(xml_text) 解析后 xmlValidateDtd(&cvp, doc, dtd) 校验——消费者用例须先读文件入内存再入 xmlParseDoc，文件版 xmlParseFile 路径不适用"
+  - "conan 制品仓的 libxml2/2.15.3.1 仅提供共享库（libxml2.so.16，无 .a），故 cplc.so 动态链入 libxml2（NEEDED: libxml2.so.16, libc.so）；OHOS 系统目录（/lib、/usr/lib 及 SDK sysroot）无同名 libxml2，不构成 R26 系统同名库冲突"
+  - "cplc.so 无 RPATH/RUNPATH；契约符号仅 exports（无 mod_register），模块名 cplc，导出命令 cpl_run_script/cpl_process_register/cpl_process_register_norpl，导出参数 18 个（db_url/db_table/cpl_dtd_file/proxy_recurse/proxy_route/redirect_route/ignore3xx/log_dir/case_sensitive/realm_prefix/lookup_domain/lookup_append_branches/timer_avp/username_column/domain_column/cpl_xml_column/cpl_bin_column/use_domain）"
+  - "cpl_init() 要求 cpl_dtd_file 与 DB（cpl_db_bind）就绪，且 load_tm_api 需要运行中的 kamailio 核心 → 完整功能路径（CPL 脚本下载/编译/执行）需 kamailio 运行时 + DB 后端，单包 CI 环境只验证加载期行为与 DTD 校验，须如实申报"
+
+# 本配方 0 补丁：探索阶段未改动任何源文件（extra_defs / XML2CFG 全部经 make 命令行注入）
+patch_generation:
+  method: per-file-difflib
+  source_orig_dir: /storage/Users/currentUser/tmp/builds/kamailio-cpl-6.0.6.orig
+  source_work_dir: /storage/Users/currentUser/tmp/builds/kamailio-cpl-6.0.6.work
+  generated_at: '2026-09-29'
+  patches_count: 0

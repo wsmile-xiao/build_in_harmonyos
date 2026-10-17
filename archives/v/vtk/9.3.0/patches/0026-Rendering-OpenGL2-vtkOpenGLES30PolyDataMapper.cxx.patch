@@ -1,0 +1,297 @@
+--- a/Rendering/OpenGL2/vtkOpenGLES30PolyDataMapper.cxx
++++ b/Rendering/OpenGL2/vtkOpenGLES30PolyDataMapper.cxx
+@@ -23,20 +23,21 @@
+ #include "vtkOpenGLState.h"
+ #include "vtkOpenGLTexture.h"
+ #include "vtkOpenGLVertexArrayObject.h"
+ #include "vtkOpenGLVertexBufferObject.h"
+ #include "vtkOpenGLVertexBufferObjectGroup.h"
+ #include "vtkPointData.h"
+ #include "vtkPolyData.h"
+ #include "vtkPolyDataVS.h"
+ #include "vtkProperty.h"
+ #include "vtkRenderer.h"
++#include "vtkSelection.h"
+ #include "vtkShaderProgram.h"
+ #include "vtkShaderProperty.h"
+ #include "vtkTransform.h"
+ #include "vtk_glew.h"
+ 
+ VTK_ABI_NAMESPACE_BEGIN
+ 
+ namespace
+ {
+ 
+@@ -279,43 +280,75 @@
+ void vtkOpenGLES30PolyDataMapper::RenderPieceDraw(vtkRenderer* ren, vtkActor* act)
+ {
+   const int representation = act->GetProperty()->GetRepresentation();
+   vtkHardwareSelector* selector = ren->GetSelector();
+   bool draw_surface_with_edges =
+     (act->GetProperty()->GetEdgeVisibility() && representation == VTK_SURFACE) && !selector;
+ 
+   for (int primType = PrimitiveStart;
+        primType < (draw_surface_with_edges ? PrimitiveEnd : PrimitiveTriStrips + 1); ++primType)
+   {
++    this->DrawingSelection = false;
+     this->DrawingVertices = primType > PrimitiveTriStrips;
+     if (this->PrimitiveIndexArrays[primType].empty())
+     {
+       continue;
+     }
+     const auto numVerts = this->PrimitiveIndexArrays[primType].size();
+     ScopedValueRollback<vtkOpenGLVertexBufferObjectGroup*> vbogBkp(
+       this->VBOs, this->PrimitiveVBOGroup[primType].Get());
+     ScopedValueRollback<std::size_t> indexCountBkp(
+       this->Primitives[primType].IBO->IndexCount, numVerts);
+ 
+     this->UpdateShaders(this->Primitives[primType], ren, act);
+     GLenum mode = this->PointPicking ? GL_POINTS : this->GetOpenGLMode(representation, primType);
+-    if (mode == GL_LINES && this->HaveWideLines(ren, act))
++    if (mode == GL_LINES && this->HaveWideLines(ren, act) &&
++      !this->UseGeometryShaderForLines(ren, act))
+     {
+       glDrawArraysInstanced(
+         mode, 0, numVerts, 2 * vtkMath::Ceil(act->GetProperty()->GetLineWidth()));
+     }
+     else
+     {
+       glDrawArrays(mode, 0, numVerts);
+     }
+   }
++
++  vtkSelection* selection = this->GetSelection();
++  if (!selector && selection && selection->GetNumberOfNodes() > 0)
++  {
++    // Selection indices refer to the original point IDs, before primitive expansion.
++    this->VBOs->CacheDataArray("vertexMC", this->CurrentInput->GetPoints()->GetData(), ren, VTK_FLOAT);
++    auto position = this->VBOs->GetVBO("vertexMC");
++    position->SetCoordShiftAndScaleMethod(
++      static_cast<vtkOpenGLVertexBufferObject::ShiftScaleMethod>(this->ShiftScaleMethod));
++    position->SetProp3D(act);
++    position->SetCamera(ren->GetActiveCamera());
++    this->VBOs->BuildAllVBOs(ren);
++    this->DrawingSelection = true;
++    this->DrawingVertices = false;
++    for (int primitive = PrimitiveStart; primitive <= PrimitiveTriStrips; ++primitive)
++    {
++      auto& selected = this->SelectionPrimitives[primitive];
++      if (!selected.IBO->IndexCount)
++      {
++        continue;
++      }
++      const GLenum mode = this->GetOpenGLMode(this->SelectionType, primitive);
++      this->UpdateShaders(selected, ren, act);
++      selected.IBO->Bind();
++      glDrawElements(mode, static_cast<GLsizei>(selected.IBO->IndexCount), GL_UNSIGNED_INT, nullptr);
++      selected.IBO->Release();
++    }
++    this->DrawingSelection = false;
++  }
++
+ }
+ 
+ //------------------------------------------------------------------------------
+ void vtkOpenGLES30PolyDataMapper::RenderPieceFinish(vtkRenderer* ren, vtkActor* vtkNotUsed(act))
+ {
+   vtkHardwareSelector* selector = ren->GetSelector();
+   // render points for point picking in a special way
+   if (selector && selector->GetFieldAssociation() == vtkDataObject::FIELD_ASSOCIATION_POINTS)
+   {
+     static_cast<vtkOpenGLRenderer*>(ren)->GetState()->vtkglDepthMask(GL_TRUE);
+@@ -367,21 +400,24 @@
+     this->PrimitiveVBOGroup[i]->ReleaseGraphicsResources(win);
+   }
+   this->Superclass::ReleaseGraphicsResources(win);
+ }
+ 
+ //------------------------------------------------------------------------------
+ void vtkOpenGLES30PolyDataMapper::GetShaderTemplate(
+   std::map<vtkShader::Type, vtkShader*> shaders, vtkRenderer* ren, vtkActor* act)
+ {
+   this->Superclass::GetShaderTemplate(shaders, ren, act);
+-  shaders[vtkShader::Geometry]->SetSource("");
++  if (!this->UseGeometryShaderForLines(ren, act))
++  {
++    shaders[vtkShader::Geometry]->SetSource("");
++  }
+ }
+ 
+ //------------------------------------------------------------------------------
+ void vtkOpenGLES30PolyDataMapper::ReplaceShaderValues(
+   std::map<vtkShader::Type, vtkShader*> shaders, vtkRenderer* ren, vtkActor* act)
+ {
+   this->ReplaceShaderPointSize(shaders, ren, act);
+   this->ReplaceShaderWideLines(shaders, ren, act);
+   this->Superclass::ReplaceShaderValues(shaders, ren, act);
+ }
+@@ -404,21 +440,21 @@
+ }
+ 
+ //------------------------------------------------------------------------------
+ void vtkOpenGLES30PolyDataMapper::ReplaceShaderCoincidentOffset(
+   std::map<vtkShader::Type, vtkShader*> shaders, vtkRenderer* ren, vtkActor* act)
+ {
+   this->Superclass::ReplaceShaderCoincidentOffset(shaders, ren, act);
+ 
+   std::string FSSource = shaders[vtkShader::Fragment]->GetSource();
+   // gles wants explicit type specification when mixed type arguments are used with an operand
+-  vtkShaderProgram::Substitute(FSSource, "cOffset/65000", "cOffset/65000.0f");
++  // The base mapper emits floating-point literals for coincident offsets.
+   shaders[vtkShader::Fragment]->SetSource(FSSource);
+ }
+ //------------------------------------------------------------------------------
+ void vtkOpenGLES30PolyDataMapper::ReplaceShaderEdges(
+   std::map<vtkShader::Type, vtkShader*> shaders, vtkRenderer* ren, vtkActor* act)
+ {
+   std::string VSSource = shaders[vtkShader::Vertex]->GetSource();
+   std::string FSSource = shaders[vtkShader::Fragment]->GetSource();
+ 
+   if (this->DrawingEdges(ren, act))
+@@ -619,30 +655,53 @@
+       VSSource, "//VTK::Picking::Impl", "  vertexIDVSOutput = int(vtkVertexID);\n");
+ 
+     shaders[vtkShader::Vertex]->SetSource(VSSource);
+   }
+   this->Superclass::ReplaceShaderPicking(shaders, ren, act);
+ }
+ 
+ //------------------------------------------------------------------------------
+ bool vtkOpenGLES30PolyDataMapper::DrawingPoints(vtkActor* actor)
+ {
++  if (this->DrawingSelection)
++  {
++    return this->GetOpenGLMode(this->SelectionType, this->LastBoundBO->PrimitiveType) == GL_POINTS;
++  }
+   return (this->LastBoundBO->PrimitiveType == PrimitivePoints ||
+     this->LastBoundBO->PrimitiveType == PrimitiveVertices || this->PointPicking ||
+     actor->GetProperty()->GetRepresentation() == VTK_POINTS);
+ }
+ 
+ //------------------------------------------------------------------------------
+ bool vtkOpenGLES30PolyDataMapper::DrawingLines(vtkActor* actor)
+ {
++  if (this->DrawingSelection)
++  {
++    return this->GetOpenGLMode(this->SelectionType, this->LastBoundBO->PrimitiveType) == GL_LINES;
++  }
+   return (this->LastBoundBO->PrimitiveType == PrimitiveLines ||
+     actor->GetProperty()->GetRepresentation() == VTK_WIREFRAME);
++}
++
++//------------------------------------------------------------------------------
++bool vtkOpenGLES30PolyDataMapper::UseGeometryShaderForLines(vtkRenderer* ren, vtkActor* act)
++{
++  if (!this->LastBoundBO ||
++    !(this->DrawingLines(act) && this->HaveWideLines(ren, act) &&
++      !this->DrawingEdges(ren, act)))
++  {
++    return false;
++  }
++  int major = 0;
++  int minor = 0;
++  static_cast<vtkOpenGLRenderWindow*>(ren->GetRenderWindow())->GetOpenGLVersion(major, minor);
++  return major > 3 || (major == 3 && minor >= 2);
+ }
+ 
+ //------------------------------------------------------------------------------
+ void vtkOpenGLES30PolyDataMapper::ReplaceShaderPointSize(
+   std::map<vtkShader::Type, vtkShader*> shaders, vtkRenderer* vtkNotUsed(ren), vtkActor* act)
+ {
+   if (this->DrawingPoints(act))
+   {
+     std::string VSSource = shaders[vtkShader::Vertex]->GetSource();
+     vtkShaderProgram::Substitute(
+@@ -650,21 +709,22 @@
+     vtkShaderProgram::Substitute(
+       VSSource, "//VTK::PointSizeGLES30::Impl", "gl_PointSize = PointSize;");
+     shaders[vtkShader::Vertex]->SetSource(VSSource);
+   }
+ }
+ 
+ //------------------------------------------------------------------------------
+ void vtkOpenGLES30PolyDataMapper::ReplaceShaderWideLines(
+   std::map<vtkShader::Type, vtkShader*> shaders, vtkRenderer* ren, vtkActor* act)
+ {
+-  if (this->DrawingLines(act) && this->HaveWideLines(ren, act) && !this->DrawingEdges(ren, act))
++  if (this->DrawingLines(act) && this->HaveWideLines(ren, act) &&
++    !this->DrawingEdges(ren, act) && !this->UseGeometryShaderForLines(ren, act))
+   {
+     std::string VSSource = shaders[vtkShader::Vertex]->GetSource();
+     vtkShaderProgram::Substitute(VSSource, "//VTK::LineWidthGLES30::Dec",
+       "uniform vec2 viewportSize;\n"
+       "uniform float lineWidthStepSize;\n"
+       "uniform float halfLineWidth;");
+     vtkShaderProgram::Substitute(VSSource, "//VTK::LineWidthGLES30::Impl",
+       "if (halfLineWidth > 0.0)\n"
+       "{\n"
+       "  float offset = float(gl_InstanceID / 2) * lineWidthStepSize - halfLineWidth;\n"
+@@ -687,25 +747,27 @@
+ }
+ 
+ //------------------------------------------------------------------------------
+ void vtkOpenGLES30PolyDataMapper::SetPropertyShaderParameters(
+   vtkOpenGLHelper& cellBO, vtkRenderer* ren, vtkActor* act)
+ {
+   this->Superclass::SetPropertyShaderParameters(cellBO, ren, act);
+   if (this->DrawingPoints(act))
+   {
+     cellBO.Program->SetUniformf("PointSize",
+-      this->PointPicking ? this->GetPointPickingPrimitiveSize(cellBO.PrimitiveType)
+-                         : act->GetProperty()->GetPointSize());
++      this->DrawingSelection ? act->GetProperty()->GetSelectionPointSize()
++        : this->PointPicking ? this->GetPointPickingPrimitiveSize(cellBO.PrimitiveType)
++                             : act->GetProperty()->GetPointSize());
+     vtkOpenGLCheckErrorMacro("failed after UpdateShader PointSize ");
+   }
+-  if (this->DrawingLines(act) && this->HaveWideLines(ren, act) && !this->DrawingEdges(ren, act))
++  if (this->DrawingLines(act) && this->HaveWideLines(ren, act) &&
++    !this->DrawingEdges(ren, act) && !this->UseGeometryShaderForLines(ren, act))
+   {
+     int vp[4] = {};
+     auto renWin = vtkOpenGLRenderWindow::SafeDownCast(ren->GetRenderWindow());
+     vtkOpenGLState* ostate = renWin->GetState();
+     ostate->vtkglGetIntegerv(GL_VIEWPORT, vp);
+     float vpSize[2];
+     vpSize[0] = vp[2];
+     vpSize[1] = vp[3];
+     const float lineWidth = act->GetProperty()->GetLineWidth();
+     cellBO.Program->SetUniform2f("viewportSize", vpSize);
+@@ -963,20 +1025,37 @@
+     }
+     const auto numPrimitives = numIndices / PrimitiveSizes[representation][primType];
+     newVertexAttrs.Resize(numIndices);
+     const auto start = indexArray.data() + iFirsts[primType];
+     expand(originalVAttribs.colors, newVertexAttrs.colors, start, numIndices);
+     expand(originalVAttribs.normals, newVertexAttrs.normals, start, numIndices);
+     expand(originalVAttribs.points, newVertexAttrs.points, start, numIndices);
+     expand(originalVAttribs.tangents, newVertexAttrs.tangents, start, numIndices);
+     expand(originalVAttribs.tcoords, newVertexAttrs.tcoords, start, numIndices);
+     expand(originalVAttribs.colorTCoords, newVertexAttrs.colorTCoords, start, numIndices);
++
++    // Custom attributes must follow the same point-index expansion as positions.
++    for (const auto& attribute : this->ExtraAttributes)
++    {
++      vtkDataArray* values =
++        polydata->GetPointData()->GetArray(attribute.second.DataArrayName.c_str());
++      if (!values)
++      {
++        continue;
++      }
++      auto expanded = vtk::TakeSmartPointer(values->NewInstance());
++      expanded->SetNumberOfComponents(values->GetNumberOfComponents());
++      expanded->SetNumberOfTuples(numIndices);
++      expand(values, expanded, start, numIndices);
++      vbos->AppendDataArray(attribute.first.c_str(), expanded, VTK_FLOAT);
++    }
++
+ 
+     if (newVertexAttrs.points != nullptr)
+     {
+       vbos->AppendDataArray("vertexMC", newVertexAttrs.points, VTK_FLOAT);
+     }
+     if (newVertexAttrs.colors != nullptr)
+     {
+       vbos->AppendDataArray("scalarColor", newVertexAttrs.colors, VTK_UNSIGNED_CHAR);
+     }
+     else if (this->HaveCellScalars && (primType != PrimitiveVertices))

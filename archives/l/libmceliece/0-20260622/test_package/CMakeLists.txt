@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_mceliece C)
+find_package(libmceliece REQUIRED)
+add_executable(test_mceliece test.c)
+target_link_libraries(test_mceliece PRIVATE libmceliece::libmceliece)
+enable_testing()
+add_test(NAME test_mceliece COMMAND test_mceliece)

@@ -1,0 +1,114 @@
+# DRAFT: HarmonyOS 沙箱拒绝 netlink bind 时的运行期接口枚举回退（getifaddrs）
+id: DRAFT-kea-hook-ha-3.0.3-sandbox-netlink-bind-getifaddrs-fallback
+status: draft
+contributor: kea-hook-ha 3.0.3 适配任务（openharmony-compile-agent）
+created: 2026-10-02
+
+# Layer 0: 错误面
+trigger_tool:           kea|dhcp4|dhcp6|conan|meson|test
+phase:                  runtime, testing
+error_signature:        Failed to bind netlink socket\.|IfaceDetectError.*netlink|AF_NETLINK.*bind.*(EPERM|denied)
+
+# Layer 1: 识别层
+severity:               2
+category:               runtime, network, sandbox, testing, detection
+title:                  HarmonyOS 沙箱只放行 netlink socket() 创建、拒绝显式 bind()：
+                        依赖 rtnetlink 做运行期接口枚举的代码（如 Kea 的 Linux IfaceMgr）
+                        构造即抛 IfaceDetectError；沙箱内 getifaddrs()/if_nametoindex/ioctl
+                        可用，应以能力探测 + getifaddrs() 回退修复
+match_keywords:         netlink, AF_NETLINK, NETLINK_ROUTE, bind, EPERM, rtnetlink, getifaddrs,
+  if_nametoindex, SIOCGIFADDR, SIOCGIFCONF, IfaceMgr, kea, dhcp, sandbox, seccomp,
+  interface enumeration, Failed to bind netlink socket
+
+# Layer 2: 诊断层
+root_cause:             HarmonyOS app 沙箱对 AF_NETLINK 套接字只放行创建与（无 bind 的）
+  sendto/recvfrom：socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE) 返回 fd，但显式 bind() 被拒
+  （EPERM）。凡是像 Kea Netlink::rtnl_open_socket 那样"创建后立即 bind 再 getsockname"的
+  持久 netlink 使用者，都会在构造阶段收到 bind 失败；Kea 把它包装成
+  IfaceDetectError（"Failed to bind netlink socket."）抛出，整个进程（kea-dhcp4/6 服务端，
+  或任何构造 IfaceMgr 的单元测试）无法继续。
+
+  真机沙箱探针取证（python）：
+  - socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE) 创建成功；缺省 bind 被拒
+  - getifaddrs() 成功：AF_PACKET 13 条（MAC 与 hatype，含 lo/dummy0/tunl0/
+    Hisilicon0/wlan0 等）+ IPv4/IPv6 地址条目；if_nameindex 列出 19 个接口
+  - if_nametoindex / ioctl(SIOCGIFADDR/SIOCGIFFLAGS/SIOCGIFINDEX) 全部成功
+  - /proc/net/dev 被拒（Permission denied，普通用户）
+  即 libc 的枚举路径（musl getifaddrs 内部不显式 bind，直接 sendto 内核）可用，
+  只有"显式 bind 的持久 netlink 套接字"这一种用法被封。
+
+affected_scope:         所有在 OHOS 沙箱内依赖 rtnetlink 做运行期网络接口枚举/监控的代码：
+                        Kea 全家族（IfaceMgr 构造即触发：kea-dhcp4/kea-dhcp6 服务端、全部 hook
+                        插件的单元测试）；任何"socket(AF_NETLINK) + bind"模式的接口发现/
+                        地址监控/网络事件订阅代码。仅做无 bind 的 sendto/recvfrom 用法
+                        （libc getifaddrs 内部）不受影响。
+verification_cmd: |
+  # netlink：socket 可建、bind 被拒
+  python3 -c "import socket; s=socket.socket(16,3,0); print('socket ok'); s.bind((0,0))"  # OSError（EPERM）
+  # 但枚举路径全部可用
+  python3 -c "import socket; print(len(socket.if_nameindex()), 'ifaces')"   # 19
+  python3 -c "import socket; print(socket.getaddrinfo('localhost', None)[0])"
+  # Kea 侧症状（真机 meson test 日志）
+  grep -m1 "Failed to bind netlink socket" <build_folder>/meson-logs/testlog.txt
+
+# Layer 3: 方案层
+rec_priority:           1
+rec_approach:           runtime-capability-probe-with-fallback
+rec_description:        在 netlink 使用点做运行期能力探测：尝试打开/绑定 netlink，抛异常时
+  回退到 getifaddrs() 枚举（复用 libc 无 bind 路径）。回退枚举内容与 netlink 主路径等价：
+  接口名/索引（if_nametoindex）、标志（ifa_flags）、MAC 与硬件类型（AF_PACKET 的
+  sll_hatype/sll_addr/sll_halen）、IPv4/IPv6 地址（IOAddress::fromBytes），注册路径
+  （update_only 语义）与主路径一致。回退分支只在 netlink 打开失败时生效，常规 Linux 上
+  netlink 正常，行为零变化——不需要平台宏，天然同时兼容 OHOS 与桌面 Linux。
+rec_command: |
+  patch: detectIfaces() 以
+    try { nl.rtnl_open_socket(); } catch (const std::exception&) { detectIfacesByIfaddrs(update_only); return; }
+  包住 netlink 打开；回退体照上游自带 iface_mgr_bsd.cc 的 getifaddrs 两趟遍历改写为 Linux 变体
+  （实例: archives/k/kea-hook-ha/3.0.3/patches/0005-src-lib-dhcp-iface_mgr_linux-getifaddrs-fallback.patch）
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      document-and-degrade
+fallback_description:   若目标进程连 getifaddrs()/ioctl 也不可用（更严沙箱），则按"接口枚举
+  不可用"明确上报或短路相关功能——不要静默返回空接口表：DHCP 类服务在空接口表上会以错误
+  配置继续运行（不监听任何接口/错误匹配子网），比启动失败更难排查。
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       bind.*(EPERM|denied).*->\s*(结论|方案)[:：].*(sudo|CAP_NET_ADMIN|setcap|提权)
+forbid_1_reason:        沙箱拒绝 netlink bind 是设计行为，CI/真机均无提权途径；提权方向
+                        第一步就走错（包构建环境无 sudo，见 E031 同类教训）。
+forbid_1_consequence:   浪费多轮返工去申请权限/改沙箱配置，而正确的修复（getifaddrs 回退）
+                        就在 libc 已有路径里。
+forbid_2_pattern:       getifaddrs.*不可用.*->\s*(结论|方案)[:：].*跳过
+forbid_2_reason:        真机取证 getifaddrs/if_nametoindex/ioctl 均可用；未取证就断言
+                        "也不可用"并放弃，会把可修复问题降级为不可适配。
+forbid_2_consequence:   误报环境不支持（释放任务/降级路径），实际上一行能力探测 + 回退即可修复。
+
+# Layer 4: 原则引用
+principles:             运行期能力探测优先于假定内核接口可用；回退路径必须与主路径语义等价；
+                        平台差异收敛在使用点内部（无需平台宏）
+
+# 关系图
+causes:                 []
+caused_by:              []
+similar_to:             E091, E237, E429
+conflicts_with:         []
+prerequisite_of:        []
+
+# 元数据
+doc_file:               drafts/DRAFT-kea-hook-ha-3.0.3-sandbox-netlink-bind-getifaddrs-fallback.md
+last_updated:           2026-10-02
+source_event:           kea-hook-ha 3.0.3 真机首验：dhcp-ha-lib-tests 48/443 FAIL
+                        （isc::dhcp::IfaceDetectError "Failed to bind netlink socket."）；
+                        补丁 0005 回退后 443/443 + 7/7 全绿
+authors:
+source_pr:
+source_commit:
+
+# 质量度量
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-10-02

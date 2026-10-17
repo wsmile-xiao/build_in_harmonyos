@@ -1,0 +1,174 @@
+--- a/src/configure.in
++++ b/src/configure.in
+@@ -95,7 +95,7 @@
+ AC_FUNC_STRFTIME
+ AC_FUNC_UTIME_NULL
+ AC_FUNC_VPRINTF
+-AC_CHECK_FUNCS([gethostbyname gethostname gettimeofday inet_ntoa memset select socket strcasecmp strchr strdup strerror strftime strncasecmp strstr utime getaddrinfo forkpty popen])
++AC_CHECK_FUNCS([gethostbyname gethostname gettimeofday inet_ntoa memset select socket strcasecmp strchr strdup strerror strftime strncasecmp strstr utime getaddrinfo forkpty open_memstream popen])
+ 
+ # Checks libraries
+ 
+--- a/src/config.h.in
++++ b/src/config.h.in
+@@ -79,6 +79,9 @@
+ /* Define to 1 if you have the <net/errno.h> header file. */
+ #undef HAVE_NET_ERRNO_H
+ 
++/* Define to 1 if you have the `open_memstream' function. */
++#undef HAVE_OPEN_MEMSTREAM
++
+ /* Define to 1 if you have the <param.h> header file. */
+ #undef HAVE_PARAM_H
+ 
+--- a/src/configure
++++ b/src/configure
+@@ -4877,6 +4877,12 @@
+   printf "%s\n" "#define HAVE_FORKPTY 1" >>confdefs.h
+ 
+ fi
++ac_fn_c_check_func "$LINENO" "open_memstream" "ac_cv_func_open_memstream"
++if test "x$ac_cv_func_open_memstream" = xyes
++then :
++  printf "%s\n" "#define HAVE_OPEN_MEMSTREAM 1" >>confdefs.h
++
++fi
+ ac_fn_c_check_func "$LINENO" "popen" "ac_cv_func_popen"
+ if test "x$ac_cv_func_popen" = xyes
+ then :
+--- a/src/class.c
++++ b/src/class.c
+@@ -484,11 +484,37 @@
+ 	return ses;
+ }
+ 
++static void write_class_contents(struct session *ses, struct listnode *node, char *arg1, FILE *file)
++{
++	int list, index;
++
++	fprintf(file, "%cCLASS {%s} OPEN\n\n", gtd->tintin_char, arg1);
++
++	for (list = 0 ; list < LIST_MAX ; list++)
++	{
++		if (!HAS_BIT(ses->list[list]->flags, LIST_FLAG_CLASS))
++		{
++			continue;
++		}
++
++		for (index = 0 ; index < ses->list[list]->used ; index++)
++		{
++			if (!strcmp(ses->list[list]->list[index]->group, arg1))
++			{
++				write_node(ses, list, ses->list[list]->list[index], file);
++			}
++		}
++	}
++
++	fprintf(file, "\n%cCLASS {%s} CLOSE\n", gtd->tintin_char, arg1);
++}
++
++
+ DO_CLASS(class_save)
+ {
+ 	FILE *file;
+ 	size_t len;
+-	int list, index;
++	int fd, use_tempfile;
+ 
+ 	if (node == NULL)
+ 	{
+@@ -497,36 +523,82 @@
+ 		return ses;
+ 	}
+ 
+-	file = open_memstream(&node->data, (size_t *) &len);
++	file = NULL;
++	use_tempfile = 1;
+ 
+-	fprintf(file, "%cCLASS {%s} OPEN\n\n", gtd->tintin_char, arg1);
++#if defined(HAVE_OPEN_MEMSTREAM)
++	file = open_memstream(&node->data, (size_t *) &len);
+ 
+-	for (list = 0 ; list < LIST_MAX ; list++)
++	if (file)
+ 	{
+-		if (!HAS_BIT(ses->list[list]->flags, LIST_FLAG_CLASS))
++		write_class_contents(ses, node, arg1, file);
++		fclose(file);
++
++		/*
++		 * 运行时校验写入结果：部分 libc（如 HarmonyOS）提供符号但实现
++		 * 损坏——写入被丢弃、缓冲区从不分配。长度与首字节校验失败时
++		 * 丢弃无效指针（不可 free）并走临时文件后备路径。
++		 */
++		if (len && node->data && node->data[0] == gtd->tintin_char)
+ 		{
+-			continue;
++			use_tempfile = 0;
++		}
++		else
++		{
++			node->data = NULL;
++			file = NULL;
+ 		}
++	}
++#endif
+ 
+-		for (index = 0 ; index < ses->list[list]->used ; index++)
++	if (use_tempfile)
++	{
++		char *tmp = getenv("TMPDIR");
++		char path[BUFFER_SIZE];
++
++		snprintf(path, sizeof(path), "%s/tt-save-XXXXXX", tmp && *tmp ? tmp : ".");
++
++		if ((fd = mkstemp(path)) == -1 || (file = fdopen(fd, "w+")) == NULL)
+ 		{
+-			if (!strcmp(ses->list[list]->list[index]->group, arg1))
++			if (fd != -1)
+ 			{
+-				write_node(ses, list, ses->list[list]->list[index], file);
++				close(fd);
+ 			}
++			show_error(ses, LIST_CLASS, "#ERROR: #CLASS {%s} SAVE FAILED.", arg1);
++			return ses;
+ 		}
+-	}
+ 
+-	fprintf(file, "\n%cCLASS {%s} CLOSE\n", gtd->tintin_char, arg1);
++		unlink(path);
++
++		write_class_contents(ses, node, arg1, file);
+ 
+-	fclose(file);
++		fflush(file);
++		fseek(file, 0, SEEK_END);
++		len = ftell(file);
++		rewind(file);
++
++		free(node->data);
++		node->data = malloc(len + 1);
++
++		if (node->data == NULL || fread(node->data, 1, len, file) != len)
++		{
++			fclose(file);
++			show_error(ses, LIST_CLASS, "#ERROR: #CLASS {%s} SAVE FAILED.", arg1);
++			return ses;
++		}
++
++		node->data[len] = 0;
++
++		fclose(file);
++	}
+ 
+ 	str_cpy_printf(&node->arg4, "%d", len);
+ 
+ 	show_message(ses, LIST_CLASS, "#CLASS {%s} HAS BEEN SAVED TO MEMORY.", arg1);
+ 
+ 	return ses;
+-}	
++}
++
+ 
+ DO_CLASS(class_size)
+ {

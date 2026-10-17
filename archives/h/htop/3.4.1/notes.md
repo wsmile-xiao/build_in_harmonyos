@@ -50,3 +50,7 @@
 - ncursesw 已静态嵌入，无需运行时 ncurses 库
 - htop 没有官方测试套件
 - patch-autotools-ohos.pl 漏加 kernel-os 白名单 linux-ohos*，需手动补充
+---
+
+**编译结束**: 2026-08-10 02:01
+**最终状态**: built

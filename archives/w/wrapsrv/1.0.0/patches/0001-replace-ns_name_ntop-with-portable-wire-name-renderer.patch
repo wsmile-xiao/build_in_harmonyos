@@ -1,0 +1,90 @@
+--- a/wrapsrv.c
++++ b/wrapsrv.c
+@@ -78,6 +78,76 @@
+ 
+ /* Functions. */
+ 
++/*
++ * Render a wire-format DNS name in presentation format.
++ *
++ * Upstream called BIND's ns_name_ntop(), which the OHOS libc (musl based)
++ * does not provide -- it ships ns_name_uncompress() and dn_expand() instead
++ * -- so the reference failed to link with "undefined symbol: ns_name_ntop".
++ * Deriving the result from the wire format itself keeps the code portable to
++ * any RFC 1035 implementation and preserves upstream behaviour exactly.
++ */
++static int
++wire_name_ntop(const unsigned char *name, char *buf, size_t buflen) {
++	const unsigned char *p;
++	size_t len = 0;
++	int jumps = 0;
++
++	if (buflen < 2)
++		return (-1);
++
++	for (p = name;;) {
++		unsigned int label = *p;
++		size_t i;
++
++		if ((label & 0xc0) == 0xc0) {
++			size_t offset;
++
++			/* A compression pointer always refers to an earlier
++			 * occurrence of the name, which is also what makes
++			 * the loop below terminate. */
++			offset = (size_t)((label & 0x3fU) << 8 | p[1]);
++			if (jumps++ >= NS_MAXDNAME ||
++			    offset >= (size_t)(p - name))
++				return (-1);
++			p = name + offset;
++			continue;
++		}
++
++		if (label & 0xc0)	/* reserved label type */
++			return (-1);
++
++		if (label == 0)
++			break;
++
++		if (label > NS_MAXLABEL || len + 2 * label + 2 > buflen)
++			return (-1);
++
++		/* Same escaping as BIND's ns_name_ntop(): a label-embedded
++		 * '.' or '\' must be backslash-escaped, or the presentation
++		 * form would not round-trip. */
++		for (i = 0; i < label; i++) {
++			unsigned int ch = p[1 + i];
++
++			if (ch == '.' || ch == '\\')
++				buf[len++] = '\\';
++			buf[len++] = (char)ch;
++		}
++
++		buf[len++] = '.';
++		p += label + 1;
++	}
++
++	if (len == 0)		/* the root name */
++		buf[len++] = '.';
++	else
++		len--;		/* drop the trailing separator */
++
++	buf[len] = '\0';
++
++	return ((int)len);
++}
++
+ static struct srv *
+ next_tuple(void) {
+ 	struct srv_prio *pe;
+@@ -225,8 +295,8 @@
+ target_name(const unsigned char *target) {
+ 	char buf[NS_MAXDNAME];
+ 
+-	if (ns_name_ntop(target, buf, sizeof buf) == -1) {
+-		perror("ns_name_ntop");
++	if (wire_name_ntop(target, buf, sizeof buf) == -1) {
++		perror("wire_name_ntop");
+ 		exit(EXIT_FAILURE);
+ 	}
+ 	return (strdup(buf));

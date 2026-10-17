@@ -1,0 +1,123 @@
+id: DRAFT-htscodecs-1.6.5-ohos-autotools-conanfile-selfcontained-patch
+title: clean conan create 中 OHOS autotools 适配补丁自包含进 conanfile.py，且 aclocal 缺失用 tool_requires(automake/libtool) 自举（config.guess + config.sub kernel-OS + configure umask + bootstrap 四合一）
+trigger_tool: conan|conan create|autoreconf|aclocal|automake|configure|config.status|config.guess|config.sub|libtool
+phase: configuration|compilation|packaging|bootstrap
+severity: 2
+category: ohos, autotools, conan, portability
+match_keywords: conan create, clean tree, patch-autotools-ohos.pl, SKILL_ROOT, config.guess,
+  config.sub, kernel-OS, linux-ohos, autoreconf, generated configure, umask, mktemp,
+  drwx--S---, BadZipFile, filename, self-contained, build(), source_folder, HarmonyOS,
+  aclocal, automake, libtool, tool_requires, Can't exec aclocal, LT_INIT, LIBTOOL undefined
+
+error_signature: |
+  Can't exec "aclocal": No such file or directory at .../Autom4te/FileUtils.pm line 299
+  autoreconf: error: aclocal failed with exit status: 2
+  htscodecs/Makefile.am: error: Libtool library used but 'LIBTOOL' is undefined
+  Invalid configuration 'aarch64-unknown-linux-ohos': Kernel 'linux' not known to work with OS 'ohos'
+  ./config.status: line N: ./confXXXXXX/subs1.awk: Permission denied
+  config.status: error: could not setup config files machinery
+  BadZipFile: File is not a zip file
+  configure: error: cannot guess build type; you must specify one
+
+root_cause: |
+  ① conan create 在干净缓存树执行 build()，SKILL_ROOT 与框架脚本
+     (patch-autotools-ohos.pl) 不可用，OHOS autotools 平台补丁必须内联进 recipe；
+  ② git-archive 类 tag tarball（codeload refs/tags/...）无生成版 configure，
+     build() 需先 autoreconf -i -f 引导，而 autoreconf 重新生成的 config.guess/
+     config.sub 仍是 GNU 原版（无 OHOS 分支/kernel-OS 校验），configure 无法
+     识别 uname -s = HarmonyOS（E007/E268）；
+  ③ autoreconf 生成的 configure 内含 `umask 077 && mktemp -d ./confXXXXXX`，
+     HMDFS setgid 下产出 drwx--S--- 目录，config.status 写入 subs1.awk 报
+     Permission denied（E114）；
+  ④ E268 判重陷阱：config.sub 的 basic_os=linux-ohos 已含 "linux-ohos" 子串，
+     若按裸字符串判断"已打补丁"会跳过 kernel-OS 校验列表修改；
+  ⑤ codeload URL 末段无 .tar.gz 后缀时 conan get() 报 BadZipFile（E276/E483）；
+  ⑥ 【R02 实测】CI 干净环境预装 autoconf 但**不预装 automake/aclocal**，
+     `autoreconf -i -f` 报 Can't exec "aclocal"（exit 2）；且 configure.ac 用
+     LT_INIT，缺少 libtool.m4 时 automake 报 `LIBTOOL is undefined`——必须
+     tool_requires automake/libtool 自举；
+  ⑦ 【R02 实测陷阱】不能顺手把 autoconf 也 tool_requires：conan 的 autoconf 包
+     依赖 conan perl，其 XS 模块（Cwd.so）会污染 buildenv 的 PERL5LIB/加载路径，
+     使**系统** autoreconf 报 `Can't load Cwd.so: Perl_my_cxt_init: symbol not
+     found`（同 DRAFT-6049 perl 双架构族；htscodecs 实测 exit 255）。CI 已有
+     autoconf，只补缺失的 automake/libtool 即可。
+
+affected_scope: |
+  所有 autotools + OHOS 的 conan 配方（尤其 source 用 codeload/git-archive tag
+  tarball 且无生成 configure 的库）；本地手动编译时 SKILL_ROOT 可用、干净
+  conan create 时不可用，两者行为不一致是主要误判来源；CI 不预装 automake 的
+  场景（PATH 仅 autoconf 家族）必须 tool_requires 自举。
+
+verification_cmd: |
+  python3 scripts/ohc-run.py conan-verify <name> <ver> 2>&1 | grep -E "G2: PASS|Invalid configuration|subs1.awk|BadZipFile|Can't exec aclocal|LIBTOOL is undefined"
+  # G2 PASS 即四合一方案生效（bootstrap + 三补丁）
+
+rec_priority: 1
+rec_approach: selfcontained-recipe-ohos-autotools-patch
+rec_description: |
+  在 conanfile.py 中自包含完成以下五步（顺序固定）：
+  0) build_requirements() 声明 self.tool_requires("automake/1.18") +
+     self.tool_requires("libtool/2.5.4.1")（制品仓已发布，CI 可拉取）——
+     干净环境缺 aclocal/libtoolize 时由 Conan 提供并注入 PATH/ACLOCAL_PATH；
+     禁止同时 tool_requires autoconf（其 conan perl XS 模块破坏系统 autoreconf）；
+  1) 若源码树无 configure（git-archive tarball）：autoreconf -i -f 生成；
+  2) 内联修补生成的 config.guess（__OHOS__ LIBC 检测 + HarmonyOS 系统识别分支，
+     =E007 patch-autotools-ohos.pl 的 config.guess 部分）；
+  3) 内联修补生成的 config.sub：ohos-linux triplet、OS 列表追加 ohos*、
+     kernel-OS 校验列表 `case $kernel-$os-$obj` 行追加 `| linux-ohos*-)`
+     —— 判重必须用精确模式 `linux-ohos\*-\s*\)`，禁止裸子串 "linux-ohos"
+     （basic_os=linux-ohos 会导致误判跳过，E268 陷阱）；
+  4) 内联移除生成的 configure 中 `umask 077 && mktemp -d` 的 umask（E114），
+     使 config.status 临时目录可写。
+  codeload URL 无扩展名时 conandata.yml 追加 filename: <name>-<ver>.tar.gz
+  （E276/E483）。
+rec_command: |
+  # conanfile.py 关键片段
+  def build_requirements(self):
+      self.tool_requires("automake/1.18")
+      self.tool_requires("libtool/2.5.4.1")
+  def build(self):
+      apply_conandata_patches(self)
+      import os
+      if not os.path.exists("configure"):
+          self.run("autoreconf -i -f", cwd=self.source_folder)  # aclocal 来自 tool_requires
+      self._apply_ohos_autotools_patch()   # config.guess + config.sub + configure umask 内联
+      autotools = Autotools(self); autotools.configure(); autotools.make(args=["-j1"])
+  # config.guess: 加 __OHOS__ LIBC + HarmonyOS case（= E007）
+  # config.sub:   kernel-OS 校验行 `linux-mlibc*- )` -> `linux-mlibc*- | linux-ohos*- )`
+  # configure:    `(umask 077 && mktemp -d "./confXXXXXX")` -> `mktemp -d "./confXXXXXX"`
+rec_auto_fix: false
+rec_impl: recipe-build-inline-patch
+
+fallback_priority: 2
+fallback_approach: patch-autotools-script
+fallback_description: |
+  仅在本地手动构建（SKILL_ROOT 可用）时可运行
+  perl ${SKILL_ROOT}/scripts/patch-autotools-ohos.pl；conan create/CI 干净树
+  不可用，必须走推荐方案。
+fallback_auto_fix: false
+fallback_impl:
+
+forbid_1_pattern: "--build=.*--host=|--build=aarch64|--host=aarch64"
+forbid_1_reason: autotools-patterns.md #0：禁止用 --build/--host 绕过 OHOS 平台识别，会误判交叉编译导致 AC_RUN_IFELSE 全部跳过
+forbid_1_consequence: 生成错误 config.h，测试静默跳过，CI 红且难排查
+
+verify_builds: htscodecs/1.6.5 干净 conan create 三连复验：
+  ① 裸配方 G2 FAIL（cannot guess build type）；② 仅 autoreconf+config.guess
+  G2 FAIL（config.sub kernel-OS 拒绝）；③ 三合一补丁 G2 PASS；
+  日志 archives/h/htscodecs/1.6.5/reports/conan-create.log 与
+  conan-verify-report.md（2026-09-21）。
+  【R02 复验】CI 等价干净缓存（PATH 无 aclocal）四连：① 原配方 autoreconf
+  报 Can't exec "aclocal"（exit 2，首错复现）；② +autoconf tool_requires 报
+  Cwd.so Perl_my_cxt_init symbol not found（exit 255）；③ +automake tool_requires
+  报 LIBTOOL undefined（缺 libtool.m4）；④ +automake+libtool tool_requires
+  conan create EXIT=0 + make check 7/7 PASS + test_package 1/1 PASS +
+  conan-verify G1-G4 PASS（2026-09-22，pc1-30）。
+authors: pc1-30
+source_pr: pending
+similar_to: E007, E122, E268, E114, E175, E276, E483, E490,
+  DRAFT-libuninameslist-conan-autotools-bootstrap-toolrequires,
+  DRAFT-6049-libnxml-0.18.5-autotools-perl-dual-arch
+caused_by: conan create clean tree (no SKILL_ROOT) / CI 不预装 automake
+prerequisite_of: none
+conflicts_with: none

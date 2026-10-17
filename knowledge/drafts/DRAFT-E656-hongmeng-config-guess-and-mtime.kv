@@ -1,0 +1,135 @@
+#====================================================================
+# DRAFT-E656-hongmeng-config-guess-and-mtime
+#   GitHub tag 归档 autotools 包在 OHOS 上的两个 bootstrap 陷阱：
+#   ① config.guess 无法识别 HongMeng 内核（cannot guess build type）；
+#   ② 物化构建树丢 mtime 触发 automake maintainer-mode 重生成
+#      （aclocal-X.Y: command not found，设备与 CI worker 均无 automake）
+# 来源: feat/re-flex-6.3.0（re-flex 6.3.0 适配 HarmonyOS PC）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+# 注：本文件必须通过 yaml.safe_load 回读自检——正则/多值字段一律使用
+#     单引号标量或块标量，避免 YAML 特殊字符歧义。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-E656-hongmeng-config-guess-and-mtime
+trigger_tool:           'configure|make|automake|config\.guess'
+phase:                  configuration
+error_signature:        'cannot guess build type; you must specify one|aclocal-[0-9.]+:\s*command not found|''aclocal-[0-9.]+'' is missing on your system|missing:\s*line.*aclocal|You should only need it if you modified'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               build-system, autotools, config-guess, mtime, ohos
+match_keywords:         'cannot guess build type, config.guess, HongMeng, HarmonyOS, UNAME_SYSTEM, build type, triplet, aclocal, automake, maintainer-mode, mtime, 时间戳, cp -r, copytree, 重生成, rebuild rules, missing, autoreconf, --build, --host, bootstrap'
+title:                  'OHOS 上 config.guess 报 cannot guess build type；构建树物化丢 mtime 触发 automake 重生成报 aclocal 缺失'
+prescan_pattern:        '\bcp\s+-r\b'
+prescan_globs:          '**/conanfile.py, conanfile.py, **/*.sh'
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >-
+  两个相互独立的 bootstrap 期陷阱，GitHub tag 归档（codeload）autotools 包在
+  OHOS 上高频同现。 ① 上游 config.guess 逐项比对 UNAME_* 探测值，鸿蒙内核返回
+  UNAME_SYSTEM="HarmonyOS"、UNAME_RELEASE="HongMeng Kernel …"，不在其已知列表，
+  configure 在推导 build 三元组时直接报 cannot guess build type（you must
+  specify one）；即使显式传了 --host，configure 默认仍要对 build 侧跑
+  config.guess，所以只传 --host 不传 --build 一样死。 ② 归档内全部文件 mtime
+  相同（=commit 时刻），make 的 automake 版本化重生成规则（aclocal.m4 ←
+  configure.ac/acinclude.m4）因 mtime 相等而休眠，本不需要 automake；但若物化
+  构建树时用丢 mtime 的复制（cp -r、逐文件 shutil.copy 循环），副本按复制先后
+  获得不同 mtime，configure.ac 这类 prerequisites 会晚于 aclocal.m4，规则唤醒，
+  调用版本化的 aclocal-1.18——设备与 CI worker 的 PATH 都没有 automake，构建在
+  真正编译开始前就死。同因异形态：configure 报 newly created file is older
+  than configure 一类时间戳比较失败也是它。
+affected_scope: >-
+  所有「configure/Makefile.in 预生成、源码树含 config.guess」的 autotools 包在
+  鸿蒙设备/CI worker 上适配时。陷阱①在 configure 阶段命中（第一手报错就是
+  cannot guess build type）；陷阱②在 make 阶段命中（形态像「上游脚本损坏」或
+  「缺 automake」，极易被误判为需要 autoreconf 而走上错路——真因是 mtime，不是
+  工具缺失）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           explicit-triplet-plus-mtime-preserving-materialize
+rec_description: >-
+  ① configure 显式传 --build 与 --host 同值三元组（OHOS 原生构建 build==host）：
+  <arch>-linux-ohos，aarch64 对应 aarch64-linux-ohos（conan OHOS 适配版
+  get_gnu_triplet 的映射口径）。config.sub 已认识 linux-ohos*，无需改上游。
+  ② 物化构建树必须保 mtime：tar 解包（归档 mtime 天然保序）或
+  shutil.copytree（内部 copy2 保留 mtime）。若必须触发重生成，才考虑
+  build_requirements 补 automake tool_requires——那是对症的错误处方，先查
+  mtime。判别三行：① configure 首错含 cannot guess build type；② grep -c
+  ohos <src>/config.sub 确认上游认识 linux-ohos 三元组；③ make 报 aclocal
+  缺失时比对 <build-tree> 内 aclocal.m4 与 configure.ac 的 mtime，确认是否被
+  物化丢序。
+rec_command:            './configure --build=aarch64-linux-ohos --host=aarch64-linux-ohos …（配 tar/copytree 物化）'
+rec_auto_fix:           false
+rec_impl:               configure-args-plus-copytree
+
+fallback_priority:      2
+fallback_approach:      touch-normalize-generated-files
+fallback_description: >-
+  已丢 mtime 的既成树上，按依赖序 touch：configure.ac → aclocal.m4 →
+  configure → Makefile.am → Makefile.in → config.h.in，把生成物 touch 得不早于
+  源头，使 maintainer-mode 规则继续休眠。能救急但序易错，仅用于无法重新物化的
+  场合。
+fallback_command:       touch configure.ac aclocal.m4 configure Makefile.am Makefile.in config.h.in
+fallback_auto_fix:      false
+fallback_impl:          touch-normalize
+
+fallback_priority:      3
+fallback_approach:      automake-tool-requires
+fallback_description: >-
+  配方 build_requirements() 显式 tool_requires automake（仓库已有同写法），让
+  重生成真正可跑。仅当任务确需修改 configure.ac/Makefile.am（重生成不可避免）
+  时使用；为「修 mtime」而引入是错配。
+fallback_command:       'def build_requirements(self): self.tool_requires("automake/1.18")'
+fallback_auto_fix:      false
+fallback_impl:          conan-tool-requires
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       'autoreconf -i|automake --add-missing'
+forbid_1_reason: >-
+  aclocal/automake 缺失的报错诱导「补 autoreconf」——但设备/CI worker 无
+  automake，且真因是 mtime 丢序；重生成还会引入与上游归档 bootstrap 不同版本的
+  产物，破坏「按该 SHA 核对」的构建输入一致性。
+forbid_1_consequence:   CI 稳定失败于 aclocal / 换环境即复现（假绿来源）
+forbid_2_pattern:       '只传 --host 不传 --build|--host=[^\s]*(?!.*--build)'
+forbid_2_reason: >-
+  config.guess 失败发生在 build 侧推导，只补 --host 不解决 cannot guess build
+  type。
+forbid_2_consequence:   配方换 --host 值后 configure 原样再死一轮
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+# ⚠️ 与 E011 分工：E011 = HMDFS 无法承载 autotools 生成器临时目录/执行位语义
+#   （config.status 的 confXXXX/subs1.awk Permission denied），本条只收
+#   config.guess 三元组 + mtime 重生成两个面；三者同现于 GitHub 归档 autotools
+#   包的 OHOS 适配，缺一不可（E011 决定「在哪构建」，本条决定「怎么传参、
+#   怎么物化」）。
+similar_to:             E011（HMDFS 临时目录语义，configure 阶段同族但报错面不同）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd: |-
+  cd "$TASK_DIR" && rm -rf e656-probe && mkdir -p e656-probe/src && cp -r <src>/configure e656-probe/src/ && python3 -c "import os; p1='<src>/configure'; p2='e656-probe/src/configure'; print('mtime src =', os.stat(p1).st_mtime); print('mtime copy=', os.stat(p2).st_mtime)"
+  # 期望：cp -r 后 copy 的 mtime 晚于 src（丢序）⇒ 该树直接 make 会触发
+  # aclocal 重生成；改用 tar/copytree 物化则两值相等，规则休眠。
+doc_file:               knowledge/drafts/DRAFT-E656-hongmeng-config-guess-and-mtime.md
+last_updated:           2026-09-22
+source_event: >-
+  re-flex 6.3.0 适配（feat/re-flex-6.3.0）：configure 报 cannot guess build
+  type（UNAME_SYSTEM=HarmonyOS）；cp -r 物化后 make 报 aclocal-1.18 command
+  not found，改 tar/copytree 物化后预生成 bootstrap 全程无需 automake，构建与
+  上游测试全绿。
+authors:                re-flex-6.3.0 执行体
+source_pr:              feat/re-flex-6.3.0（PR 编号见任务最终汇报）
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-22

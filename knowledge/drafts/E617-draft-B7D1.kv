@@ -1,0 +1,65 @@
+#====================================================================
+# E617 — 依赖只有动态 binary 时：静态库消费者/CLI 产物加 -Wl,-rpath 才能直接执行
+#====================================================================
+
+# Layer 0: Error Surface
+id:                     E617
+trigger_tool:           runtime / CI L2 smoke
+phase:                  runtime
+error_signature: |
+  error while loading shared libraries: liblcms2\.so\.2
+  cannot open shared object file
+  -version.*failed.*non-blocking
+
+# Layer 1: Recognition
+severity:               2
+category:               conan, shared-library, rpath, ohos, autotools
+prescan_pattern:        requires\(\s*["']lcms2/|PKG_CHECK_MODULES\(\[LCMS2\]|Missing prebuilt package.*lcms2
+root_cause:             |
+  某些依赖包在制品仓**只发布了动态 binary**（配方 default_options 里 shared=True，
+  例如 archives/l/lcms2/2.19）。此时：
+  (1) 静态库本体（如 libfreehand-0.1.a 里的 FHParser.o）会引用该动态库符号；
+  (2) 任何链接该静态库的最终产物（转换工具 CLI、test_package 里的消费者二进制）都会
+      带 DT_NEEDED=<lib>.so.N；
+  (3) OHOS 系统目录里往往只有**soname 不同**的自研构建（实测 /system/lib64 只有
+      liblcms_shared.z.so，没有 liblcms2.so.2），所以进程启动即报
+      "error while loading shared libraries"；
+  (4) 症状出现在**运行期**（CI L2 的 `<bin> --version` 冒烟、test_package 的
+      self.run），容易被误读成"产物坏了/链接错了"。
+  不能靠 `-o <dep>/*:shared=False` 绕开：实测 `conan install --requires=lcms2/2.19
+  -o lcms2/*:shared=False --build=never` → "Missing prebuilt package"（制品仓没编静态）。
+
+# Layer 2: Fix Strategy
+rec_approach:           inject-rpath-into-ldflags
+fix_description:        |
+  (a) 主配方 generate()：tc.extra_ldflags.append("-Wl,-rpath,<dep libdir>")。
+      必须用 `-Wl,-rpath,<dir>` 形式——裸 `-rpath <dir>` 会被 libtool 当作它自己的
+      安装路径选项吃掉。
+  (b) test_package 的 generate() 里同样注入（消费者二进制是自己编的，不继承主配方的
+      LDFLAGS），否则 self.run("./<test>") 会在运行期找不到 .so。
+  (c) 在 notes/PR 如实写明这是运行时依赖：换机器运行时由 conan runtime env
+      （conanrun.sh 的 LD_LIBRARY_PATH）提供，包内 RUNPATH 只是让构建机与 CI worker 上
+      可直接执行。
+  (d) 自证：readelf -d <pkg>/bin/<tool> → 同时看到
+      `RUNPATH [<dep libdir>]` 与 `NEEDED [<lib>.so.N]`。
+
+fix_code:               |
+  # conanfile.py (主配方)
+  def generate(self):
+      tc = AutotoolsToolchain(self)
+      ...
+      lcms_libdir = self.dependencies.host["lcms2"].cpp_info.libdirs[0]
+      tc.extra_ldflags.append("-Wl,-rpath,%s" % lcms_libdir)
+      tc.generate()
+
+  # test_package/conanfile.py 同样一段（依赖取 self.dependencies["lcms2"]）
+  # 链接行仍需显式 -L<libdir> -llcms2（静态闭包不会自动带上）
+
+fix_reference:          archives/l/libfreehand-tools/0.1.2/conanfile.py + test_package/conanfile.py
+
+# Layer 3: Validation
+validation:             |
+  - `conan install --requires=lcms2/2.19 -o lcms2/*:shared=False --build=never` rc=1（只有动态）
+  - `readelf -d <pkg>/bin/fh2raw` → RUNPATH=[…/lcms2…/p/lib] + NEEDED=[liblcms2.so.2]
+  - 包内 bin/ 直接执行 `fh2raw --version` → rc=0（无需手工 LD_LIBRARY_PATH）
+  - test_package 消费者二进制 self.run 通过（6/6 断言）

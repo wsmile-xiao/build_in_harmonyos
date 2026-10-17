@@ -1,0 +1,63 @@
+# ═══ Draft knowledge entry — gperftools 1.6 OHOS emutls 惰性 TLS 递归崩溃 ═══
+# Timestamp: 2026-09-10
+# Software: gperftools 1.6 (perftools-1.6)
+# Gate: PR 【知识库扩展】feat(gperftools) — 真机多轮 conan-verify/finish 迭代
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-gperftools-emutls-tls
+trigger_tool:           conan|configure|make|clang
+phase:                  runtime|link|build
+error_signature:        __emutls_get_address|emutls|emulated.?tls|
+                         threadlocal_heap_|GetCache RECURSION|
+                         Signal 5|Signal 11.*static init|Stack overflow.*tcmalloc
+
+severity:               2
+category:               tls|toolchain|platform|allocator|emutls|linker
+match_keywords:         emutls, __emutls_get_address, -fno-emulated-tls, tcmalloc,
+                         malloc replacement, thread-local storage, lazy TLS allocation,
+                         recursion, stack overflow, __thread, static init crash,
+                         OHOS clang, THREAD LOCAL, ThreadCache GetCache loop,
+                         SpinLock init, conan create 干净构建, AutotoolsToolchain extra_cxxflags
+
+title:                  gperftools 1.6 适配：OHOS clang 将 __thread 编译为 emulated TLS，TLS 块首次访问经 __emutls_get_address 惰性调用 malloc()，在 tcmalloc 这类 malloc 替换分配器内递归直至栈溢出；配方侧以 -fno-emulated-tls 强制真 TLS 修复
+
+## 根因
+OHOS 工具链（clang 15，target aarch64-unknown-linux-ohos）默认将 `__thread`
+变量编译为 emulated TLS：编译器生成对 `__emutls_get_address` 的调用，该运行
+时函数在**首次访问**时通过 malloc() 惰性分配 TLS 块。对 tcmalloc 这类"替换
+malloc"的库，静态初始化期（TCMallocGuard 构造 → tc_malloc → ThreadCache::
+GetCache → 读 threadlocal_heap_）读取 TLS 变量会触发 __emutls_get_address →
+malloc → tcmalloc 再次进入 GetCache → 再次读 TLS → 无限递归，进程以
+Signal 11（栈溢出）在 main 之前崩溃。手工构建同样复现；静态/动态链接均受影响。
+
+## 推荐方案
+编译全链路（库本体 + 依赖 + 消费者）加 `-fno-emulated-tls`，强制编译器生成
+真 TLS（TLSDESC/TPREL，由 loader 加载时分配，无惰性 malloc 递归）。
+Conan 配方中用 AutotoolsToolchain 的 `extra_cxxflags`/`extra_cflags` 注入
+（写入 toolchain 脚本 CXXFLAGS 行，比 cxxflags env 更可靠）。验证：干净
+conan create 全绿；`nm -u` 不再出现 __emutls_get_address。
+
+## 验证/命令
+```
+# 触发：TCMallocGuard 静态构造期递归崩溃
+grep -c emutls conanautotoolstoolchain.sh   # 修复前 0
+# 修复后 toolchain 脚本含 -fno-emulated-tls
+# conan-verify G0-G4/L2/L4/L5 全 PASS；make check 静态构建 20/36 PASS
+```
+
+## 适用边界
+- 适用于任何替换 malloc/new 的分配器库（tcmalloc、jemalloc 等）在
+  OHOS/musl 上编译。
+- 仅当工具链默认 emutls 时必要；glibc x86_64 等真 TLS 平台无需。
+- 纯库构建（不替换 malloc）通常不触发，但首次访问惰性分配仍应避免。
+
+## 查重差异
+- E293 仅覆盖 C++17 动态异常规范/register（本库另补丁），与 TLS 无关。
+- E011/E052/E060 覆盖 config.status mktemp/HMDFS 临时目录，与本条目不同。
+- 知识图谱中无 emutls/-fno-emulated-tls 递归崩溃条目，本次为新增。

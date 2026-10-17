@@ -14,7 +14,7 @@ aha是一个将ANSI终端颜色代码转换为HTML的工具。它可以将包含
 
 | 版本 | 状态 | 编译日期 | 补丁数 |
 |------|------|----------|--------|
-| 0.5.1 | published ✅ | 2026-05-20 | 2 |
+| 0.5.1 | built ✅ | 2026-07-15 | 1 |
 
 ## 使用方法
 
@@ -45,10 +45,8 @@ echo -e '\033[32m绿色\033[0m' | aha --title "我的日志" --stylesheet > outp
 ### 鸿蒙系统适配
 
 **编译补丁**:
-1. `0001-Makefile.patch`: 替换install命令为mkdir/cp/chchmod组合
-   - 原因: 鸙蒙系统缺少GNU install命令
-2. `0002-configure.patch`: 添加空configure脚本
-   - 原因: 手动Makefile项目无configure脚本
+1. `0001-Makefile.patch`: 替换install命令为mkdir/cp/chmod组合
+   - 原因: 鸿蒙系统缺少GNU install命令
 
 **编译依赖**: 无
 

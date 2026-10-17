@@ -1,0 +1,94 @@
+# ═══ Draft knowledge entry — application 类型包的下游传播会静默丢弃传递依赖的环境 ═══
+# Timestamp: 2026-09-29
+# Software: pytest 9.1.1（任何 package_type="application" 且带 Python 运行时依赖、被 requires/tool_requires 消费的包）
+# Gate: conan create 的 test_package / 任何消费者侧 import
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-pytest-9.1.1-application-dep-skip
+title:                  Conan application 类型包的下游传播把 headers/libs 置 False：传递依赖被列入 Skipped binaries，其 runenv_info 不进消费者环境，消费者 import 即缺模块
+trigger_tool:           conan|python|pytest
+phase:                  packaging
+error_signature:        ModuleNotFoundError: No module named 'pluggy'|
+                        ModuleNotFoundError: No module named 'packaging'|
+                        Error in test() method|
+                        Skipped binaries|
+                        WARN: deprecated.*env_info
+
+severity:               3
+category:               conan|python|packaging|environment
+match_keywords:         package_type application, Skipped binaries, runenv_info,
+                        buildenv_info, env_info deprecated, Conan 1.x env_info Conan 2 ignores,
+                        transitive requires, run=True, no_skip, headers False libs False,
+                        tool_requires python, site-packages PYTHONPATH chain, test_package import fails
+keywords:               PackageType.APP, process_package_type, set_if_none("_run", True),
+                        Requirement.files, graph_binaries._skip_binaries, BINARY_SKIP,
+                        propagation, dependency site-packages, published N dependency site-packages
+
+approach:               ①包自身声明 Python 运行时依赖时，每一项都必须显式写 `run=True`。包为
+                        `application` 类型时，Conan 的传播规则（`process_package_type`）会把
+                        下游 require 的 `headers`/`libs` 一律置 False、只保留 `run`；未标 run 的
+                        依赖在消费者图里被判 `BINARY_SKIP`（输出 "Skipped binaries"），其
+                        `runenv_info` 自然不会被聚合，消费者侧 `import` 报缺模块——而依赖的包目录
+                        确实在磁盘上，极易误判为"依赖没装好"。
+                        ②不能只依赖各依赖包自己导出环境：本仓 `packaging/26.3` 用 Conan 1.x 的
+                        `env_info` 对象（Conan 2 已移除该属性，仅在日志留
+                        `WARN: deprecated: 'env_info' used in: packaging/26.3`），该包在消费者
+                        PYTHONPATH 中完全不出现。由于"消费者需要什么"是被测包自己的契约，应由
+                        本包 `package_info()` 探测并**代为发布**每个依赖的 site-packages
+                        （布局不一致：pygments 在 lib/python/site-packages，其余在
+                        lib/python3.12/site-packages，须探测而非硬编码）。
+                        ③`no_skip=True` 不能替代 `run=True`：实测它只解除 skip，仍不传播环境。
+
+root_cause:             Conan 2 的依赖传播与"是否需要该依赖的文件"由 traits 决定。
+                        `conan/internal/model/requires.py::process_package_type()` 对
+                        `PackageType.APP` 执行 `set_if_none("_headers", False)`、
+                        `set_if_none("_libs", False)`、`set_if_none("_run", True)`；
+                        `Requirement.files` 是 `headers or libs or run or build`，
+                        因此既非 headers/libs 又未显式 run 的依赖 `files` 为假，
+                        `graph_binaries._skip_binaries()` 只在 `req.files or (req.direct and
+                        is_consumer)` 时把节点列入 required → 该节点被判 BINARY_SKIP →
+                        其 `runenv_info`/`buildenv_info` 不参与聚合。
+                        本机实测（假 application 工具 + 四个真实依赖 + 消费者读自己的 conanrun）：
+                        普通 requires → 消费者 PYTHONPATH 中 pluggy/iniconfig 命中 0/0；
+                        `run=True` → 1/1。`tool_requires` 构建上下文同理
+                        （conanbuildenv 同样只在 run=True 时才有这些条目）。
+
+verification_cmd:       对照组（复现缺失）：
+                        `conan install <consumer> -pr <profile>` 后
+                        `grep -o 'PYTHONPATH="[^"]*"' conanrunenv*.sh | tr ':' '\n' | grep -c <依赖缓存目录名>`
+                        期望 0，且 install 输出出现 "Skipped binaries" 列出该依赖。
+                        修复组（run=True）：同一命令期望 ≥1。
+                        端到端：`conan create <pkg>` rc=0，日志含
+                        "published N dependency site-packages path(s)"（N=依赖数）。
+
+repro_command:          conan install <consumer requiring application-type pkg> -pr <profile> \
+                        && grep -A3 "Skipped binaries" <install log>
+                        （随后在消费者环境 `PYTHONNOUSERSITE=1 python3 -c "import <pkg>"`）
+
+rec_impl:               recipe-run-trait-and-reexport
+
+fallback_priority:      2
+fallback_approach:      probe-and-report
+fallback_description:   若因"一 PR 一包"或依赖已发布而无法改依赖自身配方，则至少要在本包
+                        `package_info()` 里显式发布依赖路径，并对取不到目录的依赖
+                        `output.warning` 具名告警；绝不能静默漏项——漏项正是本条的失败形态。
+fallback_command:       conan create <pkg> 2>&1 | grep -E "published .* dependency site-packages|WARN.*no package folder"
+fallback_auto_fix:      false
+fallback_impl:          recipe-guard
+
+forbid_1_pattern:       self\.requires\("(pluggy|iniconfig|packaging|pygments)/[^"]+"\)\s*$
+forbid_1_reason:        application 类型包中对 Python 运行时依赖省略 run=True，依赖会被判
+                        Skipped binaries，消费者拿不到其环境；本机不报错只是因为 user site
+                        恰好有同名副本，CI（另一 uid，读不到 user site）才暴露。
+forbid_1_consequence:   本机全绿、CI 全红，且两边数字逐字相同地"看起来无关"，
+                        排查方向被误导向"依赖没装好/网络问题"。
+
+forbid_2_pattern:       no_skip=True
+forbid_2_reason:        误以为 no_skip 可替代 run=True。实测只解除 skip，环境仍不传播。
+forbid_2_consequence:   安装日志里 Skipped binaries 消失（看起来修好了），消费者仍缺模块。
+
+forbid_3_pattern:       self\.env_info\.PYTHONPATH
+forbid_3_reason:        Conan 1.x API，Conan 2 已移除 `env_info` 属性；该导出静默失效，只在
+                        日志留一行 deprecated 警告，极易被忽略。
+forbid_3_consequence:   依赖包本身"看起来导出了路径"，消费者 PYTHONPATH 里却完全没有它，
+                        形成最难查的缺项（警告与失败点相隔很远）。

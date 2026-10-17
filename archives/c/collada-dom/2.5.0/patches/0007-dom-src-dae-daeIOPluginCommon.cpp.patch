@@ -1,0 +1,110 @@
+--- a/dom/src/dae/daeIOPluginCommon.cpp
++++ b/dom/src/dae/daeIOPluginCommon.cpp
+@@ -1,19 +1,21 @@
+ /*
+  * Copyright 2006 Sony Computer Entertainment Inc.
+  *
+  * Licensed under the MIT Open Source License, for details please see license.txt or the website
+  * http://www.opensource.org/licenses/mit-license.php
+  *
+  */
+ 
+ #include <sstream>
++#include <fstream>
++#include <zlib.h>
+ #include <dae.h>
+ #include <dom.h>
+ #include <dae/daeDatabase.h>
+ #include <dae/daeIOPluginCommon.h>
+ #include <dae/daeMetaElement.h>
+ #include <dae/daeErrorHandler.h>
+ #include <dae/daeMetaElementAttribute.h>
+ #ifndef NO_ZAE
+ #include <dae/daeZAEUncompressHandler.h>
+ #endif
+@@ -32,20 +34,45 @@
+ 
+ daeInt daeIOPluginCommon::setMeta(daeMetaElement *_topMeta)
+ {
+     topMeta = _topMeta;
+     return DAE_OK;
+ }
+ 
+ void daeIOPluginCommon::setDatabase(daeDatabase* _database)
+ {
+     database = _database;
++}
++
++// Minimal in-library gzip support: the upstream zipFile test loads
++// cube.dae.gz (gzip magic 0x1f 0x8b), but neither this library nor the
++// bundled libxml2 (built without runtime zlib) decompresses gzip, so the
++// raw stream reaches the XML parser as garbage. Decompress it here with the
++// bundled zlib before parsing.
++static std::string readGzipFile(const daeURI& uri)
++{
++    std::string path = cdom::uriToNativePath(uri.getURI());
++    std::ifstream in(path.c_str(), std::ios::binary);
++    unsigned char m[2] = { 0, 0 };
++    if (!in.read((char*)m, 2) || m[0] != 0x1f || m[1] != 0x8b)
++        return ""; // not a gzip stream
++    in.close();
++    gzFile gz = gzopen(path.c_str(), "rb");
++    if (!gz)
++        return "";
++    std::string out;
++    char buf[65536];
++    int n = 0;
++    while ((n = gzread(gz, buf, sizeof(buf))) > 0)
++        out.append(buf, n);
++    gzclose(gz);
++    return out;
+ }
+ 
+ // This function needs to be re-entrant, it can be called recursively from inside of resolveAll
+ // to load files that the first file depends on.
+ daeInt daeIOPluginCommon::read(const daeURI& uri, daeString docBuffer)
+ {
+     // Make sure topMeta has been set before proceeding
+     if (topMeta == NULL)
+     {
+         return DAE_ERR_BACKEND_IO;
+@@ -98,25 +125,34 @@
+             {
+                 string msg = string("Failed to load ") + fileURI.str() + "\n";
+                 daeErrorHandler::get()->handleError(msg.c_str());
+                 return DAE_ERR_BACKEND_IO;
+             }
+             zaeRoot = true;
+             extractedURI = rootFileURI.str();
+         }
+         else
+         {
+-            string msg = docBuffer ?
+-                         "Failed to load XML document from memory\n" :
+-                         string("Failed to load ") + fileURI.str() + "\n";
+-            daeErrorHandler::get()->handleError(msg.c_str());
+-            return DAE_ERR_BACKEND_IO;
++            // gzip (.gz): the upstream zipFile test data cube.dae.gz is a
++            // gzip stream (magic 0x1f 0x8b). Decompress with the bundled zlib
++            // and parse from memory; libxml2 cannot gz-open it at runtime.
++            string gzXml = readGzipFile(fileURI);
++            if (!gzXml.empty())
++                domObject = readFromMemory(gzXml.c_str(), fileURI);
++            if (!domObject)
++            {
++                string msg = docBuffer ?
++                             "Failed to load XML document from memory\n" :
++                             string("Failed to load ") + fileURI.str() + "\n";
++                daeErrorHandler::get()->handleError(msg.c_str());
++                return DAE_ERR_BACKEND_IO;
++            }
+         }
+     }
+ 
+     // Insert the document into the database, the Database will keep a ref on the main dom, so it won't get deleted
+     // until we clear the database
+ 
+     daeDocument *document = NULL;
+ 
+     int res = database->insertDocument(fileURI.getURI(),domObject,&document, zaeRoot, extractedURI);
+     if (res!= DAE_OK)

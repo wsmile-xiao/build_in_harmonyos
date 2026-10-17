@@ -1,0 +1,244 @@
+--- /dev/null
++++ b/FEXCore/include/FEXCore/fextl/pmr.h
+@@ -0,0 +1,241 @@
++// SPDX-License-Identifier: MIT
++//
++// HarmonyOS PC portability shim for the C++17 <memory_resource> facility.
++//
++// The OpenHarmony C++ standard library (libcxx-ohos, LLVM 15.0.4) ships
++// without <memory_resource>: neither the header nor the std::pmr namespace
++// (memory_resource, polymorphic_allocator and the pmr container aliases) are
++// available, and the container headers do not declare the std::pmr aliases
++// either. FEXCore uses std::pmr for its monotonic arena backed caches, so
++// provide the minimal std::pmr subset FEXCore needs when the toolchain lacks
++// it.
++//
++// On a toolchain that already provides <memory_resource> this header simply
++// forwards to it.
++#pragma once
++
++#if defined(__has_include)
++#if __has_include(<memory_resource>)
++#define FEX_HAVE_STD_PMR 1
++#include <memory_resource>
++#endif
++#endif
++
++#ifndef FEX_HAVE_STD_PMR
++
++#include <cstddef>
++#include <cstdlib>
++#include <list>
++#include <map>
++#include <memory>
++#include <new>
++#include <set>
++#include <string>
++#include <type_traits>
++#include <unordered_map>
++#include <vector>
++
++namespace std {
++namespace pmr {
++
++class memory_resource {
++public:
++  virtual ~memory_resource() = default;
++
++  [[nodiscard]] void* allocate(size_t Bytes, size_t Alignment = alignof(max_align_t)) {
++    return do_allocate(Bytes, Alignment);
++  }
++
++  void deallocate(void* Ptr, size_t Bytes, size_t Alignment = alignof(max_align_t)) {
++    do_deallocate(Ptr, Bytes, Alignment);
++  }
++
++  bool is_equal(const memory_resource& Other) const noexcept {
++    return do_is_equal(Other);
++  }
++
++protected:
++  virtual void* do_allocate(size_t Bytes, size_t Alignment) = 0;
++  virtual void do_deallocate(void* Ptr, size_t Bytes, size_t Alignment) = 0;
++  virtual bool do_is_equal(const memory_resource& Other) const noexcept = 0;
++};
++
++inline bool operator==(const memory_resource& LHS, const memory_resource& RHS) noexcept {
++  return &LHS == &RHS || LHS.is_equal(RHS);
++}
++
++inline bool operator!=(const memory_resource& LHS, const memory_resource& RHS) noexcept {
++  return !(LHS == RHS);
++}
++
++namespace detail {
++class NewDeleteResource final : public memory_resource {
++private:
++  void* do_allocate(size_t Bytes, size_t Alignment) override {
++    return ::operator new(Bytes, static_cast<std::align_val_t>(Alignment));
++  }
++
++  void do_deallocate(void* Ptr, size_t Bytes, size_t Alignment) override {
++    ::operator delete(Ptr, Bytes, static_cast<std::align_val_t>(Alignment));
++  }
++
++  bool do_is_equal(const memory_resource& Other) const noexcept override {
++    return this == &Other;
++  }
++};
++
++inline memory_resource*& DefaultResourceSlot() noexcept {
++  static memory_resource* Slot = nullptr;
++  return Slot;
++}
++} // namespace detail
++
++inline memory_resource* new_delete_resource() noexcept {
++  static detail::NewDeleteResource Resource;
++  return &Resource;
++}
++
++inline memory_resource* get_default_resource() noexcept {
++  auto* Slot = detail::DefaultResourceSlot();
++  return Slot ? Slot : new_delete_resource();
++}
++
++inline memory_resource* set_default_resource(memory_resource* Resource) noexcept {
++  auto*& Slot = detail::DefaultResourceSlot();
++  auto* Old = Slot;
++  Slot = Resource;
++  return Old ? Old : new_delete_resource();
++}
++
++template<class T>
++class polymorphic_allocator {
++public:
++  using value_type = T;
++
++  polymorphic_allocator() noexcept
++    : Resource {get_default_resource()} {}
++  polymorphic_allocator(memory_resource* Resource) noexcept
++    : Resource {Resource} {}
++  polymorphic_allocator(const polymorphic_allocator&) = default;
++
++  template<class U>
++  polymorphic_allocator(const polymorphic_allocator<U>& Other) noexcept
++    : Resource {Other.resource()} {}
++
++  polymorphic_allocator& operator=(const polymorphic_allocator&) = delete;
++
++  [[nodiscard]] T* allocate(size_t Count) {
++    if (Count > (static_cast<size_t>(-1) / sizeof(T))) {
++      std::abort();
++    }
++    return static_cast<T*>(Resource->allocate(Count * sizeof(T), alignof(T)));
++  }
++
++  void deallocate(T* Ptr, size_t Count) noexcept {
++    Resource->deallocate(Ptr, Count * sizeof(T), alignof(T));
++  }
++
++  template<class U, class... Args>
++  void construct(U* Ptr, Args&&... args) {
++    if constexpr (std::uses_allocator<U, polymorphic_allocator>::value) {
++      ::new (static_cast<void*>(Ptr)) U(static_cast<Args&&>(args)..., *this);
++    } else {
++      ::new (static_cast<void*>(Ptr)) U(static_cast<Args&&>(args)...);
++    }
++  }
++
++  template<class U>
++  void destroy(U* Ptr) {
++    Ptr->~U();
++  }
++
++  [[nodiscard]] void* allocate_bytes(size_t Bytes, size_t Alignment = alignof(max_align_t)) {
++    return Resource->allocate(Bytes, Alignment);
++  }
++
++  void deallocate_bytes(void* Ptr, size_t Bytes, size_t Alignment = alignof(max_align_t)) {
++    Resource->deallocate(Ptr, Bytes, Alignment);
++  }
++
++  template<class U>
++  [[nodiscard]] U* allocate_object(size_t Count = 1) {
++    return static_cast<U*>(Resource->allocate(Count * sizeof(U), alignof(U)));
++  }
++
++  template<class U>
++  void deallocate_object(U* Ptr, size_t Count = 1) {
++    Resource->deallocate(Ptr, Count * sizeof(U), alignof(U));
++  }
++
++  template<class U, class... Args>
++  [[nodiscard]] U* new_object(Args&&... args) {
++    U* Ptr = allocate_object<U>();
++    construct(Ptr, static_cast<Args&&>(args)...);
++    return Ptr;
++  }
++
++  template<class U>
++  void delete_object(U* Ptr) {
++    destroy(Ptr);
++    deallocate_object(Ptr);
++  }
++
++  polymorphic_allocator select_on_container_copy_construction() const noexcept {
++    return polymorphic_allocator {};
++  }
++
++  memory_resource* resource() const noexcept {
++    return Resource;
++  }
++
++private:
++  template<class U>
++  friend class polymorphic_allocator;
++
++  memory_resource* Resource;
++};
++
++template<class T1, class T2>
++bool operator==(const polymorphic_allocator<T1>& LHS, const polymorphic_allocator<T2>& RHS) noexcept {
++  return *LHS.resource() == *RHS.resource();
++}
++
++template<class T1, class T2>
++bool operator!=(const polymorphic_allocator<T1>& LHS, const polymorphic_allocator<T2>& RHS) noexcept {
++  return !(LHS == RHS);
++}
++
++// Container aliases. libcxx-ohos removes these from the container headers too.
++template<class T>
++using vector = std::vector<T, polymorphic_allocator<T>>;
++
++template<class T>
++using list = std::list<T, polymorphic_allocator<T>>;
++
++template<class Key, class Compare = std::less<Key>>
++using set = std::set<Key, Compare, polymorphic_allocator<Key>>;
++
++template<class Key, class Compare = std::less<Key>>
++using multiset = std::multiset<Key, Compare, polymorphic_allocator<Key>>;
++
++template<class Key, class T, class Compare = std::less<Key>>
++using map = std::map<Key, T, Compare, polymorphic_allocator<std::pair<const Key, T>>>;
++
++template<class Key, class T, class Compare = std::less<Key>>
++using multimap = std::multimap<Key, T, Compare, polymorphic_allocator<std::pair<const Key, T>>>;
++
++template<class Key, class T, class Hash = std::hash<Key>, class Pred = std::equal_to<Key>>
++using unordered_map = std::unordered_map<Key, T, Hash, Pred, polymorphic_allocator<std::pair<const Key, T>>>;
++
++template<class CharT>
++using basic_string = std::basic_string<CharT, std::char_traits<CharT>, polymorphic_allocator<CharT>>;
++
++using string = basic_string<char>;
++using wstring = basic_string<wchar_t>;
++using u16string = basic_string<char16_t>;
++using u32string = basic_string<char32_t>;
++
++} // namespace pmr
++} // namespace std
++
++#endif

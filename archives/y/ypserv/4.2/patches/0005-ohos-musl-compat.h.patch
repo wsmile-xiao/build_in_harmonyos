@@ -1,0 +1,403 @@
+--- /dev/null
++++ b/ohos-musl-compat.h
+@@ -0,0 +1,400 @@
++/* ohos-musl-compat.h -- password database helpers missing from musl libc.
++   Copyright (C) 2021 Thorsten Kukuk <kukuk@thkukuk.de>
++
++   ypserv uses the traditional glibc / shadow-suite password database
++   interfaces to maintain the NIS master's /etc/passwd and /etc/shadow
++   (rpc.yppasswdd/update.c) and to generate the passwd/group maps
++   (yphelper/yphelper.c).  musl libc, as used by HarmonyOS, implements
++   only getpwnam()/getpwent()/getspnam-less core and provides neither the
++   stream helpers (fgetpwent/putpwent/fgetspent/putspent) nor the string
++   helpers (sgetspent) nor the password database lock (lckpwdf/ulckpwdf).
++   <shadow.h> on OHOS declares struct spwd but no function at all.
++
++   This header supplies functionally equivalent implementations, so the
++   daemons keep their upstream behaviour: real parsing/writing of the
++   colon separated database formats and real advisory locking of
++   /etc/.pwd.lock through fcntl().  It is a no-op on libcs that already
++   provide these interfaces.  */
++
++#ifndef YPSERV_OHOS_MUSL_COMPAT_H
++#define YPSERV_OHOS_MUSL_COMPAT_H 1
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <pwd.h>
++#include <grp.h>
++#include <shadow.h>
++
++/* Lock file and retry budget of the traditional (glibc) lckpwdf().  */
++#define YP_PWD_LOCKFILE "/etc/.pwd.lock"
++
++/* ---------------------------------------------------------------- */
++/* /etc/passwd                                                       */
++/* ---------------------------------------------------------------- */
++
++/* Read the next valid entry from a passwd style stream.  Lines that
++   cannot be parsed (comments, blanks, too few fields) are skipped, as
++   the glibc implementation does.  */
++static struct passwd *
++yp_fgetpwent (FILE *stream)
++{
++  static char line[4096];
++  static struct passwd pw;
++  char *fields[8];
++  char *p;
++  char *end;
++  int i;
++
++  if (stream == NULL)
++    return NULL;
++
++  while (fgets (line, sizeof (line), stream) != NULL)
++    {
++      p = strchr (line, '\n');
++      if (p != NULL)
++        *p = '\0';
++
++      fields[0] = line;
++      for (i = 1; i < 8; ++i)
++        {
++          fields[i] = NULL;
++          p = (fields[i - 1] != NULL) ? strchr (fields[i - 1], ':') : NULL;
++          if (p != NULL)
++            {
++              *p = '\0';
++              fields[i] = p + 1;
++            }
++        }
++
++      if (fields[0] == NULL || *fields[0] == '\0' || fields[0][0] == '#'
++          || fields[1] == NULL || fields[2] == NULL || fields[3] == NULL)
++        continue;
++
++      pw.pw_uid = (uid_t) strtoul (fields[2], &end, 10);
++      if (*end != '\0')
++        continue;
++      pw.pw_gid = (gid_t) strtoul (fields[3], &end, 10);
++      if (*end != '\0')
++        continue;
++
++      pw.pw_name = fields[0];
++      pw.pw_passwd = fields[1];
++      pw.pw_gecos = (fields[4] != NULL) ? fields[4] : "";
++      pw.pw_dir = (fields[5] != NULL) ? fields[5] : "";
++      pw.pw_shell = (fields[6] != NULL) ? fields[6] : "";
++      return &pw;
++    }
++
++  return NULL;
++}
++
++static int
++yp_putpwent (const struct passwd *pw, FILE *stream)
++{
++  if (pw == NULL || stream == NULL)
++    return -1;
++
++  if (fprintf (stream, "%s:%s:%lu:%lu:%s:%s:%s\n",
++               (pw->pw_name != NULL) ? pw->pw_name : "",
++               (pw->pw_passwd != NULL) ? pw->pw_passwd : "",
++               (unsigned long) pw->pw_uid, (unsigned long) pw->pw_gid,
++               (pw->pw_gecos != NULL) ? pw->pw_gecos : "",
++               (pw->pw_dir != NULL) ? pw->pw_dir : "",
++               (pw->pw_shell != NULL) ? pw->pw_shell : "") < 0)
++    return -1;
++
++  return 0;
++}
++
++/* ---------------------------------------------------------------- */
++/* /etc/group                                                        */
++/* ---------------------------------------------------------------- */
++
++/* Read the next valid entry from a group style stream.  */
++static struct group *
++yp_fgetgrent (FILE *stream)
++{
++  static char line[4096];
++  static char members[4096];
++  static char *memberv[256];
++  static struct group gr;
++  char *name;
++  char *passwd;
++  char *gidstr;
++  char *memstr;
++  char *p;
++  char *end;
++  int n;
++
++  if (stream == NULL)
++    return NULL;
++
++  while (fgets (line, sizeof (line), stream) != NULL)
++    {
++      p = strchr (line, '\n');
++      if (p != NULL)
++        *p = '\0';
++
++      name = line;
++      if (*name == '\0' || *name == '#')
++        continue;
++      p = strchr (name, ':');
++      if (p == NULL)
++        continue;
++      *p++ = '\0';
++
++      passwd = p;
++      p = strchr (passwd, ':');
++      if (p == NULL)
++        continue;
++      *p++ = '\0';
++
++      gidstr = p;
++      p = strchr (gidstr, ':');
++      if (p == NULL)
++        continue;
++      *p++ = '\0';
++      memstr = p;
++
++      gr.gr_gid = (gid_t) strtoul (gidstr, &end, 10);
++      if (*end != '\0')
++        continue;
++
++      gr.gr_name = name;
++      gr.gr_passwd = passwd;
++
++      if (*memstr != '\0')
++        {
++          strncpy (members, memstr, sizeof (members) - 1);
++          members[sizeof (members) - 1] = '\0';
++          n = 0;
++          memberv[n++] = members;
++          for (p = members; *p != '\0' && n < 255; ++p)
++            if (*p == ',')
++              {
++                *p = '\0';
++                memberv[n++] = p + 1;
++              }
++          memberv[n] = NULL;
++        }
++      else
++        memberv[0] = NULL;
++
++      gr.gr_mem = memberv;
++      return &gr;
++    }
++
++  return NULL;
++}
++
++/* ---------------------------------------------------------------- */
++/* /etc/shadow                                                       */
++/* ---------------------------------------------------------------- */
++
++/* Parse one numeric shadow field: empty means "not set" (-1), any other
++   value must be a complete number.  Returns 0 on success, -1 otherwise. */
++static int
++yp_sp_number (const char *field, long *value)
++{
++  char *end;
++
++  if (field == NULL || *field == '\0')
++    {
++      *value = -1;
++      return 0;
++    }
++
++  *value = strtol (field, &end, 10);
++  if (*end != '\0')
++    return -1;
++
++  return 0;
++}
++
++/* Parse a single shadow line (no trailing newline required).  Returns
++   NULL when the line is not a shadow entry, which lets the callers skip
++   comments, blanks and truncated lines.  */
++static struct spwd *
++yp_sgetspent (const char *line)
++{
++  static char buffer[4096];
++  static struct spwd sp;
++  char *fields[10];
++  char *p;
++  char *end;
++  int i;
++
++  if (line == NULL || strlen (line) >= sizeof (buffer))
++    return NULL;
++
++  memcpy (buffer, line, strlen (line) + 1);
++  p = strchr (buffer, '\n');
++  if (p != NULL)
++    *p = '\0';
++
++  fields[0] = buffer;
++  for (i = 1; i < 10; ++i)
++    {
++      fields[i] = NULL;
++      p = (fields[i - 1] != NULL) ? strchr (fields[i - 1], ':') : NULL;
++      if (p != NULL)
++        {
++          *p = '\0';
++          fields[i] = p + 1;
++        }
++    }
++
++  if (fields[0][0] == '\0' || fields[0][0] == '#' || fields[1] == NULL)
++    return NULL;
++
++  if (yp_sp_number (fields[2], &sp.sp_lstchg) < 0
++      || yp_sp_number (fields[3], &sp.sp_min) < 0
++      || yp_sp_number (fields[4], &sp.sp_max) < 0
++      || yp_sp_number (fields[5], &sp.sp_warn) < 0
++      || yp_sp_number (fields[6], &sp.sp_inact) < 0
++      || yp_sp_number (fields[7], &sp.sp_expire) < 0)
++    return NULL;
++
++  sp.sp_flag = (unsigned long) -1;
++  if (fields[8] != NULL && fields[8][0] != '\0')
++    {
++      sp.sp_flag = (unsigned long) strtoul (fields[8], &end, 10);
++      if (*end != '\0')
++        return NULL;
++    }
++
++  sp.sp_namp = fields[0];
++  sp.sp_pwdp = fields[1];
++  return &sp;
++}
++
++/* Read the next valid entry from a shadow style stream.  */
++static struct spwd *
++yp_fgetspent (FILE *stream)
++{
++  static char line[4096];
++  struct spwd *sp;
++
++  if (stream == NULL)
++    return NULL;
++
++  while (fgets (line, sizeof (line), stream) != NULL)
++    if ((sp = yp_sgetspent (line)) != NULL)
++      return sp;
++
++  return NULL;
++}
++
++static int
++yp_putspent (const struct spwd *sp, FILE *stream)
++{
++  if (sp == NULL || stream == NULL)
++    return -1;
++
++  if (fprintf (stream, "%s:%s:%ld:%ld:%ld:%ld:%ld:%ld:%lu\n",
++               (sp->sp_namp != NULL) ? sp->sp_namp : "",
++               (sp->sp_pwdp != NULL) ? sp->sp_pwdp : "",
++               sp->sp_lstchg, sp->sp_min, sp->sp_max, sp->sp_warn,
++               sp->sp_inact, sp->sp_expire, sp->sp_flag) < 0)
++    return -1;
++
++  return 0;
++}
++
++/* Look up an entry in /etc/shadow.  The returned entry lives in static
++   storage, like the interface it replaces.  */
++static struct spwd *
++yp_getspnam (const char *name)
++{
++  FILE *fp;
++  struct spwd *sp;
++
++  if (name == NULL)
++    return NULL;
++
++  fp = fopen ("/etc/shadow", "r");
++  if (fp == NULL)
++    return NULL;
++
++  while ((sp = yp_fgetspent (fp)) != NULL)
++    {
++      if (strcmp (sp->sp_namp, name) == 0)
++        break;
++      sp = NULL;
++    }
++
++  fclose (fp);
++  return sp;
++}
++
++/* ---------------------------------------------------------------- */
++/* Password database locking (/etc/.pwd.lock, like glibc lckpwdf())   */
++/* ---------------------------------------------------------------- */
++
++static int yp_pwdfd = -1;
++
++static int
++yp_lckpwdf (void)
++{
++  struct flock fl;
++
++  if (yp_pwdfd >= 0)
++    return -1;                  /* already locked by this process */
++
++  yp_pwdfd = open (YP_PWD_LOCKFILE, O_WRONLY | O_CREAT, 0600);
++  if (yp_pwdfd < 0)
++    return -1;
++
++  memset (&fl, 0, sizeof (fl));
++  fl.l_type = F_WRLCK;
++  fl.l_whence = SEEK_SET;
++
++  if (fcntl (yp_pwdfd, F_SETLK, &fl) < 0)
++    {
++      int saved_errno = errno;
++
++      close (yp_pwdfd);
++      yp_pwdfd = -1;
++      errno = saved_errno;
++      return -1;
++    }
++
++  return 0;
++}
++
++static int
++yp_ulckpwdf (void)
++{
++  struct flock fl;
++
++  if (yp_pwdfd < 0)
++    return -1;
++
++  memset (&fl, 0, sizeof (fl));
++  fl.l_type = F_UNLCK;
++  fl.l_whence = SEEK_SET;
++  fcntl (yp_pwdfd, F_SETLK, &fl);
++
++  close (yp_pwdfd);
++  yp_pwdfd = -1;
++  return 0;
++}
++
++/* Redirect the traditional interfaces to the implementations above.
++   This header is only included on libcs that lack them (see the two
++   users, rpc.yppasswdd/update.c and yphelper/yphelper.c).  */
++#define fgetpwent(s)    yp_fgetpwent (s)
++#define putpwent(p,f)   yp_putpwent (p, f)
++#define fgetgrent(s)    yp_fgetgrent (s)
++#define sgetspent(s)    yp_sgetspent (s)
++#define fgetspent(s)    yp_fgetspent (s)
++#define putspent(p,f)   yp_putspent (p, f)
++#define getspnam(n)     yp_getspnam (n)
++#define lckpwdf()       yp_lckpwdf ()
++#define ulckpwdf()      yp_ulckpwdf ()
++
++#endif /* YPSERV_OHOS_MUSL_COMPAT_H */

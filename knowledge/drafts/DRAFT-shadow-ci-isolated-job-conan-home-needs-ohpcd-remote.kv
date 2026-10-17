@@ -1,0 +1,78 @@
+#====================================================================
+# DRAFT knowledge entry — 真机隔离 job 新建 conan-home 默认只有 conancenter：依赖解析失败需写入 ohpcd remotes.json
+# Source: tetraproc/0.9.2 真机 shadow CI 2026-10-04（r2 迭代 2）
+#====================================================================
+
+id: DRAFT-shadow-ci-isolated-job-conan-home-needs-ohpcd-remote
+trigger_tool: conan-create|conan-graph|ohos-prepare-isolated-conan-job|remotes.json
+phase: shadow-ci|device|dependency-resolution
+error_signature: |
+  "not resolved: Unable to find .* in remotes"|
+  "Checking remote: conancenter"|
+  Computing dependency graph 阶段失败|依赖包未构建.*请先提交依赖包
+severity: 1
+category: shadow-ci, device, conan-remote, dependency-resolution
+match_keywords: remotes.json, conancenter, ohpcd, 隔离 job, conan-home,
+  Unable to find in remotes, disabled, 私有依赖, 制品仓, anonymous
+
+title: >
+  真机隔离 job 的 conan-home 是全新的：remotes.json 默认只有启用的 conancenter，
+  只发布在 ohpcd 的内部包（libx11/clthreads/fftw3f 等）必然解析失败——
+  需写入"conancenter disabled + ohpcd enabled"的 remotes.json
+
+root_cause: >
+  ohos-prepare-isolated-conan-job.sh 为每个 job 新建独立 conan-home（隔离
+  设计本身正确），但该目录的 remotes.json 初始只含启用的 conancenter；
+  conancenter 上没有本仓库适配的任何包。失败指纹高度迷惑：日志显示逐个
+  "Checking remote: conancenter" 后 "Unable to find in remotes"，修复建议
+  误导向"依赖包未构建，请先提交依赖包 PR"——实际依赖在 ohpcd 全部在架，
+  只是 job 不认识 ohpcd。
+
+affected_scope: >
+  所有真机 shadow CI 隔离 job 中依赖 ohpcd 私有包的场景（即几乎所有
+  C/C++ 适配包，因为 libx11/fontconfig/fftw3f/clthreads 等基础依赖都只在
+  ohpcd）。不适用：复用已配置 conan-home 的 job 或 runner 已预配 remote。
+
+verification_cmd: >
+  # 判定: 看 conan create 日志依赖解析段
+  grep -E "Checking remote|not resolved" <run>/logs/stdout.log
+  # 只有 conancenter → 本条；再核实依赖确实在 ohpcd:
+  conan list '<name>/<ver>' -r=ohpcd   # 本机或设备端均可
+
+rec_priority: 1
+rec_approach: write-remotes-json-with-ohpcd-before-first-runner-run
+rec_description: |
+  在启动 runner 前向 <job>/conan-home/remotes.json 写入与已知成功 job 相同的
+  配置: conancenter 保留但 disabled: true，ohpcd 启用（URL 以制品仓实际地址为准，
+  匿名可读）。实施注意:
+  1. 设备 /tmp 只读（避坑指南已知坑），不要用 heredoc 写文件——本地生成后 scp；
+  2. Windows PowerShell Set-Content -Encoding utf8 会写 BOM，conan 的 JSON
+     解析失败——用 [UTF8Encoding]::new($false) 或等价无 BOM 写法；
+  3. 修复判定: 重跑后依赖段应出现大量 "Downloaded (ohpcd)" / "Already installed"。
+rec_command: |
+  # 本地（无 BOM）:
+  [IO.File]::WriteAllText($tmp, '{"remotes":[{"name":"conancenter",...,"disabled":true},{"name":"ohpcd",...}]}', [Text.UTF8Encoding]::new($false))
+  scp -i <key> -P 2222 -O $tmp currentUser@<device>:<job>/conan-home/remotes.json
+  # 设备端核验:
+  head -c 40 <job>/conan-home/remotes.json   # 不应有 U+FEFF
+rec_auto_fix: false
+rec_impl: manual
+fallback_priority: 3
+fallback_approach: prebuild-deps-into-job-cache
+fallback_description: >
+  备选: 从设备上其它成功 job 的 conan-home 拷贝已装包目录，或 conan download
+  全量依赖到 job 缓存——成本高且可复现性差，仅当 ohpcd 网络不可达时使用。
+conflicts_with: []
+notes: >
+  查重边界：opencsg-1.8.2 / libsv-1.2 两个 shadow-ci 草稿讲的是 hnp 工具链
+  PATH（找不到 cmake 等，Error 127）；DRAFT-device-shadow-ci-repo-source-
+  pruned-missing-ci 讲 repo-source 缺 ci/（zsh can't open input file）。
+  三者失败面不同（工具链 / 脚本入口 / 依赖解析），常在同一 job 上先后出现。
+  全库检索 remotes.json/conancenter：无既有条目覆盖。
+verify_builds: >
+  tetraproc/0.9.2 真机 2026-10-04：未配置时 libx11/1.8.13 unable to find
+  （r2 第 2 轮 fail）；写入后 15 个依赖全部 Downloaded (ohpcd)/Already
+  installed（r2 第 3 轮解析通过），最终整轮 exit 0。
+authors: codex
+source_pr: pending
+source_commit: bf6d320d1e (feat/tetraproc-0.9.2-codex)

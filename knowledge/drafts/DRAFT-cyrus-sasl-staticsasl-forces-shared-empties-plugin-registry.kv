@@ -1,0 +1,173 @@
+#====================================================================
+# DRAFT-cyrus-sasl-staticsasl-forces-shared-empties-plugin-registry —
+#   --with-staticsasl 会强制 enable_shared=yes：消费者拿到的 .so 里
+#   静态插件注册表不存在，未设 SASL_PATH 时 auxprop 列表为空
+# 触发事件: cyrus-sasl-sql 2.1.28 适配，CI test_package 正向断言失败
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-cyrus-sasl-staticsasl-forces-shared-empties-plugin-registry
+trigger_tool:           conan|configure|make|clang
+phase:                  runtime|test
+
+error_signature:        could not find auxprop plugin, was searching for|
+                        FAIL: auxprop_plugin .* resolves to the SQL plugin|
+                        sasl_auxprop_store.*SASL_FAIL
+
+severity:               3
+category:               build-system, autotools, plugin-registration, runtime, linkage, ohos
+
+match_keywords:         SASL_PATH, staticsasl, --with-staticsasl, enable_shared,
+                        DO_DLOPEN, _sasl_static_plugins, staticopen.h, auxprop,
+                        auxprop_plugin, sasl_auxprop_store, plugin registry,
+                        静态注册表, 插件注册表, 正向失败阴性对照通过, SASL_PATH_ENV_VAR,
+                        libsasl2.so, libsasl2.a
+
+title:                  cyrus-sasl 的 --with-staticsasl 会强制 enable_shared=yes——消费者默认链接的 .so 里静态插件注册表根本不存在，未导出 SASL_PATH 时 auxprop 列表为空（表现为「正向断言失败、阴性对照反而通过」）
+
+topic: >
+  cyrus-sasl-sql 的 test_package 断言「auxprop_plugin='sql' 可被解析」，CI 结果：
+
+      FAIL: auxprop_plugin 'sql' resolves to the SQL plugin (sasl_auxprop_store -> SASL_OK)
+        ok   negative control: unregistered auxprop_plugin is rejected (SASL_FAIL)
+
+  **正向失败 + 阴性对照"通过"** —— 这个组合是判别关键：说明 auxprop 列表
+  整体为空。列表空则任何名字都查不到，故「未注册名被拒」这句也"成立"，
+  阴性对照失去区分力（它不再证明任何东西）。
+
+root_cause:             cyrus-sasl 的 configure 中 --with-staticsasl 会**无条件**
+                        enable_shared=yes（configure.ac:104-107）：
+
+                            AC_ARG_WITH(staticsasl)
+                            if test "$with_staticsasl" = yes; then
+                                    enable_shared=yes      # 即使传了 --disable-shared
+                                    enable_static=yes
+                            fi
+
+                        因此执行 --disable-shared --enable-static --with-staticsasl
+                        的配方，最终仍会构建出共享库：包内同时有 libsasl2.a 与
+                        libsasl2.so，而消费者（含 test_package 经 CMakeDeps）默认
+                        链接到 **.so**。
+                        enable_shared=yes 又触发 configure.ac:978-980 的
+                        AC_DEFINE(DO_DLOPEN)，于是共享库走 dlopen 路径；而
+                        dlopen.c:432-459 的静态插件注册表循环被 #ifndef PIC 包住，
+                        **PIC 构建里这段不参与编译** → .so 中 _sasl_static_plugins
+                        符号根本不存在，插件只能经 dlopen 从搜索路径加载。
+                        未设置 SASL_PATH（上游既有环境变量，lib/common.c 的
+                        SASL_PATH_ENV_VAR）时搜索路径为空 → auxprop 列表为空。
+
+durable_solution: >
+  在 ==package_info()== 里按编译期插件目录导出 SASL_PATH，让消费者
+  （含 test_package）在 conanrun 环境下能找到插件：
+
+      self.runenv_info.append_path(
+          "SASL_PATH", os.path.join(self.package_folder, "lib", "sasl2"))
+
+  ⚠️ 不要试图通过「让 test_package 改链 libsasl2.a」来规避 —— .so 才是消费者
+  默认拿到的产物，若 .so 路径不通，真实下游 SASL 使用者同样会踩坑；
+  导出 SASL_PATH 是对消费者正确的约定。
+
+impact: >
+  cyrus-sasl-sql 2.1.28：CI 首轮 test_package 唯一失败点即为该断言（8/9），
+  而本地/真机手工构建不暴露（手工跑时环境里恰好可能有可用搜索路径，
+  或直接链了 .a）。补齐 SASL_PATH 后 9/9 全过，且完整 conan create 复现后
+  rc=0。
+
+recovery:               任何「autotools 项目里有被 #ifndef PIC 包住的静态注册表 +
+                        又同时产出 .so/.a」的包，若消费者断言"某插件/扩展被注册"
+                        却只在 CI 失败，先按本节判别流程确认注册表是否整体为空，
+                        再看该项目的插件搜索环境变量（SASL_PATH / GIO_EXTRA_MODULES
+                        一类）是否需要在 package_info() 里导出。
+
+evidence_chain: >
+  task cyrus-sasl-sql 2.1.28 适配（feat/cyrus-sasl-sql-2.1.28，PR #9810）
+    - CI 首轮 conan-build-test 唯一失败：
+        FAIL: auxprop_plugin 'sql' resolves to the SQL plugin (sasl_auxprop_store -> SASL_OK)
+          ok   negative control: unregistered auxprop_plugin is rejected (SASL_FAIL)
+    - 本机复现：经 api.github.com release assets 端点取官方 release 包
+      （4034803 字节，sha256 7ccfc6ab…，与配方声明逐字节一致），把 conandata.yml
+      的 url 临时指向本地文件（sha256 不变）后**实跑完整 conan create** → 复现同一失败
+    - 源码取证：
+        configure.ac:104-107  --with-staticsasl ⇒ enable_shared=yes（覆盖命令行）
+        configure.ac:978-980  enable_shared=yes ⇒ AC_DEFINE(DO_DLOPEN)
+        dlopen.c:432-459      静态插件表循环被 #ifndef PIC 包住
+        staticopen.h:181-183  SPECIFIC_AUXPROP_PLUG_INIT( sql, "SQL" )
+    - **符号级决定性证据**（同一包里两个产物对比）：
+        libsasl2.a        _sasl_static_plugins=1   引用 sql_auxprop_plug_init=1
+        libsasl2.so.3.0.0 _sasl_static_plugins=0   引用 sql_auxprop_plug_init=0
+        test 二进制 NEEDED = [libsasl2.so.3] → 走的是没有注册表的那份
+    - 因果验证（同一二进制、只变环境变量）：
+        不设 SASL_PATH → 8/9（正向 FAIL）
+        设 SASL_PATH   → 9/9 全过
+    - 修复落地（package_info 导出 SASL_PATH）后重跑 conan create → rc=0，9/9
+
+verification_cmd: >
+  # ① 判别：正向失败而阴性对照"通过" ⇒ 注册表整体为空
+  #    （列表为空时任何名字都查不到，阴性对照不再有区分力）
+  # ② 确认消费者实际链接的是 .so 还是 .a
+  readelf -d <test_binary> | grep NEEDED        # 期望 libsasl2.so.3
+  # ③ 对比两份产物的静态注册表符号
+  nm <pkg>/lib/libsasl2.a        | grep _sasl_static_plugins   # 有
+  nm <pkg>/lib/libsasl2.so.3.0.0 | grep _sasl_static_plugins   # 无
+  # ④ 因果确认：只变环境变量重跑
+  LD_LIBRARY_PATH=<pkg>/lib <test_binary>                          # 8/9（复现）
+  SASL_PATH=<pkg>/lib/sasl2 LD_LIBRARY_PATH=<pkg>/lib <test_binary> # 9/9（修复）
+
+limitations: >
+  ① 结论基于 cyrus-sasl 2.1.28 源码与实测；上游不同版本若改写了
+     AC_ARG_WITH(staticsasl) 的 enable_shared 赋值，需重新确认。
+  ② 本节的「.a 有注册表 / .so 没有」是**静态链接与共享链接在插件发现机制上的
+     固有差异**，不是 cyrus-sasl 独有缺陷；凡「静态注册表 + 可选共享构建」的
+     项目都可能同构（判断时看注册表是否被 #ifndef PIC / BUILD_SHARED 一类宏包住）。
+  ③ 修法选择（导出 SASL_PATH）假定消费者确实需要 .so；若某下游明确只用静态库，
+     链 .a 也能工作，但那不属于包级默认约定的问题。
+  ④ 该失败**只在 CI 暴露、本地手工构建不暴露**这一点值得注意：手工验证若跳过
+     「真实消费者链接路径」，会漏掉此类问题——建议 R34 一律走包级 test_package
+     而非手工命令行。
+
+rec_priority:           1
+rec_approach:           export-plugin-search-path-in-package-info
+rec_description: >
+  在 package_info() 里用 runenv_info.append_path 导出该项目的插件搜索环境变量
+  （cyrus-sasl 用 SASL_PATH），指向包内编译期插件目录（<pkg>/lib/sasl2），
+  使消费者在 conanrun 环境下能 dlopen 到随包交付的插件。
+rec_command:            # conanfile.py 的 package_info()
+                        self.runenv_info.append_path(
+                            "SASL_PATH", os.path.join(self.package_folder, "lib", "sasl2"))
+rec_auto_fix:           false
+rec_impl:               conan-recipe-export-sasl-path
+
+forbid_1_pattern:       把 test_package 改成链接 libsasl2.a 以绕开 .so 的注册表缺失
+forbid_1_reason:        .so 是消费者（CMakeDeps/pkg-config）默认拿到的产物；让测试改链
+                        .a 只是让测试通过，真实下游 SASL 使用者仍会因缺 SASL_PATH 而
+                        拿到空插件表，问题被掩盖而非解决
+forbid_1_consequence:   CI 变绿但下游集成失败；且掩盖了「共享构建需导出搜索路径」这一
+                        对消费者有意义的约定
+forbid_2_pattern:       把 --with-staticsasl 去掉，以为这样就不会构建 .so
+forbid_2_reason:        实测去掉后 configure rc=1（该选项参与其它必要的静态配置路径），
+                        且即便成功也改变了包交付形态；真正的修法是导出搜索路径，
+                        而不是翻转构建形态
+forbid_2_consequence:   构建失败或交付形态变化，且问题可能以另一种形式复现
+
+affected_scope:         autotools/C 项目中「可选共享构建 + 静态插件注册表」的包：
+                        cyrus-sasl（本条的 SASL_PATH 与 lib/sasl2）、以及同类
+                        「注册表被 #ifndef PIC / BUILD_SHARED 宏包住」的库。
+                        消费者侧典型是 test_package 或任何经 CMakeDeps/pkg-config
+                        取包的下游；表现为「CI 失败、本地手工通过」。
+
+doc_file:               knowledge/drafts/DRAFT-cyrus-sasl-staticsasl-forces-shared-empties-plugin-registry.md
+last_updated:           2026-09-13
+source_event:           cyrus-sasl-sql 2.1.28 适配：CI test_package 中 auxprop_plugin='sql' 解析失败，根因为 .so 无静态注册表且未导出 SASL_PATH
+authors:                atomcode-executor
+source_pr:              9810
+source_commit:          a4866fa7f
+
+similar_to:             DRAFT-autotools-toolchain-vars-empty-vs-unset
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-13
+
+draft:                  true
+contributor_id:         ffieldd22_-

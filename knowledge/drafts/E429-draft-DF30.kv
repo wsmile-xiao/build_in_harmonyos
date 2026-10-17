@@ -1,0 +1,63 @@
+#====================================================================
+# E429 — DRAFT（路径 B 知识库扩展草稿，待主编 promote）
+# 未初始化结构体指针成员 → 严格分配器上 invalid free
+#====================================================================
+
+# ═══ Layer 0: 错误面 ═══
+id:                     E429
+trigger_tool:           conan|make|clang|ctest|sh|runtime
+phase:                  testing|runtime
+error_signature:        rc=-5|SIGTRAP|invalid free|free\(\): invalid pointer|attempting free on address which was not malloc|AddressSanitizer:.*SEGV.*in entry_free|MallocScribble
+severity:               3
+category:               memory, platform, musl, libc, runtime, testing
+match_keywords:         rc=-5, SIGTRAP, invalid free, invalid pointer, uninitialised struct, uninitialized pointer member, malloc without memset, MallocScribble, MALLOC_PERTURB_, ASan, strict allocator
+title:                  未初始化结构体指针成员在严格分配器上触发 invalid free（glibc/macOS 侥幸通过，OHOS 以 SIGTRAP 终止）
+
+# ═══ Layer 1: 诊断 ═══
+root_cause:             构造函数只 malloc 结构体而不初始化其指针成员；查询/解析未命中时回调不执行，这些成员保持垃圾值，随后无条件的清理函数对它们逐个 free()，形成对野指针的释放。glibc 与 macOS 在对象刚从整页映射、内容恰为 0 时 free(NULL) 是空操作，于是同一份代码静默通过；OHOS 的分配器不静默容忍非法释放，而是就地终止进程（实测退出码 -5 / signal 5）。所以根因是平台无关的上游内存安全缺陷，平台差异只决定它是否现形。
+affected_scope:         C/C++ 项目中"只分配不初始化"的工厂函数（x_new_empty 之类）+ 在失败/空结果分支上仍无条件清理的代码；典型表现是同一份源码在本机 glibc/macOS 测试全过、只在 OHOS 上崩。同类问题也出现在手工解析器、缓存对象、可选字段结构体
+verification_cmd:       修复前：macOS `MallocScribble=1 <bin> <args>` 或 glibc `MALLOC_PERTURB_=170 <bin> <args>` 应非零终止（ylva 实测 rc=134）；ASan（-fsanitize=address）跑同一路径，栈应为 free ← 清理函数 ← 调用方（ylva 实测 #2 entry_free）。修复后：同样命令 rc=0，OHOS 侧对应用例退出码不再是 -5
+
+# ═══ Layer 2: 推荐方案 ═══
+rec_priority:           1
+rec_approach:           zero-init-struct-right-after-malloc
+rec_description:        在"只分配不初始化"的工厂函数里，malloc 之后立刻 memset(ptr, 0, sizeof(*ptr))，把所有指针成员先置 NULL。free(NULL) 是 POSIX 定义的空操作，失败路径不再触碰野指针，成功路径随后照常赋值，语义等价、无平台宏、可直接向上游提交
+rec_command:            编辑目标源文件后在仓内刷新补丁：`python3 scripts/ohc-run.py track-edit add <software> <version> <src/file.c>` → 加 memset → `python3 scripts/ohc-run.py refresh-patch --auto <software> <version>`
+rec_auto_fix:           false
+rec_impl:               manual-source-fix
+
+# ═══ Layer 3: 回退方案 ═══
+fallback_priority:      2
+fallback_approach:      null-guard-every-pointer-in-cleanup
+fallback_description:   若构造方不方便改（结构体由第三方分配/接口已冻结），改成在清理函数里对每个指针字段判空后再 free；但必须逐字段守护，漏一个仍旧崩，因此优先级低于整体清零
+fallback_command:       把清理函数里的 free(x) 全部改为 if (x) free(x)（含 stamp/next 这类容易漏的字段），再用同一触发路径复验
+fallback_auto_fix:      false
+fallback_impl:          manual-source-fix
+
+# ═══ Layer 4: 禁止做法 ═══
+forbid_1_pattern:       跳过该用例|删掉该测试|移除 test_package|rc=-5.*(忽略|不处理)|不测缺失 id
+forbid_1_reason:        该崩溃是真实的内存安全缺陷，不是平台差异；删/跳过用例只让崩溃从 CI 消失，真实使用照样崩
+forbid_1_consequence:   包"构建通过"但同类路径仍 invalid free，用户一用就崩，且把可复用的通用问题一起埋掉
+forbid_2_pattern:       -Wno-.*free|MALLOC_CHECK_=0|MALLOC_PERTURB_=0|关掉.*分配器检查
+forbid_2_reason:        用关闭分配器检查的方式"绕过"等于拆掉安全网，下一次同类 UB 会退化成静默内存破坏
+forbid_2_consequence:   崩溃从"可诊断的信号"变成"随机内存损坏"，排障成本成倍上升，且无法证明修复
+principles:
+
+# ═══ 关系与元数据 ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E249]
+conflicts_with:         []
+prerequisite_of:        []
+doc_file:               doc/E429.md
+last_updated:           2026-10-02
+source_event:           ylva/1.7 适配（PR #14061 / 构建 #65823）：test_package 用例 F9 `ylva -l <缺失 id>` 在 OHOS 上 rc=-5（signal 5），根因 entry_new_empty() 未初始化 + entry_free() 释放野指针
+authors:                Codex (agent DF30)
+source_pr:              14061
+source_commit:
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+draft:                  true
+contributor_id:         DF30

@@ -1,0 +1,73 @@
+draft: DRAFT-E5xx-ohos-meson-detect-ninja-env-pin
+status: pending-editor-review
+id: E5xx
+title: OHOS conanbuild 环境重写后 ninja/cmake ELF 全 exit 127——conanbuildenv-*.sh 追加注入是唯一有效点
+category: ohos, meson, conan, toolchain, ninja, linking
+severity: 2
+last_updated: 2026-09-26
+software: gtksourceview5-5.22.0, libshumate-1.7.0
+verify_builds: "本地 conan create RC=0 ×2（gtksourceview5 UPSTREAM-TESTS passed=2、libshumate passed=13）；CI #61498 通过（gtksourceview5）"
+
+match_keywords: >
+  meson, ninja, Could not detect Ninja, exit 127, Error relocating,
+  libc++_shared.so, conanbuildenv, ConanFile.run, buildenv_info,
+  os.environ, generate(), NINJA, hnp, /system/lib64, cmake
+
+error_signature: >
+  Could not detect Ninja v1\.8\.2 or newer|Error loading shared library libc\+\+_shared\.so.*needed by .*ninja|Error relocating .*ninja.*symbol not found|Error relocating /data/service/hnp/bin/cmake.*_ZdlPv
+
+root_cause: >
+  三层机制叠加：(1) OHOS musl loader 对 conanbuild 子进程不搜 /system/lib64
+  的 libc++_shared.so（linker namespace 限制），而 hnp 的 ninja/cmake 等 ELF
+  恰好需要它——SDK llvm/lib 里也没有此库；(2) conan 的 ConanFile.run() 默认
+  env="conanbuild"，用 `source conanbuild.sh` 包装一切子命令，父进程
+  os.environ 的修改全部被丢弃；(3) conanbuildenv-{settings}.sh 由
+  VirtualBuildEnv（generators 属性）在 recipe generate() **之后**写入，
+  generate() 里的 buildenv_info.define_path 也不会进该文件。结果：meson
+  detect_ninja 跑 `ninja --version` 得 exit 127（loader 报错被吞成探测失败），
+  配方无论在 generate() 里怎么注入都无效。
+
+solution: |
+  唯一有效注入点：**build() 里、第一次 meson.configure() 之前**，直接向
+  已生成的 conanbuildenv-*.sh 文件追加 export 行：
+
+  ```python
+  def _patch_conanbuildenv(self):
+      import glob as _glob
+      for _envf in _glob.glob(os.path.join(self.generators_folder,
+                                           "conanbuildenv-*.sh")):
+          with open(_envf, encoding="utf-8") as _f:
+              _text = _f.read()
+          _append = ""
+          if 'NINJA=' not in _text:
+              _append += '\nexport NINJA="/data/service/hnp/bin/ninja"\n'
+          if 'export LD_LIBRARY_PATH="/system/lib64' not in _text:
+              _append += ('export LD_LIBRARY_PATH="/system/lib64'
+                        ':/data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18'
+                        '/ohos/native/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n')
+          if _append:
+              if not _text.endswith("\n"):
+                  _text += "\n"
+              with open(_envf, "w", encoding="utf-8") as _f:
+                  _f.write(_text + _append)
+
+  def build(self):
+      self._patch_conanbuildenv()   # ← 必须在第一次 meson.configure() 前
+      ...
+  ```
+
+  要点：NINJA 环境变量是 meson detect_ninja 的第一优先探测源（绝对路径
+  绕过 PATH 搜索）；LD_LIBRARY_PATH 前置 /system/lib64 让 ninja/cmake
+  ELF 能加载 libc++_shared.so（usr/local/bin/ninja wrapper 就是这么做的）。
+
+fallback: >
+  若不想 patch env 文件：test_package 的 build() 里可直接 os.environ
+  前置 /system/lib64 + SDK llvm/lib（CMake.configure 前生效，因为
+  cmake 由 self.run 起子进程时继承修改后的 os.environ 的场景有限——
+  更稳的做法仍是 patch conanbuildenv 文件）。CI worker 上 PATH 顺序
+  恰好正确时此问题不显现（gtksourceview5 CI #61498 在无此修复时也过），
+  但本地复现/其他 worker 必踩——防御性加此段无副作用。
+
+reference_impl: >
+  archives/g/gtksourceview5/5.22.0/conanfile.py _patch_conanbuildenv()
+  archives/l/libshumate/1.7.0/conanfile.py 同款

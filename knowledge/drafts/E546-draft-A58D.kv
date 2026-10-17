@@ -1,0 +1,79 @@
+#====================================================================
+# E546 — OHOS 交叉编译中 build-time generator 与 target artifact 混用
+# 用法: 验证后由主编提升为正式 E546 条目
+# 对应的人类文档: knowledge/drafts/E546-draft-A58D.md
+#
+# 实例: libmagic/file 5.48 (PR feat/libmagic-5.48)
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E546
+trigger_tool:           make|configure|cmake
+phase:                  compilation
+error_signature:        Cannot use the installed version of file.*to compile magic support files|magic support files.*version.*match|Exec format error.*[a-z_-]*(tool|generator|compiler)|cannot execute binary file.*generated|Failed to generate.*host.*tool|refusing to run.*cross.*executable
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               cross-compile, build-system, autotools, ohos
+match_keywords:         FILE_COMPILE, magic.mgc, host tool, build-time generator, target executable, cross compile, version consistency, Exec format error, generated database, bootstrap tool, build-context
+title:                  交叉构建中版本绑定的构建期数据生成器选择：同 ABI 环境复用目标工具或异构环境执行两阶段构建
+prescan_pattern:        FILE_COMPILE\s*=|add_custom_command\(COMMAND\s+\$\{[^}]*HOST[^}]*\}|add_executable\([^)]*native|BUILD_EXECUTABLE|BOOTSTRAP.*TOOL|run.*at.*build.*time
+prescan_globs:          Makefile*, *.mk, *.am, CMakeLists.txt, *.cmake
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             上游构建分两阶段——构建期用工具 X 编译数据/代码产物 D，再把 D 与目标库一起安装；非交叉模式 X 就是刚构建的 target 二进制（可直接在构建机运行），交叉模式（--host≠--build）下上游改用构建机 PATH 上的同名系统工具并强制版本一致（D 的格式与库的解析器版本绑定），构建机没有该工具或版本不符时构建在 D 生成处中断；反之若构建系统不加区分直接运行 target X 则报 Exec format error。
+affected_scope:         自带"工具编译数据→库消费数据"双阶段构建的项目：file/libmagic（magic.mgc）、glib/gobject（glib-mkenums 系）、perl 部分模块、unicode 数据表类、语法分析器生成器、任何在 make 阶段运行自己刚链接出的可执行文件的 autotools/CMake 项目；在 OHOS 交叉构建且构建宿主与 target 同架构同 libc（HarmonyOS PC 构建 OHOS AArch64）时本条目的推荐方案适用。
+verification_cmd:       grep -RInE "FILE_COMPILE|add_custom_command|BUILD_EXECUTABLE|\.mgc|mkenums" Makefile* */Makefile.am CMakeLists.txt | head; <target-tool> --version（在构建机上直接运行）; file <target-tool>（确认 ELF 机器）; make -n 2>&1 | grep -E "cannot execute|Exec format|version"
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           run-target-tool-on-same-arch-host-with-path-override
+rec_description:        构建宿主与 target 同架构同 libc（HarmonyOS PC 构建 OHOS AArch64）时，直接用刚构建出的 target 工具编译构建期数据：通过 make 变量（如 FILE_COMPILE）传含路径的覆盖（路径含 / 时上游通常跳过系统版本检查），先完成工具目标再构建数据目标；构建出的数据产物架构无关（版本化二进制数据库），target 库运行时加载不受构建机架构影响。
+rec_command:            make -j1 FILE_COMPILE=$PWD/src/file
+                        # autotools 通用形态: make <TOOL_VAR>=$PWD/<builddir>/<tool>
+rec_auto_fix:           false
+rec_impl:               recipe
+
+fallback_priority:      2
+fallback_approach:      two-stage-host-tool-build
+fallback_description:   构建宿主与 target 异构（或 target 工具不能在宿主运行）时，两阶段构建：先用 build profile（或独立原生配方 tool_requires）构建 host 工具，用它在构建期生成数据产物，再构建 target 库并安装数据；工具与库必须同版本（数据格式与解析器版本绑定），数据产物架构无关。
+fallback_command:        conan create . -pr:h=<target-profile> -pr:b=<build-profile> --build=missing
+fallback_auto_fix:      false
+fallback_impl:          recipe|tool-require
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+forbid_1_pattern:       \|\|\s*true|ignore_errors|-(k|-keep-going).*(FILE_COMPILE|magic\.mgc)|rm.*magic\.mgc.*rule
+forbid_1_reason:        数据生成失败被吞掉后包里没有（或用陈旧的）数据库，测试和消费者会静默拿到错误识别结果
+forbid_1_consequence:   上游测试与 test_package 可能假绿或运行期报 "could not find any valid magic files"
+forbid_2_pattern:       commit.*\.mgc|prebuilt.*database|add.*magic\.mgc.*git
+forbid_2_reason:        提交预生成二进制数据库绕过构建期编译，无法验证与所构建库版本一致，且违反仓库不追踪二进制产物规则
+forbid_2_consequence:   版本升级时数据库格式漂移导致 target 端解析失败
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             no-silent-skip, provenance-verifiable
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E456, E423, E486]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E546.md
+last_updated: 2026-09-03
+source_event:           libmagic/file 5.48 OHOS AArch64 适配：交叉模式 make 在 magic.mgc 处中断，"Cannot use the installed version of file (toybox 0.8.12) to compile magic support files"
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-03
+
+draft: true
+contributor_id: A58D

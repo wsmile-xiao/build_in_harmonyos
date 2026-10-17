@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_clens C)
+find_package(clens REQUIRED)
+add_executable(test_clens test.c)
+target_link_libraries(test_clens PRIVATE clens::clens)
+enable_testing()
+add_test(NAME test_clens COMMAND test_clens)

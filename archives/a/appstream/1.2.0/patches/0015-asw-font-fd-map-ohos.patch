@@ -1,0 +1,105 @@
+--- a/compose/worker/asw-font.c	2026-09-25 06:47:30.617030625 +0800
++++ b/compose/worker/asw-font.c	2026-09-25 06:57:13.125031250 +0800
+@@ -26,6 +26,11 @@
+ #include "config.h"
+ #include "asw-font-private.h"
+ 
++#include <errno.h>
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++
+ #include <fontconfig/fontconfig.h>
+ #include <fontconfig/fcfreetype.h>
+ #include FT_SFNT_NAMES_H
+@@ -384,6 +389,19 @@
+ }
+ 
+ /**
++ * asw_font_memfd_unmap_cb:
++ *
++ * Free the mmap'ed font data once its #GBytes wrapper is released.
++ */
++static void
++asw_font_memfd_unmap_cb (gpointer data)
++{
++	gpointer *closure = data;
++	munmap (closure[0], GPOINTER_TO_SIZE (closure[1]));
++	g_free (closure);
++}
++
++/**
+  * asw_font_new_from_fd:
+  * @fd: A (sealed) file descriptor containing the font data.
+  * @file_basename: Font file basename.
+@@ -397,13 +415,65 @@
+ AswFont *
+ asw_font_new_from_fd (gint fd, const gchar *file_basename, GError **error)
+ {
+-	g_autoptr(GMappedFile) mfile = NULL;
+ 	g_autoptr(GBytes) data = NULL;
++	struct stat st;
++	gsize size = 0;
++	void *map;
++	off_t sz = 0;
++	gpointer *closure = NULL;
++
++	/* OHOS denies fstat() on file descriptors received via SCM_RIGHTS
++	 * (EACCES), which makes g_mapped_file_new_from_fd() fail internally
++	 * ("Failed to get attributes of file 'fd'"). Map the descriptor directly
++	 * instead, deriving the size via seek when fstat is denied — the same
++	 * approach the image path (asw_memfd_map_bytes) uses. */
++	if (fstat (fd, &st) != 0) {
++		if (errno != EACCES) {
++			g_set_error (error,
++				     G_FILE_ERROR,
++				     g_file_error_from_errno (errno),
++				     "Unable to get attributes of font file descriptor: %s",
++				     g_strerror (errno));
++			return NULL;
++		}
++		sz = lseek (fd, 0, SEEK_END);
++		if (sz < 0) {
++			g_set_error (error,
++				     G_FILE_ERROR,
++				     g_file_error_from_errno (errno),
++				     "Unable to determine font data size: %s",
++				     g_strerror (errno));
++			return NULL;
++		}
++		size = (gsize) sz;
++	} else {
++		if (!S_ISREG (st.st_mode)) {
++			g_set_error_literal (error,
++					     G_FILE_ERROR,
++					     G_FILE_ERROR_INVAL,
++					     "Font data descriptor is not a regular file.");
++			return NULL;
++		}
++		size = (gsize) st.st_size;
++	}
+ 
+-	mfile = g_mapped_file_new_from_fd (fd, FALSE, error);
+-	if (mfile == NULL)
+-		return NULL;
+-	data = g_mapped_file_get_bytes (mfile);
++	if (size == 0)
++		data = g_bytes_new_static ("", 0);
++	else {
++		map = mmap (NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
++		if (map == MAP_FAILED) {
++			g_set_error (error,
++				     G_FILE_ERROR,
++				     g_file_error_from_errno (errno),
++				     "Unable to map font data: %s",
++				     g_strerror (errno));
++			return NULL;
++		}
++		closure = g_new0 (gpointer, 2);
++		closure[0] = map;
++		closure[1] = GSIZE_TO_POINTER (size);
++		data = g_bytes_new_with_free_func (map, size, asw_font_memfd_unmap_cb, closure);
++	}
+ 
+ 	return asw_font_new_from_bytes (data, file_basename, error);
+ }

@@ -1,0 +1,61 @@
+#====================================================================
+# DRAFT-ee-3.2.2-ohos-sim-hal-fixed-low-addr-flash — STM32 HAL 依赖嵌入式库的 OHOS 模拟 HAL + 固定低地址 Flash 模拟
+# Source event: ee 3.2.2 (NimaLTD.I-CUBE-EE) HarmonyOS PC 适配, 2026-09-20
+# Status: UNMATCHED draft — 待人工审核 promote
+#====================================================================
+
+id:                     DRAFT-ee-3.2.2-ohos-sim-hal-fixed-low-addr-flash
+trigger_tool:           clang|conan|link|runtime
+phase:                  build|link|runtime
+error_signature:        main\.h.*No such file|Segmentation fault|SIGSEGV|cast to 'volatile uint8_t \*'.*smaller integer type|FLASH_BASE|HAL_FLASH_Unlock|__IO uint8_t
+
+severity:               2
+category:               embedded, stm32, hal, mmap, simulation, ohos
+match_keywords:         STM32, HAL, main.h, EEPROM, FLASH, __IO, uint32_t address, direct dereference, mmap, fixed low address, 0x20000000, simulated flash, embedded firmware library, 32-bit address truncation, PIE
+title:                  STM32 HAL 依赖嵌入式固件库的 OHOS 适配：模拟 HAL + 固定低地址 mmap 模拟 Flash
+
+root_cause:             嵌入式 MCU 固件库（如 ee 3.2.2 EEPROM 模拟）同时存在三个 OHOS 宿主障碍：
+                        ① 头文件耦合——ee.h 包含 STM32 HAL 的 main.h，OHOS 无此头；
+                        ② 直接地址解引用——ee.c 用 uint32_t 保存 Flash 基址并以
+                        (*(__IO uint8_t*)(eeHandle.Address + i)) 直接读写，64 位宿主上
+                        缓冲区地址超过 4 GiB 时被 uint32_t 截断，默认 PIE 链接必然 SIGSEGV
+                        （-no-pie 碰巧正常，掩盖问题）；
+                        ③ 无真实 Flash 硬件，需可观察的模拟语义（0xFF 空态、擦除、编程 1→0、读回校验）。
+
+affected_scope:         依赖 STM32/Cortex-M HAL 且内部以 32 位整型保存地址并直接解引用的
+                        嵌入式固件/中间件库移植到 64 位 OHOS/宿主平台。
+
+verification_cmd:       clang -O2 -std=c11 -I<prefix>/include smoke_test.c -L<prefix>/lib -lee -o smoke_test && ./smoke_test
+                        # 默认 PIE 链接下容量/写回读/格式化/非法参数断言全绿
+
+rec_priority:           1
+rec_approach:           sim-hal-with-fixed-low-address-mmap
+rec_description:        ① 新增 main.h 模拟 STM32 HAL：定义 __IO、HAL_StatusTypeDef/HAL_OK、
+                        FLASH_EraseInitTypeDef、FLASH_* 宏（FLASH_BASE/FLASH_PAGE_SIZE/
+                        FLASH_SECTOR_SIZE/FLASH_TYPEPROGRAM_HALFWORD）并选择无 FLASH_SIZE
+                        重定义的 MCU 型号宏（STM32F7 避免 ee.c 内 FLASH_SIZE 重定义警告）；
+                        ② 新增 ee_sim_flash.c：构造时 mmap 固定低地址 0x20000000 的 16 KiB
+                        匿名缓冲区并整段置 0xFF（Flash 空态）；HAL_FLASHEx_Erase=memset(0xFF)，
+                        HAL_FLASH_Program=半字写入（与 0xFF 做与运算，1→0 真实编程语义），
+                        Unlock/Lock=无操作返回 HAL_OK；EE_Read 直接寻址命中该缓冲区；
+                        mmap 失败时 HAL 函数如实返回 HAL_ERROR（真实错误而非越界）；
+                        ③ conanfile.py 用 tools.build:compiler_executables 取 clang + llvm-ar
+                        直接编译归档（micro-ecc 范式），patches/ 新增文件补丁必须用标准
+                        `--- /dev/null` + `+++ b/<file>` 头部（conan apply_conandata_patches 要求）。
+
+rec_command:            mmap((void*)0x20000000UL, 16384, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      platform-probe-fallback
+fallback_description:   若固定低地址被占用（mmap 失败），参照 boxfort 39bit-VA 条目思路在
+                        [4 GiB, 256 GiB) 低窗口内运行时探测可用地址后映射；但注意 ee 类库
+                        内部地址字段为 uint32_t，窗口上限必须 < 4 GiB 才能保证直接解引用安全。
+
+principles:             P005, P016
+causes:                 []
+caused_by:              []
+similar_to:             E045, DRAFT-boxfort-ohos-39bit-user-va-map-fixed-limit, DRAFT-snmalloc-0.7.5-ohos-mmap-va-reservation-limit
+prerequisite_of:        []
+conflicts_with:         []

@@ -1,0 +1,91 @@
+# E694 — 上游 autotools 探测宏 vs Conan 包交付物形态失配 → 静默降级/假绿（presage 双 shim 实证）
+# Software: presage 0.9.1（及一切 AM_PATH_CPPUNIT / AC_CHECK_LIB([curses]) 族 autotools 包）
+# Status: DRAFT — same-stem .md/.kv pair（待审核 promote 为 E 条目；取号 E694 经 knowledge_id --claim 全池重扫）
+---
+id: E694
+title: 上游 autotools 探测宏与 Conan 包交付物形态失配导致测试/工具静默降级——AM_PATH_CPPUNIT 只认 cppunit-config 可执行（conan cppunit 无此文件则 94 单测不构建而 make check 仍绿）、AC_CHECK_LIB([curses]) 求 -lcurses 基名（conan ncurses 仅 *w 库名则 presage_demo 被可选分支吞掉）
+trigger_tool: configure
+phase: configuration
+error_signature: 'CppUnit not found\. Unit tests will not be built|checking for Cppunit - version >= [0-9.]+ \.\.\. no|curses library not found\. curses demo programs will not be built'
+severity: 3
+category: platform|conan|false-green|autotools|cppunit|ncurses
+match_keywords: AM_PATH_CPPUNIT, cppunit-config, HAVE_CPPUNIT, make check, 假绿, 静默跳过, 94, CPPUNIT_TEST, AC_CHECK_LIB, curses, libcurses, ncursesw, shim, conan cppunit, testRunner
+prescan_pattern: 'CppUnit not found\. Unit tests will not be built|checking for Cppunit - version >= [0-9.]+ \.\.\. no|curses library not found\. curses demo programs will not be built'
+
+root_cause: |
+  两起同构问题，都是「上游 configure 期探测机制」与「Conan 包交付物形态」不匹配，
+  且都以“静默降级”而非报错收场：
+  1) presage 用 AM_PATH_CPPUNIT（m4/cppunit.m4，cppunit 老式 config-tool 约定）：
+     `AC_PATH_PROG(CPPUNIT_CONFIG, cppunit-config, no)` 只找名为 cppunit-config
+     的可执行程序，然后 `$CPPUNIT_CONFIG --cflags/--libs/--version` 取三元组。
+     conan cppunit/1.15.1 包 bin/ 只有 DllPlugInTester，没有 cppunit-config
+     → no_cppunit=yes → AM_CONDITIONAL([HAVE_CPPUNIT]) 为空 → test/ 下全部
+     check_PROGRAMS（testRunner 系 7 个）不构建、TESTS 为空、`make check`
+     “通过”而 94 个 CPPUNIT_TEST 一个都没跑——完整假绿面。
+     （同族：taglib FindCppUnit.cmake 需要 cppunit-config 才设
+     CPPUNIT_INSTALLED_VERSION；本例为 m4 形态。）
+  2) presage `AC_CHECK_LIB([curses],[initscr])` 按基名 -lcurses 链接探测，
+     而 conan ncurses/6.6 只交付 libncursesw.a 等 *w 库名、没有 libcurses.a
+     （系统侧也无）→ 探测失败 → HAVE_CURSES 空 → 上游“curses demo 不构建”
+     可选分支静默吞掉 presage_demo 可执行文件，包产物比上游默认形态少一件，
+     且没有任何报错。
+affected_scope: |
+  一切配 conan cppunit 的 AM_PATH_CPPUNIT autotools 包；一切按 -lcurses 基名
+  探测而 conan ncurses 为 *w 库名的包；推广形态：凡「上游按可执行程序名/库基名
+  探测」而「conan 交付形态不同」的组合都可能静默降级。
+verification_cmd: |
+  # m4 只认 cppunit-config（presage 源树）
+  grep -n "AC_PATH_PROG(CPPUNIT_CONFIG" $WORKSPACE_ROOT/tmp/builds/presage-0.9.1.work/m4/cppunit.m4
+  # conan cppunit 无此文件
+  ls "$(conan cache path cppunit/1.15.1:f23d5a9b1d537641c03c7814478a2fadb727650a)/bin"
+  # ncurses 仅 *w 库名
+  ls "$(conan cache path ncurses/6.6:21b17f8b2bc0e9511e276e3d57a23893067cefe5)/lib"
+  # configure 后置判据（命中即证降级发生）
+  grep -n "checking for Cppunit - version\|checking for initscr in -lcurses" <build>/config.log
+
+rec_approach: generate-shims
+rec_priority: 1
+rec_description: |
+  配方 generate() 在 buildfolder 下生成 conan-shims/ 并注入运行环境：
+  1) cppunit-config 壳脚本：应答 --cflags（-I<cppunit 包>/include）、
+     --libs（-L<cppunit 包>/lib -lcppunit）、其余回 <版本号>；
+     chmod 0755；env.prepend_path("PATH", shim_dir)。
+  2) libcurses.a → <ncurses 包>/lib/libncursesw.a 符号链接；
+     env.prepend_path("LIBRARY_PATH", shim_dir)（clang LIBRARY_PATH 探针实证 rc=0）
+     + AutotoolsToolchain extra_ldflags 追加 -L<shim> 双通道。
+  修复后判据：configure 出现 `checking for Cppunit - version >= 1.9.6... 1.15.1`
+  与 `checking for initscr in -lcurses... yes`，make check 打出各 runner
+  `OK (N tests)` 行且 N 之和 == 有效注册宏数。
+rec_command: |
+  # 判定（presage 实例，设备可直接执行）：
+  grep -n "checking for Cppunit - version >= 1.9.6\.\.\. 1.15.1" "$HOME/tmp/presage-0.9.1/w0/native-build.log"
+  grep -c "^OK (" "$HOME/tmp/presage-0.9.1/w0/native-build.log"
+rec_auto_fix: true
+rec_impl: recipe
+
+fallback_priority: 2
+fallback_approach: patch-configure-probe
+fallback_description: 不注入 shim 时的替代面：改上游探测（patch m4/cppunit.m4 改用 pkg-config；注意 conan cppunit.pc 的 prefix=/ 是坏的、须配方注入正确 CFLAGS/LIBS）或 patch configure 的 AC_CHECK_LIB 基名。工程量与回归面均大于 shim，仅在 shim 注入通道被框架限制时使用。
+fallback_auto_fix: false
+fallback_impl: source-patch
+
+forbid_1_pattern: CPPUNIT_CFLAGS= | CPPUNIT_LIBS=
+forbid_1_reason: 用空格/空值环境变量把上游 cppunit 探测“顶掉”（librevenge 先例的做法）只适用于“不跑上游单测”的包；presage 的测试面就是 94 个 CPPUNIT_TEST，顶掉 = 主动放弃核心测试面，属假绿。
+forbid_1_consequence: make check 全绿但零单测执行，违反 N 清点与“不得用跳过测试凑绿”红线。
+
+principles: P004, P006
+caused_by:
+similar_to: E011, E702
+conflicts_with:
+prerequisite_of:
+
+doc_file: drafts/E694-presage-0.9.1-autotools-probe-conan-shape-mismatch.md
+last_updated: 2026-09-24
+source_event: presage 0.9.1（任务卡 9711，feat/presage-0.9.1）
+
+authors: agent-session-de4f7e68 (presage-0.9.1)
+source_pr: pending
+metrics_success_count: 0
+metrics_fail_count: 0
+metrics_confidence: 0.0
+metrics_last_used:

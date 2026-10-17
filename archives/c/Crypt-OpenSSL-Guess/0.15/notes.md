@@ -1,12 +1,12 @@
 # Crypt-OpenSSL-Guess 0.15 编译笔记
 
 ## 编译日期
-2026-06-16
+2026-08-06
 
 ## 编译环境
 - 平台: OpenHarmony (aarch64-unknown-linux-ohos)
 - Perl 版本: 5.42.0
-- 编译器: clang 18.1.8
+- 编译器: clang 15.0.4
 - 构建工具: ExtUtils::MakeMaker
 
 ## 模块信息
@@ -18,7 +18,7 @@
 
 ### Step 1: 下载源码
 ```bash
-curl -k -L -o tmp/Crypt-OpenSSL-Guess-0.15.tar.gz \
+curl -L -o tmp/Crypt-OpenSSL-Guess-0.15.tar.gz \
   "https://cpan.metacpan.org/authors/id/A/AK/AKIYM/Crypt-OpenSSL-Guess-0.15.tar.gz"
 ```
 
@@ -139,14 +139,13 @@ WriteMakefile(
 
 ### 上库建议
 Crypt::OpenSSL::Guess 0.15 **完全符合上库要求**：
-1. 编译状态: `published`
+1. 编译状态: `built`
 2. 功能验证: ✅ 全部通过
 3. 质量门禁: ✅ 全部通过
 4. 依赖链: ✅ 为 Crypt::OpenSSL::RSA/Random 提供路径支持
-5. 文档完整: ✅ manifest + notes + test-report + quality-report
+5. 文档完整: ✅ manifest + notes + test-report
 
 ---
-**编译结束**: 2026-06-16 17:10
-**最终状态**: published (可加载)
-**测试验证**: 2026-06-16 17:55
-**上库结论**: ✅ 符合上库要求
+
+**编译结束**: 2026-08-06 05:05
+**最终状态**: built

@@ -1,0 +1,90 @@
+#====================================================================
+# DRAFT - radvd/2.20 实证 —— 本地 W3「先注入镜像列表、后做预下载备份」的顺序缺陷
+#   ci/conan/build_and_test.sh 的 Mirror fallback 段把 conandata.yml 的单值 url
+#   就地改写成镜像列表，之后预下载段才做 PREDL_BACKUP，于是收尾 trap 的「还原」
+#   必然还原到已污染形态 ⇒ 每次本地 W3 之后 conandata.yml 提交态必脏。
+#   收口建 PR 前必须单独把这一枚文件从 HEAD 还原并把禁词计数做到 0。
+# Draft only, do not promote without reviewer assignment.
+# Trigger event radvd/2.20（HarmonyOS PC B 机，分支 feat/radvd-2.20），2026-09-25
+# 格式 key: value（冒号后一个空格）；多行值续行以空格开头；列表逗号分隔
+# 查重 E415 / DRAFT-E323 / DRAFT-8543 / DRAFT-libnbd-1.9.6 /
+#      DRAFT-conandata-single-url-ci-mirror-fallback（已 promote 为 E549）/
+#      DRAFT-lexy-2025.05.0-e017-mirror-injection-residual-cleanup ——
+#      逐条差异见同名 .md 末节「查重与新增价值」
+#====================================================================
+
+id:                     DRAFT-radvd-2.20-conandata-predl-backup-after-mirror-rewrite
+status:                 pending-editor-review
+severity:               2
+category:               conan, build-infra, ci-script, delivery, url-pollution
+trigger_tool:           sh|python3|build_and_test.sh|ohc-run.py finish
+phase:                  installation|validation|pre-commit
+
+error_signature:        Source URLs rewritten with mirror fallback|url:\s*\n\s*- "https://gh-proxy\.com/https://|file://[^"]*predl_cache|conandata\.yml.*ghfast\.top|PF7.*(镜像|mirror).*URL
+
+match_keywords:         conandata.yml, 镜像注入, mirror fallback, gh-proxy.com, ghfast.top, file://, PREDL_BACKUP, predl_cache, trap, _restore_conandata, 还原不彻底, 提交态脏, PF7, R39, JC1, conandata.yml.orig, 收口前还原, 禁词计数, build_and_test.sh, finish, W3, 本地 CI 模拟
+
+keywords:               conandata 污染顺序, 备份发生在改写之后, trap 只撤销 file 前缀, 每次 W3 必脏, 单文件从 HEAD 逐字节还原, radvd 2.20 实证
+
+title:                  本地 W3 的镜像列表注入发生在 PREDL 备份之前，收尾 trap 的「还原」只能撤销 file:// 而撤销不了镜像注入 ⇒ conandata.yml 每跑一次 W3 必被留在脏态，收口建 PR 前必须单独从 HEAD 还原并把禁词计数做到 0
+
+root_cause:             实测基线为 feat/radvd-2.20 的 HEAD 2130d7ad8251e47ecbaeddb5c2e766f92f28979b，ci/conan/build_and_test.sh 共 1824 行，下述行号均为该版本下 `grep -n` 复核值。
+                          第一段 Mirror fallback 起于 L1019 —— L1027 用一条单行正则判定「url 与 https:// 出现在同一行」的单值形态（也就是 E549 要求合规配方写成的形态），L1029 立刻 `cp "$CONANDATA" "${CONANDATA}.orig"` 存下**全流程唯一一份改写前的干净快照**，随后 L1032-1157 的内嵌 python 块把该单值 url **就地改写为列表**并回写文件 —— L1050-1054 是 GitHub 分支（产出 `https://gh-proxy.com/<官方 url>` 打头 + 官方 url 兜底），L1141 定义 replace_url，L1153 是那条匹配式，L1154 执行 re.sub，L1156-1157 写回磁盘，L1160 打印 `[ok] Source URLs rewritten with mirror fallback`。
+                          第二段 Pre-download 起于 L1165，它才在 L1179-1180 做备份 —— `PREDL_BACKUP="${PREDL_DIR}/conandata.yml.predl-orig"` 与 `cp "$CONANDATA" "$PREDL_BACKUP"`，并在 L1181-1187 定义 `_restore_conandata()`、L1188 注册 `trap _restore_conandata EXIT`；脚本自己的注释（L1176-1178）写明该 trap 的用意是「脚本退出时恢复官方 URL —— 防止 file:// 残留被提交」，并点名先例 gulkan PR（#7121）被 W4 判 P0。
+                        缺陷就在**备份点比改写点晚 25 行** —— trap 拿到的快照已经是 L1154 改写后的列表形态，所以它退出时能撤销的只有 L1293 那次 `content.replace(url, f'file://{local_path}')`，**结构上不可能撤销 L1154 的镜像列表注入**；而 L1029 那份真正的干净快照在整个脚本里再没有第二次引用（`grep -n "\.orig"` 全文只命中 L1029 一处，无任何还原路径）。
+                        推论（确定性而非概率性）—— 凡满足 L1027 单值形态判定的源码包，每跑一次本地 W3（`python3 scripts/ohc-run.py finish <pkg> <ver> built` 的 Step 5/10 会调本脚本）就会被留在带 `gh-proxy.com` 列表项的 conandata.yml；此时「顺手 `git add archives/<l>/<pkg>`」就把镜像域名写进提交态，而 pipeline 的 run 第 [4/8] 步正是按目录形态 `git add`，不会替你把这一枚文件挑出来。
+
+affected_scope:         所有走本地 W3（build_and_test.sh）的源码包，与包本身无关 —— 判据只有「conandata.yml 写成 E549 要求的单值 url 且域名在 L1027 白名单内」。写得越合规的配方越必脏，因此这是**合规配方的必然后遗症**，不是 radvd 特有；radvd 之外 notes/test-report 已在本仓留下同形态观察，历史上 gulkan（其 PR 号 7121，被 W4 判 P0）、knewstuff、ki18n 是同一副作用的落地事故。
+
+verification_cmd:       cd <worktree>; sed -n '1032,1157p' ci/conan/build_and_test.sh > ~/tmp/uc2/<task>/rewrite_block.py; python3 ~/tmp/uc2/<task>/rewrite_block.py <一枚单值 url 形态的 conandata.yml 副本>; grep -nE 'gh-proxy\.com|^ *url$' <该副本>   （观察单值 url 被拆成列表且镜像项出现）再按 L1179 备份、L1293 写 file://、L1188 还原，末态仍带 gh-proxy.com。完整可重放脚本见同名 .md「最小复现」节
+
+verification:           radvd/2.20 on HarmonyOS PC（B 机 aarch64，profile ohos-aarch64）2026-09-25 实证 ——
+                          (1) 提交态还原前后各一枚真实提交为证 —— `fc7a4a8637`（【主窗停工接管】radvd/2.20 收工前落盘）把 `https://ghfast.top/https://github.com/radvd-project/radvd/releases/download/v2.20/radvd-2.20.tar.gz` 写进了 archives/r/radvd/2.20/conandata.yml 第 3 行的 url 值；`42d8b5a231fac17628078bbc75c08b7b064488e1` 才把它还原成官方单值 URL，`sha256` 一字未动（1 file changed, 1 insertion(+), 1 deletion(-)）。
+                          (2) 零构建逻辑复现已在本仓 HEAD 上跑通 —— 按 verification_cmd 抽出真实改写块对一枚同形态 conandata 跑一遍，改写后第 3 行只剩 `url`、第 4 行是 `- "https://gh-proxy.com/https://github.com/..."`；随后模拟 L1179-1180 备份 + L1293 file:// 替换 + L1188 trap 还原，末态仍是「列表 + gh-proxy.com」，禁词命中行数 = 1（即还原后仍脏）。脚本 `~/tmp/uc2/z34-radvd/repro-w3-pollution.sh`（设备 B 机，可原样重放）。
+                          (3) 本包收口前禁词计数 `grep -cE 'file://|ghfast|gh-proxy'` 该文件 = 0，且 `git show HEAD:archives/r/radvd/2.20/conandata.yml` 与该文件逐字节一致；工作区另有 `conandata.yml.ghfast-bak`、`conandata.yml.orig` 两枚改写期快照，均被 archives/.gitignore 第 2、4 行忽略，不会随 add 进 PR（这点必须核，不能默认）。
+
+rec_priority:           1
+rec_approach:         restore-that-one-file-from-head-then-count-forbidden-words
+rec_description:        把「本地 W3 之后单独还原 conandata.yml」当成收口建 PR 前的**固定第 0 步**，而不是事后补救 ——
+                          1) 只对这一枚文件动手，用 `git show HEAD:<路径> > <路径>` 从 HEAD 逐字节取回（不要去改 sha256、不要去改脚本、不要整目录 `git checkout`，那会连累同目录其它证据文件）；
+                          2) 用禁词计数当硬判据 —— `grep -cE 'file://|ghfast|gh-proxy' <路径>` 必须输出 0（注意 grep 无命中时退出码是 1，属正常，别把它读成失败）；
+                          3) 再核 `git diff --name-only` 里**不该**出现 conandata.yml；若出现且内容只差 sha256，说明改错了，停手；
+                          4) 最后才做按目录的 `git add`，避免 run 第 [4/8] 步把镜像 URL / file:// 直接送进 PR；
+                          5) 顺手确认 `.ghfast-bak` / `.orig` / `.build-cache/` 这三类残留被 .gitignore 覆盖（`git check-ignore -v <文件>`），没覆盖就单列未跟踪、绝不 add。
+
+rec_command:            cd <worktree>; P=archives/<l>/<pkg>/<ver>/conandata.yml; git show "HEAD:$P" > "$P"; n=$(grep -cE 'file://|ghfast|gh-proxy' "$P"); echo "forbidden-hit=$n（必须 0）"; git diff --name-only | grep -F "$P" && echo "STILL-DIRTY 停手" || echo "CLEAN 可以 add"
+
+rec_auto_fix:           true
+rec_impl:               manual-pre-commit-step
+
+fallback_priority:      2
+fallback_approach:      use-the-l1029-orig-snapshot
+fallback_description:   若该包的 conandata.yml 还没进过任何提交、或 HEAD 版本本身就是脏的（上一轮已把镜像 URL 提交进去），改写段在 L1029 留下的 `conandata.yml.orig` 就是改写前那份干净快照，可 `cp conandata.yml.orig conandata.yml` 作应急取源；但它只在「本轮真的跑过 Mirror fallback 段」时存在，且属运行期残留，取完必须删掉以免撞 JC1，最终仍以 HEAD 或手工修回官方单值 URL 为准。
+fallback_command:       cd <worktree>/archives/<l>/<pkg>/<ver>; cp conandata.yml.orig conandata.yml; grep -cE 'file://|ghfast|gh-proxy' conandata.yml; rm -f conandata.yml.orig
+
+forbid_1_pattern:       git add (archives/<l>/<pkg>|-A|.) 之后才想起 conandata.yml 未还原
+forbid_1_reason:        run 第 [4/8] 步与常规收口都按目录形态暂存文件，脏的 conandata.yml 会被一起带走；等 CI 或 W4 报出来，镜像 URL 已经在提交历史里，只能追加还原提交（radvd 即 fc7a4a8637 提交、42d8b5a231 追加还原）。
+forbid_1_consequence:   PF7 源 URL 闸 / R39 官方源约束直接命中，gulkan PR（#7121）已被 W4 按 P0 打回，属可预防不可侥幸。
+
+forbid_2_pattern:       为了让禁词变 0 去改 sha256|改写 url 里的域名而不同步 sha256|把镜像域名当官方域名提交
+forbid_2_reason:        sha256 是源码身份的唯一硬校验，镜像只改传输通道不改内容；为过闸动 sha256 会把「取源污染」升级成「源码身份造假」，性质从可返工变成不可信。
+forbid_2_consequence:   远端 CI 的 source() 校验必败，且审查按造假处理，整条 PR 的可信度连带作废。
+
+forbid_3_pattern:       改 ci/conan/build_and_test.sh 的备份顺序来「顺手修框架」
+forbid_3_reason:        ci/ 是多窗口共享的框架红线面，本条只交付「副作用管理 + 事后逐字节还原」这一层；把 PREDL_BACKUP 提到改写之前属框架真修，影响所有包的取源路径，必须独立 PR 并先取得用户批准。
+forbid_3_consequence:   框架改动混进单库配方 PR，违反一 PR 一软件归档的原子边界，CI/AI 复核面连带扩大。
+
+principles:             R39, PF7, R6, R10, W3
+causes:                 []
+caused_by:              [E549, E017]
+similar_to:             [E415, DRAFT-8543-conandata-comment-url-predl-rewrite, DRAFT-libnbd-1.9.6-local-predl-url-pollution, DRAFT-E323-conan-verify-ghfast-bak-rollback, DRAFT-lexy-2025.05.0-e017-mirror-injection-residual-cleanup]
+conflicts_with:         [DRAFT-8543-conandata-comment-url-predl-rewrite]
+prerequisite_of:        []
+
+related:                E549（conandata 必须写单值 url 才拿得到镜像兜底 —— 正是该合规写法触发本条污染）；E415（同症状「CI 后 conandata 必脏」的既有已 promote 条目，只登记了副作用与事后核验，未给出「还原为何必然失败」的机制）；E017（镜像注入总目）；DRAFT-E323（conan_verify.py 侧 .ghfast-bak 崩溃恢复回滚，另一枚脚本的独立缺陷）；gulkan PR（#7121，W4 P0 先例）
+doc_file:               knowledge/drafts/DRAFT-radvd-2.20-conandata-predl-backup-after-mirror-rewrite.md
+last_updated:           2026-09-25
+source_event:           radvd/2.20 适配（HarmonyOS PC B 机，分支 feat/radvd-2.20，HEAD 2130d7ad8251e47ecbaeddb5c2e766f92f28979b）—— finish Step5/10 本地 W3 之后 conandata.yml 处于带 gh-proxy.com 列表项的脏态，提交态由 42d8b5a231 手工还原；机制行号在 HEAD 上逐条 grep 复核，另以零构建脚本 repro-w3-pollution.sh 跑通全链路
+source_commit:          42d8b5a231fac17628078bbc75c08b7b064488e1
+authors:                主理-34
+source_pr:              待主窗创建（正文以「知识库扩展」引用本对草稿）

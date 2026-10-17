@@ -1,0 +1,140 @@
+--- a/Makefile	2026-08-25 14:47:21.911159376 +0800
++++ b/Makefile	2026-08-25 15:08:35.067156876 +0800
+@@ -1,7 +1,12 @@
+ #!/bin/make
+ #
+-# Makefile for libnsbmp
++# Standalone Makefile for libnsbmp (adapted for HarmonyOS/OpenHarmony)
+ #
++# The upstream NetSurf build system (NSSHARED / netsurf-buildsystem) is not
++# packaged for OHOS and is not a standard autotools/cmake/meson project, so it
++# cannot be driven directly on this platform. This Makefile reproduces the
++# upstream compile, install and test rules without the NSSHARED dependency.
++#
+ # Copyright 2009-2020 John-Mark Bell <jmb@netsurf-browser.org>
+ 
+ # Component settings
+@@ -8,42 +13,94 @@
+ COMPONENT := nsbmp
+ COMPONENT_VERSION := 0.1.7
+-# Default to a static library
++# Default to a static library (matches upstream COMPONENT_TYPE ?= lib-static)
+ COMPONENT_TYPE ?= lib-static
+ 
+-# Setup the tooling
+-PREFIX ?= /opt/netsurf
+-NSSHARED ?= $(PREFIX)/share/netsurf-buildsystem
+-include $(NSSHARED)/makefiles/Makefile.tools
++# Installation paths
++PREFIX ?= /usr/local
++LIBDIR ?= lib
++INCLUDEDIR ?= include
++# Build output directory (objects, library, test binaries)
++BUILDDIR ?= build
+ 
+-# Reevaluate when used, as BUILDDIR won't be defined yet
+-TESTRUNNER = test/runtest.sh $(BUILDDIR) $(EXEEXT)
++# Source files
++SRCDIR := src
++INCDIR := include
++SRC := $(SRCDIR)/libnsbmp.c
++OBJ := $(BUILDDIR)/libnsbmp.o
++LIB := $(BUILDDIR)/lib$(COMPONENT).a
++PC_IN := libnsbmp.pc.in
++PC := $(BUILDDIR)/lib$(COMPONENT).pc
+ 
+-# Toolchain flags
++# Compiler settings
++CC ?= clang
++AR ?= llvm-ar
++RANLIB ?= llvm-ranlib
++CFLAGS ?= -fPIC -O2
++
++# Warning flags adapted from the original NetSurf Makefile.
++# -Werror is removed for HarmonyOS compatibility: clang on OHOS may emit
++# warnings that differ from upstream's GCC, and -Werror would abort the build
++# on harmless warnings.
+ WARNFLAGS := -Wall -W -Wundef -Wpointer-arith -Wcast-align \
+ 	-Wwrite-strings -Wstrict-prototypes -Wmissing-prototypes \
+-	-Wmissing-declarations -Wnested-externs -pedantic
+-# BeOS/Haiku standard library headers create warnings
+-ifneq ($(BUILD),i586-pc-haiku)
+-  WARNFLAGS := $(WARNFLAGS) -Werror
+-endif
++	-Wmissing-declarations -Wnested-externs -pedantic -Wno-error
+ 
+-CFLAGS := -D_BSD_SOURCE -D_DEFAULT_SOURCE \
+-	-I$(CURDIR)/include/ -I$(CURDIR)/src \
++COMPILE_CFLAGS := -D_BSD_SOURCE -D_DEFAULT_SOURCE -std=c99 \
++	-I$(CURDIR)/$(INCDIR)/ -I$(CURDIR)/$(SRCDIR) \
+ 	$(WARNFLAGS) $(CFLAGS)
+-ifneq ($(GCCVER),2)
+-  CFLAGS := $(CFLAGS) -std=c99
+-else
+-  # __inline__ is a GCCism
+-  CFLAGS := $(CFLAGS) -Dinline="__inline__"
+-endif
+ 
+-TESTCFLAGS := -g -O2
+-TESTLDFLAGS := -lm -l$(COMPONENT) $(TESTLDFLAGS)
++# Upstream test programs (analyse + decode each BMP/ICO, write PPM/PAM)
++TEST_BINS := $(BUILDDIR)/test_decode_bmp $(BUILDDIR)/test_decode_ico
++TESTLDFLAGS := -lm
+ 
+-include $(NSBUILD)/Makefile.top
++.PHONY: all clean install uninstall test check
+ 
+-# Extra installation rules
+-I := /$(INCLUDEDIR)/
+-INSTALL_ITEMS := $(INSTALL_ITEMS) $(I):include/libnsbmp.h
+-INSTALL_ITEMS := $(INSTALL_ITEMS) /$(LIBDIR)/pkgconfig:lib$(COMPONENT).pc.in
+-INSTALL_ITEMS := $(INSTALL_ITEMS) /$(LIBDIR):$(OUTPUT)
++all: $(LIB) $(PC)
++
++$(BUILDDIR):
++	mkdir -p $(BUILDDIR)
++
++$(OBJ): $(SRC) | $(BUILDDIR)
++	$(CC) $(COMPILE_CFLAGS) -c -o $@ $<
++
++$(LIB): $(OBJ)
++	$(AR) rcs $@ $(OBJ)
++	@command -v $(RANLIB) >/dev/null 2>&1 && $(RANLIB) $@ || true
++
++$(PC): $(PC_IN) | $(BUILDDIR)
++	sed -e 's|PREFIX|$(PREFIX)|g' \
++	    -e 's|LIBDIR|$(LIBDIR)|g' \
++	    -e 's|INCLUDEDIR|$(INCLUDEDIR)|g' \
++	    -e 's|VERSION|$(COMPONENT_VERSION)|g' \
++	    $(PC_IN) > $(PC)
++
++# Test programs link the freshly built static library
++$(BUILDDIR)/test_decode_bmp: test/decode_bmp.c $(LIB)
++	$(CC) $(COMPILE_CFLAGS) -o $@ test/decode_bmp.c $(LIB) $(TESTLDFLAGS)
++
++$(BUILDDIR)/test_decode_ico: test/decode_ico.c $(LIB)
++	$(CC) $(COMPILE_CFLAGS) -o $@ test/decode_ico.c $(LIB) $(TESTLDFLAGS)
++
++test: $(TEST_BINS)
++
++# Upstream official test runner: decodes the full BMP+ICO corpus
++# (bmpsuite, afl-bmp, ns-afl-bmp, icons, afl-ico, ns-afl-ico) and reports
++# pass/error counts. runtest.sh resolves test data relative to the source
++# root, so this target must be invoked from the source directory.
++check: test
++	test/runtest.sh $(BUILDDIR)
++
++clean:
++	rm -rf $(BUILDDIR)
++
++install: all
++	mkdir -p $(DESTDIR)$(PREFIX)/$(LIBDIR)/pkgconfig
++	mkdir -p $(DESTDIR)$(PREFIX)/$(INCLUDEDIR)
++	cp $(LIB) $(DESTDIR)$(PREFIX)/$(LIBDIR)/
++	cp $(PC) $(DESTDIR)$(PREFIX)/$(LIBDIR)/pkgconfig/
++	cp $(INCDIR)/libnsbmp.h $(DESTDIR)$(PREFIX)/$(INCLUDEDIR)/
++
++uninstall:
++	rm -f $(DESTDIR)$(PREFIX)/$(LIBDIR)/$(notdir $(LIB))
++	rm -f $(DESTDIR)$(PREFIX)/$(LIBDIR)/pkgconfig/$(notdir $(PC))
++	rm -f $(DESTDIR)$(PREFIX)/$(INCLUDEDIR)/libnsbmp.h

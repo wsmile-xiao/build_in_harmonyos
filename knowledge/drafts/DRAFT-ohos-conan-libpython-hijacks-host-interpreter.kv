@@ -1,0 +1,156 @@
+#====================================================================
+# DRAFT-ohos-conan-libpython-hijacks-host-interpreter —— 用宿主解释器跑测试时，
+#   LD_LIBRARY_PATH 上的 conan 版 libpython 会把宿主解释器「换身份」
+#   （sys.platform / sysconfigdata 名改变），任何 sysconfig 调用即 ModuleNotFoundError
+#
+# 对应文档: knowledge/drafts/DRAFT-ohos-conan-libpython-hijacks-host-interpreter.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+# 注: 本文件所有字段均为单行值或块值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-ohos-conan-libpython-hijacks-host-interpreter
+source_lib:             cffi 2.1.1
+trigger_tool:           python|pytest|conan|mesa|distutils
+phase:                  testing|runtime
+error_signature:        No module named '_sysconfigdata__linux_aarch64-linux-ohos'|
+                         ModuleNotFoundError.*_sysconfigdata|
+                         sysconfig.*ModuleNotFoundError|
+                         distutils.*_sysconfigdata.*not found|
+                         Error relocating.*libpython.*symbol not found|
+                         sys\.platform.*(linux|ohos).*(期望|expected).*(ohos|linux)
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               python, environment, runtime, linking, conan, testing
+match_keywords:         sysconfigdata, _sysconfigdata__linux_aarch64-linux-ohos,
+                         sys.platform, sysconfig.get_config_var, distutils,
+                         LD_LIBRARY_PATH, libpython3.12.so, conan python 依赖,
+                         package_info 自动注入, 宿主解释器, host interpreter,
+                         interpreter identity, 身份翻转, embed, embedding,
+                         make_server, verify(), 编译型测试, quiet mode
+title:                  用**宿主**解释器跑 Python 包的编译型测试时，conan `python`
+                        依赖经 package_info 自动注入的 lib 会让宿主解释器改用
+                        conan 版 libpython —— sys.platform 与 sysconfigdata 名随编译时
+                        平台改变，任何 sysconfig.get_config_var() 即 ModuleNotFoundError
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  conan 的 `python/3.12.x` 依赖在 package_info() 里会把自身 lib 目录注入
+  `LD_LIBRARY_PATH`（runenv）。当测试**用宿主解释器**运行（本仓多包适配的通行做法，
+  原因见 DRAFT-ohos-python-test-must-use-host-interpreter 式的既有结论）时，
+  该 LD_LIBRARY_PATH 会让宿主 `python3` 在启动时被动态链接器解析到 **conan 版
+  libpython3.12.so**，而不是它自己编译时绑定/预期的那份。
+  后果是解释器「换身份」：`sys.platform` 由 `ohos` 变成 conan 构建时的 `linux`，
+  于是 `sysconfig` 去加载 `_sysconfigdata__linux_aarch64-linux-ohos` 这个
+  **按 conan 编译平台拼出的模块名**——而宿主 stdlib 里只有自己那份
+  (`_sysconfigdata__ohos_aarch64-...`)，于是任何 `sysconfig.get_config_var()`
+  都抛 `ModuleNotFoundError: No module named '_sysconfigdata__linux_aarch64-linux-ohos'`。
+  症状具有欺骗性：报错指向 sysconfig 内部、与「我用错了 LD_LIBRARY_PATH」毫无字面
+  关联；且若测试代码只是 import 而没调 sysconfig，则**完全无感**，直到某个用例
+  需要 `LDSHARED`/`LIBDIR`/`platform` 时才炸。
+  cffi 2.1.1 实证：`testing/conftest.py`（或其间接依赖）经 sysconfig 取编译参数，
+  在 LD_LIBRARY_PATH 含 conan python lib 时全线报
+  `No module named '_sysconfigdata__linux_aarch64-linux-ohos'`。
+affected_scope: >
+  所有「用宿主解释器跑测试、同时被测包（或测试依赖）是 conan `python/*` 依赖」
+  的 Python 包适配：cffi、psutil、lxml、pillow 等带编译型测试的包。
+  以及任何在测试期调用 `sysconfig`（含 distutils/setuptools 内部调用）、
+  或需编译扩展、或需判断平台的用例。
+  反向情形同样存在（本条的对称坑）：**embedding 类用例**需要宿主 libpython 在
+  `LD_LIBRARY_PATH` 上（其生成的可执行文件 NEEDED 里有 libpython3.12.so.1.0，
+  否则 exit 127/「Error loading shared library」）—— 故两种需求方向相反，
+  必须分别处理，不能一刀切。
+verification_cmd: >
+  ① 复现身份翻转：在含 conan python lib 的 LD_LIBRARY_PATH 下启动宿主解释器——
+     `LD_LIBRARY_PATH=<conan_python_pkg>/lib python3 -c "import sys, sysconfig; print(sys.platform); sysconfig.get_config_var('CC')"`
+     → 命中时报 `ModuleNotFoundError: No module named '_sysconfigdata__linux_aarch64-linux-ohos'`
+  ② 对照：把该 lib 从 LD_LIBRARY_PATH 剔除后同一条命令 → 正常
+  ③ 确认 conan 是否自动注入了它：看测试环境里
+     `echo $LD_LIBRARY_PATH | tr ':' '\n' | grep <conan_python_pkg>`
+     （或检查 conanrun.sh / VirtualRunEnv 生成物），命中即证实来源
+  ④ 查是否已有 `_PYTHON_SYSCONFIGDATA_NAME` 环境变量干扰：
+     `env | grep _PYTHON`（有则一并清理）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           strip-conan-libpython-from-ld-path-when-using-host-interpreter
+rec_description: >
+  ①【针对本坑】用宿主解释器跑测试时，把 conan `python` 依赖的 lib 目录从
+     `LD_LIBRARY_PATH` 中**剔除**（按 realpath 比较，避免符号链接绕过），
+     并清掉可能残留的 `_PYTHON_SYSCONFIGDATA_NAME`。剔除后扩展仍正常：Python
+     符号由**已在运行的主解释器**解析（扩展的 NEEDED 里即便有 libpython，
+     动态链接器也会复用已加载的同一 soname）。cffi 实测：剔除后套件恢复正常。
+  ②【对称需求，必须一并处理】embedding / 内嵌解释器类用例需要**宿主** libpython
+     在 `LD_LIBRARY_PATH` 上（否则其生成的测试可执行文件 exit 127）。做法是把
+     宿主 `sysconfig.get_config_var('LIBDIR')` 作为**单项**前置进 LD_LIBRARY_PATH，
+     而不是把 conan 版留在里面。二者顺序：先剔除 conan 版，再前置宿主版。
+  ③【判定方向】一句话原则：**跑测用宿主解释器 → 必须让宿主自己的 libpython 当先；
+     凡是被 conan python 依赖自动注入的同名 lib，都要从测试进程的 LD_LIBRARY_PATH
+     里剔除**。可用探针自检：启动后断言 `sys.platform == 'ohos'`
+     （或断言 `sysconfig.get_config_var('CC')` 可正常返回），不满足即抛错，
+     避免静默跑出错误结果。
+rec_command:            # conanfile 内对测试 env 处理（剔除 conan lib + 前置宿主 lib）
+                        env["LD_LIBRARY_PATH"] = os.pathsep.join(p for p in old.split(os.pathsep) if os.path.realpath(p) != os.path.realpath(conan_py_lib))
+                        env["LD_LIBRARY_PATH"] = os.pathsep.join([host_libdir] + [p for p in env["LD_LIBRARY_PATH"].split(os.pathsep) if p])
+rec_auto_fix:           false
+rec_impl:               ld-path-realpath-filter
+
+fallback_priority:      2
+fallback_approach:      assert-platform-and-fail-loudly
+fallback_description: >
+  若因某些原因无法安全剔除（例如被测套件确实需要 conan 版 libpython），
+  至少在测试启动时**显式断言平台身份**（`sys.platform`、sysconfig 可取 CC），
+  不满足即**报错退出**而不是继续跑——宁可不跑，也不要在一半功能失效的解释器上
+  跑出一片虚假结果。同时把该环境约束写入 MANIFEST/notes。
+fallback_command:       python3 -c "import sys, sysconfig; assert sysconfig.get_config_var('CC'); print(sys.platform, 'ok')"
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       (conan.*libpython|LD_LIBRARY_PATH).*(不管|忽略|无影响)|
+                         sysconfig.*ModuleNotFoundError.*(当作|视为).*(上游|库的)?bug
+forbid_1_reason:        该 ModuleNotFoundError 是**测试进程的 LD_LIBRARY_PATH 选错了
+                        libpython** 造成的环境污染，不是被测库或 Python 自身的缺陷；
+                        当成上游 bug 会导致误报与错误修复方向。
+forbid_1_consequence:   把环境配置错误上报为上游问题，返工且污染知识库；
+                        更糟的是若测试只 import 不调 sysconfig，会静默产出错误的通过率。
+
+forbid_2_pattern:       embedding.*(exit 127|Error loading shared library).*(直接|就).*(跳过|deselect).*(不|未).*前置.*libpython
+forbid_2_reason:        embedding 类用例需要宿主 libpython（方向与本体相反，但同源）；
+                        先剔除 conan 版后必须**补上宿主版**，否则从「身份错乱」变成
+                        「找不到 libpython」，仍是非上游因素的失败。
+forbid_2_consequence:   同一根因在两侧各制造一批失败，却只在文档里记「用例不可用」，
+                        掩盖真实修法（先剔除 conan 版、再前置宿主版）。
+
+principles:             P013, P015
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E036, E512, DRAFT-ohos-test-subprocess-overrides-pythonpath-needs-venv]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 (Metadata) ═══
+doc_file:               knowledge/drafts/DRAFT-ohos-conan-libpython-hijacks-host-interpreter.md
+last_updated:           2026-09-20
+source_event:           cffi 2.1.1 OHOS aarch64 适配：用宿主解释器跑测试时，
+                        LD_LIBRARY_PATH 上的 conan 版 libpython3.12.so 使宿主解释器
+                        sys.platform 由 ohos 变 linux，sysconfig 抛
+                        ModuleNotFoundError: No module named
+                        '_sysconfigdata__linux_aarch64-linux-ohos'
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:              11334
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-20
+
+draft:                  true
+contributor_id:         3211

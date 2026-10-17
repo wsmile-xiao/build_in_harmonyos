@@ -1,0 +1,41 @@
+#====================================================================
+# Draft: HMDFS 上 tarball 自带 configure 的 autotools 重生成防线——
+#        四层固定递增 mtime touch + 反引号 PKG_CONFIG_PATH 注入
+#====================================================================
+
+id:                     DRAFT-CLUTTER-1264-HMDFS-AUTOTOOLS-REGEN-GUARD
+trigger_tool:           make|aclocal|automake|autoconf|pkg-config|bash
+phase:                  compilation|build-system
+error_signature:        aclocal-1.16: error: @am_AUTOM4TE@ failed with exit status: 127|automake-1.16: error: autoconf failed with exit status: 127|make: *** [Makefile:586: aclocal.m4] Error 127|make: *** [Makefile:557: Makefile.in] Error 1|No package 'glib-2.0' found|fatal error: 'glib-object.h' file not found
+
+severity:               2
+category:               platform|portability|build-system
+match_keywords:         HMDFS, autotools, aclocal.m4, Makefile.in, configure, touch, mtime, stale, aclocal-1.16, automake-1.16, autom4te, tarball, autoreconf, PKG_CONFIG_PATH, 命令替换, 反引号, env 前缀, jobserver, mkfifo, confstat, umask, mktemp, catdoc, boa, ccze, cogl
+
+title:                  HMDFS 上 tarball 自带 configure 的 make 触发"重生成 aclocal.m4/Makefile.in → aclocal-1.16/autom4te 不存在 Error 127"问题，touch 防 stale 的正解是按依赖链四层固定递增时间戳（configure.ac+*.am+*.m4 < aclocal.m4 < Makefile.in+config.h.in < configure），而不是单趟 os.walk touch——单趟乱序在同一秒内落 mtime，字母序会让依赖项反超 27μs 而被判 stale；另一坑：self.run 里 `env VAR=x cmd \`pkg-config ...\`` 的反引号命令替换发生在 env 前缀生效之前，pkg-config 全部报 not found，必须改 `export VAR=x; cmd \`pkg-config ...\``
+
+root_cause:             ①tarball 自带的 autotools 产物（configure/Makefile.in/aclocal.m4）在 HMDFS 上因文件系统行为触发表观 mtime 变化，make 按 autotools 依赖链（configure.ac+*.m4 → aclocal.m4 → configure；aclocal.m4+Makefile.am → Makefile.in）判 stale 就尝试重生成，而 OHOS 本机没有 aclocal-1.16/automake/autoconf 链（autom4te exit 127）。第一直觉是"touch 全部相关文件"让它们统一变新——但 os.walk 单趟按字母序 touch，aclocal.m4 在 configure.ac 之前、Makefile.in 在 aclocal.m4 之后被 touch，亚秒级（HMDFS mtime_ns 精度）依赖项反超目标 27μs，make 仍判 stale：实测形态一 aclocal.m4 stale（aclocal-1.16 Error 127→make Error 2）、形态二 Makefile.in stale（automake Error 1）。HMDFS 不保 touch 顺序，且单文件粒度的 utime 只能设秒级以上的稳定差。②self.run("env PKG_CONFIG_PATH=x clang -c ... `pkg-config --cflags glib-2.0`") 的反引号命令替换由 shell 在执行 env 前缀**之前**展开——替换子 shell 里 PKG_CONFIG_PATH 还是旧值，pkg-config 对每个包报 not found，连锁 fatal error: 'glib-object.h' file not found，极具迷惑性（看起来像 .pc 生成失败）。
+
+affected_scope:         所有在 OHOS HMDFS 上用 tarball 自带 configure 构建（不经 autoreconf）的 autotools 三方库——catdoc/boa/ccze/cogl/clutter 一族及后续同形态库；反引号坑适用于配方内一切带命令替换的环境注入。
+
+verification_cmd:       make -n aclocal.m4 2>/dev/null | grep -c aclocal; python3 -c "import os; [print(f, os.stat(f).st_mtime_ns) for f in ('configure.ac','aclocal.m4','Makefile.in','configure')]"
+
+rec_priority:           1
+rec_approach:           four-layer-monotonic-mtime-touch-and-export-injection
+rec_description:        ①四层固定递增时间戳 touch：以 now-3600 为基点，按 (configure.ac, *.am, *.m4)→+1s、(aclocal.m4)→+2s、(Makefile.in, config.h.in)→+3s、(configure)→+4s 分层 os.utime(path,(t,t))——固定秒差彻底消除亚秒竞态，make 对全部重生成规则判 up-to-date。注意 .m4 通配须排除 aclocal.m4 本身（它在第二层）。②环境注入用 export 而非 env 前缀：self.run("export PKG_CONFIG_PATH=%s; clang -c ... `pkg-config --cflags ...`")——export 对整个 shell 及其命令替换子 shell 生效。③配套 HMDFS 常规件（先例已固化）：configure 的 confstat 机制 umask 077→000（0700 临时目录不可写）；make -j1（jobserver mkfifo Operation not permitted）；HMDFS 目录遍历极慢（配方勿 os.walk 超大树、shell 勿 find ~/.conan2 全缓存）。
+rec_command:            python3 - <<'EOF' (配方内：分层 utime 见 conanfile.py touch 段) EOF && make -n aclocal.m4 && echo UP-TO-DATE
+rec_auto_fix:           false
+
+# ═══ 社区 W 系字段（goblinrs 审查线：solution/fallback/verify_builds 必填）═══
+solution: >
+  代码级（conanfile.py 内建两件）：①四层固定递增时间戳 touch——base_t = int(time.time())-3600，layers = ((1,("configure.ac",),(".am",".m4")), (2,("aclocal.m4",),()), (3,("Makefile.in","config.h.in"),()), (4,("configure",),()))，分层 os.utime(path,(base_t+offset, base_t+offset))；.m4 通配须排除 aclocal.m4 本身（它在第二层）；固定秒差彻底消除亚秒竞态，make 对全部重生成规则判 up-to-date。②环境注入改 export 形态——self.run("export PKG_CONFIG_PATH=%s; clang ... `pkg-config --cflags ...`")，export 对整个 shell 及其命令替换子 shell 生效（env 前缀形态的替换子 shell 看不到变量）。③配套 HMDFS 件：confstat umask 077→000、make -j1（jobserver mkfifo 禁）。
+fallback: >
+  四层 touch 仍触发重生成（autotools 版本差异导致额外依赖）时：patch 删除 Makefile 中 aclocal.m4/Makefile.in/configure 重生成规则的目标依赖，或配方内提供 automake/autoconf 工具链（成本高，不推荐）。
+verify_builds: "#14164（本 PR CI）+ 本机 conan create EXIT=0（修复前两形态 aclocal Error 127 / automake Error 1 复现于 notes.md 问题表 #3/#4）"
+draft: true
+status: pending-review
+reference_impl: catdoc/boa/ccze/cogl 同族先例（umask/jobserver 件已固化，本条增量在 mtime 分层与反引号时序）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              14164
+source_commit:          45fbc05a1a

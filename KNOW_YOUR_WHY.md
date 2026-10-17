@@ -50,7 +50,7 @@
 
 - L1/L2 知识写入后，必须在 manifest.yaml 中加 `knowledge_ref` 引用
 - conan-verify G2 失败时自动调用引擎匹配 E-entry
-- 未命中时自动生成草稿（`knowledge/graph/drafts/`），主编审核后入正式知识库
+- 未命中时自动生成草稿（`knowledge/drafts/`），主编审核后入正式知识库
 
 ### 边做边记
 
@@ -85,12 +85,9 @@
 
 | 指标 | 值 |
 |------|-----|
-| 已收录软件 | **427** 款 / **490** 个版本 |
-| 已发布（published） | 26 |
-| 已编译（built） | 76 |
-| 编译失败 | 5 |
-| 错误模式 | 211 条（E001-E211） |
-| 编译铁律 | 32 条（R1-R32） |
+| 已收录软件 | **2500+** 款（以 [SUMMARY.md](SUMMARY.md) 为准） |
+| 错误模式 | **320+** 条 E001-E320（以 `knowledge/graph/index.tsv` 为准） |
+| 编译铁律 | **43** 条（R1-R43） |
 
 > 数据来源：[SUMMARY.md](SUMMARY.md)（自动生成，请勿手动编辑）
 
@@ -100,13 +97,13 @@
 
 | 文档 | 说明 |
 |------|------|
-| [SKILL.md](SKILL.md) | 主操作手册（v8.7），回答"怎么做" |
+| [SKILL.md](SKILL.md) | 主操作手册（v12.2），回答"怎么做" |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南 |
 | [docs/ADAPTATION_GUIDE.md](docs/ADAPTATION_GUIDE.md) | AI 适配操作手册 |
 | [docs/TEST_QUALITY_SPEC.md](docs/TEST_QUALITY_SPEC.md) | 测试质量规范 |
-| [references/iron-rules.md](references/iron-rules.md) | 32 条铁律详解 |
+| [references/iron-rules.md](references/iron-rules.md) | 43 条铁律详解（R1-R43） |
 
 ---
 
 *本文档是 SKILL.md 的精简伴侣。SKILL.md 回答"怎么做"，本文档回答"为什么"和"绝对不能忘什么"。*
-*对齐 SKILL.md v8.7 · 2026-07-01*
+*对齐 SKILL.md v12.2 · 2026-08-20*

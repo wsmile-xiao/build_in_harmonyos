@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(kicad_templates_test_package LANGUAGES CXX)
+
+add_executable(kicad_templates_probe kicad_templates_probe.cpp)
+target_compile_features(kicad_templates_probe PRIVATE cxx_std_17)

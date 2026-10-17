@@ -1,0 +1,70 @@
+# ═══ Draft knowledge entry — CMake 上游以 find_package(QUIET)+FetchContent 引用 vendored 子模块：已发布的 conan 包可令空子模块不被触碰 ═══
+# Timestamp: 2026-09-30
+# Software: rampler 2.1.1（任何 CMake 上游，依赖以 find_package(<pkg> <ver> QUIET) 优先 + FetchContent(git clone) 兜底）
+# Gate: 真机 conan create（OHOS aarch64 / conan 2.29.1，2026-09-30 实测）
+# Status: DRAFT（首报；与 E150"手工拷子模块源入树"是同族不同解法，见 dedup_notes）
+# 用法：复制为 DRAFT-<你的包>-<你的版本>-find-package-preferred-over-vendored-submodule.{kv,md}
+
+id: DRAFT-rampler-2.1.1-find-package-preferred-over-vendored-submodule
+title: CMake 上游 find_package(QUIET)+FetchContent 引用 vendored 子模块时，声明已发布的 conan 依赖即命中 find_package，空子模块不被触碰——无需拷源也无需打网络补丁
+trigger_tool: recipe / conan create / cmake configure
+phase: build|configure
+error_signature: "Fetching submodules|vendor/[a-z]+/ is empty|does not contain a CMakeLists.txt|Cannot find package"
+severity: 2
+category: cmake|submodule|dependency-resolution|ohos
+match_keywords: find_package, FetchContent, QUIET, CMakeDeps, submodule, .gitmodules, vendor,
+  bioparser, biosoup, tag archive
+prescan_pattern: find_package\\(.*QUIET\\)|FetchContent_Declare
+prescan_globs: archives/**/conanfile.py, **/CMakeLists.txt
+safety_boundary: |
+  ①上游必须是 find_package **在前**（QUIET）、FetchContent 兜底在后——若上游无条件 FetchContent
+  （没有 find_package 分支），本条不适用，得走 E150（单独取子模块源拷入）或补丁改 CMakeLists；
+  ②conan 依赖版本必须与 find_package 要求的**最低版本**兼容（QUIET 找不到仍会落 FetchContent）；
+  ③FetchContent 兜底里的 GIT_REPOSITORY 若真被执行，设备/CI 到 GitHub 的网络问题会以
+  clone 挂起形式另发——判别：configure 日志里搜 "Fetching"。
+keywords: find_package, FetchContent, QUIET, CMakeDeps, M2, submodule, tag archive,
+  空子模块, rampler, bioparser, biosoup
+approach: |
+  **背景（M2 场景）**：tag 归档（codeload）不带子模块内容——rampler 2.1.1 归档里
+  `.gitmodules` 在而 `vendor/bioparser/` 目录为空，CMake 直接 configure 会报
+  子模块路径下无 CMakeLists。
+
+  **关键上游结构**（rampler 2.1.1 CMakeLists 原文）：
+  ```cmake
+  find_package(bioparser 3.0.15 QUIET)
+  if (NOT bioparser_FOUND)
+    FetchContent_Declare(bioparser GIT_REPOSITORY ... GIT_TAG 3.0.15)
+    ...FetchContent_Populate...
+  endif ()
+  ```
+  biosoup 同构。两个依赖在 ohpcd 远端**均已发布**（bioparser/3.0.15、biosoup/0.10.0）。
+
+  **修复**：配方里正常声明依赖 + CMakeDeps 生成包配置：
+  ```python
+  def requirements(self):
+      self.requires("bioparser/3.0.15")
+      self.requires("biosoup/0.10.0")
+  def generate(self):
+      tc = CMakeToolchain(self); tc.generate()
+      deps = CMakeDeps(self); deps.generate()
+  ```
+  find_package 命中 conan 生成的包配置 ⇒ FetchContent 分支永不执行 ⇒ 空子模块不被触碰。
+  零补丁、零网络依赖。
+
+  **判别（领坑时 30 秒）**：
+  1. `tar tz <tag归档> | grep .gitmodules` 有、`grep -c 'vendor/<sub>/'` 文件数为 0 ⇒ M2 场景；
+  2. 看上游 CMakeLists 是否 find_package 在前；
+  3. 查 conan 远端该依赖是否已发布（`conan download <pkg>/<ver> --only-recipe -r=ohpcd`）。
+  三条全绿 ⇒ 用本条；第 3 条不绿 ⇒ 该依赖本身按适配任务先做（拓扑序）或走 E150。
+
+  **验证后读数（rampler 2.1.1 实测）**：conan create 成功；conan-verify G0-G4 全 PASS；
+  test_package 三条断言（--version / `-o .` missing-arguments / usage 路径）通过。
+  configure 日志中无任何 FetchContent 痕迹。
+dedup_notes: |
+  E150：子模块缺失时"单独取子模块源拷入归档"——本条与其同族但**解法不同**（利用上游
+  find_package 优先结构直接以 conan 包满足探测，不改归档内容）；且 E150 适用于无条件
+  FetchContent 的上游。
+  M2 草稿（prefer-make-dist-asset-over-tag-archive-for-submodules）：前提是 release 有
+  **源码**资产；rampler 2.1.1 的 release 资产只有 2.0.0/1.1.1（且均为 bin/打包形态），
+  2.1.1 无源码资产 ⇒ M2 不适用，本条接位。
+  E540（runner PATH）：不同机制。

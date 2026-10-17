@@ -1,0 +1,1 @@
+. "/storage/Users/currentUser/opt/ai-worker/repo/archives/l/lua-resty-http/0.17.2/test_package/deactivate_conanbuildenv-armv8.sh"

@@ -1,0 +1,33 @@
+#====================================================================
+# Draft: klibc-dash 2.0.14 — 上游测试二进制输出非 UTF-8 字节，回灌到工具链日志后
+#        触发 UnicodeDecodeError，使 conan-verify/conan create 在「读取子进程输出」
+#        阶段崩溃（表现为 G2 FAIL、堆栈落在 subprocess._translate_newlines）
+# 来源: klibc-dash 2.0.14 适配（2026-09-25）
+#====================================================================
+
+id:                     DRAFT-UPSTREAM-TEST-BINARY-NONUTF8-LOG-DECODE-CRASH
+trigger_tool:           conan|test|python
+phase:                  testing|verification
+error_signature:        UnicodeDecodeError: 'utf-8' codec can't decode byte|_translate_newlines|data = data\.decode\(encoding, errors\)
+
+severity:               2
+category:               testing|conan|packaging|compat
+match_keywords:         UnicodeDecodeError, utf-8 codec, invalid start byte, _translate_newlines, subprocess capture_output text=True, conan create, conan-verify, G2 FAIL, upstream tests, inet_aton, inet_pton, raw address bytes, binary output, per-test log redirection, results.tsv
+
+title:                  上游测试程序打印原始二进制字节（如 inet_aton/inet_pton 打印地址字节）时，把测试输出直接回灌给 conan/工具链会触发 UnicodeDecodeError 导致 verifier 崩溃——批量跑上游测试必须把每个用例输出重定向到独立日志文件
+
+root_cause:             klibc 的 usr/klibc/tests 里 inet_aton / inet_pton 会把解析后的地址按原始字节写到 stdout（含 0xb1 等非 UTF-8 字节）。配方 build() 若用 self.run("timeout 20 <prog>") 让子进程输出回灌到 conan 输出流，工具侧（如 ohc 的 conan_verify._run，subprocess.run(capture_output=True, text=True)）会在解码捕获输出时抛 UnicodeDecodeError，堆栈落在 subprocess._translate_newlines，表象是「conan-verify G2 FAIL」而看不到任何构建错误——极易被误判为编译失败。
+affected_scope:         任何在 conanfile build()/test() 里批量执行上游测试二进制的配方（Conan 2 的 self.run 会捕获并转发输出）；凡是测试程序可能输出非 UTF-8（原始字节、本地化编码、二进制转储）的包都会命中，且只在「有测试输出」时才复现，容易在 CI 上偶发。
+verification_cmd:       python3 -c "import glob,os
+for f in glob.glob('<build>/upstream-tests/*.log'):
+    try: open(f,'rb').read().decode('utf-8')
+    except UnicodeDecodeError as e: print(os.path.basename(f), hex(e.object[e.start]))"
+
+rec_priority:           1
+rec_approach:           redirect-each-upstream-test-output-to-own-logfile
+rec_description:        在配方 build() 里对每个上游用例做 `timeout 20 "<prog>" <args> > "<outdir>/<name>.log" 2>&1`，异常退出码仍由 self.run 返回（用于统计 PASS/FAIL），但内容不再进入上层日志。这样做同时满足 R51 的「逐项用例名称 + 日志路径」留档要求：把 (name, status, log_path) 汇总写成 results.tsv。不要用 text=False 或先解码再转发（治标且丢证据）；也不要因为解码崩溃就把测试整体跳过（会丢失上游测试统计）。
+rec_command:            timeout 20 "<tests>/<prog>" <args> > "<build>/upstream-tests/<prog>.log" 2>&1; echo $? >> "<build>/upstream-tests/results.tsv"
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# 首次记录于 klibc-dash/2.0.14 适配（notes.md 错误 #6）

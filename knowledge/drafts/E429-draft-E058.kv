@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E429.kv，填写各字段
+# 对应的人类文档: doc/E429.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E429
+trigger_tool: cmake|conan|create|install|find_path
+phase: packaging
+error_signature: install.*DESTINATION.*<依赖包>/share/indi|数据文件不在本包|share/indi/<新文件> 出现在依赖包目录
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 3
+category: cmake, packaging, conan
+match_keywords: find_path, INDI_DATA_DIR, INDI_ROOT, PATH_SUFFIXES, install(FILES, DESTINATION, CMAKE_INSTALL_PREFIX, 写进依赖包, 产物缺失, CMakeCache, Nova_DIR, 相对路径, find_package 变量
+title: 上游 CMake 若把数据目录用 find_path 找出来（如 indi-3rdparty 的 INDI_DATA_DIR 经 INDI_ROOT 命中），该变量会是**依赖包的绝对路径**，而驱动的 install(FILES … DESTINATION ${INDI_DATA_DIR}) 会把产物写进依赖包、本包反而没有该文件——修法是在 toolchain 里预置该变量为相对路径（find_path 对已定义变量跳过搜索）或补丁改相对目的地
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: indi-3rdparty 的 cmake_modules/FindINDI.cmake 用 `find_path(INDI_DATA_DIR NAMES drivers.xml PATH_SUFFIXES share/indi …)` 定位 INDI 数据目录。适配时把 INDI_ROOT 指向预构建 libindi 的 package_folder（这是让 finder 命中依赖包的必要手段），而 libindi 包里确实带 share/indi/drivers.xml → find_path 命中，INDI_DATA_DIR 被定为**依赖包的绝对路径**。随后 indi-talon6/CMakeLists.txt 的 `install(FILES ${CMAKE_CURRENT_BINARY_DIR}/indi_talon6.xml DESTINATION ${INDI_DATA_DIR})` 因目的地是绝对路径而忽略 CMAKE_INSTALL_PREFIX → XML 被写进 **libindi 的包目录**（实测确实写进去了），本包只有 bin/ 没有 share/indi → 消费者校验报 "INDI data file is missing"。
+affected_scope: 所有「cmake configure 时把某目录变量用 find_path/find_library 解析、而 install() 用该变量当 DESTINATION」的上游工程；在 Conan 里把依赖包的 package_folder 通过 *_ROOT 提示注入时最易触发（finder 会在依赖包内命中）
+verification_cmd: ① 构建后 `grep '^INDI_DATA_DIR' <build>/CMakeCache.txt`（若为绝对路径即命中本问题）② `ls <本包>/share/indi/`（应含驱动 XML）③ `git status`/`find` 检查依赖包目录是否被写入
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: preset-directory-variable-to-relative-path-in-toolchain
+rec_description: 在 recipe 的 generate() 里用 `tc.variables["INDI_DATA_DIR"] = "share/indi"` 预置该变量为**相对路径**——CMake 的 find_path 对已定义（非 NOTFOUND）的变量会**直接跳过搜索**，因此既避免了写入依赖包，又让 install() 以 CMAKE_INSTALL_PREFIX（= 本包）为基准落到 share/indi/。此路不需改上游源码。若上游变量名不可预置（例如被 include() 后强制覆盖），备选是加补丁把 install 目的地改成相对的 `${CMAKE_INSTALL_DATADIR}/indi`（GNUInstallDirs 已 include）。
+rec_command: tc.variables["INDI_DATA_DIR"] = "share/indi" # generate() 内，tc.generate() 之前
+rec_auto_fix: false
+rec_impl: manual
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: patch-install-destination-to-relative-datadir
+fallback_description: 若无法预置变量，则在归档 patches/ 内加补丁把 `install(FILES … DESTINATION ${INDI_DATA_DIR})` 改为 `DESTINATION ${CMAKE_INSTALL_DATADIR}/indi`（相对目的地 → 随 CMAKE_INSTALL_PREFIX 落到本包）。只改构建脚本、不改被编译源码。
+fallback_command: patch -p1 --dry-run < patches/000N-<pkg>-datadir-relative.patch
+fallback_auto_fix: false
+fallback_impl: manual forbid_1_pattern:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:
+forbid_1_reason:
+forbid_1_consequence:
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E429.md
+last_updated: 2026-10-08
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: E058

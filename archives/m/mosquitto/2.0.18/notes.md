@@ -1,81 +1,61 @@
 # mosquitto 2.0.18 — 编译进度
 
-> 档案创建时间: 2026-04-27 00:00:00
-> 最后更新: 2026-04-27 (当前状态)
-> 当前会话 ID: (可选，用于多轮对话追踪)
+> 档案创建时间: 2026-08-07
+> 最后更新: 2026-08-07
+> 状态: built (conan-verify passed, W3 CI passed)
 
 ## 一、基本信息
 | 项目 | 值 |
 |------|-----|
 | 软件 | mosquitto |
 | 版本 | 2.0.18 |
-| 状态 | 🔵 进行中 / ✅ success / ⚠️ partial / ❌ failed |
-| 构建系统 | autotools/cmake/meson/... |
-| 源码路径 | URL |
+| 状态 | ✅ success |
+| 构建系统 | cmake |
+| 源码路径 | https://mosquitto.org/files/source/mosquitto-2.0.18.tar.gz |
 
-## 二、编译阶段（checkbox 实时更新）
+## 二、编译阶段
 
 ### Phase 1: 环境准备
-- [ ] ohc-run.py init-build 完成 / 源码下载解压
+- [x] init-build 完成 / 源码下载解压
 
-### Phase 2: 编译（configure + make + make install）
-- [ ] configure 完成（记录参数和耗时）
-- [ ] make 编译完成（记录错误和修复）
-- [ ] make install 完成
+### Phase 2: 编译（cmake + make）
+- [x] cmake configure 完成
+- [x] make 编译完成
+- [x] make install 完成
 
-### Phase 2.5: 独立目录安装验证（⭐ 必须做）
-- [ ] 干净源码 + 补丁应用
-- [ ] 独立 TEST_PREFIX configure + make install
-- [ ] 功能回归测试结果
+### Phase 2.5: Conan 配方生成与验证
+- [x] conan-init 生成 conanfile.py + conandata.yml + test_package/
+- [x] conan-verify 全部通过 (G0-G4 + L2/L4/L5)
 
 ### Phase 3: 测试验证
-- [ ] make check / make test 结果
-- [ ] 安全弹窗触发确认
+- [x] conan create test_package 通过
+- [x] test_mosquitto 调用 mosquitto_lib_init/version/new/destroy API
 
-### Phase 4: 预编译包制作（⭐ verify PASS 后必须）
-- [ ] Step 1-10 打包流程（见 packaging.md）
+### Phase 4: 归档收尾
+- [x] 补丁生成（refresh-patch --auto）
+- [x] manifest.yaml 更新
+- [x] W3 本地 CI 模拟通过
+- [x] 归档关闭
 
-### Phase 5: 归档收尾
-- [ ] 补丁生成（ohc-run.py refresh-patch --auto）
-- [ ] manifest.yaml / README.md / PROGRESS.md 更新
-- [ ] ohc-run.py verify-build 质量门禁
+## 三、平台修复
 
-## 三、对话记录（⭐ 断点续传核心）
+### 修复 1: CMakeLists.txt
+- 问题: cmake_minimum_required(VERSION 3.1) 不兼容 CMake 4.x
+- 修复: bump 到 3.5
+- 补丁: patches/0001-CMakeLists.txt.patch
 
-> **每轮对话结束时必须更新此节。新 AI 会从这里恢复上下文。**
-
-### 对话 #N — 2026-04-27 HH:MM
-**操作**: （做了什么，如"执行 configure"、"修复 xxx bug"、"制作预编译包"）
-**结果**: （成功/失败/部分成功，附关键输出摘要）
-**发现的问题**: （遇到的坑、错误信息、根因分析）
-**当前状态**: （精确到哪个步骤，下一步该做什么）
-**遗留问题**: （未解决的、需要下轮继续的）
-
----
-
-### 对话 #1 — 2026-04-27 00:00
-**操作**: 执行 ./configure --prefix=$DEFAULT_PREFIX
-**结果**: （待填写）
-**发现的问题**: （待填写）
-**当前状态**: Phase 2 configure 进行中
-**遗留问题**: 无
-
-（后续每轮对话追加...）
+### 修复 2: config.h
+- 问题: HarmonyOS 不实现 pthread_cancel/pthread_testcancel (与 Android Bionic 相同)
+- 修复: 添加 __OHOS__ 守卫，不定义 HAVE_PTHREAD_CANCEL
+- 补丁: patches/0002-config.h.patch
 
 ## 四、源码修改清单
 | 文件 | 原因 | 方式 | 补丁状态 |
 |------|------|------|---------|
-| ... | ... | ... | ... |
+| CMakeLists.txt | CMake 4.x 兼容性 | 修改 cmake_minimum_required | ✅ 0001-CMakeLists.txt.patch |
+| config.h | HarmonyOS pthread_cancel 缺失 | 添加 __OHOS__ 守卫 | ✅ 0002-config.h.patch |
 
-## 五、预编译包交付物
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| ... | ... | ... |
-
-## 六、结束记录
-- **最终状态**: ...
-- **结束时间**: ...
----
-
-**编译结束**: 2026-04-27 11:07
-**最终状态**: partial
+## 结束记录
+- **最终状态**: built (conan-verify passed, W3 CI passed, W4 audit passed)
+- **结束时间**: 2026-08-07
+- **编译结束**: 2026-08-07

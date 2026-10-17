@@ -1,0 +1,103 @@
+--- a/asinfo.c
++++ b/asinfo.c
+@@ -34,21 +34,22 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include "globals.h"
+ 
+ #ifndef CRIPPLED_LIBC  /* must be after globals.h - which includes defs.h */
+ 
+ #include "asinfo.h"
+ 
+ /* private. */
+ 
+-static struct __res_state res;
++/* 统一使用经典 POSIX 解析器接口（res_init/res_query/h_errno）：
++ * 不持有 per-call 的 resolver 状态（无 static __res_state）。 */
+ 
+ /* forward. */
+ 
+ static char *asinfo_from_ipv4(const char *, char **, char **);
+ #ifdef asinfo_ipv6
+ static const char *asinfo_from_ipv6(const char *, char **, char **);
+ #endif
+ static char *asinfo_from_dns(const char *, char **, char **);
+ static const char *keep_best(char **, char **, char *, char *);
+ 
+@@ -76,30 +77,36 @@
+ }
+ 
+ /* asinfo_domain_exists(domain) -- verify DNS-level existence of a domain
+  *
+  * return boolean -- does this domain exist in some form?
+  */
+ bool
+ asinfo_domain_exists(const char *domain) {
+ 	u_char buf[NS_PACKETSZ];
+ 
++	/* 经典 POSIX 解析器接口：res_query() 前必须显式 res_init()，
++	 * 不得依赖未初始化状态；res_init() 返回值按 POSIX 语义检查
++	 * （0=成功，非 0=失败，失败时域存在性不可确认，返回 false）。 */
++	if (res_init() != 0)
++		return false;
+ 	return res_query(domain, ns_c_in, ns_t_txt, buf, sizeof buf) > 0 ||
+-		_res.res_h_errno != HOST_NOT_FOUND;
++		h_errno != HOST_NOT_FOUND;
+ }
+ 
+ /* asinfo_shutdown() -- deallocate underlying library's heap resources
+  */
+ void
+ asinfo_shutdown(void) {
+-	if ((res.options & RES_INIT) != 0)
+-		res_nclose(&res);
++	/* 经典 POSIX 解析器接口（res_init/res_query）为进程级全局状态，
++	 * 无 per-query 句柄或堆资源需要显式释放，故无操作。 */
++	(void)0;
+ }
+ 
+ /* static. */
+ 
+ /* asinfo_from_ipv4(addr, asnum, cidr) -- prepare and use ASINFO IPv4 name
+  *
+  * return NULL on success, or else, reason (malloc'd string) for failure.
+  *
+  * side effect: on success, *asnum and *cidr will be heap-allocated strings.
+  */
+@@ -167,28 +174,31 @@
+  */
+ static char *
+ asinfo_from_dns(const char *dname, char **asnum, char **cidr) {
+ 	u_char buf[NS_PACKETSZ];
+ 	int n, an, rrn, rcode;
+ 	char *result;
+ 	ns_msg msg;
+ 	ns_rr rr;
+ 
+ 	DEBUG(1, true, "asinfo_from_dns(%s)\n", dname);
+-	if ((res.options & RES_INIT) == 0)
+-		res_ninit(&res);
+-	n = res_nquery(&res, dname, ns_c_in, ns_t_txt, buf, sizeof buf);
++	/* 统一经典 POSIX 解析器接口：res_init()/res_query()，错误码经 h_errno
++	 * 暴露（配 hstrerror()）。res_init() 返回值按其 POSIX 语义检查
++	 * （0=成功，非 0=失败——失败时解析器未就绪，如实返回错误）。 */
++	if (res_init() != 0)
++		return strdup(hstrerror(h_errno));
++	n = res_query(dname, ns_c_in, ns_t_txt, buf, sizeof buf);
+ 	if (n < 0) {
+-		if (res.res_h_errno == HOST_NOT_FOUND)
++		if (h_errno == HOST_NOT_FOUND)
+ 			return NULL;
+ 		else
+-			return strdup(hstrerror(res.res_h_errno));
++			return strdup(hstrerror(h_errno));
+ 	}
+ 	if (ns_initparse(buf, n, &msg) < 0)
+ 		return strdup(strerror(errno));
+ 	rcode = ns_msg_getflag(msg, ns_f_rcode);
+ 	if (rcode != ns_r_noerror) {
+ 		if (asprintf(&result, "DNS RCODE 0x%x", rcode) < 0)
+ 			return strdup(strerror(errno));
+ 		return result;
+ 	}
+ 	an = ns_msg_count(msg, ns_s_an);

@@ -1,0 +1,134 @@
+package: libgsystemservice
+version: "0.3.0"
+homepage: "https://gitlab.gnome.org/pwithnall/libgsystemservice"
+license: LGPL-2.1-or-later
+status: built
+build_system: meson
+build_date: "2026-09-20"
+
+source:
+  url: "https://gitlab.gnome.org/pwithnall/libgsystemservice/-/archive/0.3.0/libgsystemservice-0.3.0.tar.gz"
+  sha256: "06dc0f8533fdfd6fa6acd96c76e2782a97ebbea9bb55fb7b82356dc065a21dcb"
+  tar_format: tar.gz
+  notes: >-
+    上游位于 GNOME GitLab（project id 1180，路径 pwithnall/libgsystemservice），
+    默认分支 main、最新 tag 0.3.0；`GNOME/libgsystemservice` 这个路径在 GitLab
+    API 上不存在（404），只有 pwithnall/ 命名空间下这一份。tarball 解出目录
+    libgsystemservice-0.3.0/，配方用 strip_root=True 拉平。meson 项目，
+    发布物不含生成文件，subprojects/ 为空，因此 wrap_mode=nodownload 不会联网。
+
+build:
+  system: meson
+  configure_options:
+    - "default_library=shared"
+    - "wrap_mode=nodownload"
+    - "gtk_doc=false"
+    - "installed_tests=false"
+  dependencies:
+    - glib/2.84.0.1
+    - systemd/261
+    - polkit/127
+  tool_requires:
+    - meson/1.11.0
+
+patches_applied: []
+
+notes: |
+  meson 项目，**无补丁**（上游源码在 OHOS 上原样可编译）。五处适配都在配方侧：
+
+  1) 两个「名字对不上」的 pkg-config 依赖。上游 meson.build 私有依赖写的是
+     dependency('libsystemd') 与 dependency('polkit-gobject-1')，而 PkgConfigDeps
+     按 **包名** 生成 .pc（systemd.pc / polkit.pc），meson 找不到。两个依赖包里
+     自带的真实 .pc（libsystemd.pc / polkit-gobject-1.pc）才是要找的东西，
+     但它们是用 --prefix=/ + DESTDIR 装出来的，prefix= 指向 /，直接复制会让
+     -I${includedir} 落到根目录。配方把这两份 .pc 复制进 generators_folder
+     （meson 的 pkg_config_path 首位）并把 prefix= 改写成实际包目录。
+     同一套路见 archives/a/accountsservice/26.27.3。
+     特例：已发布的 systemd/261 二进制包里 lib/pkgconfig/ 是**空**的
+     （它的 build() 只构建 libsystemd 目标、不走 meson.install()，
+     pkg.generate() 的产物就没落盘），polkit/127 则自带 .pc。对这种情况
+     配方改走 _synthesize_libsystemd_pc()，按包内真实布局
+     （include/systemd/sd-*.h + lib/libsystemd.so）合成一份最小 .pc，
+     Version 取自 dependency.ref.version，Cflags 带 -I${includedir}
+     与 -I${includedir}/systemd。同一处坑见 archives/l/libratbag/0.18。
+
+  2) glib 的 proxy-libintl。OHOS 上 glib 与子项目 proxy-libintl 一起构建，
+     g_libintl_* 就在 glib 包里，但 glib 配方的 package_info 没声明 intl 系统库，
+     PkgConfigDeps 生成的 glib-2.0.pc 缺少 -lintl，消费者会 undefined reference
+     到 g_libintl_*。配方就地增补生成的 .pc（补 -lintl 与 glib 工具变量），
+     并把 libintl 静态/动态库路径加进 meson 的 c_link_args。
+
+  3) meson 机器文件里的 ar/ranlib/pkg-config。MesonToolchain 生成的
+     conan_meson_native.ini 的 [binaries] 段在 OHOS worker 上缺这三项，配方
+     从 conf/已知 SDK 路径补注入。
+
+  4) gnome.compile_resources() 要走 pkg-config 工具变量。上游 tests/meson.build
+     用它生成 gresource；meson 的 gnome._find_tool() 把 glib-compile-resources
+     映射到 gio-2.0 模块的 glib_compile_resources 变量（注意映射与直觉相反：
+     glib-* 里只有 glib-mkenums / glib-genmarshal 挂 glib-2.0，其余四个都挂
+     gio-2.0），随后 ModuleState.find_tool() 在 .pc 分支上调用的是
+     dep.get_variable(pkgconfig='glib_compile_resources') —— **没有 default**，
+     变量缺失即
+     ERROR: Could not get pkg-config variable and no default provided for
+     <PkgConfigDependency gio-2.0: True ['>= 2.71']>。PkgConfigDeps 生成的 .pc
+     只写 Cflags/Libs、不带任何工具变量，配方遂在 _augment_glib_pkg_config()
+     的映射表里补上 gio-2.0.pc（值一律指向 _prepare_glib_build_tools() 拷贝
+     并重签后的 staging 副本，因为 glib 包缓存里的原件在 HMFS 上不可执行）；
+     同时把 -lintl 的增补收窄回 glib-2.0.pc / gobject-2.0.pc——gio 不引用
+     g_libintl_*，给它挂上只会让消费者的 gio 链接行多一个无谓的 -lintl。
+
+  5) 测试运行环境挂 /system/lib64。polkit/127 的 libpolkit-gobject-1.so.0 是
+     libgsystemservice-0.so.0 的直接 NEEDED，而该库自己的 DT_NEEDED 只有
+     libz.so 与 libc.so（glib/expat/duktape 全部静态链入）；ohpcd 发布的
+     zlib/1.3.1(\.1) 包内只有静态 libz.a、没有 libz.so，CI 里 zlib 还进了
+     Skipped binaries，于是 meson test 的 LD_LIBRARY_PATH（清一色 conan 依赖
+     lib/）没有 libz.so 的来源。OHOS 上 conan-run 的库路径默认不含系统库目录
+     （avahi-ui/0.8 为 libc++_shared.so 补 /system/lib64、alkimia/8.2.1 同款），
+     libz.so 只能来自 /system/lib64。配方在 OHOS 上 append_path（不是 prepend：
+     系统同名库不得顶掉 conan 的 glib/expat，baloo/26.04.3 同款理由）。
+     症状是 CI #62298 三个测试程序全 exit 127，loader 报
+     "Error loading shared library libpolkit-gobject-1.so.0: (needed by
+     .../libgsystemservice-0.so.0)" + polkit_* symbol not found——报的是正在解析的
+     那个直接依赖，被它拖住的 libz.so 不单独点名，归因须从 DT_NEEDED + 实际包
+     内容反推，不能只看被点名的库。
+     ★ 但这一段的归因是**错的**：挂上 /system/lib64 之后 CI #62306 仍报逐字相同
+     的错。真因见 6)。/system/lib64 这一行保留（它服务的是真实存在的 libz.so
+     依赖），但它不是那条报错的解药。
+
+  6) 依赖包里的 SONAME 是符号链接（E073）。CI #62306 的 LD_LIBRARY_PATH 里
+     已经有 .../p/polki5512206552703/p/lib，报错却一字未变——不是「找不到」，
+     是「找到了加载不了」：`Error loading shared library X: (needed by Y)` 冒号后
+     **strerror 为空**就是符号链接解析失败的特征（找不到会写 No such file or
+     directory，ELF 未签名会写 Permission denied，E077）。
+     判据用 conanmanifest.txt 的 md5：Conan 对符号链接记的是**目标字符串**的
+     md5，实测
+       lib/libpolkit-gobject-1.so:   77d3b7c8… == md5("libpolkit-gobject-1.so.0")
+       lib/libpolkit-gobject-1.so.0: d2edb620… == md5("libpolkit-gobject-1.so.0.0.0")
+       lib/libpolkit-gobject-1.so.0.0.0: b341322b…   ← 唯一的真文件
+     （libpolkit-agent-1.so.0 同款；libgmobile 的依赖 json-glib-1.8.0 亦同：
+       libjson-glib-1.0.so.0 == md5("libjson-glib-1.0.so.0.1000.6")。)
+     而 libgsystemservice-0.so.0 的 DT_NEEDED 用的正是**链接名**。
+     修法：_stage_symlinked_sonames() 把各依赖 libdir 顶层的符号链接展开成真文件
+     副本放进 <build>/conan-staged-soname-libs/，prepend 到 LD_LIBRARY_PATH 最前
+     （副本按字节复制，自带原签名）。依赖包在 Conan 缓存里只读且被其它包引用，
+     改不得，故只能在消费侧补——与 libsigc/2.12.1、fluidsynth/2.5.7、
+     libxft/2.3.8 同属 E073 处置。
+
+  上游测试：libgsystemservice/tests/meson.build 的 test_programs 注册 3 个测试
+  程序（config-file / peer-manager / service），共 13 个 g_test_add 用例
+  （9 + 2 + 2）。配方在 build() 内全量执行 meson test，并**回读**
+  meson-logs/testlog.txt 的汇总块做硬断言——不吃退出码，因为 SKIP 与
+  「用例根本没注册」同样以退出码 0 结束。
+
+  其中 peer-manager 在 OHOS 上**必然失败**：其夹具调用 g_test_dbus_up()，需要
+  一个私有 dbus-daemon 在 AF_UNIX socket 上监听，而 OHOS 沙箱拒绝 AF_UNIX
+  bind（Operation not permitted，见 archives/d/dbus/1.14.10.2/manifest.yaml），
+  且已发布的 dbus 包只含客户端库、不含 dbus-daemon。该程序仍然被构建、被执行
+  （不是 SKIP），配方显式「允许它失败但必须核对失败原因」：只有当失败日志里
+  出现已知的「无 session bus」标记时才放行，否则抛异常——避免真实回归伪装成
+  已声明的平台限制。
+
+  适配后实测口径：上游 3 个程序 / 13 个用例；本平台 2/3 程序通过
+  （config-file、service 全绿），peer-manager 因上述沙箱限制失败，
+  通过率 66.7%（程序口径）/ 11/13（用例口径，peer-manager 的 2 个用例
+  未通过）。用例口径 84.6%，程序口径 66.7%，均在规则要求的 50% 以上。

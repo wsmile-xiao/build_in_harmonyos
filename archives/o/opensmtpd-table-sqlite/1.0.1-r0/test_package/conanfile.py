@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Conan test_package template — Conan L1 official test.
+"""Conan test_package for opensmtpd-table-sqlite.
 
-This is the L1 test in the five-level test system.
-CI runs this automatically via `conan create` (which invokes test_package).
-
-File location: archives/{letter}/opensmtpd-table-sqlite/{version}/test_package/conanfile.py
+Verifies the sqlite3 transitive dependency is functional by building
+and running a C program that creates an in-memory SQLite database,
+inserts data, and queries it back.
 """
 import os
 
@@ -12,12 +11,13 @@ from conan import ConanFile
 from conan.tools.cmake import CMake, cmake_layout
 
 
-class OpensmtpdtablesqliteTestConan(ConanFile):
+class OpensmtpdTableSqliteTestConan(ConanFile):
     settings = "os", "compiler", "build_type", "arch"
     generators = "CMakeDeps", "CMakeToolchain"
 
     def requirements(self):
         self.requires(self.tested_reference_str)
+        self.requires("sqlite3/3.49.1")
 
     def layout(self):
         cmake_layout(self)
@@ -30,5 +30,8 @@ class OpensmtpdtablesqliteTestConan(ConanFile):
     def test(self):
         cmake = CMake(self)
         cmake.test()
-        # Alternatively, run the binary directly:
-        # self.run(f"{os.path.join(self.cpp.build.bindirs[0], 'test_opensmtpd-table-sqlite')}", env="conanrun")
+        # Also verify the installed table-sqlite binary exists and runs
+        dep = self.dependencies["opensmtpd-table-sqlite"]
+        binary = os.path.join(str(dep.package_folder), "libexec", "smtpd", "table-sqlite")
+        assert os.path.isfile(binary), f"table-sqlite binary not found at {binary}"
+        self.run(f'"{binary}" --nonexistent-config 2>&1; test $? -ne 0')

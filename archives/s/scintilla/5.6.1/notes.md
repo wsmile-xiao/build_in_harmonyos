@@ -1,6 +1,17 @@
 # Scintilla 5.6.1 for HarmonyOS — 补丁归档
 
-> 最后更新：2026-04-09 02:03 (Fix-0053~0055f 键盘输入修复链)
+> 最后更新：2026-09-17 (CI 修复：lld 链接器 libxml2.so.16 加载失败)
+
+## CI 修复记录
+
+### Fix-CI-001: lld 缺 libxml2.so.16 导致 CMake 编译器测试失败（2026-09-17）
+- **现象**：CI 构建 #38725 报 `Error loading shared library libxml2.so.16: (needed by .../llvm/bin/lld)` → `clang-15: error: unable to execute command` → CMakeTestCCompiler 失败
+- **根因**：OHOS SDK 的 lld 动态依赖 `libxml2.so.16`（位于 `<sdk>/llvm/lib/`）。部分 CI worker 上 lld 的 RUNPATH（`$ORIGIN/../lib`）解析失败，musl loader 找不到该库（知识图谱 E120/E132 同案例：raylib 6.0、libvpx 1.14.1）
+- **修复**：`build()` 开头将 `<sdk>/llvm/lib` 注入 `LD_LIBRARY_PATH`（conanfile.py `_inject_linker_env()` + test_package/conanfile.py 同步）
+- **关键实现细节**：必须用 `os.environ` 直接修改，**不能用 `buildenv_info`** —— Conan 2 的 VirtualBuildEnv 不聚合 recipe 自身的 buildenv_info，`buildenv_info.append("LD_LIBRARY_PATH", ...)` 会被静默丢弃（已实测验证：conanbuild.sh 中无该变量）
+- **验证**：① 复制 lld 到临时目录模拟 RUNPATH 失效 → 复现 CI 同款报错；加 LD_LIBRARY_PATH 后恢复 ② 探测配方实证 os.environ → self.run() 传播链 ③ 干净缓存 conan create 全流程通过（构建 + test_package 链接）
+
+---
 
 ---
 

@@ -1,0 +1,134 @@
+#====================================================================
+# E6339 — OHOS Fortran 库必须用 flang 当链接驱动
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - error_signature: | 分隔的**字面子串**（engine.py 只做字面包含，不解析正则）
+#   - 以 # 开头的行为注释
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id: E6339
+trigger_tool: cmake|flang|clang|ld.lld|conan
+phase: configure|build|package-consumer|runtime
+error_signature: unable to find library -l:libunwind.a|cannot open crtbeginS.o|cannot open Scrt1.o|_FortranATrim: symbol not found|_QMnetcdfPnf90_create: symbol not found|_FortranAioBeginExternalFormattedOutput: symbol not found
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 2
+category: fortran, toolchain, ohos, linking, build-system
+match_keywords: flang-ohos, Fortran link driver, CMAKE_Fortran_CREATE_SHARED_LIBRARY, CMAKE_Fortran_LINK_EXECUTABLE, libunwind.a, resource-dir, sysroot, crtbeginS.o, Scrt1.o, Fortran runtime symbols, libFortranRuntime, clang driving Fortran link, CMake Fortran link rule override, provider shared object cannot serve consumers
+title: OHOS Fortran 库必须用 flang 当链接驱动，且链接 flag 要齐（clang 顶替会在消费者侧静默失败）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  flang-ohos 是精简运行集（不含 libclang_rt.builtins.a，也不带 crt 对象），
+  它在 OHOS 上要靠 SDK 提供链接所需的一切：crt 来自 --sysroot，
+  crtbeginS.o/crtendS.o 与内建库来自 -resource-dir，而 libunwind.a 只在
+  <sdk>/llvm/lib/aarch64-linux-ohos。缺任何一项，ld.lld 直接报
+  `cannot open Scrt1.o` / `cannot open crtbeginS.o` / `unable to find library -l:libunwind.a`。
+  反向陷阱更隐蔽：把 CMake 的 Fortran 链接规则改成用 clang 驱动，构建期能编出 .so
+  且上游 CTest 全绿，但该 .so 无法为消费方提供 Fortran 运行时符号——消费者在
+  **加载期**报 `_FortranATrim: symbol not found` 一类错误（RC 127），缺陷从构建期
+  逃逸到交付面。
+affected_scope: >
+  OHOS/鸿蒙 PC 上所有 Fortran（或混合 C/Fortran）库的 CMake 适配：openblas、lapack、
+  libxc、arpack-ng、mpich、mumps、netcdf-fortran 等；以及任何试图用 clang 顶替
+  Fortran 链接规则的做法。
+verification_cmd: >
+  (1) flang 编译+链接探针：`flang hello.f90 -o hello --target=aarch64-unknown-linux-ohos
+  --sysroot=<sdk>/sysroot -resource-dir=<sdk>/llvm/lib/clang/<ver>
+  -L<sdk>/llvm/lib/aarch64-linux-ohos`，要求 rc=0 且 `./hello` 真跑出预期输出；
+  (2) 逐项剪枝确认承重参数：去掉 -L 后必现 `unable to find library -l:libunwind.a`；
+  (3) 交付面判据：对**安装后**的库跑真实消费者，且消费者必须解析 Fortran 运行时符号
+  （`llvm-nm -D --defined-only <pkg>/lib/lib<name>.so*` 的 Fortran 符号数应非零）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority: 1
+rec_approach: flang-as-link-driver-with-full-sdk-flags
+rec_description: >
+  让 CMake 继续用 flang 作为 Fortran 的编译器**和链接驱动**（不要覆盖
+  CMAKE_Fortran_CREATE_SHARED_LIBRARY / CMAKE_Fortran_LINK_EXECUTABLE），
+  只在 recipe 的 generate() 里喂齐三组参数：CMAKE_Fortran_FLAGS 放
+  `--target=aarch64-unknown-linux-ohos --sysroot=<sdk>/sysroot
+  -resource-dir=<resource-dir>`；CMAKE_EXE_LINKER_FLAGS 与
+  CMAKE_SHARED_LINKER_FLAGS 放 `-L<sdk>/llvm/lib/aarch64-linux-ohos`。
+  -L 放链接 flags 而不是编译 flags，可避免 flang 每次编译都告警
+  `argument unused during compilation`（实测 84 行 → 0 行）。
+  `<resource-dir>` 现场用 `<sdk>/llvm/bin/clang -print-resource-dir` 问得，不写死版本号。
+rec_command: |
+  # generate() 中（CMakeToolchain）
+  tc.variables["CMAKE_Fortran_COMPILER"] = <flang-ohos>/bin/flang
+  tc.variables["CMAKE_Fortran_FLAGS"] = "--target=aarch64-unknown-linux-ohos --sysroot=<sdk>/sysroot -resource-dir=<resource-dir>"
+  tc.variables["CMAKE_EXE_LINKER_FLAGS"] = "-L<sdk>/llvm/lib/aarch64-linux-ohos"
+  tc.variables["CMAKE_SHARED_LINKER_FLAGS"] = "-L<sdk>/llvm/lib/aarch64-linux-ohos"
+  # resource-dir: <sdk>/llvm/bin/clang -print-resource-dir
+  # 构建期若需运行 Fortran 测试，LD_LIBRARY_PATH 补 <sdk>/llvm/lib 与 <flang-ohos>/lib
+rec_auto_fix: false
+rec_impl: recipe-toolchain-variables
+
+# 回退方案（推荐方案不可用时）
+fallback_priority: 2
+fallback_approach: link-only-wrapper-around-flang
+fallback_description: >
+  若上游构建系统硬编码了 Fortran 链接器且无法改 CMake 变量，用一层薄包装脚本
+  让「链接器」仍然是 flang（脚本内把上述 flag 补齐后 exec flang），
+  而不是换成 clang——换成 clang 会命中本条的禁止策略。
+fallback_command: |
+  #!/bin/sh
+  exec <flang-ohos>/bin/flang "$@" --target=aarch64-unknown-linux-ohos \
+    --sysroot=<sdk>/sysroot -resource-dir=<resource-dir> \
+    -L<sdk>/llvm/lib/aarch64-linux-ohos
+fallback_auto_fix: false
+fallback_impl: wrapper-script
+
+# ★ 禁止策略 ★
+forbid_1_pattern: CMAKE_Fortran_CREATE_SHARED_LIBRARY.*CMAKE_C_COMPILER|CMAKE_Fortran_LINK_EXECUTABLE.*CMAKE_C_COMPILER
+forbid_1_reason: >
+  用 C 编译器顶替 Fortran 链接规则能编出 .so，构建期甚至全绿，但该 .so 无法为
+  消费方提供 Fortran 运行时符号，缺陷只在消费者加载期暴露。
+forbid_1_consequence: >
+  交付面失败：消费者 rc=127，报 `_FortranATrim: symbol not found` /
+  `_QMnetcdfPnf90_create: symbol not found`；且因为是"构建成功"，极易被当成
+  消费方问题反复排查。
+forbid_2_pattern: \<FLAGS\>.*CMAKE_Fortran_CREATE_SHARED_LIBRARY|<FLAGS>
+forbid_2_reason: >
+  CMake 的 Fortran 共享库链接规则里 <FLAGS> 不会展开，会被原样当文件名传给编译器。
+forbid_2_consequence: "clang: error: no such file or directory: 'FLAGS'"
+
+# ═══ Layer 4: 原则引用 ═══
+principles: P004, P009
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E109, E242, E190, E504]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E6339-draft-C835.md
+last_updated:           2026-09-11
+source_event: >
+  netcdf-fortran 4.6.4 鸿蒙 PC 适配（feat/netcdf-fortran-4.6.4）：上游 51 项 CTest
+  在配方 build() 内全通过、test_package Fortran 消费者 27/27 通过。
+  过程中先走了"用 clang 顶替 Fortran 链接规则"的错误路线（构建期 51/51 全绿，
+  但安装后的库消费者 RC 127、Fortran 运行时符号缺失），改用 flang 驱动后正常；
+  并用剪枝实验确定 `-L<sdk>/llvm/lib/aarch64-linux-ohos` 是承重参数。
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors: Awstme <awstme@qq.com>
+source_pr: !9556
+# source_commit = **首次加入本草稿的提交**（不可变、可用 git log 复核）；
+# 它不是 PR head——本 PR 内该草稿后续还有修订提交，PR 最新提交见 PR 页面。
+source_commit: f858938338aa
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-11
+
+draft: true
+contributor_id: C835

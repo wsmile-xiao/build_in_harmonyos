@@ -1,0 +1,67 @@
+#====================================================================
+# DRAFT — Compile-fail (expect-to-fail) upstream test suites on OHOS:
+#         driver substitution, TMPDIR pinning, diagnostic-oracle governance
+# Draft only: do not promote without reviewer assignment.
+# Trigger event: trompeloeil/49 adaptation (task #11301)
+#====================================================================
+
+id:                     DRAFT-11301-ohos-compile-fail-suite
+trigger_tool:           sh|clang|clang++|conan|make
+phase:                  testing
+error_signature:        parallel: (not found|command not found)|mktemp:.*(Read-only file system|can't create)|verify_compilation_error.*FAIL|expect(ed)?-to-fail.*(compiled|succeeded)|negative compil(e|ation) case.*(passed|did not fail)
+
+severity:               2
+category:               testing, clang, compilation, portability, shell
+prescan_pattern:        compilation_errors/|check_errors\.sh|verify_compilation_error\.sh|COMPILE_FAIL|WILL_FAIL
+prescan_globs:          *.sh, test/CMakeLists.txt, tests/CMakeLists.txt, Makefile*, *.mk, meson.build
+match_keywords:         expect-to-fail, compile-fail test, negative compile test, diagnostic oracle, compilation_errors, verify_compilation_error.sh, check_errors.sh, GNU parallel, xargs -P, ThreadPoolExecutor, TMPDIR, mktemp, // pass:, // exception:, clang 15, libc++
+title:                  Compile-fail (expect-to-fail) upstream test suites on OHOS: driver substitution, TMPDIR pinning, and diagnostic-oracle governance
+
+root_cause:             A class of upstream projects encodes compile-time contracts as expect-to-fail test cases: one translation unit per contract, each expected to FAIL compilation with a diagnostic that must match a declared oracle (trompeloeil compilation_errors/ uses `// pass: <regex>` over compiler output plus `// exception: <regex>` exclusions matched against the compiler command line). These suites assume a GNU user space and a known compiler family: they fan out with GNU parallel and create per-case logs with mktemp in /tmp. OHOS provides neither (toybox has no parallel; /tmp is read-only, E002), so the suite cannot start at all - and its negative assertions are silently lost if the package is skipped, which is the strongest assertion class such a package has. Even when forced to run, the suite is only trustworthy if the OHOS compiler emits the diagnostics the oracles declare: the assertion is the diagnostic text, not the exit code. Existing entries cover single ingredients (E002 /tmp, E063 -Werror, E325 shell resolution for test_package wrappers) but none defines the execution model, the per-case PASS/FAIL/excluded accounting, or the no-silent-skip governance that makes such suites meaningful.
+affected_scope:         Upstream test suites whose assertion is "this must not compile + the diagnostic text matches": mocking-framework negative suites (trompeloeil compilation_errors/), framework and library API-boundary negative tests (Catch2-style CompileTime checks, cmocka/doctest negative cases), codegen/DSL negative fixtures, and compile-time trait/static-assert contract suites - whenever they are compiled as part of the Conan build on OHOS.
+verification_cmd:       cd <src>/<negative-dir> && CXX=<clang++ abs path> CXXFLAGS="-std=c++14" TMPDIR=<writable build dir> sh -c 'ls *.cpp | xargs -P2 -n1 sh ../verify_compilation_error.sh' | grep -c FAIL   # expect 0; PASS lines = executed cases; neither = upstream // exception: exclusion
+
+rec_priority:           1
+rec_approach:           recipe-driven-compile-fail-suite-runner
+rec_description:        Keep the upstream cases, the per-case verify script and every diagnostic oracle untouched; replace only the fan-out and environment layer inside the recipe: (1) drive each case from the recipe (Python ThreadPoolExecutor(2) or xargs -P2) calling the same verify script; (2) export CXX from tools.build:compiler_executables (R33) and CXXFLAGS=-std=c++NN; (3) pin TMPDIR to a build-folder subdirectory; (4) count PASS/FAIL per output line exactly like the upstream driver does (FAILURES = grep FAIL | wc -l), fail conan create on any FAIL, and treat cases printing neither as upstream // exception: exclusions; (5) run at least the default standard and the newest supported one (C++20 for coroutine-guarded cases) and report cases/executed/pass/fail/excluded per standard in notes and the PR body; (6) never rewrite // pass: regexes - diagnostic drift, if ever observed, is reported with the raw compiler output instead of being silenced.
+rec_command:            ThreadPoolExecutor(2) -> subprocess.run(["sh", "../verify_compilation_error.sh", case], cwd=neg_dir, env={CXX, CXXFLAGS, TMPDIR}); fallback: CXX=<clang++> CXXFLAGS=-std=c++NN TMPDIR=<writable> sh -c 'ls *.cpp | xargs -P$(nproc) -n1 sh ../verify_compilation_error.sh'
+rec_auto_fix:           false
+rec_impl:               recipe-driven-compile-fail-suite-runner
+
+fallback_priority:      2
+fallback_approach:      tool-require-gnu-parallel-and-pin-tmpdir
+fallback_description:   If a GNU parallel package is published in the registry (parallel/20260522 exists in ohpcd), add it as tool_requires and run the upstream driver verbatim, pinning only TMPDIR. Prefer this when byte-identical upstream driver behavior matters; prefer the thread-pool driver when the package must stay dependency-free.
+fallback_command:       CXX=<clang++> CXXFLAGS=-std=c++14 TMPDIR=<writable> ./check_errors.sh
+fallback_auto_fix:      false
+fallback_impl:          registry-parallel-tool-require
+
+forbid_1_pattern:       skip.*(compilation_errors|compile-fail|negative).*suite|compilation_errors.*(BUILD_TESTING.*OFF|disable)|(mark|report).*(passed|success).*(without|not).*(run|compil)
+forbid_1_reason:        The compile-fail suite is the package's strongest assertion class; skipping it while reporting "upstream tests pass" is a false green.
+forbid_1_consequence:   CI, reviewers and the archive accept a package whose "must fail" contract was never exercised; API-boundary or cardinality diagnostic regressions ship unnoticed.
+forbid_2_pattern:       sed -i.*// pass:|relax.*diagnostic.*(regex|oracle)|delete.*// pass:|grep -v FAIL
+forbid_2_reason:        The declared diagnostic regexes are the oracle. Rewriting or filtering them records drift as success and removes the suite's ability to fail.
+forbid_2_consequence:   Diagnostic drift becomes invisible and the suite degenerates into a compile-only smoke test.
+forbid_3_pattern:       TMPDIR=/tmp|mktemp.*-p /tmp
+forbid_3_reason:        /tmp is read-only on OHOS (E002); a driver silently falling back to /tmp dies in CI even if it worked on another host.
+forbid_3_consequence:   Per-case logs cannot be created and failures become environment artifacts instead of diagnostic findings.
+
+principles:             P013
+causes:                 []
+caused_by:              []
+similar_to:             [E002, E063, E325, E418, E423]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-11301-ohos-compile-fail-suite.md
+last_updated:           2026-09-16
+source_event:           trompeloeil/49 HarmonyOS PC adaptation (task #11301): 68 expect-to-fail cases, C++14 50 executed / 0 FAIL / 18 upstream exceptions, C++20 68 executed / 0 FAIL; GNU parallel absent from the OHOS user space and mktemp requires a pinned TMPDIR
+
+authors:                kasumizawa-miyuu <241250031@smail.nju.edu.cn>
+source_pr:
+source_commit:          3ee6d1c35
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-16
+draft:                  true
+contributor_id:         9C4A

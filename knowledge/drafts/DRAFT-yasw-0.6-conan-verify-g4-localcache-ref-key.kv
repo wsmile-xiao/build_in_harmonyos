@@ -1,0 +1,113 @@
+#====================================================================
+# DRAFT-yasw-0.6-conan-verify-g4-localcache-ref-key
+#   conan-verify G4 报「无法找到程序包 ID」→ L2/L4/L5 全跳过的**第二种机制**：
+#   Conan 2.29 `conan list --format=json` 的 "Local Cache" 以**完整 ref** 为键，
+#   而 G4 用 [software][ref] 两层取键 → KeyError
+# 来源: yasw 0.6 适配 conan-verify（G4 ✅ PASS 但 L2/L4/L5 全部 ⏭️ 跳过）
+# 状态: 草稿（待审核 promote）
+# 备注: 与 E478 是**同一症状族、不同机制** —— E478 是 G2 提取 package id 的正则
+#       不匹配含点号版本号；本条是 G4 自身的 JSON 取键层级错误。两者可同时命中
+#       （yasw 0.6 即同时命中：版本号 "0.6" 含点号 + G4 两层取键）。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-yasw-0.6-conan-verify-g4-localcache-ref-key
+trigger_tool:           conan-verify|conan
+phase:                  verify
+error_signature:        G4.*无法找到程序包 ID|无法找到程序包 ID|⏭️ 跳过（无 cache 路径）
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan, verify, harness
+match_keywords:         conan-verify, G4, L2, L4, L5, 无法找到程序包 ID, Local Cache,
+                        conan list --format=json, KeyError, cache path, 跳过
+title:                  conan-verify G4「无法找到程序包 ID」的第二种机制：Conan 2.29 的 "Local Cache" 以完整 ref 为键，G4 的 [software][ref] 两层取键必 KeyError，连带 L2/L4/L5 全部跳过
+prescan_pattern:        无法找到程序包 ID
+prescan_globs:          conan_verify.py
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             scripts/ohc/conan_verify.py::gate4_artifact_integrity 用
+                        listing["Local Cache"][self.software][self.ref]["revisions"]… 取键；
+                        但 Conan 2.29 的 `conan list <ref>:* --format=json` 输出里
+                        "Local Cache" 下**只有唯一一个键 = 完整 ref**（形如
+                        "yasw/0.6@ohpcd/stable"），而不是 [software][ref] 两层。
+                        因此 [self.software]（如 ["yasw"]）必然抛 KeyError，被
+                        except (KeyError, IndexError, StopIteration) 吞掉后只打印
+                        「⚠️ 无法找到程序包 ID」并**以 passed=True 提前 return**，
+                        同时 self._cache_path 未赋值 → L2/L4/L5 三个下游门禁全部
+                        「⏭️ 跳过（无 cache 路径）」且各自标记 PASS。
+affected_scope:         **仓库内几乎所有归档包**（实测 abiword-plugin-pdb/3.0.8、abook/0.6.1、
+                        adobe-source-sans/3.052、airspyhf/1.6.8、aiven-client/4.16.0、
+                        allow-html-temp/10.1.1 等均为 `## G4: ✅ PASS / ⚠️ 无法找到程序包 ID`）。
+                        即：脚本**默认**不覆盖产物完整性、平台冒烟、静态安全扫描与基线对比。
+                        scripts/ohc/ 属共享工具，单包 PR 不得改动（W2 / R21 边界）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           manual-l2-equivalent-verification
+rec_description:        不改共享 harness，改为**等价补偿**：从 `conan list "<ref>:*" --format=json`
+                        或 `conan list "<ref>:*"` 文本里取 40 位十六进制 package id，再
+                        `conan cache path "<ref>:<pkgid>"` 拿到产物目录，然后手工执行
+                        L2 等价冒烟（复用配方自带的 test_package/test.sh）与 readelf/checksec，
+                        并把结论写进 reports/ 作为 PR 证据。
+rec_command:            conan list "yasw/0.6@ohpcd/stable:*" --format=json | python3 -c \
+                          "import json,sys; d=json.load(sys.stdin); \
+                           ref=next(iter(d['Local Cache'])); \
+                           rev=next(iter(d['Local Cache'][ref]['revisions'].values())); \
+                           print(f'{ref}:{next(iter(rev[\"packages\"]))}')"
+                        # → yasw/0.6@ohpcd/stable:0f8defcd8d7c98a4819c11895b0843c9bb571858
+                        conan cache path yasw/0.6@ohpcd/stable:0f8defcd8d7c98a4819c11895b0843c9bb571858
+                        # → /storage/Users/currentUser/.conan2/p/yasw…/p
+rec_auto_fix:           false
+rec_impl:               manual-l2-equivalent
+
+fallback_priority:      2
+fallback_approach:      fix-harness-in-separate-framework-pr
+fallback_description:   正解是把取键改为「取 "Local Cache" 的唯一键」或直接 `next(iter(...))`，
+                        但这属于 scripts/ohc/ 共享工具，须另开**框架 PR**（W2 原子性：配方 PR
+                        与框架 PR 不得混合），不得夹带在本包 PR 中。
+fallback_command:       ref = next(iter(listing["Local Cache"]))
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       "G4: ✅ PASS".*因此产品完整性已充分验证|L2.*跳过.*视为已覆盖
+forbid_1_reason:        G4/L2/L4/L5 跳过是**门禁未生效**，不等于验证通过
+forbid_1_consequence:   产物缺失、架构错误、无 SONAME、缺符号等问题会一路带到 PR 与 CI
+forbid_2_pattern:       在(本|该)包 PR 中.*(修改|patch).*scripts/ohc/conan_verify\.py
+forbid_2_reason:        scripts/ 属共享框架，越权修改违反 R21 文件权限边界与 W2 PR 原子性
+forbid_2_consequence:   配方 PR 与框架 PR 混合，被要求拆分；且可能掩盖其他包的验证口径
+forbid_3_pattern:       跳过.*(改为|标记|改写为).*FAIL.*以(强制|要求)人工介入
+forbid_3_reason:        单包不应改写共享门禁的严重级别（R24 CI 门禁不可绕过）
+forbid_3_consequence:   影响全仓所有包的验证结果，基线被污染
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P008
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             E478（**同一症状族、不同机制**：E478 是 G2 用 `(\w+/\w+@\w+/\w+):(\w+)` 提取
+                        package id 时 `\w+` 不匹配含点号的版本号；本条是 G4 取键层级错误。
+                        yasw 0.6 版本号 "0.6" 含点号且 ref 键层级不同，两者**同时命中**）、
+                        DRAFT-yasw-0.6-qmake-probe-fork-pressure-empty-output（同属验证链路过早退出）
+caused_by:              共享 harness 与 Conan 2.29 JSON 结构不同步
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       conan list "yasw/0.6@ohpcd/stable:*" --format=json | head -5
+                        # 期望看到："Local Cache": { "yasw/0.6@ohpcd/stable": { "revisions": … } }
+                        # 即 "Local Cache" 下唯一键 = 完整 ref（无软件名中间层）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                ohc-worker <ohc-worker@local>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  0
+metrics_fail_count:     1
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-21
+
+draft: true
+contributor_id:         yasw-0.6

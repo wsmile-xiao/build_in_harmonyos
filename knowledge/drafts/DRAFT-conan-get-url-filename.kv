@@ -1,0 +1,130 @@
+#====================================================================
+# DRAFT-conan-get-url-filename
+#   Conan get() 对带查询串的源 URL 无法推断文件名 → source() 硬失败；
+#   修复 = conandata.yml 的 sources.filename 字段
+# 来源: kicad-library-utils 0.0-git20260711.a8c0d0e 适配（conan create
+#       在 source() 阶段 ConanException 失败；conandata 补 filename 后
+#       conan create 通过，上游测试 133+53+1 用例真实执行 PASS）
+# 路径: Path A+B（知识库扩展；Curator 判定 L1 主条，配额 1/2）
+# 状态: 草稿（待审核 promote；最终 Exxx 编号由知识库主编确认）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-conan-get-url-filename
+trigger_tool:           conan|conan.tools.files.get|source()
+phase:                  source
+error_signature:        Cannot deduce file name from the url.*Use 'filename' parameter|
+                        Error in source\(\) method.*get
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               build-system, conan-source-acquisition, packaging
+match_keywords:         Conan, get(), filename, conandata.yml, query string,
+                        sha, GitLab API, archive.tar.gz, Cloudflare,
+                        strip_root, 预签名 URL, presigned, source 下载失败
+title:                  Conan `get()` 对带查询串的源 URL 无法推断文件名导致 source() 硬失败，应在 conandata.yml 的 sources 中显式声明 filename
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             Conan 2.x conan/tools/files/files.py 的 get() 在未显式传
+                        filename 时从 URL 推断缓存文件名，且推断前有前置检查：
+                        URL 含 ? 或 = 即 raise
+                        ConanException("Cannot deduce file name from the url:
+                        ... Use 'filename' parameter")（files.py L123-127，
+                        Conan 2.29.1 实测）。GitLab 托管上游 pin commit 的确定性
+                        归档必须走 API 端点
+                        /api/v4/projects/<enc>/repository/archive.tar.gz?sha=<full-sha>
+                        （web 端 /-/archive/ 被 Cloudflare 拦命令行下载 403），
+                        该 URL 必含 ?sha= → 使用
+                        get(self, **self.conan_data["sources"]) 且 conandata.yml
+                        只写 url+sha256 的 recipe 在 source() 阶段必失败。
+                        触发命令 conan create；失败点 source() 未进入下载；
+                        归类构建系统语义（源获取）。
+
+affected_scope:         任何 source URL 带 query string（GitLab/GitHub API 归档
+                        端点、S3/OSS 预签名 URL 等）且 source() 用
+                        get(self, **conan_data['sources']) 展开的项目；与归档
+                        根目录名含 <name>-<sha>-<sha>/ 需 strip_root=True 的
+                        事实常伴生。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           conandata-filename-field
+rec_description:        在 conandata.yml 的 sources: 下与 url/sha256 平级加
+                        filename: "<name>-<sha>.tar.gz"。原理：
+                        **self.conan_data["sources"] 展开后 filename 作为关键字
+                        参数进入 get()，跳过 URL 推断分支；字段级声明随
+                        conandata 走，recipe 代码零改动、换 commit 只改 sha
+                        不动代码。同时保留 strip_root=True 应对
+                        <name>-<sha>-<sha>/ 根目录。
+rec_command:            conandata.yml 编辑：
+                        sources:
+                          url: "...archive.tar.gz?sha=<full-sha>"
+                          filename: "<name>-<sha>.tar.gz"
+                          sha256: "..."
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      get-filename-arg
+fallback_description:   在 conanfile.py 的 get(self, ...,
+                        filename="<name>.tar.gz") 直接硬编码。权衡（诚实）：
+                        立即可用但把下载文件名冻结进配方代码，与 conandata 的
+                        url/sha 分离，未来换源或升 commit 时易漏改产生不一致；
+                        仅作退路。
+fallback_command:       get(self, **self.conan_data["sources"], filename="<name>-<sha>.tar.gz", strip_root=True)
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       gitlab\.com/.+/-/archive/|(去掉|移除|剥掉).*(query|\?sha=)|自建镜像.*去参数
+forbid_1_reason:        反模式：为绕开文件名推断检查改写 URL——web 端 /-/archive/
+                        被 Cloudflare 拦命令行下载（403）；去掉 query 串后 URL
+                        与 pin commit 的绑定关系丢失、sha256 无法跨 commit 复核
+forbid_1_consequence:   源获取不稳定或 provenance 失效（R39 源码溯源 /
+                        R34 测试实质依赖类门禁风险）
+
+# ═══ Layer 4: 原则引用 ═══
+# principles.yaml 现存 P 编号（P-AUTOTOOLS-*/P-PATCH-*/…）无"源码溯源/确定性"
+# 族条目，暂不挂接；主编 promote 时可考虑补 P-SOURCE-001（源 URL 形态与
+# 下载器语义失配族）
+principles:
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 关系图 (Relations) ═══
+# 与 E215-draft-7A01 同族不同分支：7A01 = codeload URL 无扩展名 basename →
+# 解包器按内容嗅探错型 → BadZipFile 静默失败；本条 = URL 含 ?/= → get()
+# 前置检查硬失败。触发形态、error_signature、修复落点（conanfile 硬编码 vs
+# conandata 字段）三项均可区分，非重复条目。
+similar_to:             knowledge/graph/draft/E215-draft-7A01.kv（同族 codeload/
+                        BadZipFile 静默错型分支）、
+                        E183（HMDFS heredoc 写文件受限——本条 verification_cmd
+                        的 printf 写法与其同族，机理不同）
+
+# ═══ 元数据 ═══
+verification_cmd:       # 三步自包含探针（任意新 shell 可跑；探针文件用 printf 写，
+                        # 禁 heredoc——E183 族；不依赖任何 run 日志路径）
+                        # (1) 工具实现证据：定位 conan 的 files.py 并确认前置检查
+                        CMOD=$(python3 -c "import conan.tools.files.files as m; print(m.__file__)") && grep -n "Cannot deduce file name" "$CMOD"
+                        # (2) 定向复现：临时目录 printf 写探针 recipe（source() 用带 ?sha= 的 API 归档 URL）
+                        cd "$(mktemp -d)" && mkdir klu-get-probe && cd klu-get-probe && printf '%s\n' 'from conan import ConanFile' 'from conan.tools.files import get' 'class Probe(ConanFile):' '    name = "klu-get-probe"' '    version = "1.0"' '    settings = "os", "compiler", "build_type", "arch"' '    def source(self):' '        get(self, "https://gitlab.com/api/v4/projects/kicad%2Flibraries%2Fkicad-library-utils/repository/archive.tar.gz?sha=a8c0d0ec8faad0e55e8be55bcb43df89da515d26", strip_root=True)' > conanfile.py && conan create . --build=missing
+                        # 期望(2)：ConanException: Cannot deduce file name from the url ... Use 'filename' parameter.
+                        # (3) 修复验证：get(...) 追加 filename="klu-probe.tar.gz" 后重跑
+                        printf '%s\n' 'from conan import ConanFile' 'from conan.tools.files import get' 'class Probe(ConanFile):' '    name = "klu-get-probe"' '    version = "1.0"' '    settings = "os", "compiler", "build_type", "arch"' '    def source(self):' '        get(self, "https://gitlab.com/api/v4/projects/kicad%2Flibraries%2Fkicad-library-utils/repository/archive.tar.gz?sha=a8c0d0ec8faad0e55e8be55bcb43df89da515d26", filename="klu-probe.tar.gz", strip_root=True)' > conanfile.py && conan create . --build=missing
+                        # 期望(3)：下载解压成功（strip_root 处理 <name>-<sha>-<sha>/ 根目录）
+doc_file:               knowledge/drafts/DRAFT-conan-get-url-filename.md
+last_updated:           2026-09-25
+source_event:           kicad-library-utils 0.0-git20260711.a8c0d0e 适配：
+                        conan create 在 source() 阶段 ConanException 失败；
+                        conandata.yml 增加 sources.filename 后 conan create
+                        通过，权威 CI 全门禁 PASS，上游测试 133+53+1 用例
+                        真实执行 PASS
+authors:                Builder（oh-device-porting-v2 AI 适配）
+source_commit:          a8c0d0ec8faad0e55e8be55bcb43df89da515d26（案例上游 pin commit）
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-25

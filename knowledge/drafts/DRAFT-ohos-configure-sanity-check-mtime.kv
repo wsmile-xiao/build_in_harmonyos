@@ -1,0 +1,132 @@
+#====================================================================
+# DRAFT-ohos-configure-sanity-check-mtime —
+#   预生成 autotools 产物的 mtime 策略：未来时间戳会触发 configure 的
+#   AM_SANITY_CHECK（"newly created file is older than distributed
+#   files!"）；0.01s 精度 FS 下唯一鲁棒做法是"生成文件统一同一 now +
+#   patch 影响的源文件 pin 到过去（now - 1 天）"
+# 触发事件: siril/1.2.3 HarmonyOS PC 适配（archives/s/siril，PR #8366）
+#   本地 rebuild7 绿 → 未来时间戳（#41049）configure sanity check 失败
+#   → 双向 mtime 策略（3de384537）本地 conan create 全绿
+# 主从明确: 与 E248（patch 致 mtime 倒挂 → automake 重生成）同族不同层：
+#   E248 讲"生成文件旧于源文件"触发 automake 且其对齐方案在低精度 FS
+#   失效；本条讲"生成文件在未来"触发 configure sanity check 的硬报错，
+#   并给出不依赖 FS 精度的双向 mtime 策略
+#====================================================================
+
+id:                     DRAFT-ohos-configure-sanity-check-mtime
+trigger_tool:           configure|make|automake|conan
+phase:                  configuration|compilation
+error_signature:        newly created file is older than distributed files!|
+                         Check your system clock|
+                         checking whether build environment is sane\.\.\. no|
+                         automake-[0-9.]+: command not found
+severity:               3
+category:               ohos|autotools|configure|mtime|timestamp|sanity-check|conan|hmdfs
+match_keywords:         AM_SANITY_CHECK, build environment is sane,
+                         newly created file is older, distributed files,
+                         os.utime, future timestamp, timestamp resolution,
+                         am__configure_deps, Makefile.in, Makefile.am,
+                         automake, autoconf, regenerate, 0.01s, HMDFS, mtime
+title:                  预生成 autotools 文件的 mtime 策略：未来时间戳触发
+                         configure AM_SANITY_CHECK；0.01s 精度 FS 需
+                         "生成文件统一同一 now + patch 影响的源文件 pin 到
+                         过去"，automake/autoconf 规则与 sanity check 双绿
+
+root_cause: >
+  设备/CI 沙箱不能 EXECUTE host automake/aclocal（"Can't exec aclocal",
+  /data/service/hnp/bin 无 automake）→ 配方携带预生成 autotools 产物
+  （configure/aclocal.m4/config.h.in/全部 Makefile.in/aux）并跳过
+  autoreconf。但 patch 改了 configure.ac / Makefile.am，而 automake
+  维护规则 `$(srcdir)/Makefile.in: $(srcdir)/Makefile.am
+  $(am__configure_deps)` 一触发即无条件执行 $(AUTOMAKE) --foreign →
+  必须让生成文件 mtime 严格新于 patch 源文件。CI worker 文件系统
+  时间戳精度仅 0.01s：os.utime(当前时间) 与 patch 应用落在同一 tick，
+  不能保证严格新 → 规则仍触发 → "automake-1.17: command not found"。
+  试图用"未来时间戳"（now+3600）压制 automake 规则 → 反而触发
+  configure 的 AM_SANITY_CHECK：configure 用 `ls -Lt "$srcdir/configure"
+  conftest.file` 比较 configure 与它自己运行期间新建的临时文件；configure
+  一旦在未来，永远比 conftest.file 新 → 两次重试后硬报错 "newly created
+  file is older than distributed files! / Check your system clock"。
+
+affected_scope: >
+  任何用 conan patch 修改 configure.ac / Makefile.am + 携带预生成
+  autotools 产物 + 目标环境无 automake 且文件系统时间戳精度粗（0.01s）
+  的 autotools 库配方；E248 场景（patch 触及 Makefile.am）的低精度 FS
+  强化。
+
+verification_cmd: >
+  # 观察 configure 阶段 sanity check 通过：
+  conan create archives/<软件>/<版本> -pr:h=ci/conan/profiles/ohos-aarch64 \
+    -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing \
+    | grep -E "build environment is sane"     # 期望 "yes"
+  # 确认无 automake/autoconf 重生成调用：
+  grep -E "automake|autoconf|missing:" <日志>   # 期望无"command not found"
+
+rec_priority:           1
+rec_approach:           bidirectional-mtime-strategy
+rec_description: >
+  双向拉开，与 FS 时间戳精度彻底无关：
+  (1) 生成文件统一 os.utime(dst_file, (now, now))——用同一个 now 值
+  （time.time() 只算一次），保证相互严格相等，make 的 `>` 严格比较
+  永不触发维护规则；
+  (2) patch 影响的源文件（configure.ac、被 patch 的 Makefile.am、
+  生成的 po/Makefile.am）pin 到过去 os.utime(src_file, (past, past))，
+  past = now - 86400，使其绝对旧于生成文件；
+  (3) 任何文件都不在未来 → configure 的 AM_SANITY_CHECK 通过
+  （configure 旧于它运行期间新建的 conftest.file）。
+rec_command: >
+  # 在 build() apply_conandata_patches(self) 之后：
+  now = time.time(); past = now - 86400
+  for dst_file in <全部生成文件>:
+      os.utime(dst_file, (now, now))
+  for src_file in <configure.ac, */Makefile.am, po/Makefile.am>:
+      if os.path.exists(src_file):
+          os.utime(src_file, (past, past))
+rec_auto_fix:           false
+rec_impl:               recipe-build-hook
+
+fallback_priority:      2
+fallback_approach:      e248-align-mtime
+fallback_description: >
+  E248 的 fix-mtime-after-patch（os.utime(makefile_in,
+  ns=(os.stat(makefile_am).st_mtime_ns,)*2) 对齐两者 mtime）在
+  1s/1ns 精度的文件系统上够用；在 0.01s 精度 FS 上 .am/.in 可能落在
+  同一 tick、无法保证严格新 → 仍触发。须叠加本方案的"源文件 pin 过去"
+  才稳，故仅作低精度场景之外的简化替代。
+fallback_command:       os.utime(makefile_in, ns=(os.stat(makefile_am).st_mtime_ns,)*2)
+fallback_auto_fix:      false
+fallback_impl:          recipe-build-hook
+
+forbid_1_pattern:       os\.utime\(.*time\.time\(\).*\+ *\d{3,}|now *\+ *3600|future timestamp|(time\.time\(\) *\+ *3600,? *\)? *\*? *2)
+forbid_1_reason: >
+  任何"未来时间戳"都会让 configure 的 AM_SANITY_CHECK 必然失败：
+  configure 比较 $srcdir/configure 与自己运行期间新建的 conftest.file，
+  configure 在未来 → 永远比 conftest.file 新 → "newly created file is
+  older than distributed files!" 硬报错，CI 无法进入编译阶段。
+forbid_1_consequence:   configure 阶段硬失败（#41049 实证），且与 automake
+                        规则无关、无法靠 sleep/重试绕过。
+
+principles:             R37
+similar_to:             E248, E069, E175, E178
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-ohos-configure-sanity-check-mtime.md
+last_updated:           2026-09-06
+source_event:           archives/s/siril/1.2.3 PR #8366：
+                        #40743 automake-1.17 command not found（E248 面，
+                        os.utime 当前时间在 0.01s FS 不保证严格新）；
+                        #41049 os.utime(now+3600) 未来时间戳 →
+                        configure sanity check 失败；
+                        3de384537 双向 mtime 策略本地 conan create 全绿
+                        （"sane... yes"、零 automake 调用、test_package
+                        siril-cli --version = "siril 1.2.3"）
+
+authors:                SnowTT <SnowTT@atomgit.com>
+source_pr:              OpenHarmonyPCDeveloper/build_in_harmonyos!8366
+source_commit:          3de384537
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-06

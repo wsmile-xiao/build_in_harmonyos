@@ -1,0 +1,68 @@
+lib/eu-config.h 的 musl 可移植性修复。由真实文件 git diff 生成，非手写。
+
+背景：OHOS 的 musl 有 libintl.h，但那是个**不声明任何函数的空桩**
+（实测 `#include <libintl.h>` 能编，`gettext` 却是 undeclared identifier）。
+凡 gettext 家族调用，编译期退化为隐式声明（返回 int）→
+  error: incompatible integer to pointer conversion ... 'const char *'
+或链接期 → ld.lld: error: undefined symbol: textdomain
+
+家族成员按**广义 grep** 枚举，一次覆盖（教训：分三轮逐个修白等了三次构建，
+其中第三次是链接期才暴露的 textdomain）：
+  grep -rhoE '\b[a-z_]*(gettext|textdomain)[a-z_]*\s*\('
+    _()/dgettext   宏，2 处
+    ngettext       src/readelf.c 直接调用 19 处
+    textdomain     src/*.c 的 main() 初始化 13 处 —— **链接期**才报
+    bindtextdomain 同上 11 处
+  （sgettext / gettext_noop / init_gettext_strs 是 elfutils 自有的，不涉及）
+
+configure.ac 用 AM_GNU_GETTEXT、config.h.in 有 `#undef ENABLE_NLS`，
+故 --disable-nls 时可用该宏分叉。
+
+另修 program_invocation_short_name：glibc 扩展，OHOS musl 完全没有
+（errno.h/stdlib.h 零提及；-D_GNU_SOURCE 无效，与 musl 上游通行情况不同），
+别名到实测可用的 BSD __progname。
+
+--- a/lib/eu-config.h
++++ b/lib/eu-config.h
+@@ -31,10 +31,39 @@
+ 
+ #include "locks.h"
+ 
+-#include <libintl.h>
+ /* gettext helper macros.  */
+ #define N_(Str) Str
+-#define _(Str) dgettext ("elfutils", Str)
++#ifdef ENABLE_NLS
++# include <libintl.h>
++# define _(Str) dgettext ("elfutils", Str)
++#else
++/* --disable-nls：不引 libintl.h、不调任何 gettext 家族函数。
++   musl 提供的 libintl.h 是个**不声明任何函数的空桩**，照原样用会让
++   这些调用退化成隐式声明（返回 int）而编译失败，或在链接期 undefined。
++
++   家族成员按实测枚举（广义 grep `[a-z_]*(gettext|textdomain)[a-z_]*`）：
++     _()/dgettext    —— 宏，2 处
++     ngettext        —— src/readelf.c 直接调用 19 处
++     textdomain      —— src/*.c 的 main() 初始化 13 处（链接期 undefined）
++     bindtextdomain  —— 同上 11 处
++   （sgettext / gettext_noop / init_gettext_strs 是 elfutils 自有的，不必管） */
++# define _(Str) (Str)
++# define ngettext(Sing, Plur, N) ((N) == 1 ? (Sing) : (Plur))
++# define textdomain(Dom) ((char *) (Dom))
++# define bindtextdomain(Dom, Dir) ((char *) (Dir))
++#endif
++
++/* program_invocation_short_name 是 glibc 扩展，musl 不提供。
++   OHOS 的 musl 提供传统 BSD 的 __progname（同样是不含路径的程序名），
++   语义一致，直接别名。
++   不选另两个候选（都能编过但语义不对）：
++     getprogname()        —— musl 未声明
++     getauxval(AT_EXECFN) —— 返回完整路径，对应 program_invocation_name */
++#ifndef HAVE_PROGRAM_INVOCATION_SHORT_NAME
++extern char *__progname;
++# undef program_invocation_short_name
++# define program_invocation_short_name __progname
++#endif
+ 
+ /* Compiler-specific definitions.  */
+ #define strong_alias(name, aliasname) \

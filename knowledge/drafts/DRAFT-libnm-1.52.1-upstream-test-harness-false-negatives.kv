@@ -1,0 +1,116 @@
+# DRAFT: NetworkManager 上游测试入口的两个假失败源（exit status 5 归一化 / 裸 nm 版本标签）
+id: DRAFT-libnm-1.52.1-upstream-test-harness-false-negatives
+status: draft
+contributor: libnm 1.52.1 适配任务（openharmony-compile-agent）
+created: 2026-09-20
+
+# Layer 0: 错误面
+trigger_tool:           meson|test|nm|ld
+phase:                  testing
+error_signature:        contains symbols that are not exported by library|FAIL +[0-9.]+s +exit status 5|Bad system call \(core dumped\).*run-nm-test\.sh
+
+# Layer 1: 识别层
+severity:               2
+category:               testing, meson, conan, linking, detection
+title:                  NetworkManager 上游测试的 exit status 5 是 run-nm-test.sh 归一化产物（不是真实错误码）；
+                        check-exports.sh 用裸 nm 读 .symtab 不打印 @version，把已导出符号误报为缺失
+match_keywords:         run-nm-test.sh, die(), exit status 5, Bad system call, core dumped, check-exports.sh,
+  libnm.ver, linker script, not exported, nm, nm -D, .symtab, .dynsym, @version, version tag, meson testlog
+
+# Layer 2: 诊断层
+root_cause:             两个独立的"上游测试入口自身缺陷"，都会在日志里表现为"测试失败"，但都与被适配
+  的库无关：
+
+  **A. `tools/run-nm-test.sh` 的 `die()` 把任意崩溃归一化成 exit status 5。**
+  该脚本用 `"${NMTST_DBUS_RUN_SESSION[@]}" "$TEST" ...` 包住被测二进制，并注册 `die()`；
+  子进程被信号杀掉（本环境为沙箱 seccomp 拒绝 `NETLINK_ROUTE` → `Bad system call (core dumped)`）时，
+  meson 的 testlog 里只会看到 `exit status 5`。**真实原因只出现在 bash 自己打印的那一行**：
+      run-nm-test.sh: line 286: 65339 Bad system call (core dumped) ...
+  只看 testlog 的 `result: exit status 5` 会完全不知道发生了什么。
+
+  **B. `tools/check-exports.sh` 用裸 `nm` 与 `libnm.ver` 的 `#<sym>@<ver>;` 注释行做字符串比对。**
+  裸 `nm` 读的是 **`.symtab`**，不打印 `@version` 标签；带版本标签的是 **`nm -D`**（读 `.dynsym`）。
+  于是脚本认定 21 个符号"未导出"，而 `nm -D libnm.so` 显示这 21 个符号全部导出且带
+  `@libnm_1_0_6` / `@@libnm_1_2_0` 标签。**纯误报**。
+  注意该用例是 `exit status 1`（脚本自身 exit 1），不是 5 —— 与 A 的形态可区分。
+
+affected_scope:         所有在 OHOS 上跑 NetworkManager（libnm / libnm-core / nmcli 等上游 meson 工程）
+  测试的适配任务；A 也适用于任何用"裸二进制 + 环境类脚本"包装测试、且把崩溃归一化成固定退出码的
+  上游 harness。
+verification_cmd: |
+  # A: 在 testlog 之外找 bash 的原话
+  grep -n "Bad system call\|run-nm-test.sh: line" <build_folder>/meson-logs/testlog.txt
+  # A: exit status 5 与 exit status 1 分列，判断到底是不是崩溃
+  grep -E "FAIL +[0-9.]+s +exit status" <build_folder>/meson-logs/testlog.txt
+  # B: 两把 nm 对照
+  nm    <pkg>/lib/libnm.so | grep -c "nm_utils_wifi_2ghz_freqs"   # 裸 nm：无 @version
+  nm -D <pkg>/lib/libnm.so | grep    "nm_utils_wifi_2ghz_freqs"   # 动态：@@libnm_1_0_6
+
+# Layer 3: 方案层
+rec_priority:           1
+rec_approach:           testlog-plus-bash-original-message
+rec_description:        判定上游测试失败原因时，**不要只看 meson testlog 的 `result:` / `exit status`**：
+  ① 用 `grep "run-nm-test.sh: line"` 把 bash 打印的原始原因（信号名/命令）抓出来，exit status 5
+  是归一化产物不是信息；② 涉及符号导出检查的用例，一律用 `nm -D` 复核（裸 nm 无版本标签，
+  必然误报）；③ 在配方里维护**显式 allowlist**（逐项写明技术原因），任何未登记失败直接抛异常终止
+  构建，避免"挂掉也不管"和"误报当真实缺陷"两种极端。libnm 的实现是 `ENVIRONMENT_BLOCKED_TESTS`
+  + `failed_unexpected` 非空即 `raise ConanException`。
+rec_command: |
+  # 抓 bash 原始原因
+  grep -n "Bad system call\|run-nm-test.sh: line" <build_folder>/meson-logs/testlog.txt
+  # 复核符号导出
+  nm -D <pkg>/lib/libnm.so | grep "@libnm_"
+  # testlog 分块解析（每项以 "===== N/M =====" 分隔，含 test: / result:）
+  python3 - <<'PY'
+  import re
+  txt = open("<build_folder>/meson-logs/testlog.txt", encoding="utf-8", errors="replace").read()
+  for blk in re.split(r'^=+ \d+/\d+ =+$', txt, flags=re.M)[1:]:
+      m = re.search(r'^\s*test:\s*(.+)$', blk, re.M); r = re.search(r'^\s*result:\s*(.+)$', blk, re.M)
+      if m: print(m.group(1).strip(), '->', (r.group(1).strip() if r else '?'))
+  PY
+rec_auto_fix:           false
+rec_impl:               recipe-test
+
+fallback_priority:      2
+fallback_approach:      disable-specific-upstream-test
+fallback_description:   若某用例的失败确属本包产物之外的组件（如 libnm 的 test-keyfile-settings 打在
+  NetworkManager 守护进程侧 keyfile 插件上，而本包只出 libnm.so + 头 + libnm.pc），可在 meson 选项
+  层关掉对应测试组，但必须在 PR 说明里写清理由，并在 allowlist 里留痕。
+fallback_command:       meson configure -Dtests=yes <build>
+fallback_auto_fix:      false
+fallback_impl:          build-option
+
+forbid_1_pattern:       result: exit status 5\s*->\s*结论[:：].*(段错误|未知|崩溃|segfault)
+forbid_1_reason:        exit status 5 是 run-nm-test.sh 的 die() 归一化产物，不含任何原因信息。
+forbid_1_consequence:   会去猜崩溃原因并改配方；真实原因（沙箱 seccomp / 缺 D-Bus session bus）
+                        在 bash 原话里，方向一错就多轮返工。
+forbid_2_pattern:       nm +[^D].*\.so.*not exported
+forbid_2_reason:        裸 nm 读 .symtab 不打印 @version 标签，与 libnm.ver 的
+                        `#<sym>@<ver>;` 比对必然全部"缺失"。
+forbid_2_consequence:   把 21 个实际已导出的符号当成漏导出，去动符号可见性/链接脚本，
+                        属于反向修改。
+
+# Layer 4: 原则引用
+principles:
+
+# 关系图
+causes:                 []
+caused_by:              []
+similar_to:             E370, E274
+conflicts_with:         []
+prerequisite_of:        []
+
+# 元数据
+doc_file:               drafts/DRAFT-libnm-1.52.1-upstream-test-harness-false-negatives.md
+last_updated:           2026-09-20
+source_event:           libnm 1.52.1 R51：54 项中 10 项 exit status 5（沙箱 seccomp）+ check-local-exports-libnm 21 符号误报
+
+authors:
+source_pr:
+source_commit:
+
+# 质量度量
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-20

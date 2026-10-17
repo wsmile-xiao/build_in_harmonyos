@@ -1,0 +1,83 @@
+#====================================================================
+# DRAFT — CMake find_library(m) 在 OpenHarmony NDK 上返回 NOTFOUND
+#
+# 场景：HarmonyOS PC (OHOS aarch64) 交叉编译
+# 来源：mapcode 2.5.7 适配（feat/mapcode-2.5.7）
+#====================================================================
+
+id:                     DRAFT-mapcode-2.5.7-cmake-find-library-m-notfound
+trigger_tool:           cmake
+phase:                  linking
+error_signature:        "unable to find library -l[A-Za-z_]+-NOTFOUND|set to NOTFOUND[\\s\\S]*M_LIB"
+
+severity:               2
+category:               cmake
+match_keywords:         find_library, NOTFOUND, M_LIB-NOTFOUND, libm.a, aarch64-linux-ohos,
+                        target triplet, GNUInstallDirs, ld.lld, sysroot, triplet directory,
+                        CMake Error variables used but set to NOTFOUND
+title:                  "CMake find_library 不探测 sysroot 的目标三元组库目录，导致 -lXXX-NOTFOUND 链接失败"
+
+root_cause: >
+  OpenHarmony NDK 把库放在 sysroot 的**目标三元组目录**下：
+  `sysroot/usr/lib/aarch64-linux-ohos/libm.a`（只有静态库，没有 libm.so）。
+  CMake 的 `find_library` 依据 `CMAKE_FIND_LIBRARY_SUFFIXES` 与平台推导出的库搜索路径查找，
+  不包含该三元组子目录，因此 `find_library(M_LIB m)` 返回 `M_LIB-NOTFOUND`。
+  上游 `CMakeLists.txt` 随后无条件 `target_link_libraries(... ${M_LIB})`，
+  链接器收到的是字面量 `-lM_LIB-NOTFOUND`：
+  `ld.lld-15: error: unable to find library -lM_LIB-NOTFOUND`。
+  关键点：**库本身是存在的**（只是只有 .a），所以正确解法不是改工具链或造 sysroot 软链，
+  而是让 CMake 退回纯链接器标志 `-lm`，由链接器按自己的搜索路径找到 libm.a。
+affected_scope:         任何在 OHOS NDK 上用 CMake `find_library()` 探测数学库/其它库的上游项目；
+                        典型是 autotools/手写 CMake 老项目里的 `find_library(M_LIB m)` + 无条件 link
+verification_cmd:       ls "$SYSROOT/usr/lib/aarch64-linux-ohos/" | grep '^libm'   # 期望 libm.a 存在
+                        cmake 源码目录后观察 `CMake Error: ... M_LIB ... set to NOTFOUND`
+
+rec_priority:           1
+rec_approach:           find-library-fallback-to-plain-flag
+rec_description: >
+  在 find_library 之后加一层兜底：查不到就把变量退回纯链接器标志名。
+  该写法不含任何平台宏，对所有平台都是安全的幂等行为（查得到就完全不生效）。
+rec_command:            patch CMakeLists.txt:
+                          find_library(M_LIB m)
+                          if(NOT M_LIB)
+                              set(M_LIB m)
+                          endif()
+rec_auto_fix:           true
+rec_impl:               cmake-find-library-plain-flag-fallback
+
+fallback_priority:      2
+fallback_approach:      explicit-sysroot-library-path
+fallback_description: >
+  若目标库连 .a 都没有，可显式给出 sysroot 内的绝对/相对路径：
+  `set(M_LIB "${CMAKE_SYSROOT}/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}/libm.a")`，
+  或在 recipe 里 `tc.cache_variables["M_LIB"] = "<path>"`。
+  缺点是把平台布局写死进配方，可移植性差，仅作兜底。
+fallback_command:       cmake -DM_LIB=<sysroot>/usr/lib/aarch64-linux-ohos/libm.a ...
+fallback_auto_fix:      false
+fallback_impl:          cmake-cache-variable-library-path
+
+forbid_1_pattern:       find_library\([A-Za-z_]+\s+[a-z]+\)[\s\S]{0,200}?target_link_libraries\([^\n]*\$\{[A-Za-z_]+\}
+forbid_1_reason:        find_library 的结果未经 NOTFOUND 校验就传给 target_link_libraries，
+                        在库只存在于目标三元组子目录的 sysroot 上必然产生 -lXXX-NOTFOUND
+forbid_1_consequence:   CMake Generate 阶段直接失败并连带报 3 个 target 的 NOTFOUND 错误
+
+principles:             P001, P003
+similar_to:             E092
+conflicts_with:
+prerequisite_of:        DRAFT-mapcode-2.5.7-cross-building-false
+caused_by:
+causes:
+requires:
+solved_by:
+
+doc_file:               knowledge/drafts/DRAFT-mapcode-2.5.7-cmake-find-library-m-notfound.md
+last_updated:           2026-09-26
+source_event:           mapcode 2.5.7 探索阶段首次 cmake configure 失败
+authors:                A7F3
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-26

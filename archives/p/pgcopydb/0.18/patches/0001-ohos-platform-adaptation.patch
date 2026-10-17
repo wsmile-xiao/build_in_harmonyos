@@ -1,0 +1,925 @@
+--- a/src/bin/pgcopydb/lock_utils.h
++++ b/src/bin/pgcopydb/lock_utils.h
+@@ -12,6 +12,10 @@
+ #include <sys/ipc.h>
+ #include <sys/sem.h>
+ 
++#if defined(HAVE_BROKEN_SYSV_SEM)
++#include <semaphore.h>
++#endif
++
+ /*
+  * pgcopydb uses semaphores as a locking mechanism protecting a critical
+  * section, where a single worker/process is expected at any time.
+@@ -30,6 +34,19 @@
+ 	bool reentrant;
+ 	int depth;
+ 
++#if defined(HAVE_BROKEN_SYSV_SEM)
++	/*
++	 * HarmonyOS build: the System V semaphore system calls are rejected by
++	 * the platform with SIGSYS, so the facility is rebuilt on POSIX named
++	 * semaphores (see lock_utils.c). posixSem caches the handle of the
++	 * currently addressed slot, opened by name on first use, and
++	 * depthOwner records which process acquired the re-entrant lock.
++	 */
++	sem_t *posixSem;
++	int posixSemIndex;
++	pid_t depthOwner;
++#endif
++
+ 	bool debug;
+ } Semaphore;
+ 
+--- a/src/bin/pgcopydb/lock_utils.c
++++ b/src/bin/pgcopydb/lock_utils.c
+@@ -11,6 +11,14 @@
+ #include <sys/sem.h>
+ #include <unistd.h>
+ 
++#if defined(HAVE_BROKEN_SYSV_SEM)
++#include <errno.h>
++#include <fcntl.h>
++#include <limits.h>
++#include <semaphore.h>
++#include <string.h>
++#endif
++
+ #include "copydb.h"
+ #include "defaults.h"
+ #include "file_utils.h"
+@@ -116,6 +124,463 @@
+ }
+ 
+ 
++#if defined(HAVE_BROKEN_SYSV_SEM)
++
++/*
++ * The platform rejects the System V semaphore system calls (semget, semctl
++ * and semop) with SIGSYS, so the locking facility is rebuilt on POSIX named
++ * semaphores instead: every slot of a semaphore set is a named semaphore
++ * whose name is derived from the (process-unique) semaphore id, which means
++ * that forked children -- and any process that re-opens the semaphore from
++ * the PGCOPYDB_LOG_SEMAPHORE environment variable -- address it by name.
++ *
++ * The recipe defines HAVE_BROKEN_SYSV_SEM for the affected platform only; the
++ * portable System V implementation is kept in the #else branch below.
++ */
++
++/* room for the longest POSIX semaphore name, including the leading slash */
++#define SEMAPHORE_NAME_SIZE 64
++
++static int semaphore_seq = 0;
++
++/*
++ * semaphore_posix_name computes the POSIX name of the given slot.
++ */
++static void
++semaphore_posix_name(int semId, int index, char *name, size_t size)
++{
++	snprintf(name, size, "/pgcopydb-sem-%d-%d", semId, index);
++}
++
++
++/*
++ * semaphore_posix_create creates the named semaphore of one slot. The handle
++ * is closed right away: what the other processes need is the name, and
++ * handles are re-opened on demand by semaphore_posix_handle().
++ */
++static bool
++semaphore_posix_create(int semId, int index, int value)
++{
++	char name[SEMAPHORE_NAME_SIZE] = { 0 };
++	sem_t *sem = SEM_FAILED;
++
++	semaphore_posix_name(semId, index, name, sizeof(name));
++
++	sem = sem_open(name, O_CREAT | O_EXCL, 0600, (unsigned int) value);
++
++	if (sem == SEM_FAILED && errno == EEXIST)
++	{
++		/* stale semaphore left behind by a process that did not cleanup */
++		(void) sem_unlink(name);
++
++		sem = sem_open(name, O_CREAT | O_EXCL, 0600, (unsigned int) value);
++	}
++
++	if (sem == SEM_FAILED)
++	{
++		log_error("Failed to create semaphore \"%s\": %m", name);
++		return false;
++	}
++
++	(void) sem_close(sem);
++
++	return true;
++}
++
++
++/*
++ * semaphore_posix_handle returns a handle on the slot currently addressed by
++ * the semaphore, opening it by name when necessary.
++ */
++static sem_t *
++semaphore_posix_handle(Semaphore *semaphore)
++{
++	char name[SEMAPHORE_NAME_SIZE] = { 0 };
++
++	if (semaphore->posixSem != NULL &&
++		semaphore->posixSemIndex == semaphore->semIndex)
++	{
++		return semaphore->posixSem;
++	}
++
++	if (semaphore->posixSem != NULL)
++	{
++		(void) sem_close(semaphore->posixSem);
++		semaphore->posixSem = NULL;
++	}
++
++	semaphore_posix_name(semaphore->semId, semaphore->semIndex,
++						 name, sizeof(name));
++
++	semaphore->posixSem = sem_open(name, 0);
++	semaphore->posixSemIndex = semaphore->semIndex;
++
++	if (semaphore->posixSem == SEM_FAILED)
++	{
++		semaphore->posixSem = NULL;
++
++		log_error("Failed to open semaphore \"%s\": %m", name);
++		return NULL;
++	}
++
++	return semaphore->posixSem;
++}
++
++
++/*
++ * semaphore_create creates a new semaphore with the value 1, or the value
++ * semaphore->initValue when it's not zero.
++ */
++bool
++semaphore_create(Semaphore *semaphore)
++{
++	semaphore->owner = getpid();
++	semaphore->semIndex = 0;
++
++	/* a process-unique id, used to derive the POSIX names */
++	semaphore->semId = (int) (((getpid() & 0x7FFFFF) << 8) |
++							  (++semaphore_seq & 0xFF));
++
++	/* by default the Semaphore struct is initialized to { 0 }, fix it */
++	semaphore->initValue = semaphore->initValue == 0 ? 1 : semaphore->initValue;
++
++	if (!semaphore_posix_create(semaphore->semId, 0, semaphore->initValue))
++	{
++		return false;
++	}
++
++	log_debug("Created semaphore %d", semaphore->semId);
++
++	/* register the semaphore to the resources clean-up array */
++	if (!copydb_register_sysv_semaphore(&system_res_array, semaphore))
++	{
++		/* errors have already been logged */
++		return false;
++	}
++
++	return true;
++}
++
++
++/*
++ * semaphore_create_set creates a set of `count` independent slots, all
++ * initialised to 1 (unlocked). With POSIX named semaphores, each slot simply
++ * is its own named semaphore.
++ */
++bool
++semaphore_create_set(Semaphore *semaphore, int count)
++{
++	semaphore->owner = getpid();
++	semaphore->semIndex = 0;
++
++	/* a process-unique id, used to derive the POSIX names */
++	semaphore->semId = (int) (((getpid() & 0x7FFFFF) << 8) |
++							  (++semaphore_seq & 0xFF));
++
++	for (int i = 0; i < count; i++)
++	{
++		if (!semaphore_posix_create(semaphore->semId, i, 1))
++		{
++			log_error("Failed to create semaphore set of %d slots", count);
++			return false;
++		}
++	}
++
++	log_debug("Created semaphore set %d with %d slots", semaphore->semId, count);
++
++	/* register the set to the resources clean-up array */
++	if (!copydb_register_sysv_semaphore(&system_res_array, semaphore))
++	{
++		/* errors have already been logged */
++		return false;
++	}
++
++	return true;
++}
++
++
++/*
++ * semaphore_open opens our semaphore. We share the semaphore identifier in
++ * the environment and the POSIX names are derived from it, so there is
++ * nothing else to do here.
++ */
++bool
++semaphore_open(Semaphore *semaphore)
++{
++	char semIdString[BUFSIZE] = { 0 };
++
++	/* ensure the owner is set to zero when we re-open an existing semaphore */
++	semaphore->owner = 0;
++
++	if (!get_env_copy(PGCOPYDB_LOG_SEMAPHORE, semIdString, BUFSIZE))
++	{
++		/* errors have already been logged */
++		return false;
++	}
++
++	if (!stringToInt(semIdString, &semaphore->semId))
++	{
++		/* errors have already been logged */
++		return false;
++	}
++
++	semaphore->semIndex = 0;
++	semaphore->posixSem = NULL;
++
++	log_debug("Using semaphore %d", semaphore->semId);
++
++	return true;
++}
++
++
++/*
++ * semaphore_unlink removes an existing semaphore: all the slots of the set.
++ */
++bool
++semaphore_unlink(Semaphore *semaphore)
++{
++	char name[SEMAPHORE_NAME_SIZE] = { 0 };
++
++	log_debug("sem unlink %d", semaphore->semId);
++
++	if (semaphore->posixSem != NULL)
++	{
++		(void) sem_close(semaphore->posixSem);
++		semaphore->posixSem = NULL;
++	}
++
++	/*
++	 * Sets are always created starting from slot 0, so remove slots 0, 1, ...
++	 * up to the first one that does not exist.
++	 */
++	for (int index = 0; index < INT_MAX; index++)
++	{
++		sem_t *sem = SEM_FAILED;
++
++		semaphore_posix_name(semaphore->semId, index, name, sizeof(name));
++
++		sem = sem_open(name, 0);
++
++		if (sem == SEM_FAILED)
++		{
++			if (errno == ENOENT)
++			{
++				break;
++			}
++
++			fformat(stderr, "Failed to remove semaphore %d slot %d: %m\n",
++					semaphore->semId, index);
++			return false;
++		}
++
++		(void) sem_close(sem);
++
++		if (sem_unlink(name) != 0)
++		{
++			fformat(stderr, "Failed to remove semaphore %d slot %d: %m\n",
++					semaphore->semId, index);
++			return false;
++		}
++	}
++
++	/* mark the semaphore as unlinked to the resources clean-up array */
++	if (!copydb_unlink_sysv_semaphore(&system_res_array, semaphore))
++	{
++		/* errors have already been logged */
++		return false;
++	}
++
++	return true;
++}
++
++
++/*
++ * semaphore_cleanup is used when we find a stale PID file, to remove a
++ * possibly left behind semaphore. The user could also use ipcs and ipcrm to
++ * figure that out, if the stale pidfile does not exist anymore.
++ */
++bool
++semaphore_cleanup(const char *pidfile)
++{
++	Semaphore semaphore;
++
++	long fileSize = 0L;
++	char *fileContents = NULL;
++
++	if (!file_exists(pidfile))
++	{
++		return false;
++	}
++
++	if (!read_file(pidfile, &fileContents, &fileSize))
++	{
++		return false;
++	}
++
++	LinesBuffer lbuf = { 0 };
++
++	if (!splitLines(&lbuf, fileContents))
++	{
++		/* errors have already been logged */
++		return false;
++	}
++
++	if (lbuf.count < PIDFILE_LINE_SEM_ID)
++	{
++		log_debug("Failed to cleanup the semaphore from stale pid file \"%s\": "
++				  "it contains %lld lines, semaphore id is expected in line %d",
++				  pidfile,
++				  (long long) lbuf.count,
++				  PIDFILE_LINE_SEM_ID);
++		return false;
++	}
++
++	if (!stringToInt(lbuf.lines[PIDFILE_LINE_SEM_ID], &(semaphore.semId)))
++	{
++		/* errors have already been logged */
++		return false;
++	}
++
++	log_trace("Read semaphore id %d from stale pidfile", semaphore.semId);
++
++	return semaphore_unlink(&semaphore);
++}
++
++
++/*
++ * semaphore_lock locks a semaphore (decrement count), blocking if count would
++ * be < 0
++ */
++bool
++semaphore_lock(Semaphore *semaphore)
++{
++	sem_t *sem = NULL;
++
++	/* semId == 0: no semaphore allocated (e.g. read-only catalog) — no-op */
++	if (semaphore->semId == 0)
++	{
++		return true;
++	}
++
++	/* a child process must not inherit the lock depth of its parent */
++	if (semaphore->depthOwner != getpid())
++	{
++		semaphore->depth = 0;
++		semaphore->depthOwner = getpid();
++	}
++
++	/*
++	 * Some semaphores are used in a re-entrant way: when this very process
++	 * already holds the lock, only account for the extra nesting level.
++	 */
++	if (semaphore->reentrant && semaphore->depth > 0)
++	{
++		++semaphore->depth;
++		return true;
++	}
++
++	sem = semaphore_posix_handle(semaphore);
++
++	if (sem == NULL)
++	{
++		return false;
++	}
++
++	/*
++	 * Note: if errStatus is -1 and errno == EINTR then it means we returned
++	 * from the operation prematurely because we were sent a signal. So we
++	 * try and lock the semaphore again.
++	 */
++	int errStatus = 0;
++
++	do {
++		if (errStatus < 0 &&
++			(asked_to_stop || asked_to_stop_fast || asked_to_quit))
++		{
++			return false;
++		}
++
++		errStatus = sem_wait(sem);
++	} while (errStatus < 0 && errno == EINTR);
++
++	if (errStatus < 0)
++	{
++		fformat(stderr,
++				"%d Failed to acquire a lock with semaphore %d: %m\n",
++				getpid(),
++				semaphore->semId);
++		return false;
++	}
++
++	/* always maintain the depth, even for non-reentrant semaphores */
++	++semaphore->depth;
++
++	return true;
++}
++
++
++/*
++ * semaphore_unlock unlocks a semaphore (increment count)
++ */
++bool
++semaphore_unlock(Semaphore *semaphore)
++{
++	sem_t *sem = NULL;
++
++	/* semId == 0: no semaphore allocated (e.g. read-only catalog) — no-op */
++	if (semaphore->semId == 0)
++	{
++		return true;
++	}
++
++	/* a child process must not inherit the lock depth of its parent */
++	if (semaphore->depthOwner != getpid())
++	{
++		semaphore->depth = 0;
++		semaphore->depthOwner = getpid();
++	}
++
++	/* unlocking a reentrant semaphore skips an actual sem_post() call */
++	if (semaphore->reentrant && semaphore->depth > 1)
++	{
++		--semaphore->depth;
++		return true;
++	}
++
++	sem = semaphore_posix_handle(semaphore);
++
++	if (sem == NULL)
++	{
++		return false;
++	}
++
++	int errStatus = 0;
++
++	do {
++		if (errStatus < 0 &&
++			(asked_to_stop || asked_to_stop_fast || asked_to_quit))
++		{
++			return false;
++		}
++
++		errStatus = sem_post(sem);
++	} while (errStatus < 0 && errno == EINTR);
++
++	if (errStatus < 0)
++	{
++		fformat(stderr,
++				"Failed to release a lock with semaphore %d: %m\n",
++				semaphore->semId);
++		return false;
++	}
++
++	--semaphore->depth;
++
++	return true;
++}
++
++#else /* HAVE_BROKEN_SYSV_SEM */
++
+ /*
+  * semaphore_create creates a new semaphore with the value 1, or the value
+  * semaphore->initValue when it's not zero.
+@@ -468,6 +933,8 @@
+ 	return true;
+ }
+ 
++#endif /* HAVE_BROKEN_SYSV_SEM */
++
+ 
+ /*
+  * semaphore_log_lock_function integrates our semaphore facility with the
+--- a/src/bin/pgcopydb/queue_utils.c
++++ b/src/bin/pgcopydb/queue_utils.c
+@@ -12,6 +12,12 @@
+ #include <sys/msg.h>
+ #include <unistd.h>
+ 
++#if defined(HAVE_BROKEN_SYSV_MSG)
++#include <string.h>
++#include <sys/mman.h>
++#include <semaphore.h>
++#endif
++
+ #include "copydb.h"
+ #include "defaults.h"
+ #include "log.h"
+@@ -19,6 +25,360 @@
+ #include "signals.h"
+ 
+ 
++#if defined(HAVE_BROKEN_SYSV_MSG)
++
++/*
++ * The platform rejects the System V message queue system calls (msgget,
++ * msgsnd, msgrcv and msgctl) with SIGSYS, so the queues are rebuilt on an
++ * anonymous shared memory ring buffer protected by a process-shared POSIX
++ * semaphore. The queues are created by the orchestrating process before it
++ * forks its workers, and MAP_SHARED anonymous memory is inherited by the
++ * children, so every user of a queue sees the same buffer.
++ *
++ * The recipe defines HAVE_BROKEN_SYSV_MSG for the affected platform only; the
++ * portable System V implementation is kept in the #else branch below.
++ */
++
++/* one message slot; must be large enough for struct QMessage.data */
++#define OHOS_QUEUE_SLOT_SIZE 256
++#define OHOS_QUEUE_CAPACITY 1024
++#define OHOS_QUEUE_MAX 64
++
++typedef struct OhosQueueSlot
++{
++	long type;
++	unsigned char data[OHOS_QUEUE_SLOT_SIZE];
++} OhosQueueSlot;
++
++typedef struct OhosQueueShm
++{
++	int head;                   /* index of the first message in the ring */
++	int count;                  /* number of messages in the ring */
++	uint64_t usedBytes;         /* bytes of message payload in the ring */
++	pid_t lastSender;           /* pid of the last successful queue_send() */
++	pid_t lastReceiver;         /* pid of the last successful queue_receive() */
++	sem_t mutex;                /* process-shared lock of the ring */
++	OhosQueueSlot slots[OHOS_QUEUE_CAPACITY];
++} OhosQueueShm;
++
++/* compile-time check that a message fits in a slot */
++typedef char ohos_queue_slot_size_check
++	[(sizeof(((QMessage *) 0)->data) <= OHOS_QUEUE_SLOT_SIZE) ? 1 : -1];
++
++/*
++ * The queues of this process, indexed by qId - 1; the array is inherited by
++ * fork(2) children, which are the processes driving the queues.
++ */
++static OhosQueueShm *ohosQueues[OHOS_QUEUE_MAX] = { 0 };
++
++static OhosQueueShm *
++ohos_queue_lookup(Queue *queue)
++{
++	if (queue->qId <= 0 || OHOS_QUEUE_MAX < queue->qId)
++	{
++		return NULL;
++	}
++
++	return ohosQueues[queue->qId - 1];
++}
++
++static bool
++ohos_queue_lock(OhosQueueShm *shm)
++{
++	int errStatus = 0;
++
++	do {
++		errStatus = sem_wait(&(shm->mutex));
++	} while (errStatus < 0 && errno == EINTR);
++
++	return errStatus == 0;
++}
++
++static void
++ohos_queue_unlock(OhosQueueShm *shm)
++{
++	(void) sem_post(&(shm->mutex));
++}
++
++
++/*
++ * queue_create creates a new message queue.
++ */
++bool
++queue_create(Queue *queue, char *name)
++{
++	queue->name = name;
++	queue->owner = getpid();
++
++	int qId = 0;
++
++	for (int i = 0; i < OHOS_QUEUE_MAX; i++)
++	{
++		if (ohosQueues[i] == NULL)
++		{
++			qId = i + 1;
++			break;
++		}
++	}
++
++	if (qId == 0)
++	{
++		log_fatal("Failed to create message queue: too many queues");
++		return false;
++	}
++
++	void *memory = mmap(NULL, sizeof(OhosQueueShm),
++						PROT_READ | PROT_WRITE,
++						MAP_SHARED | MAP_ANONYMOUS, -1, 0);
++
++	if (memory == MAP_FAILED)
++	{
++		log_fatal("Failed to create message queue: %m");
++		return false;
++	}
++
++	OhosQueueShm *shm = (OhosQueueShm *) memory;
++
++	memset(shm, 0, sizeof(OhosQueueShm));
++
++	if (sem_init(&(shm->mutex), 1, 1) != 0)
++	{
++		log_fatal("Failed to initialise the message queue lock: %m");
++		(void) munmap(memory, sizeof(OhosQueueShm));
++		return false;
++	}
++
++	ohosQueues[qId - 1] = shm;
++	queue->qId = qId;
++
++	/* register the queue to the resources clean-up array */
++	if (!copydb_register_sysv_queue(&system_res_array, queue))
++	{
++		/* errors have already been logged */
++		return false;
++	}
++
++	log_debug("Created message %s queue %d", queue->name, queue->qId);
++
++	return true;
++}
++
++
++/*
++ * queue_unlink removes an existing message queue.
++ */
++bool
++queue_unlink(Queue *queue)
++{
++	OhosQueueShm *shm = ohos_queue_lookup(queue);
++
++	log_debug("unlink message queue %d (%s)", queue->qId, queue->name);
++
++	if (shm != NULL)
++	{
++		(void) sem_destroy(&(shm->mutex));
++		(void) munmap((void *) shm, sizeof(OhosQueueShm));
++
++		ohosQueues[queue->qId - 1] = NULL;
++	}
++
++	/* mark the queue as unlinked to the resources clean-up array */
++	if (!copydb_unlink_sysv_queue(&system_res_array, queue))
++	{
++		/* errors have already been logged */
++		return false;
++	}
++
++	return true;
++}
++
++
++/*
++ * queue_send sends a message on the queue.
++ */
++bool
++queue_send(Queue *queue, QMessage *msg)
++{
++	OhosQueueShm *shm = ohos_queue_lookup(queue);
++	int errStatus = -1;
++	bool firstLoop = true;
++
++	if (shm == NULL)
++	{
++		log_error("Failed to send a message to %s queue (%d): "
++				  "the queue is not known in this process",
++				  queue->name,
++				  queue->qId);
++		return false;
++	}
++
++	do {
++		if (asked_to_stop || asked_to_stop_fast || asked_to_quit)
++		{
++			return false;
++		}
++
++		if (firstLoop)
++		{
++			firstLoop = false;
++		}
++		else
++		{
++			pg_usleep(10 * 1000); /* 10 ms */
++		}
++
++		if (!ohos_queue_lock(shm))
++		{
++			continue;
++		}
++
++		if (shm->count < OHOS_QUEUE_CAPACITY)
++		{
++			OhosQueueSlot *slot =
++				&(shm->slots[(shm->head + shm->count) % OHOS_QUEUE_CAPACITY]);
++
++			slot->type = msg->type;
++			memcpy(slot->data, &(msg->data), sizeof(msg->data));
++
++			++(shm->count);
++			shm->usedBytes += sizeof(msg->data);
++			shm->lastSender = getpid();
++
++			errStatus = 0;
++		}
++		else
++		{
++			/* the queue is full, try again later */
++			errno = EAGAIN;
++			errStatus = -1;
++		}
++
++		ohos_queue_unlock(shm);
++	} while (errStatus < 0 && (errno == EINTR || errno == EAGAIN));
++
++	if (errStatus < 0)
++	{
++		log_error("Failed to send a message to %s queue (%d) "
++				  "with type %ld: %m",
++				  queue->name,
++				  queue->qId,
++				  msg->type);
++		return false;
++	}
++
++	return true;
++}
++
++
++/*
++ * queue_receive receives a message from the queue.
++ */
++bool
++queue_receive(Queue *queue, QMessage *msg)
++{
++	OhosQueueShm *shm = ohos_queue_lookup(queue);
++	int errStatus = -1;
++	bool firstLoop = true;
++
++	if (shm == NULL)
++	{
++		log_error("Failed to receive a message from %s queue (%d): "
++				  "the queue is not known in this process",
++				  queue->name,
++				  queue->qId);
++		return false;
++	}
++
++	do {
++		if (asked_to_stop || asked_to_stop_fast || asked_to_quit)
++		{
++			return false;
++		}
++
++		if (firstLoop)
++		{
++			firstLoop = false;
++		}
++		else
++		{
++			pg_usleep(10 * 1000); /* 10 ms */
++		}
++
++		if (!ohos_queue_lock(shm))
++		{
++			continue;
++		}
++
++		if (shm->count > 0)
++		{
++			OhosQueueSlot *slot = &(shm->slots[shm->head]);
++
++			msg->type = slot->type;
++			memcpy(&(msg->data), slot->data, sizeof(msg->data));
++
++			shm->head = (shm->head + 1) % OHOS_QUEUE_CAPACITY;
++			--(shm->count);
++			shm->usedBytes -= sizeof(msg->data);
++			shm->lastReceiver = getpid();
++
++			errStatus = 0;
++		}
++		else
++		{
++			/* the queue is empty, try again later */
++			errno = ENOMSG;
++			errStatus = -1;
++		}
++
++		ohos_queue_unlock(shm);
++	} while (errStatus < 0 && (errno == EINTR || errno == ENOMSG));
++
++	if (errStatus < 0)
++	{
++		log_error("Failed to receive a message from %s queue (%d): %m",
++				  queue->name,
++				  queue->qId);
++		return false;
++	}
++
++	return true;
++}
++
++
++/*
++ * queue_stats retrieves statistics from the queue.
++ */
++bool
++queue_stats(Queue *queue, QueueStats *stats)
++{
++	OhosQueueShm *shm = ohos_queue_lookup(queue);
++
++	if (shm == NULL)
++	{
++		log_error("Failed to get stats for %s message queue %d: "
++				  "the queue is not known in this process",
++				  queue->name,
++				  queue->qId);
++		return false;
++	}
++
++	if (!ohos_queue_lock(shm))
++	{
++		return false;
++	}
++
++	stats->msg_cbytes = shm->usedBytes;
++	stats->msg_qnum = shm->count;
++	stats->msg_lspid = shm->lastSender;
++	stats->msg_lrpid = shm->lastReceiver;
++
++	ohos_queue_unlock(shm);
++
++	return true;
++}
++
++#else /* HAVE_BROKEN_SYSV_MSG */
++
+ /*
+  * queue_create creates a new message queue.
+  */
+@@ -181,3 +541,5 @@
+ 
+ 	return true;
+ }
++
++#endif /* HAVE_BROKEN_SYSV_MSG */
+--- a/src/bin/pgcopydb/cli_root.c
++++ b/src/bin/pgcopydb/cli_root.c
+@@ -72,7 +72,16 @@
+ 
+ 	optind = 0;
+ 
+-	while ((c = getopt_long(argc, argv, "JVvdzqh",
++	/*
++	 * The leading '+' in the option string asks getopt_long() to stop option
++	 * parsing as soon as it reaches the first non-option, which is the
++	 * sub-command name. main() achieves the same result by exporting
++	 * POSIXLY_CORRECT, but getopt_long() implementations are not required to
++	 * honour that environment variable, and the one from musl does not: it
++	 * keeps permuting arguments and then rejects the sub-command's own
++	 * options, which breaks the whole sub-command dispatching.
++	 */
++	while ((c = getopt_long(argc, argv, "+JVvdzqh",
+ 							long_options, &option_index)) != -1)
+ 	{
+ 		switch (c)

@@ -1,34 +1,20 @@
 #!/usr/bin/env python3
-"""Conan test_package template — Conan L1 official test.
-
-This is the L1 test in the five-level test system.
-CI runs this automatically via `conan create` (which invokes test_package).
-
-File location: archives/{letter}/wait4ports/{version}/test_package/conanfile.py
-"""
+"""test_package for executable packages — runs test.sh which invokes the binary."""
 import os
 
 from conan import ConanFile
-from conan.tools.cmake import CMake, cmake_layout
 
 
 class Wait4PortsTestConan(ConanFile):
     settings = "os", "compiler", "build_type", "arch"
-    generators = "CMakeDeps", "CMakeToolchain"
+    generators = "VirtualRunEnv"
+    test_type = "explicit"
 
     def requirements(self):
         self.requires(self.tested_reference_str)
 
-    def layout(self):
-        cmake_layout(self)
-
-    def build(self):
-        cmake = CMake(self)
-        cmake.configure()
-        cmake.build()
-
     def test(self):
-        cmake = CMake(self)
-        cmake.test()
-        # Alternatively, run the binary directly:
-        # self.run(f"{os.path.join(self.cpp.build.bindirs[0], 'test_wait4ports')}", env="conanrun")
+        # OHOS: /system/bin/sh (mksh) cannot execute ELF binaries.
+        # Use bash to wrap binary execution.
+        bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
+        self.run(f"{bash} test.sh", env="conanrun")

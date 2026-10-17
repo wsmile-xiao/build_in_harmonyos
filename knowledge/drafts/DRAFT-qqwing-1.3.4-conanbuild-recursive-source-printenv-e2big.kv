@@ -1,0 +1,63 @@
+#====================================================================
+# DRAFT-qqwing-1.3.4-conanbuild-recursive-source-printenv-e2big — Environment.save_script("conanbuild")
+# 与 AutotoolsToolchain 聚合产生递归 source，printenv Argument list too long
+# 触发事件: qqwing 1.3.4 HarmonyOS PC 适配（archives/q/qqwing/1.3.4）真机 shadow CI
+# 主从明确：与 mydumper/dejagnu 的 save_script("conanbuild") clobber 同根因但表现不同——
+#           那里是「覆盖聚合环境 → 环境丢失 → SIGSEGV」，这里是「聚合成 conanbuild.sh 递归
+#           source 自身 → 死循环 + 环境无限累积 → exec printenv E2BIG」。
+#====================================================================
+
+id:                     DRAFT-qqwing-1.3.4-conanbuild-recursive-source-printenv-e2big
+trigger_tool:           conan|sh|make|configure
+phase:                  build|generate
+error_signature:        printenv: Argument list too long|conanautotoolstoolchain\.sh.*printenv|make: \*\*\* No targets specified and no makefile found
+
+severity:               3
+category:               conan|environment|autotools|ohos
+match_keywords:         printenv, Argument list too long, E2BIG, save_script, conanbuild, recursive source, AutotoolsToolchain, Environment, 递归, 死循环, 环境变量
+title:                  Environment.save_script("conanbuild") 与 AutotoolsToolchain 聚合产生递归 source，导致 printenv Argument list too long
+
+root_cause:             OHOS 配方在 generate() 里先 AutotoolsToolchain(self).generate()，再用
+                         Environment().vars(self).save_script("conanbuild") 追加变量（如 LD/AR/RANLIB）。
+                         Conan 聚合 env 文件时，把这两个同名 conanbuild 脚本合并成一份
+                         conanbuild.sh，其中又 source 了 conanbuild.sh 自身（递归），
+                         每次递归都执行 conanautotoolstoolchain.sh / conanbuildenv-*.sh 里的
+                         `value=$(printenv $v)` 与 `export ...`，环境变量无限累积，
+                         最终 exec printenv 时环境总量超过 ARG_MAX → E2BIG
+                         （/system/bin/sh: .../printenv: Argument list too long，重复数十次），
+                         导致 configure/make 的环境 setup 失败（make 找不到生成的 Makefile）。
+
+affected_scope:         所有在 generate() 里把 AutotoolsToolchain 与 Environment.save_script("conanbuild")
+                         同时使用、并在 OHOS（ARG_MAX 偏小）真机原生构建的 Conan 配方。
+
+verification_cmd:       grep -n "conanbuild.sh" <build>/build-release/conan/conanbuild.sh   # 观察是否递归 source 自身
+
+rec_priority:           1
+rec_approach:           inline-export-instead-of-save-script
+rec_description:        不要用 Environment.save_script("conanbuild") 追加工具链变量；改为在
+                        build()/package() 的 self.run 命令串前直接 export 完整路径
+                        （如 export LD=/data/service/hnp/bin/ld; export AR=.../ar; export RANLIB=.../ranlib;）。
+                        这样变量只在单条命令内生效，不进入聚合 env 文件，避免递归 source。
+rec_command:            self.run(f'export LD=/data/service/hnp/bin/ld; export AR=/data/service/hnp/bin/ar; make -j1', env="conanbuild", cwd=self.source_folder)
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      custom-script-name
+fallback_description:   若必须用 Environment 注入变量，用非 "conanbuild" 的自定义脚本名
+                        （如 save_script("qqwing_buildenv")），再在命令里显式 source 该脚本，
+                        避免与 AutotoolsToolchain 的 conanbuild 聚合同名递归。
+fallback_command:       env.vars(self).save_script("qqwing_buildenv")
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+forbid_1_pattern:       Environment.*save_script\("conanbuild"\)
+forbid_1_reason:        与 AutotoolsToolchain 的 conanbuild 同名聚合会递归 source 自身。
+forbid_1_consequence:   printenv E2BIG 死循环，环境无限累积，构建失败且难定位。
+
+reuse_note:             mydumper（DRAFT-mydumper-mysql-stub.kv）已记「save_script("conanbuild")
+                        覆盖聚合环境导致 self.run SIGSEGV（勿覆盖）」，dejagnu 已记「用自定义名
+                        避免 clobber」；本条为同一根因的**新表现**（递归 source → 死循环 →
+                        printenv Argument list too long / E2BIG），并给出「命令内 export」这一
+                        最简规避，属补充而非重复。E338 覆盖 autotools 的 ar/ranlib 缺失与
+                        config.status mktemp，不含本递归 source 现象。

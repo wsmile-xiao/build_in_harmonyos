@@ -1,0 +1,498 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 51818cf..46fd67f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -12,6 +12,7 @@ set_package_properties(ECM PROPERTIES TYPE REQUIRED DESCRIPTION "Extra CMake Mod
+ set(CMAKE_MODULE_PATH "${ECM_MODULE_PATH}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+ 
+ option(BUILD_DOC "Whether to build the documentation" ON)
++option(BUILD_KCM "Whether to build the KCM configuration module" ON)
+ 
+ include(KDEInstallDirs)
+ include(KDECMakeSettings)
+@@ -28,7 +29,7 @@ include(ECMDeprecationSettings)
+ set(EXCLUDE_DEPRECATED_BEFORE_AND_AT 5.1.0 CACHE STRING "Control the range of deprecated API excluded from the build [default=5.1.0].")
+ 
+ find_package(Qt6 ${QT_MIN_VERSION} REQUIRED COMPONENTS Network Widgets)
+-find_package(KF6 ${KF_MIN_VERSION} REQUIRED COMPONENTS Config I18n KIO WidgetsAddons KCMUtils)
++find_package(KF6 ${KF_MIN_VERSION} REQUIRED COMPONENTS Config I18n CoreAddons)
+ if(BUILD_DOC)
+     find_package(KF6DocTools ${KF_MIN_VERSION})
+     set_package_properties(KF6DocTools PROPERTIES
+@@ -57,7 +58,9 @@ ecm_set_disabled_deprecation_versions(
+ configure_file(config-musicbrainz.h.in ${CMAKE_CURRENT_BINARY_DIR}/config-musicbrainz.h )
+ include_directories(${CMAKE_CURRENT_BINARY_DIR})
+ 
+-add_subdirectory(kcmcddb)
++if(BUILD_KCM)
++    add_subdirectory(kcmcddb)
++endif()
+ add_subdirectory(libkcddb)
+ 
+ if(BUILD_TESTING)
+diff --git a/libkcddb/CMakeLists.txt b/libkcddb/CMakeLists.txt
+index 77a6c9f..a808eba 100644
+--- a/libkcddb/CMakeLists.txt
++++ b/libkcddb/CMakeLists.txt
+@@ -75,8 +75,8 @@ target_link_libraries(KCddb
+     PUBLIC
+         KF6::ConfigGui
+     PRIVATE
++        KF6::CoreAddons
+         KF6::I18n
+-        KF6::KIOCore
+         Qt6::Network
+ )
+ 
+diff --git a/libkcddb/asynchttplookup.cpp b/libkcddb/asynchttplookup.cpp
+index 9527189..944e770 100644
+--- a/libkcddb/asynchttplookup.cpp
++++ b/libkcddb/asynchttplookup.cpp
+@@ -8,7 +8,9 @@
+ #include "asynchttplookup.h"
+ #include "logging.h"
+ 
+-#include <KIO/TransferJob>
++#include <QNetworkAccessManager>
++#include <QNetworkReply>
++#include <QNetworkRequest>
+ 
+ namespace KCDDB
+ {
+@@ -91,23 +93,30 @@ namespace KCDDB
+   }
+ 
+     void
+-  AsyncHTTPLookup::slotData( KIO::Job *, const QByteArray &data )
++  AsyncHTTPLookup::slotResult()
+   {
+-    if (data.size() > 0)
+-      data_.append(data);
+-  }
++    QNetworkReply *job = qobject_cast<QNetworkReply *>(sender());
+ 
+-    void
+-  AsyncHTTPLookup::slotResult( KJob *job )
+-  {
+-    if ( 0 != job->error() )
++    if ( nullptr == job )
++    {
++      result_ = UnknownError;
++      if ( !block_ )
++        Q_EMIT queryReady();
++      return;
++    }
++
++    if ( job->error() != QNetworkReply::NoError )
+     {
+       result_ = ServerError;
++      job->deleteLater();
+       if ( !block_ )
+         Q_EMIT queryReady();
+       return;
+     }
+ 
++    data_.append( job->readAll() );
++    job->deleteLater();
++
+     jobFinished();
+   }
+ 
+@@ -116,14 +125,14 @@ namespace KCDDB
+   {
+ 	qCDebug(LIBKCDDB) << "About to fetch: " << cgiURL_.url();
+ 
+-    KIO::TransferJob* job = KIO::get( cgiURL_, KIO::NoReload, KIO::HideProgressInfo );
++    QNetworkAccessManager *nam = new QNetworkAccessManager(this);
++    QNetworkRequest request(cgiURL_);
++    QNetworkReply* job = nam->get(request);
+ 
+     if ( nullptr == job )
+       return ServerError;
+ 
+-    connect( job, &KIO::TransferJob::data,
+-          this, &AsyncHTTPLookup::slotData );
+-    connect( job, &KJob::result,
++    connect( job, &QNetworkReply::finished,
+           this, &AsyncHTTPLookup::slotResult );
+ 
+     return Success;
+diff --git a/libkcddb/asynchttplookup.h b/libkcddb/asynchttplookup.h
+index 949e5ba..ec20a5c 100644
+--- a/libkcddb/asynchttplookup.h
++++ b/libkcddb/asynchttplookup.h
+@@ -10,7 +10,7 @@
+ 
+ #include "httplookup.h"
+ 
+-class KJob;
++class QNetworkReply;
+ 
+ namespace KCDDB
+ {
+@@ -36,8 +36,7 @@ namespace KCDDB
+       void slotQueryReady();
+       void requestCDInfoForMatch();
+ 
+-      void slotData( KIO::Job *, const QByteArray & );
+-      void slotResult( KJob * );
++      void slotResult();
+ 
+     protected:
+       Result fetchURL() override;
+diff --git a/libkcddb/asynchttpsubmit.cpp b/libkcddb/asynchttpsubmit.cpp
+index 30e10dd..486cb73 100644
+--- a/libkcddb/asynchttpsubmit.cpp
++++ b/libkcddb/asynchttpsubmit.cpp
+@@ -6,7 +6,7 @@
+ 
+ #include "asynchttpsubmit.h"
+ 
+-#include <KIO/Job>
++#include <QNetworkReply>
+ #include <QDebug>
+ 
+ namespace KCDDB
+@@ -22,21 +22,30 @@ namespace KCDDB
+ 
+   }
+ 
+-  Result AsyncHTTPSubmit::runJob(KIO::Job* job)
++  Result AsyncHTTPSubmit::runJob(QNetworkReply* job)
+   {
+-    connect(job, &KJob::result, this, &AsyncHTTPSubmit::slotFinished);
++    connect(job, &QNetworkReply::finished, this, &AsyncHTTPSubmit::slotFinished);
+ 
+     return Success;
+   }
+ 
+-  void AsyncHTTPSubmit::slotFinished(KJob* job)
++  void AsyncHTTPSubmit::slotFinished()
+   {
+     qDebug() << "Finished";
+ 
+-    if ( job->error()==0 )
++    QNetworkReply *job = qobject_cast<QNetworkReply *>(sender());
++    if (!job)
++    {
++      Q_EMIT finished( UnknownError );
++      return;
++    }
++
++    if ( job->error() == QNetworkReply::NoError )
+       Q_EMIT finished( Success );
+     else
+       Q_EMIT finished( UnknownError );
++
++    job->deleteLater();
+   }
+ }
+ 
+diff --git a/libkcddb/asynchttpsubmit.h b/libkcddb/asynchttpsubmit.h
+index 9bfe47b..c72bd9f 100644
+--- a/libkcddb/asynchttpsubmit.h
++++ b/libkcddb/asynchttpsubmit.h
+@@ -9,7 +9,7 @@
+ 
+ #include "httpsubmit.h"
+ 
+-class KJob;
++class QNetworkReply;
+ 
+ namespace KCDDB
+ {
+@@ -23,9 +23,9 @@ namespace KCDDB
+     Q_SIGNALS:
+       void finished( KCDDB::Result );
+     protected:
+-      Result runJob(KIO::Job* job) override;
++      Result runJob(QNetworkReply* job) override;
+     private Q_SLOTS:
+-      void slotFinished(KJob*);
++      void slotFinished();
+   } ;
+ }
+ 
+diff --git a/libkcddb/httplookup.h b/libkcddb/httplookup.h
+index 9ea4a7e..b899f72 100644
+--- a/libkcddb/httplookup.h
++++ b/libkcddb/httplookup.h
+@@ -12,11 +12,6 @@
+ #include "lookup.h"
+ #include <QUrl>
+ 
+-namespace KIO
+-{
+-  class Job;
+-}
+-
+ namespace KCDDB
+ {
+   class HTTPLookup : public Lookup
+diff --git a/libkcddb/httpsubmit.cpp b/libkcddb/httpsubmit.cpp
+index 1cb7008..43eef19 100644
+--- a/libkcddb/httpsubmit.cpp
++++ b/libkcddb/httpsubmit.cpp
+@@ -7,7 +7,9 @@
+ 
+ #include "httpsubmit.h"
+ 
+-#include <KIO/TransferJob>
++#include <QNetworkAccessManager>
++#include <QNetworkRequest>
++#include <QNetworkReply>
+ 
+ namespace KCDDB
+ {
+@@ -25,15 +27,14 @@ namespace KCDDB
+ 
+   }
+ 
+-  KIO::Job* HTTPSubmit::createJob(const CDInfo& cdInfo)
++  QNetworkReply* HTTPSubmit::createJob(const CDInfo& cdInfo)
+   {
+-    KIO::TransferJob* job = KIO::http_post(url_, diskData_.toUtf8().data(), KIO::HideProgressInfo);
++    QNetworkAccessManager *nam = new QNetworkAccessManager(this);
++    QNetworkRequest request(url_);
++    request.setHeader(QNetworkRequest::ContentTypeHeader, QLatin1String( "text/plain" ));
+ 
+-    job->addMetaData(QLatin1String( "content-type" ), QLatin1String( "Content-Type: text/plain" ));
+     QString header;
+ 
+-    header += QLatin1String( "Content-Type: text/plain\n" );
+-
+     header += QLatin1String( "Category: " ) + cdInfo.get(Category).toString() + QLatin1Char( '\n' );
+     header += QLatin1String( "Discid: " ) + cdInfo.get(QLatin1String( "discid" )).toString() + QLatin1Char( '\n' );
+     header += QLatin1String( "User-Email: " ) + from_ + QLatin1Char( '\n' );
+@@ -41,8 +42,12 @@ namespace KCDDB
+     header += QLatin1String( "Submit-Mode: submit\n" );
+     header += QLatin1String( "Charset: UTF-8" );
+ 
+-    job->addMetaData(QLatin1String( "customHTTPHeader" ), header);
++    request.setRawHeader( QByteArrayLiteral("Category"), cdInfo.get(Category).toString().toUtf8() );
++    request.setRawHeader( QByteArrayLiteral("Discid"), cdInfo.get(QLatin1String( "discid" )).toString().toUtf8() );
++    request.setRawHeader( QByteArrayLiteral("User-Email"), from_.toUtf8() );
++    request.setRawHeader( QByteArrayLiteral("Submit-Mode"), QByteArrayLiteral("submit") );
++    request.setRawHeader( QByteArrayLiteral("Charset"), QByteArrayLiteral("UTF-8") );
+ 
+-    return job;
++    return nam->post(request, diskData_.toUtf8());
+   }
+-}
++} 
+diff --git a/libkcddb/httpsubmit.h b/libkcddb/httpsubmit.h
+index 7f8f932..0593822 100644
+--- a/libkcddb/httpsubmit.h
++++ b/libkcddb/httpsubmit.h
+@@ -8,6 +8,8 @@
+ #define HTTPSUBMIT_H
+ 
+ #include "submit.h"
++
++class QNetworkReply;
+ #include <QUrl>
+ 
+ namespace KCDDB
+@@ -19,7 +21,7 @@ namespace KCDDB
+       virtual ~HTTPSubmit();
+ 
+     protected:
+-      KIO::Job* createJob(const CDInfo& cdInfo) override;
++      QNetworkReply* createJob(const CDInfo& cdInfo) override;
+ 
+       QUrl url_;
+       QString from_;
+diff --git a/libkcddb/sites.cpp b/libkcddb/sites.cpp
+index 7c1d047..001a97f 100644
+--- a/libkcddb/sites.cpp
++++ b/libkcddb/sites.cpp
+@@ -6,12 +6,15 @@
+ 
+ #include "sites.h"
+ 
+-#include <KIO/TransferJob>
++#include <QNetworkAccessManager>
++#include <QNetworkReply>
++#include <QNetworkRequest>
+ #include <QDebug>
+ #include <QRegularExpression>
+ #include <QTextStream>
+ #include <QUrl>
+ #include <QUrlQuery>
++#include <QEventLoop>
+ 
+ namespace KCDDB
+ {
+@@ -40,13 +43,20 @@ namespace KCDDB
+ 
+     QList<Mirror> result;
+ 
+-    KIO::TransferJob* job = KIO::get( url, KIO::NoReload, KIO::HideProgressInfo );
++    QNetworkAccessManager nam;
++    QNetworkRequest request(url);
++    QNetworkReply* job = nam.get(request);
+     QByteArray data;
+-    QObject::connect( job, &KIO::TransferJob::data, [&data](KIO::Job *, const QByteArray &d){ data += d; } );
+-    if( job->exec() )
++    QObject::connect( job, &QNetworkReply::finished, [&data, job](){ data += job->readAll(); } );
++    QEventLoop loop;
++    QObject::connect( job, &QNetworkReply::finished, &loop, &QEventLoop::quit );
++    loop.exec();
++
++    if ( job->error() == QNetworkReply::NoError )
+     {
+       result = readData( data );
+     }
++    job->deleteLater();
+ 
+     return result;
+   }
+diff --git a/libkcddb/submit.cpp b/libkcddb/submit.cpp
+index b5f3fcc..d729118 100644
+--- a/libkcddb/submit.cpp
++++ b/libkcddb/submit.cpp
+@@ -33,7 +33,7 @@ namespace KCDDB
+     if (!validCategory(cdInfo.get(Category).toString()))
+       return InvalidCategory;
+ 
+-    KIO::Job* job = createJob(cdInfo);
++    QNetworkReply* job = createJob(cdInfo);
+ 
+     if (!job)
+       return UnknownError;
+diff --git a/libkcddb/submit.h b/libkcddb/submit.h
+index d72d7f0..0c92838 100644
+--- a/libkcddb/submit.h
++++ b/libkcddb/submit.h
+@@ -14,10 +14,7 @@
+ #include "cdinfo.h"
+ #include <QObject>
+ 
+-namespace KIO
+-{
+-  class Job;
+-}
++class QNetworkReply;
+ 
+ namespace KCDDB
+ {
+@@ -31,9 +28,9 @@ namespace KCDDB
+       Result submit( CDInfo cdInfo, const TrackOffsetList &offsetList);
+ 
+     protected:
+-      virtual KIO::Job* createJob(const CDInfo& cdInfo) = 0;
+-      virtual Result runJob(KIO::Job* job) = 0;
+-    
++      virtual QNetworkReply* createJob(const CDInfo& cdInfo) = 0;
++      virtual Result runJob(QNetworkReply* job) = 0;
++
+       bool validCategory(const QString&);
+ 
+       Result parseWrite( const QString & );
+diff --git a/libkcddb/synchttplookup.cpp b/libkcddb/synchttplookup.cpp
+index d3412d5..d030db0 100644
+--- a/libkcddb/synchttplookup.cpp
++++ b/libkcddb/synchttplookup.cpp
+@@ -6,9 +6,13 @@
+ */
+ 
+ #include "synchttplookup.h"
++
++#include <QNetworkAccessManager>
++#include <QNetworkReply>
++#include <QNetworkRequest>
++#include <QEventLoop>
+ #include "logging.h"
+ 
+-#include <KIO/TransferJob>
+ 
+ namespace KCDDB
+ {
+@@ -94,15 +98,25 @@ namespace KCDDB
+   {
+ 	qCDebug(LIBKCDDB) << "About to fetch: " << cgiURL_.url();
+ 
+-    KIO::TransferJob* job = KIO::get( cgiURL_, KIO::NoReload, KIO::HideProgressInfo );
++    QNetworkAccessManager nam;
++    QNetworkRequest request(cgiURL_);
++    QNetworkReply* job = nam.get(request);
+ 
+     if ( nullptr == job )
+       return ServerError;
+ 
+-    QObject::connect( job, &KIO::TransferJob::data, [&](KIO::Job *, const QByteArray &data){ data_ += data; } );
++    QEventLoop loop;
++    QObject::connect( job, &QNetworkReply::finished, &loop, &QEventLoop::quit );
++    loop.exec();
+ 
+-    if (!job->exec())
++    if ( job->error() != QNetworkReply::NoError )
++    {
++      job->deleteLater();
+       return ServerError;
++    }
++
++    data_ += job->readAll();
++    job->deleteLater();
+ 
+     jobFinished();
+ 
+diff --git a/libkcddb/synchttpsubmit.cpp b/libkcddb/synchttpsubmit.cpp
+index 271949f..4971c9c 100644
+--- a/libkcddb/synchttpsubmit.cpp
++++ b/libkcddb/synchttpsubmit.cpp
+@@ -6,7 +6,8 @@
+ 
+ #include "synchttpsubmit.h"
+ 
+-#include <KIO/Job>
++#include <QNetworkReply>
++#include <QEventLoop>
+ 
+ namespace KCDDB
+ {
+@@ -21,11 +22,18 @@ namespace KCDDB
+ 
+   }
+ 
+-  Result SyncHTTPSubmit::runJob(KIO::Job* job)
++  Result SyncHTTPSubmit::runJob(QNetworkReply* job)
+   {
+-    if (job->exec())
+-      return Success;
+-    else
++    if (!job)
+       return UnknownError;
++
++    QEventLoop loop;
++    QObject::connect(job, &QNetworkReply::finished, &loop, &QEventLoop::quit);
++    if (!job->isFinished())
++      loop.exec();
++
++    Result result = (job->error() == QNetworkReply::NoError) ? Success : UnknownError;
++    job->deleteLater();
++    return result;
+   }
+ }
+diff --git a/libkcddb/synchttpsubmit.h b/libkcddb/synchttpsubmit.h
+index 033a26b..de96887 100644
+--- a/libkcddb/synchttpsubmit.h
++++ b/libkcddb/synchttpsubmit.h
+@@ -9,6 +9,8 @@
+ 
+ #include "httpsubmit.h"
+ 
++class QNetworkReply;
++
+ namespace KCDDB
+ {
+   class SyncHTTPSubmit : public HTTPSubmit
+@@ -18,7 +20,7 @@ namespace KCDDB
+       virtual ~SyncHTTPSubmit();
+ 
+     protected:
+-      Result runJob(KIO::Job* job) override;
++      Result runJob(QNetworkReply* job) override;
+   } ;
+ }
+ 

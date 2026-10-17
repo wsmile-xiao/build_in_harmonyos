@@ -1,0 +1,108 @@
+#====================================================================
+# DRAFT-kfourinline-kgame-proc-stdin-eof-event-loop-bounded-test
+# — KDE KGame AI 进程 stdin-EOF 不退出（KMessageFilePipe cookie 解析刷日志自旋）——测试须有界兜底 + rc 合法化
+# 触发事件: kfourinline 26.04.0 适配 PR #11104，CI #51100/#51114 test_package 卡死轮 + 首版 timeout 方案定稿
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-kfourinline-kgame-proc-stdin-eof-event-loop-bounded-test
+draft:                  DRAFT-kfourinline-kgame-proc-stdin-eof-event-loop-bounded-test
+status:                 pending-editor-review
+title:                  KDE KGame AI 协程进程 stdin-EOF 不退出（KMessageFilePipe cookie 解析 EOF 自旋）——headless 测试须启动握手断言 + 有界兜底 + rc 合法化
+
+category:               platform, compat, testing, kde, qt
+trigger_tool:           test_package|test.sh|conan|kfourinlineproc
+phase:                  testing|runtime
+
+error_signature: >
+  Cookie error|AI process starts up|kgameprocess\.cpp|stdin-EOF|timeout 15.*rc=124|
+  Error 124 while executing|test_package.*hang|kfourinlineproc.*did not exit
+
+match_keywords: >
+  kfourinline, kfourinlineproc, KGame, KProcess, KMessageFilePipe, cookie error,
+  stdin, EOF, event loop, AI process, kgameprocess.cpp, kwin4proc.cpp, KDEGames,
+  timeout, rc=124, SIGTERM, rc=143, banner, startup handshake, headless, Qt,
+  QCoreApplication, subprocess hang, busy loop, 不退出, 事件循环
+
+severity:               2
+
+root_cause: >
+  KDEGames 生态的 AI 引擎进程（kfourinlineproc 是典型：游戏主进程经 KProcess
+  spawn 它，双方通过 stdin/stdout 交换 KGame 消息协议）**没有"stdin EOF 退出"
+  路径——这是上游设计**：src/kgameprocess.cpp 把 rFile/wFile 绑到 stdin/stdout
+  （QIODevice::Unbuffered），消息循环由父进程的消息驱动（发关闭消息才退出）。
+  CI headless 测试里给 stdin 喂 EOF（< /dev/null）时，KMessageFilePipe 的
+  cookie 解析循环把 EOF 当作半条消息反复尝试解析，stderr 刷 "Cookie error"
+  且进程永不退出——测试脚本若 `$(timeout 15 proc < /dev/null)` 后无 rc 兜底
+  就挂死或误判失败。三个特征：①进程启动即打 "AI process starts up" banner
+  （启动握手成功）；②EOF 不退出但 TERM 可干净杀掉；③上游 main 设计返回码
+  就是 1（非崩溃）。与 E464（MyGUI Dummy busy loop）同签名家族（忙循环+kill
+  兜底）但根因完全不同：E464 是图形资源注册缺失+DataStream read 契约缺陷
+  （需补实现）；本条是 **IO 协议进程的退出语义**（上游行为正确，测试侧适配）。
+
+solution: |
+  test_package 对此类"协议进程"的验证模式改为**启动握手断言 + 有界兜底 +
+  退出码合法化**三件套（kfourinline 26.04.0 test.sh 断言 2 定稿形态）：
+
+  ```sh
+  # 1) 启动进程，后台运行，banner 落盘
+  "$PROC" > "$KFIPROC_OUT" 2>&1 &
+  PID=$!
+  # 2) 轮询最多 5s 等 banner（启动握手 = ELF 加载 + Qt 运行时初始化 +
+  #    KGame 进程对象构造全部成功的证据）
+  while [ $i -lt 25 ]; do
+      grep -q "AI process starts up" "$KFIPROC_OUT" 2>/dev/null && { FOUND=1; break; }
+      kill -0 $PID 2>/dev/null || break
+      sleep 0.2; i=$((i + 1))
+  done
+  # 3) banner 出现即 PASS；然后 TERM 收尾，rc 0/1/143 全部合法
+  kill -TERM $PID; wait $PID; RC=$?
+  case "$RC" in 0|1|143) echo "[test] ✅ terminated cleanly (rc=$RC)";;
+                   *) exit 1;; esac
+  ```
+
+  演进形态（首版，CI 实测可用）：`PROC_OUT="$(timeout 15 "$PROC" < /dev/null 2>&1)"`
+  + rc=124（timeout 兜底杀掉）判合法——banner 已验证启动握手成立，循环由
+  harness 有界终止。两版核心等价：**不断言进程自然退出，断言启动握手 +
+  干净可终止**。
+
+  KGame IO 协议是 KDEGames 全家共用模式（kfourinline/kgoldrunner/
+  kapman/ksirk 等所有带 AI 进程的游戏同构）——kgoldrunner 26.04.0 后续
+  适配可直接套用本测试模式。
+
+fallback: >
+  ① 不测 AI 进程，只测 GUI 二进制 --version（覆盖度损失：proc 的 Qt 运行时
+  + KGame 构造链路漏测）；② 上游 patch 给 kwin4proc 加 EOF 退出路径——
+  违背上游设计（协议进程只被父进程消息关闭），且 KDEGames 共享代码改动
+  面大；③ CI 里放任挂死等 conan 超时——浪费整轮构建，禁止。
+
+verify_builds: "#51100, #51114（修前红：test_package 卡死/失败轮）, #51150（修后绿：timeout 15s 方案定稿轮）, #7835（release 全绿）"
+
+reference_impl: >
+  PR #11104（kfourinline 26.04.0，merged）：commit 5a1146acad 首版
+  timeout 15s + rc=124 合法化（test.sh 断言 2），commit fd69863645 清理
+  误提交的 kfiproc.out；归档 archives/k/kfourinline/26.04.0/test_package/
+  test.sh（banner 轮询 + TERM 收尾版）与 notes.md "Verification" 节。
+
+principles: P003, P010, P012
+
+affected_scope: >
+  所有 KDEGames 系带 KProcess AI/协议子进程的包（kfourinline/kgoldrunner/
+  kapman/ksirk/ksquares...）在 headless CI 的 test_package；广义适用于任何
+  "父子进程 IO 协议驱动的子进程"（stdin/stdout 消息协议、退出由父进程控制）
+  的无头测试设计——区别于 DRAFT-8960（kea-shell：CLI 等 stdin EOF 是测试侧
+  没给 EOF）和 E569（mdp：TUI 的 /dev/tty freopen 需 pty 双通道）。
+
+related_entries: "E464（MyGUI Dummy busy loop/SIGKILL——同 kill-兜底家族，根因不同：图形资源注册 vs IO 协议退出语义）、DRAFT-8960-conan-test-package-cli-reads-stdin-to-eof（镜像问题：CLI 读 stdin 等 EOF 时测试侧须显式给 EOF；本条是给了 EOF 进程也不退出）、DRAFT-E569-mdp-stdin-tty（TUI /dev/tty 冲突须 pty）、E302（open_memstream cookie stream——cookie 关键词撞名不同主题）"
+
+doc_file:               knowledge/drafts/DRAFT-kfourinline-kgame-proc-stdin-eof-event-loop-bounded-test.md
+last_updated:           2026-09-19
+source_event:           kfourinline 26.04.0 PR #11104 CI #51100/#51114 test_package 卡死轮诊断
+authors:                calbee21
+source_pr:              11104
+source_commit:          5a1146acad
+
+metrics_success_count:  1
+metrics_fail_count:     2
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-19

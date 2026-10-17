@@ -55,7 +55,15 @@
 ---
 **编译结束**: 2026-05-26 14:38
 **最终状态**: built
+## 对话记录
+
+- AI 分析发现 unix/configure 中 umask 077 在 HMDFS 上导致临时文件权限问题，建议改为 umask 022
+- 扩展 umask 补丁至 9 个子包（itcl/sqlite3/tdbc/thread）的 configure 脚本
+- 新增 C API 测试 test_tcl_api.c，编译链接 -ltcl8.6 -lz，验证 Tcl_CreateInterp/Tcl_Eval/Tcl_DeleteInterp
+- test_package 改用 dependencies[tcl].package_folder 绝对路径，不依赖 PATH
+- make test 集成至 build()，共 46 FAILED（OHOS 平台限制：只读 /tmp、无网络、无动态加载）
+- 本地 conan create exit 0, conan-verify exit 0, test_package 10/10 PASS
 ---
 
-**编译结束**: 2026-05-26 14:39
+**编译结束**: 2026-08-10 20:44
 **最终状态**: built

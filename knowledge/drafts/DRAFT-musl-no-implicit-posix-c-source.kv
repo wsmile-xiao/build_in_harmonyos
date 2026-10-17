@@ -1,0 +1,57 @@
+#====================================================================
+# DRAFT — musl features.h 不隐式定义 _POSIX_C_SOURCE，defined(_POSIX_C_SOURCE)
+#          平台探测在 OHOS 上落 #error Unknown system
+# 适配实例: coin 4.0.10 上游 CoinTests harness（TestSuiteUtils.cpp:37/42，2026-09-10）
+# 验证: 设备 clang15 stdin 探针——原始探测式 error: Unknown system；
+#       +|| defined(__linux__) 通过；-E -dM 实证 features.h 后仍无 _POSIX_C_SOURCE，
+#       且 __linux__/__unix__/__OHOS__ 预定义、__MUSL__ 不定义
+#====================================================================
+
+draft:                 musl-no-implicit-posix-c-source
+status:                pending-editor-review
+trigger_tool:          clang|clang++|cmake|make
+phase:                 compilation
+error_signature:       #error Unknown system|#error.*[Uu]nknown.*system
+
+severity:              2
+category:              libc, musl, platform-detect, compat
+match_keywords:        _POSIX_C_SOURCE, _POSIX_SOURCE, USE_POSIX, Unknown system, features.h, 特性宏, 平台探测, musl, glibc 默认定义, __linux__, feature test macro
+title:                 musl features.h 不隐式定义 _POSIX_C_SOURCE，上游以 defined(_POSIX_C_SOURCE) 判定 POSIX 系统的探测会落 #error Unknown system，应补 __linux__/__unix__ 族宏或改能力探测
+
+root_cause:            glibc features.h 在默认（gnu）方言、未显式指定特性宏时，经隐式 _DEFAULT_SOURCE 将 _POSIX_C_SOURCE 定义为 200809L（glibc ≥2.19，feature_macros(7)）；musl features.h 只消费用户提供的特性宏、从不自行定义，且 clang 对任何目标 libc 均不预定义 _POSIX_C_SOURCE。因此上游"以 defined(_POSIX_C_SOURCE) 当 POSIX 系统探测器"的代码（典型：#if defined(_POSIX_C_SOURCE)…#define USE_POSIX … #elif defined(_WIN32) … #else #error Unknown system）在 glibc/Linux 恒真，在 musl/OHOS 恒假，落入 #else 分支 #error，库或测试 harness 构建失败。OHOS clang 实证（-E -dM）：__linux__/__unix__/__OHOS__ 均预定义为 1，__MUSL__ 不定义，_POSIX_C_SOURCE 含 features.h 后仍未定义。
+affected_scope:        任何源码含「以 defined(_POSIX_C_SOURCE)/defined(_POSIX_SOURCE) 判定 POSIX/Unix 系统」（#define USE_POSIX / #error Unknown system 模式）的 C/C++ 项目，在 musl/OHOS 工具链下构建其库或测试 harness 时编译失败；glibc 构建遮蔽该缺陷。
+verification_cmd:      # ① 工具实现证据（任意目录，零落盘）：musl 不回显特性宏；glibc 机器上运行同命令应得 ECHO_POSIX_DEFINED（glibc 侧另见 feature_macros(7)）
+                       printf '#include <features.h>\n#ifdef _POSIX_C_SOURCE\nECHO_POSIX_DEFINED\n#else\nNO_POSIX_MACRO_ON_MUSL\n#endif\n' | clang -E -x c - | grep POSIX_MACRO
+                       # 期望（OHOS/musl）: NO_POSIX_MACRO_ON_MUSL
+                       # ② 定向复现：上游式平台探测构建失败
+                       printf '#if defined(_POSIX_C_SOURCE) || defined(_POSIX_SOURCE) || defined(__APPLE__) || defined(__FreeBSD__)\n#define USE_POSIX\n#elif defined(_WIN32)\n#define USE_WIN32\n#else\n#error Unknown system\n#endif\nint x;\n' | clang -fsyntax-only -x c -
+                       # 期望: error: Unknown system
+                       # ③ 修复验证：探测链补 __linux__ 族宏后通过
+                       printf '#if defined(_POSIX_C_SOURCE) || defined(_POSIX_SOURCE) || defined(__APPLE__) || defined(__FreeBSD__) || defined(__linux__)\n#define USE_POSIX\n#elif defined(_WIN32)\n#define USE_WIN32\n#else\n#error Unknown system\n#endif\nint x;\n' | clang -fsyntax-only -x c -
+                       # 期望: 无输出（通过）
+rec_priority:          1
+rec_approach:          extend-probe-with-linux-family-macro
+rec_description:       在上游探测链追加 || defined(__linux__)（或更泛 || defined(__unix__)），保留原有分支与 #error 兜底。进配方的改动走 conandata 补丁并带完整元数据（P-PATCH-004）；若改动仅服务上游测试门禁 harness 且配方 COIN_BUILD_TESTS=OFF 不构建测试（coin 4.0.10 案例），则改动保留在门禁构建树、不进配方交付物，并留 pristine A/B 反证日志。
+rec_command:           #if defined (_POSIX_C_SOURCE) || defined (_POSIX_SOURCE) || defined(__APPLE__) || defined(__FreeBSD__) || defined(__linux__)；验证=探针②③；门禁场景另留 pristine 构建失败日志与 diff 证明唯一差异
+rec_auto_fix:          false
+rec_impl:              patch-upstream-or-gate-harness-only
+
+fallback_priority:     2
+fallback_approach:     define-posix-c-source-via-cxxflags
+fallback_description:  无法改源时以 -D_POSIX_C_SOURCE=200809L（CXXFLAGS/CMake add_compile_definitions）使 defined() 为真。掩盖探测语义而非修复：改变整个翻译单元的可见性集合，可能与上游其他探测交互；须按 P006 记录技术债。注意：改用 -std=gnu 方言只对"声明门控"类近亲问题（capstone 类，E152 族）有效，对本探测（musl 任何方言都不定义该宏）无效。
+fallback_auto_fix:     false
+
+forbid_1_pattern:      删除 #error 分支|直接 #define USE_POSIX
+forbid_1_reason:       破坏上游平台判定完整性，丢失 _WIN32 分支选择语义，探测退化为盲断。
+forbid_1_consequence:  跨平台回归风险，上游不可收。
+forbid_2_pattern:      把 POSIX 族判定改写为 #ifdef __OHOS__
+forbid_2_reason:       将"是否 POSIX 系统"的能力族探测降级为平台名硬编码（态度审计①），且不可向上游提交（P005）；__OHOS__ 只用于 OHOS 专属行为隔离（P004 边界）。
+forbid_2_consequence:  上游拒收；非 OHOS 的 musl 平台仍坏。
+forbid_3_pattern:      依赖 __MUSL__ 判定 musl
+forbid_3_reason:       OHOS clang 15 实证（-E -dM）不预定义 __MUSL__。
+forbid_3_consequence:  判定恒假，误判平台。
+
+principles:            P005, P006, P004（辨析引用：__OHOS__ 属平台隔离场景，非本探测场景）
+similar_to:            [E152, E138, E092]
+conflicts_with:        []
+note:                  既有 musl-glibc-full-comparison-gnu-linux.md §4.3 将 _POSIX_C_SOURCE 标为 glibc✅/musl✅，仅覆盖"宏被尊重"，未覆盖"默认是否定义"；建议知识库主编收录本条时对该行加注。

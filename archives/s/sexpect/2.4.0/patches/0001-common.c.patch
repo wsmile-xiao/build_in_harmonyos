@@ -1,0 +1,167 @@
+--- a/common.c
++++ b/common.c
+@@ -1,17 +1,20 @@
+ 
+ #include <string.h>
+ #include <stdio.h>
+ #include <stdarg.h>
++#include <stddef.h>
++#include <stdint.h>
+ #include <stdlib.h>
+ #include <unistd.h>
+ #include <errno.h>
++#include <sys/stat.h>
+ #include <regex.h>
+ #include <signal.h>
+ #include <ctype.h>
+ #include <math.h>
+ #include <arpa/inet.h>
+ #include <sys/select.h>
+ #include <sys/socket.h>
+ #include <sys/un.h>
+ 
+ #include "common.h"
+@@ -876,39 +879,133 @@
+  */
+ void
+ sig_handle(int signo, void (*handler)(int) )
+ {
+     struct sigaction act = { 0 };
+ 
+     act.sa_handler = handler;
+     sigaction(signo, &act, NULL);
+ }
+ 
++/*
++ * Some platforms (e.g. HarmonyOS) do not permit creating pathname AF_UNIX
++ * sockets (bind(2) fails with EPERM) and /tmp may be read-only.  In that case
++ * the server falls back to the abstract namespace; the abstract name is
++ * deterministically derived from the sockfile path so that the server and all
++ * its clients (which share the same SEXPECT_SOCKFILE) keep talking to each
++ * other.
++ */
++static socklen_t
++sock_abstract_addr(const char * sockpath, struct sockaddr_un * addr)
++{
++    uint64_t h = 1469598103934665603ULL; /* FNV-1a */
++    const unsigned char * p = (const unsigned char *) sockpath;
++
++    for (; * p != '\0'; ++ p) {
++        h ^= (uint64_t) * p;
++        h *= 1099511628211ULL;
++    }
++
++    memset(addr, 0, sizeof(* addr));
++    addr->sun_family = AF_LOCAL;
++    snprintf(addr->sun_path + 1, sizeof(addr->sun_path) - 1,
++             "sexpect-%016llx", (unsigned long long) h);
++
++    return (socklen_t) (offsetof(struct sockaddr_un, sun_path)
++                        + 1 + strlen(addr->sun_path + 1));
++}
++
++static int
++sock_connect_one(const struct sockaddr_un * addr, socklen_t addrlen)
++{
++    int fd;
++
++    fd = socket(AF_LOCAL, SOCK_STREAM, 0);
++    if (fd < 0) {
++        return -1;
++    }
++
++    if (connect(fd, (const struct sockaddr *) addr, addrlen) < 0) {
++        close(fd);
++        return -1;
++    }
++
++    return fd;
++}
++
+ int
+ sock_connect(char * sockpath)
+ {
+     int sock_fd;
+     struct sockaddr_un srv_addr = { 0 };
++    struct sockaddr_un abst_addr;
++    socklen_t abst_len;
+ 
+     /* connect to the socket */
+-    sock_fd = socket(AF_LOCAL, SOCK_STREAM, 0);
+-    if (sock_fd < 0) {
+-        fatal_sys("socket");
+-    }
+-
+     srv_addr.sun_family = AF_LOCAL;
+     snprintf(srv_addr.sun_path, sizeof(srv_addr.sun_path), "%s", sockpath);
+-    if (connect(sock_fd, (struct sockaddr *) & srv_addr, sizeof(srv_addr) ) < 0) {
+-        return -1;
+-    }
+-
+-    return sock_fd;
++
++    sock_fd = sock_connect_one(& srv_addr, sizeof(srv_addr));
++    if (sock_fd >= 0) {
++        return sock_fd;
++    }
++
++    /* fall back to the abstract namespace (see `sock_bind()') */
++    abst_len = sock_abstract_addr(sockpath, & abst_addr);
++
++    return sock_connect_one(& abst_addr, abst_len);
++}
++
++int
++sock_bind(char * sockpath, bool * abstract_used)
++{
++    int fd;
++    struct sockaddr_un srv_addr = { 0 };
++    struct sockaddr_un abst_addr;
++    socklen_t abst_len;
++
++    * abstract_used = false;
++
++    fd = socket(AF_LOCAL, SOCK_STREAM, 0);
++    if (fd < 0) {
++        fatal_sys("socket");
++    }
++
++    /* or bind() would fail: Address already in use (EADDRINUSE) */
++    unlink(sockpath);
++
++    srv_addr.sun_family = AF_LOCAL;
++    snprintf(srv_addr.sun_path, sizeof(srv_addr.sun_path), "%s", sockpath);
++
++    /* don't let other users connect to my server! */
++    umask(0077);
++
++    if (bind(fd, (struct sockaddr *) & srv_addr, sizeof(srv_addr)) < 0) {
++        if (errno != EPERM && errno != EACCES && errno != EROFS) {
++            close(fd);
++            fatal_sys("bind");
++        }
++
++        /*
++         * Pathname AF_UNIX sockets are not permitted on this platform;
++         * use the abstract namespace instead.
++         */
++        abst_len = sock_abstract_addr(sockpath, & abst_addr);
++        if (bind(fd, (struct sockaddr *) & abst_addr, abst_len) < 0) {
++            close(fd);
++            fatal_sys("bind(abstract)");
++        }
++
++        * abstract_used = true;
++    }
++
++    return fd;
+ }
+ 
+ size_t
+ msg_size(ttlv_t *msg)
+ {
+     return ttlv_calc_size(msg);
+ }
+ 
+ void
+ msg_free(ttlv_t **msg)

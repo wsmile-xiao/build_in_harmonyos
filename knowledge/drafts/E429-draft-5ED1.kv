@@ -1,0 +1,94 @@
+#====================================================================
+# E429-draft-5ED1 — ohpcd ncurses/6.6 以 root（uid 0）运行时忽略 TERMINFO：
+# x86 runner 上本地 qemu 实跑 ncurses TUI 报 cannot initialize terminal type
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E429
+trigger_tool:           runtime|test|qemu
+phase:                  testing|runtime
+error_signature:        ncurses: cannot initialize terminal type \(\$TERM="[^"]*"\); exiting|Error opening terminal: [A-Za-z0-9._+-]+\.
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               testing, runtime, environment, ohos, security
+match_keywords:         ncurses, terminfo, TERMINFO, TERMINFO_DIRS, cannot initialize terminal type, uid 0, root,
+                         _nc_env_access, use_terminfo_vars, issetugid, cf_cv_multiuser, USE_ROOT_ENVIRON,
+                         --enable-root-environ, /etc/passwd, qemu-aarch64, static relink, setpriv, nobody, x86 runner
+title:                  ohpcd ncurses/6.6 的 TUI 以 root 运行时忽略 TERMINFO/TERMINFO_DIRS/~/.terminfo（据推断是构建时 configure 把系统判为非多用户系统所致）：x86 runner（root）上 qemu 实跑报 cannot initialize terminal type，降权为非 root 即恢复
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             ncurses 6.6 的 configure 只在 "conventional multiuser system"（/etc/passwd 中存在 uid>=100
+                         且登录 shell 不是 true/false/nologin/空 的账户）时才处理 --enable-root-environ 与
+                         --enable-setuid-environ（默认均为 yes，定义 USE_ROOT_ENVIRON/USE_SETUID_ENVIRON）；探测为 no
+                         时两个宏都不定义，use_terminfo_vars() 退化为 _nc_env_access()：getuid()/geteuid()==0 或
+                         issetugid() 时返回 FALSE，db_iterator 不再读取 TERMINFO、TERMINFO_DIRS 与 $HOME/.terminfo，
+                         只剩编译期默认目录 //share/terminfo（--prefix=/，运行机上不存在），initscr 以
+                         "ncurses: cannot initialize terminal type ($TERM=...); exiting" 退出。ohpcd 的 libncursesw.a
+                         中 db_iterator.o、home_terminfo.o、write_entry.o 三个目标文件通过 use_terminfo_vars() 引用
+                         _nc_env_access（USE_ROOT_ENVIRON 与 USE_SETUID_ENVIRON 都定义时 use_terminfo_vars() 是常量 1，
+                         就不会有这些外部引用；comp_error.o 的第 4 处是 --with-trace 下的直接调用，与开关无关，不计），
+                         access.o 还定义了仅在 USE_ROOT_ACCESS 未定义时才编译的 _nc_safe_fopen/_nc_safe_open3——三个
+                         configure 开关没有全部生效，与 configure 判定 multiuser=no 一致（据此推断，未取得该次构建的
+                         config.log）。x86 runner 默认以 root 做本地 qemu 验证，即使 TERMINFO 指向可读的包内 terminfo
+                         （root 自有副本、env -i 干净环境亦然）也失败；同一二进制与数据改由 nobody 运行即全部通过。
+                         CI 若以非 root 运行则不受影响（CI worker 的 uid 未直接核实）。root 下失败这一现象与另一个包
+                         （tmatrix 1.4，DRAFT-12001 的旁注）的独立观察一致；本条补充的是 configure 层的成因链、库内证据
+                         与可执行的本地处置。
+affected_scope:         静态链接 ohpcd ncurses/6.6（其他版本未核验）的 TUI 程序：在 x86 runner 上以 root 用
+                         qemu-aarch64 做本地功能验证（E544 同源 .o 静态重链路线）；以及设备上以 root/setuid 身份运行
+                         同类程序。以非 root 运行的 CI 与普通用户终端不受影响（CI worker 的 uid 未直接核实）。
+verification_cmd:       llvm-nm -A <ncurses>/lib/libncursesw.a | grep ' U _nc_env_access'                 # 4 处：db_iterator/home_terminfo/write_entry 三处来自 use_terminfo_vars()，comp_error 一处是直接调用（不计）
+                         llvm-ar x <ncurses>/lib/libncursesw.a access.o && llvm-nm access.o | grep -E ' T _nc_safe_(fopen|open3)'
+                         env -i TERM=vt100 TERMINFO=<readable terminfo> ./tui-static               # root：cannot initialize terminal type
+                         setpriv --reuid=nobody --regid=nogroup --clear-groups env TERM=vt100 TERMINFO=<readable copy> ./tui-static   # 正常初始化
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           run-local-tui-verification-as-non-root
+rec_description:        本地（x86 runner）用 qemu 实跑 ncurses TUI 的消费者测试时降权为非 root：把静态重链产物、测试
+                         程序与 terminfo 副本放到 nobody 可读写的目录（chmod -R a+rX，工作目录 777），用
+                         setpriv --reuid=nobody --regid=nogroup --clear-groups env HOME=<dir> TERMINFO=<copy> 运行；
+                         配方与 test_package 不需为此改动（CI 若为非 root，TERMINFO 由 ncurses 的 runenv 经 conanrun 提供）。
+                         无法降权时，应把 root 下的失败如实记为「本地未实跑」或带明确说明的条件跳过，不得写成通过。
+rec_command:            D=<scratch>; cp -r <ncurses>/share/terminfo $D/terminfo; chmod -R a+rX $D; chmod 777 $D
+                         setpriv --reuid=nobody --regid=nogroup --clear-groups env HOME=$D TERMINFO=$D/terminfo ./test_prog $D/app $D/work
+rec_auto_fix:           false
+rec_impl:               archives/s/shed/1.16/notes.md（本地 qemu 实跑章节）
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:      ncurses-recipe-preseed-multiuser
+fallback_description:   若确需 root 进程使用 TERMINFO（设备上以 root 运行 TUI），应由 ncurses 配方在 configure 前预置缓存
+                         变量 cf_cv_multiuser=yes，让默认的 --enable-root-environ/--enable-setuid-environ 生效；只传
+                         --enable-root-environ 无效（非多用户系统下该选项被忽略并告警）。属 ncurses 配方维护者决策，
+                         下游配方不得改依赖包。
+fallback_command:       ./configure cf_cv_multiuser=yes ...   # 仅限 ncurses 配方侧
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       把 root 下的 cannot initialize terminal type 判成 TERMINFO 路径错误或 terminfo 缺失，去改被测包配方、
+                         把 terminfo 复制进 /share/terminfo 等系统路径，或把该失败静默改成 skip/写成通过
+forbid_1_reason:        TERMINFO 本身正确，是 root 身份触发 ncurses 的安全限制；改配方或写系统路径不解决问题且污染共享构建机
+forbid_1_consequence:   引入无关配方变更、共享机被写入仓库外文件，或本地证据缺失却写成已通过
+
+principles:
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-12001-runenv-terminfo-shadows-ncurses（旁注段独立观察到同一 root 现象，主题是 runenv 覆盖；无 configure 层成因链与降权处置）, DRAFT-E568-mdp-ohos-musl-terminfo-path（同一报错，成因为 terminfo 路径未导出）
+conflicts_with:         []
+prerequisite_of:        []
+doc_file:               doc/E429.md
+last_updated:           2026-09-28
+source_event:           shed 1.16 适配：以 conan create 同源 .o 静态重链 + qemu 实跑 pty 消费者测试，root 下 4/5 用例报
+                         cannot initialize terminal type，nobody 下消费者 5/5、鸿蒙特有 2/2 全过
+authors:                lkjing2021345 <1908499668@qq.com>
+source_pr:
+source_commit:
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 5ED1

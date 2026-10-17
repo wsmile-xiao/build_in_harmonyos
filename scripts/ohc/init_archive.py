@@ -134,6 +134,7 @@ def _generate_conanfile(name: str, version: str, build_system: str,
         "autotools": "conanfile-autotools.py",
         "makefile": "conanfile-makefile.py",
         "make": "conanfile-makefile.py",
+        "headeronly": "conanfile-headeronly.py",
     }
     template_name = template_map.get(build_system.lower(), "conanfile-cmake.py")
     template_path = TEMPLATES_DIR / template_name
@@ -388,6 +389,12 @@ def init_archive_cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--clean", action="store_true")
     parser.add_argument("--project-dir")
     args = parser.parse_args(argv)
+    # R46: 任务起点即写生命周期草稿（防中断丢 result.json；best-effort 不阻塞）
+    try:
+        from .result_report import write_lifecycle_draft
+        write_lifecycle_draft(args.software, args.version, "task_started")
+    except Exception:
+        pass
     return init_archive(args.software, args.version, args.source_url,
                         args.build_system, args.clean,
                         getattr(args, "project_dir", None))

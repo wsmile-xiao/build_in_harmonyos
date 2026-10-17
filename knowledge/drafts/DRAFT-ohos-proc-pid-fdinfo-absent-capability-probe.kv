@@ -1,0 +1,86 @@
+#====================================================================
+# DRAFT-ohos-proc-pid-fdinfo-absent-capability-probe -
+# OHOS procfs 不提供 /proc/<pid>/fdinfo（自身进程亦 ENOENT）：运行期解析
+# fdinfo 的工具核心功能结构性降级，应先做能力探测并诚实收窄输出。
+#
+# 场景: inotify-info 0.0.4（inotify 视角的 lsof，纯 C++11 + 内置 lfqueue）
+#       在 OHOS PC（aarch64, clang 15.0.4 / OHOS SDK 26.0.0.18）真机运行：
+#       inotify syscall 与 /proc/sys/fs/inotify/* 限额完全可用，但内核
+#       procfs 不实例化 /proc/<pid>/fdinfo（自身进程亦 ENOENT，节点级缺失
+#       而非权限拒绝）→ watch 计数与被 watch inode→路径反查结构性恒空；
+#       实例计数经 readlink /proc/<pid>/fd → anon_inode:inotify 对同 uid
+#       进程仍有效（正对照两次独立复现 Instances=1），跨 uid /proc/<pid>/fd
+#       为 Permission denied 不可见。
+# 适用: 所有运行期解析 /proc/<pid>/fdinfo 的进程内省工具（fd/watch 用量
+#       统计、lsof 类）在 OHOS 上的适配与验证；以及"工具能跑但统计恒 0"
+#       类问题的 30 秒定位范式（先探节点存在性，勿误排查 musl/SELinux/代码 bug）。
+#
+# 注: 本文件所有字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-ohos-proc-pid-fdinfo-absent-capability-probe
+source_lib:             inotify-info 0.0.4
+trigger_tool:           inotify-info|lsof 类|fd 统计工具
+phase:                  runtime
+error_signature:        fdinfo.*No such file or directory|fopen /proc/.*/fdinfo.*NULL|watch.*恒为 0
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               platform-detect, runtime, procfs
+match_keywords:         /proc, fdinfo, inotify, anon_inode, watch count, ENOENT, capability probe, graceful degrade
+title:                  OHOS procfs 不提供 /proc/<pid>/fdinfo，运行期解析 fdinfo 的工具核心功能结构性降级，应先做能力探测并诚实收窄输出
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OHOS 内核 procfs 不实例化 fdinfo 节点（探针：自身 ENOENT，非权限拒绝，区别 E031 的"有节点读不了"）→ fopen("/proc/<pid>/fdinfo/<fd>") 恒 NULL（inotify-info.cpp:329 guard 静默吞掉）→ watch 计数与 inode/sdev→路径反查恒空 → 实例计数同 uid 经 readlink anon_inode:inotify 仍可用（:356-372）、跨 uid EPERM → 限额 /proc/sys/fs/inotify/* 完全可读 → 归类：平台能力缺失（内核 procfs 语义），非 musl 差异、非 SELinux、非代码 bug
+affected_scope:         任何运行期解析 /proc/<pid>/fdinfo 的进程内省工具（fd/watch 用量统计、lsof 类）在 OHOS 上的适配与验证
+verification_cmd:       cd $(mktemp -d) && ls /proc/self/fd >/dev/null && echo A1-fd-dir-present && r=$(readlink /proc/self/fd/0) && echo A2-readlink-ok:$r && { [ -e /proc/self/fdinfo ] && echo A3-fdinfo-PRESENT || echo A3-fdinfo-ABSENT; }; ls /proc/1/fdinfo 2>&1 | head -1; cat /proc/sys/fs/inotify/max_user_watches; printf '%s\n' '#include <stdio.h>' '#include <fcntl.h>' '#include <sys/inotify.h>' 'int main(void){int i=inotify_init();inotify_add_watch(i,"/tmp",1);int f=open("/etc/passwd",0);char p[64];snprintf(p,64,"/proc/self/fdinfo/%d",f);FILE* x=fopen(p,"r");printf("inotify_fd=%d open_fd=%d fdinfo_probe=%s\n",i,f,x?"PRESENT":"NULL(ABSENT)");return x==NULL;}' > probe.c && /data/service/hnp/bin/clang probe.c -o probe && ./probe
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           fdinfo-capability-probe-degrade
+rec_description:        运行期先对自身 pid 探测 fdinfo 节点存在性（一次判定全平台），缺失时收窄输出到可用子集并显式标注（对齐 g_kernel_provides_watches_info 式守卫）；测试侧只断言可用子集
+rec_command:            [ -e /proc/self/fdinfo ] && echo fdinfo-PRESENT || echo fdinfo-ABSENT
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      same-uid-instance-count-only
+fallback_description:   以 readlink /proc/<pid>/fd→anon_inode:inotify 计实例（仅同 uid 可见，诚实标注覆盖边界），输出退化为限额+同 uid 实例总数；权衡：掩盖不了 watch 侧缺失，仅保住可用面，非修复
+fallback_command:       readlink /proc/self/fd/* | grep -c anon_inode:inotify
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       硬编码"因为 OHOS 所以没有"而不做运行期探测
+forbid_1_reason:        内核能力随版本变化，探针才是真相（能力探测优于平台名硬编码）
+forbid_1_consequence:   平台恢复 fdinfo 后误降级
+forbid_2_pattern:       在冒烟/单测断言 fdinfo 派生计数为 0 并当作通过
+forbid_2_reason:        把结构性缺失伪装成数值正确
+forbid_2_consequence:   假绿，平台恢复后测试仍错误通过、降级不被发现（不污染上游判定）
+
+# principles 注册表: knowledge/graph/principles.kv:151（P013 平台限制必须降级而非绕过；
+# 原报告"principles.yaml"表述经 Curator addendum 更正，以此处为准）
+principles:             P013
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E031, E285]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-ohos-proc-pid-fdinfo-absent-capability-probe.md
+last_updated:           2026-09-26
+source_event:           inotify-info 0.0.4 OHOS aarch64 真机适配：fdinfo-probe + Scout 正对照 + Auditor 独立探针（CI 产物工具裸跑 Instances=1）三路独立复现 fdinfo 节点缺失
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                sea_crab（不知对不队，oh-device-porting-v2 run inotify-info-0.0.4）
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-26

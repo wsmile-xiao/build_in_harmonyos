@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(musikcube_test LANGUAGES CXX)
+find_package(musikcube CONFIG REQUIRED)
+add_executable(musikcube_core_test test.cpp)
+target_link_libraries(musikcube_core_test PRIVATE musikcube::musikcore)
+enable_testing()
+add_test(NAME musikcube_core_test COMMAND musikcube_core_test)

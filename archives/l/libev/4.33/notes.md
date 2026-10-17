@@ -1,82 +1,74 @@
-# libev 4.33 编译进度记录
+# libev 4.33 OHOS Conan adaptation
 
-## 编译信息
-- 软件名: libev
-- 版本: 4.33
-- 构建系统: autotools（手动编译）
-- 编译状态: partial（成功但需记录系统限制）
-- 编译日期: 2026-04-25
+## Scope
 
-## 编译过程
+- Source: libev 4.33 release archive with verified SHA256.
+- Package: shared `libev` C library plus `ev.h`, `ev++.h`, and `event.h`.
+- Dependencies: no third-party Conan dependencies.
 
-### Phase 1: 初始化
-- 下载源码: http://dist.schmorp.de/libev/libev-4.33.tar.gz
-- 解压成功
-- 环境检查通过
+## Build approach
 
-### Phase 2: 配置尝试
-- 首次尝试: config.guess 无法识别 HarmonyOS 系统
-- 修复方法:
-  1. 下载最新的 config.guess 和 config.sub（2025-07-10 版本）
-  2. 修改 config.guess 添加 aarch64:HarmonyOS 识别（输出 aarch64-unknown-linux-ohos）
-  3. 修改 config.sub 添加 ohos-linux 分支和 OS/kernel 白名单
+The archived autotools attempt failed when `config.status` created temporary
+files on HMDFS. The recipe therefore generates a small CMake project that
+builds the same upstream sources (`ev.c` and `event.c`) and derives `config.h`
+from compile/link feature checks.
 
-- 二次尝试: config.status 遭遇 HMDFS 文件系统限制
-  - 错误: "can't create ./confXXX/subs1.awk: Permission denied"
-  - 原因: HMDFS 文系统对 autotools 的临时目录创建有特殊限制
-  - 尝试了多种方法（VPATH 构建、不同目录、不同 shell）均失败
+SDK 11 does not contain a system `libev.so`, so the recipe defaults to a shared
+package. It assigns `VERSION 4.0.0` and `SOVERSION 4`, matching upstream
+libtool `-version-info 4:0:0`, and uses `$ORIGIN` as the install RUNPATH.
 
-### Phase 3: 手动编译
-- 由于 autotools 配置失败，采用手动编译方式
-- 创建 config.h（基于 configure 输出的宏定义）
-- 手动编译源文件:
-  - `clang -c -fPIC -O2 -I. ev.c -o ev.o`（40 个警告，均为 assert 语句的兼容性问题）
-  - `clang -c -fPIC -O2 -I. event.c -o event.o`
-- 创建库文件:
-  - 静态库: `llvm-ar rcs libev.a ev.o event.o` (69K)
-  - 动态库: `clang -shared -fPIC -o libev.so ev.o event.o` (70K)
+OHOS does not implement the newer io_uring syscall family. The generated CMake
+target sets `EV_USE_IOURING=0` only for OHOS; portable epoll, poll, select,
+eventfd, signalfd, and timerfd capabilities remain controlled by feature checks.
+The Linux `__kernel_rwf_t` typedef is checked with a compile probe equivalent to
+upstream `AC_CHECK_TYPES`, rather than a symbol-address probe that rejects types.
 
-### Phase 4: 安装和验证
-- 安装到 ~/usr/local:
-  - 库文件: libev.a, libev.so
-  - 头文件: ev.h, ev++.h, event.h
-- 验证测试程序成功运行:
-  - 输出 "libev version: 4.33"
-  - 成功创建 default loop
+## Tests and evidence boundary
 
-### Phase 5: 预编译包创建
-- 创建预编译包目录结构
-- 由于 tar.gz 在 HMDFS 上有问题，使用 zip 格式
-- 预编译包: libev-4.33-ohos-aarch64.zip (73K)
+libev 4.33 ships no upstream test target. The Conan consumer validates the
+reported 4.33 version, creates the default event loop, and runs a one-shot
+timer callback. During a Windows-to-OHOS cross-build it is compiled and linked
+but not executed because `can_run()` is false. Target execution was verified
+separately on a HarmonyOS PC device.
 
-## 遇到的问题和解决方案
+Three independent CTest unit cases now cover version constants, loop userdata
+and initial state, and one-shot timer activation/callback/event-mask behavior.
+They contain 11 assertions and compile/link together with the existing
+3-assertion consumer. The forced `conan create --build=libev/*` log SHA256 is
+`8D0866DEE4B767D50A76AC1546EF6A39744951419C21910CA3BAB4D95DDB6037`;
+the Windows-hosted cross-build still skips execution by design.
 
-### 问题1: config.guess 无法识别 HarmonyOS
-- 解决方案: 修改 config.guess 添加 HarmonyOS 识别分支
-- 知识沉淀: E007 (config.guess)
+On 2026-07-24, the two AArch64 test executables and `libev.so.4` were uploaded
+to `/storage/Users/currentUser/codex-tests/pr-3009` on HarmonyOS PC
+`10.62.151.101:2222`. Each ELF was signed in its final HMDFS path. The consumer
+and the `version`, `loop_userdata`, and `timer_once` unit cases all exited 0,
+for a device result of 4/4. The consumer output confirmed libev 4.33 and the
+default-loop timer callback. Signed SHA256 values were
+`b437815ccf3dfb1dc47ef16dd7022e065205cf6e866426389592336d1b92f070`
+(`test_libev`),
+`c7943dcaa8e19c05edd5acf8b15412697e4e2ccc98c976ea9d4cd887c7e8c609`
+(`test_libev_unit`), and
+`b171e3108547d3d0ffcbcee2682680ced519b9344367ff3acfbb96d0528f5eea`
+(`libev.so.4`).
 
-### 问题2: config.sub 无法识别 ohos 三元组
-- 解决方案: 修改 config.sub 添加 ohos-linux 分支和白名单
-- 知识沉淀: E072 (config.sub 三元组验证)
+The final `conan create` produced recipe revision
+`73333e435862e817075ecb36ab0f55b9`, package ID
+`01d92cf349a0dd98ff915f4bd99a04430171517f`, and package revision
+`03688af8a1f0696b9ad4f751a2d55240`. `llvm-readelf` confirmed AArch64 ELF64,
+SONAME `libev.so.4`, RUNPATH `$ORIGIN`, and only `libc.so` as a dynamic
+dependency. The package contains no static archive and no Windows path string.
 
-### 问题3: HMDFS 文件系统限制导致 config.status 失败
-- 现象: autotools 无法在当前目录创建临时文件
-- 原因: HMDFS 的特殊权限限制
-- 解决方案: 采用手动编译方式绕过 autotools
-- 知识沉淀: 需要记录到 E046 或新建条目
+## Knowledge reuse and path classification
 
-### 问题4: tar.gz 创建失败（ustar header限制）
-- 现象: GNU tar 和 toybox tar 都报 "ustar header field is too small"
-- 原因: HMDFS 文件系统路径限制
-- 解决方案: 使用 zip 格式创建预编译包
-- 状态: partial（预编译包可用但格式非标准）
-
-## 补丁文件
-- 0001-config.guess.patch: 添加 HarmonyOS 识别
-- 0002-config.sub.patch: 添加 ohos 三元组支持
-
-## 后续工作
-- 需要记录 HMDFS 限制问题到知识图谱
-- 需要研究是否可以修改 autotools 以适应 HMDFS
-- 预编译包格式建议改为 zip（或找到 tar.gz 的解决方案）
-
+- Reused `openharmony-conan-cmake-upstream-tests-cross-runpath` for the shared
+  library RUNPATH and host-path audit.
+- Reused the existing OHOS adaptation rule that unsupported new Linux syscalls
+  such as io_uring must not be enabled solely because Linux headers are present.
+- Added verified knowledge draft E217 (`knowledge/graph/draft/E217-draft-CX17.kv`
+  and `knowledge/graph/draft/E217-draft-CX17.md`) for the reusable rule that typedef availability must
+  be tested with a target compile probe rather than `check_symbol_exists`.
+  This is a path B knowledge innovation, so the dependency is classified as
+  path A + path B.
+- libev uses public C/CMake/Conan tooling, has no private system interface,
+  assembly, closed binary, special scheduler, or large dependency graph, so it
+  does not qualify for path C.

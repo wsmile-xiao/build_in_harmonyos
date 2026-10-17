@@ -1,0 +1,76 @@
+#====================================================================
+# E9101 — libshout 源客户端消费者测试：假 Icecast 服务器必须模拟 TLS 探测与 401 挑战
+# 用法: 验证后由主编提升为正式条目
+# 对应的人类文档: knowledge/drafts/E9101-draft-B9EA.md
+#
+# 实例: oggfwd 0.2-git20150412.506088e (PR feat/oggfwd-0.2-git20150412.506088e)
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E9101
+trigger_tool:           test|runtime
+phase:                  testing
+error_signature:        OPTIONS \* HTTP/1\.1.*Upgrade: TLS/1\.0|User-Agent: libshout/2\.[0-9]+\.[0-9]+.*Connection: Upgrade|WWW-Authenticate: Basic realm=.Icecast|oggfwd: Error connecting|ezstream.*Error connecting|shout_open.*(timed out|Socket error)
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               testing, network, socket, ohos
+match_keywords:         libshout, oggfwd, ezstream, Icecast, fake server, shout_open, SHOUT_TLS_AUTO, OPTIONS * HTTP/1.1, Upgrade TLS/1.0, 401 Unauthorized, WWW-Authenticate, Authorization Basic, consumer test, test_package, hang
+title:                  libshout 源客户端（oggfwd/ezstream 类）的 test_package 假服务器：默认 TLS AUTO 探测与无凭据先 401 导致握手卡死
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             libshout 2.4.x 的 HTTP 源协议握手不是"一次 SOURCE 请求 → 200"：(1) 客户端默认 TLS 模式为 AUTO（oggfwd 的 -T auto），先发 "OPTIONS * HTTP/1.1 + Connection: Upgrade + Upgrade: TLS/1.0" 探测，普通 TCP 假服务器若按"读到头就回 200"处理，客户端会一直等待 OPTIONS 应答而无输出、无退出；(2) 关闭 TLS（-T disabled）后，第一次 "SOURCE /mount HTTP/1.0" 请求**不带 Authorization**，只有收到 401 + WWW-Authenticate 后才关闭连接并**重新连接**、带 "Authorization: Basic base64(source:password)" 重试；假服务器对首个无凭据请求直接回 200 时，客户端已关闭首连接并在第二个连接上等应答，测试卡在 pselect 直到超时。二者都不是被测包缺陷，而是消费者测试对协议的建模不足。
+affected_scope:         所有基于 libshout 的 Icecast/Shoutcast 源客户端包的 test_package（oggfwd、ezstream、darkice、ices 等）；以及任何"起本地假服务器 + 被测 CLI 作客户端"且客户端库带协议协商/挑战重试的消费者测试。libshout 构建带 openssl（with_tls=True，制品仓 libshout/2.4.6 默认）时 -T 选项存在。
+verification_cmd:       qemu-aarch64 ./test_fake_icecast_static ./oggfwd-wrap.sh（静态重链 oggfwd 后，假服务器 11/11 PASS）；python3 - <<< "监听端口 → 运行 oggfwd -T disabled ... → 打印首个请求头"；观察首个请求无 Authorization、二次连接才带 "Authorization: Basic c291cmNlOmhhY2ttZQ=="
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           model-icecast-challenge-in-fake-server
+rec_description:        假服务器按 Icecast 行为建模：循环 accept，无 "Authorization: Basic" 的请求回 "HTTP/1.0 401 Unauthorized + WWW-Authenticate: Basic realm=..." 并关闭连接，带凭据的请求回 "HTTP/1.0 200 OK"；客户端命令行加 -T disabled（先看 -h 用法是否含 "[-T "）避开 OPTIONS/TLS 升级探测；所有等待处设 alarm() 上限，stdout 用行缓冲以便超时时保留已通过的断言输出。
+rec_command:            oggfwd -T disabled -m meta.txt -n NAME -g GENRE -p 127.0.0.1 $PORT hackme /test.ogg < /dev/null
+rec_auto_fix:           false
+rec_impl:               test_package
+
+fallback_priority:      2
+fallback_approach:      assert-cli-error-paths-only
+fallback_description:   假服务器建模成本不可接受时，仅用 -h 用法横幅、缺参报错、连接被拒（Error connecting，退出码 1）等无需握手的可观测行为做消费者断言，并在 notes 中如实说明握手路径未覆盖。
+fallback_command:       oggfwd 127.0.0.1 <closed-port> pw /m < /dev/null
+fallback_auto_fix:      false
+fallback_impl:          test_package
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+forbid_1_pattern:       sleep .*&&.*kill|timeout .*\|\| true|\|\| true.*oggfwd|assert True|grep -q libshout
+forbid_1_reason:        用 sleep/kill、"|| true" 吞掉超时，或只 grep 符号名当作握手通过，会把卡死的握手记成假绿，rule12 明确不认这类"只是断言"的测试
+forbid_1_consequence:   consumer 用例失去可观测行为校验，评审判 rule12 FAIL 或运行期在真实 Icecast 上才暴露问题
+forbid_2_pattern:       patch.*libshout|SHOUT_TLS_AUTO.*patch|drop.*Upgrade
+forbid_2_reason:        握手行为是 libshout 协议的正常实现，不该为迁就测试去改库或改被测客户端源码
+forbid_2_consequence:   偏离上游行为，掩盖真实兼容性问题，并引入不必要补丁
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             no-silent-skip, provenance-verifiable
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E544]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E9101.md
+last_updated: 2026-09-30
+source_event:           oggfwd 0.2-git20150412.506088e test_package 握手卡死（pselect6 无返回）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                nyaco3 <aqjCItYW1QmEJQuF.gcw_XDpqZ8sO@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: B9EA

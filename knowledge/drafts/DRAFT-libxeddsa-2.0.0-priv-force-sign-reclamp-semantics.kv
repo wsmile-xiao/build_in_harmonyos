@@ -1,0 +1,76 @@
+# ═══ Draft knowledge entry — priv_to_ed25519_pub 内部 sc_clamp 会破坏 priv_force_sign 的取反标量，测试断言须走曲线公钥+显式符号位的功能等价路径 ═══
+# Timestamp: 2026-09-19
+# Software: libxeddsa 2.0.0-20231128.d725c81（VXEdDSA/XEdDSA 系、任何"输出非 clamped 形态标量"再喂回"入口自 clamp"API 的密码库）
+# Gate: test_package 消费者用例（真机 1/19 失败定位）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-libxeddsa-2.0.0-priv-force-sign-reclamp-semantics
+title: libxeddsa 测试误用诊断——priv_to_ed25519_pub 入口 sc_clamp 对 priv_force_sign 输出的取反标量做二次 clamp 得到不等价标量，直接断言其公钥符号位必然失败；库本身正确，功能验证须按上游模式从 curve 公钥+显式 sign bit 推导并交叉签名/验签
+trigger_tool: 测试运行期
+phase: testing
+error_signature: FAIL.*sign bit|priv_force_sign.*FAIL|签名位|sign.*bit.*fail
+severity: 3
+category: testing|crypto|api-semantics|clamping|consumer-test
+match_keywords: priv_force_sign, priv_to_ed25519_pub, sign bit, sc_clamp,
+  取反标量, 符号位断言, 测试误用
+keywords: priv_force_sign, sc_neg, sc_clamp 幂等性, 取反标量非 clamped 形态,
+  priv_to_ed25519_pub 内部 clamp, curve25519_pub_to_ed25519_pub, sign bit 0/1,
+  XEdDSA 约定, 交叉签名验签, RFC 8032/7748 KAT, 功能等价断言, 上游 test_signing
+  模式, 假库 bug
+approach: functional-cross-verify-via-curve-pub
+root_cause: libxeddsa 的私钥 API 分两层：priv_force_sign(priv_out, priv_in,
+  set_sign_bit) 先 sc_clamp 再按需 sc_neg（输出可能是**取反标量**，不是 clamped
+  形态）；而 priv_to_ed25519_pub 入口自己也做 sc_clamp。clamp 只对
+  clamped 形态幂等——对一般标量（如取反结果）做 clamp 得到的是**另一个不等价
+  的标量**（直接置位/清位 254/253/低 3 位，不做模约简）。于是"force(1) 的输出
+  回灌 priv_to_ed25519_pub 再读符号位"这条直觉断言路径必然得到随机符号位。
+  库本身无 bug：ed25519_priv_sign 直接用传入标量 ge_scalarmult_base（不
+  clamp），上游 test_signing 的正确用法是 priv_force_sign 后签名、用
+  curve25519_pub_to_ed25519_pub(curve_pub, sign) 转换公钥再验签——该路径在
+  真机全绿（上游套件 + 20/20 消费者断言）。
+affected_scope: 为 XEdDSA 系库写消费者测试的人；更一般地：密码库中"入口自
+  规范化（clamp/hash-to-scalar 等）"的 API 与"输出非规范形态"的 API 组合
+  使用时的断言设计；以及会话代码把 sign-bit 强制后的标量复用为 X25519
+  ECDH 密钥的第二现场（force 可能取反标量，两侧不一致则共享密钥不一致，
+  真机 26/27 实测；签名与 ECDH 必须各持标量）
+verification_cmd: 固定密钥 k：A1=priv_to_ed25519_pub(force(k,0))，
+  A2=priv_to_ed25519_pub(force(k,1))——若两者符号位关系不稳定即中招；正解：
+  用 force 输出签名，对 curve25519_pub_to_ed25519_pub(pub(k), 0/1) 交叉验签
+rec_priority: 1
+rec_approach: functional-cross-verify-via-curve-pub
+rec_description: 符号位功能断言写成 2x2 交叉：force(k,0) 签名对 sign=0 公钥
+  验过/sign=1 公钥拒；force(k,1) 签名对 sign=1 公钥验过/sign=0 公钥拒——
+  与库的实际契约一致且失败可定位
+rec_command: test_xeddsa.c 中 priv_force_sign 段即此写法（真机 4/4 通过，
+  原"直接读符号位"写法 1/19 失败）
+rec_auto_fix: false
+rec_impl: consumer-test
+fallback_priority: 2
+fallback_approach: mirror-upstream-test-pattern
+fallback_description: 直接照上游 test_signing.c 的用法（force 后签名 +
+  curve 公钥转换验签）写断言，不自创"读公钥符号位"的观测路径
+fallback_auto_fix: false
+fallback_impl: consumer-test
+principles: 断言要打在 API 的公开契约上，不依赖内部表示的旁路观测；入口自
+  规范化的函数与输出非规范形态的函数串联时，先问"规范化的幂等域是什么"；
+  库测试失败先与上游套件交叉印证再定性库 bug
+caused_by: 消费者测试对私钥 API 组合语义的误用（未读 pub_derivation.c/
+  seed_priv_utils.c 的 clamp 语义）
+causes: 1/19 断言失败；极易误报"libxeddsa 符号位处理在 OHOS 上有 bug"，
+  引发无谓的平台问题排查
+similar_to: E235 类（静默错值但此处为测试侧）、isal SHF_MERGE 条的"先洗清
+  指令嫌疑再定位"方法论（本条镜像：先洗清库嫌疑再定位到测试误用）
+conflicts_with:
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-libxeddsa-2.0.0-priv-force-sign-reclamp-semantics.md
+last_updated: 2026-09-19
+source_event: libxeddsa 真机 test_package 第三轮：18/19，唯"priv_force_sign
+  翻转符号位"失败；同轮上游 test_signing（含符号位路径）3/3 全绿——读源码定位
+  sc_clamp 幂等域问题，改交叉验签写法后 20/20（含消费者用例 27/27）
+authors: gcw_6YxinkyD <m13307644603@163.com>
+source_pr: (本 PR)
+source_commit: 5593e7342f
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 1.0
+metrics_last_used: 2026-09-19

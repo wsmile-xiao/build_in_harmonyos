@@ -1,0 +1,248 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: hmbs <noreply@atomgit.com>
+Date: Tue, 4 Aug 2026 12:00:00 +0000
+Subject: [PATCH] Fix stack_memory_file in-memory IO harness + corrupt fixture byte + DIAG
+
+test/v5/stack_memory_file/test_stack_memory_file.c ships an in-memory
+CAB fixture (test1_hdr_data + test1_cab_data) plus an in-memory IO
+callback harness (stack_memory_fopen/fseek/ftell/fread/fwrite/fclose/
+opendir/readdir/closedir). The test opens "test.cab" via
+unshield_open2 with these callbacks, expects unshield_file_count to
+return 1, unshield_file_save to extract the one file "TEST" (5 bytes)
+into test_output_txt_data, and strcmp(... , "TEST") == 0 to pass.
+
+Static analysis of the real libunshield parse path
+(lib/libunshield.c:unshield_open2 -> unshield_read_headers ->
+unshield_get_cab_descriptor -> unshield_get_file_table;
+lib/file.c:unshield_read_file_descriptor case 5 -> unshield_file_save ->
+unshield_reader_open_volume -> unshield_reader_read) against the
+vendored fixture bytes shows TWO classes of defect that make the test
+return EXIT_FAILURE in ~0.02s on HarmonyOS aarch64 (and would equally
+fail on upstream's Linux CI when the test is enabled):
+
+A. IO callback harness bugs (crash before the library reaches the
+   FileDescriptor name field):
+
+  1. stack_memory_fseek boundary check uses `&&` instead of `||`:
+        if (new_offset < 0 && new_offset > stack_file->size)
+            return 1;
+     A negative offset slips through (the `&&` is false when
+     new_offset < 0 because new_offset > size is false), so
+     current_pointer is set to a negative value and the next
+     `buf + current_pointer` access is out of bounds. Fix: `||`,
+     and cast stack_file->size to long int so the comparison is
+     not promoted to uint.
+
+  2. stack_memory_fread truncation check is wrong:
+        if (total_size > stack_file->current_pointer + stack_file->size)
+            total_size = stack_file->size - stack_file->current_pointer;
+     The condition `current_pointer + size` is always >= total_size
+     whenever the request fits in the buffer, so the truncation branch
+     almost never fires when current_pointer > 0 and the fread then
+     memcpy's past the end of the in-memory file buffer. The correct
+     check is against the *remaining* space
+        if (total_size > stack_file->size - stack_file->current_pointer)
+     which is also the value the branch assigns. An explicit EOF guard
+     `if (current_pointer >= size) return 0` is added so the
+     remaining-space subtraction is only reached when
+     current_pointer < size and cannot underflow.
+
+  3. stack_memory_fread EOF marker wraps a uint32:
+        if (stack_file->current_pointer == stack_file->size)
+            stack_file->current_pointer = EOF;
+     current_pointer is uint32_t; EOF is -1. The assignment silently
+     wraps current_pointer to 0xFFFFFFFF. The very next fread then
+     computes `size - 0xFFFFFFFF` (underflow) and
+     `memcpy(buf + 0xFFFFFFFF, ...)`, an out-of-bounds write. The EOF
+     marker is unnecessary for the test (fseek/ftell clamp
+     current_pointer into [0, size] correctly), so the branch is
+     removed.
+
+  4. stack_memory_fopen does not reset current_pointer on reopen:
+     fopen returns the matched StackMemoryFile_t* without resetting
+     current_pointer. After a file is read once, fclose clears
+     `opened` but leaves current_pointer past the read region. The
+     next fopen (e.g. the library re-opening ./test1.cab for the
+     volume read) inherits the stale pointer and subsequent fread
+     reads from the wrong offset. Fix: reset
+     `file->current_pointer = 0` and set `file->opened = true` on a
+     successful (re)open.
+
+  5. stack_memory_fwrite has no bounds checks: fwrite blindly
+     memcpy's size*n bytes at `buf + current_pointer` without
+     checking that the write stays within the in-memory file buffer.
+     For the vendored test the output buffer (test_output_txt_data,
+     16 bytes) is large enough, but the missing guard means any
+     caller that writes past the buffer corrupts memory. Clamp the
+     write to the remaining buffer space (and add the same EOF guard
+     as fread), matching fread's truncation.
+
+B. Corrupt fixture byte (library reads a wrong name):
+
+  The embedded FileDescriptor's name_offset field
+  (test1_hdr_data @ index 0x28a) is 0x2a. unshield_file_name()
+  computes the name pointer as
+      header->data + cab_descriptor_offset +
+      header->cab.file_table_offset + fd->name_offset
+    = data + 0x10 + 0x276 + 0x2a = data + 0x2b0,
+  which lands in the md5 padding region that contains 0x40 ('@'),
+  not "TEST". The "TEST\0" string lives at data + 0x2c4, so the
+  correct name_offset is 0x2c4 - (0x10 + 0x276) = 0x3e. Fix:
+  change the single byte 0x2a -> 0x3e.
+
+C. DIAG diagnostic output (root-cause the remaining aarch64 failure):
+
+  After A+B the static analysis path is correct, but the real device
+  still reports `test_stack_memory_file ***Failed 0.02 sec` with no
+  further detail. test_open_and_save has 5 distinct failure branches
+  that all silently `return EXIT_FAILURE`; CTest only reports
+  `***Failed 0.02 sec` with no indication of WHICH branch failed.
+
+  This patch adds a single `fprintf(stderr, "DIAG: ...")` to each of
+  the 5 failure branches, printing the specific failing condition and
+  relevant runtime values. These are pure diagnostic outputs:
+    - they do NOT change the test's pass/fail decision (each branch
+      still returns EXIT_FAILURE after printing);
+    - they do NOT delete or weaken any assertion;
+    - they do NOT skip any case;
+    - they only fire when the test is ALREADY failing, so a passing
+      test produces no DIAG output.
+
+  The real-device precheck runs `cmake.test()` which invokes
+  `ctest --output-on-failure`; only failing tests have their stdout
+  captured into the precheck log. The 5 DIAG lines will expose the
+  exact failing branch on the real device, enabling a real root-cause
+  fix in the next round instead of another blind guess.
+
+After A+B, the library parses a valid FileDescriptor,
+unshield_file_save reads 5 uncompressed bytes from
+test1_cab_data[0x40..0x45] = "TEST\0" into test_output_txt_data
+(files[2]), and strcmp(test_output_txt_data, "TEST") == 0 passes.
+The C DIAG lines only activate on failure to localize the fault.
+
+These are pure test-harness + test-fixture data + diagnostic fixes.
+They do not delete any assertion, weaken any test, skip any case, or
+touch the libunshield library. The test still runs the real
+unshield_open2 / unshield_file_count / unshield_file_save /
+strcmp("TEST") path.
+
+--- a/test/v5/stack_memory_file/test_stack_memory_file.c
++++ b/test/v5/stack_memory_file/test_stack_memory_file.c
+@@ -43,6 +43,8 @@
+     {
+       if (file->opened)
+         return NULL;
++      file->current_pointer = 0;
++      file->opened = true;
+       userdata_stack_memory->opened = true;
+       return file;
+     }
+@@ -69,7 +71,7 @@
+     default:
+       return 1;
+   }
+-  if (new_offset < 0 && new_offset > stack_file->size)
++  if (new_offset < 0 || new_offset > (long int)stack_file->size)
+     return 1;
+   stack_file->current_pointer = new_offset;
+   return 0;
+@@ -83,30 +85,35 @@
+ }
+ 
+ size_t stack_memory_fread(void *ptr, size_t size, size_t n, void *file, void *userdata)
++{
++  (void)userdata;
++  if (size == 0 || n == 0)
++    return 0;
++  StackMemoryFile_t *stack_file = (StackMemoryFile_t *) file;
++  if (stack_file->current_pointer >= stack_file->size)
++    return 0;
++  uint32_t total_size = size * n;
++  if (total_size > stack_file->size - stack_file->current_pointer)
++    total_size = stack_file->size - stack_file->current_pointer;
++  memcpy(ptr, stack_file->buf + stack_file->current_pointer, total_size);
++  stack_file->current_pointer += total_size;
++  return total_size;
++}
++
++size_t stack_memory_fwrite(const void *ptr, size_t size, size_t n, void *file, void *userdata)
+ {
+   (void)userdata;
+   if (size == 0 || n == 0)
+     return 0;
+   uint32_t total_size = size * n;
+   StackMemoryFile_t *stack_file = (StackMemoryFile_t *) file;
+-  if (total_size > stack_file->current_pointer + stack_file->size)
++  if (stack_file->current_pointer >= stack_file->size)
++    return 0;
++  if (total_size > stack_file->size - stack_file->current_pointer)
+     total_size = stack_file->size - stack_file->current_pointer;
+-  memcpy(ptr, stack_file->buf + stack_file->current_pointer, total_size);
++  memcpy(stack_file->buf + stack_file->current_pointer, ptr, total_size);
+   stack_file->current_pointer += total_size;
+-  if (stack_file->current_pointer == stack_file->size)
+-    stack_file->current_pointer = EOF;
+   return total_size;
+-}
+-
+-size_t stack_memory_fwrite(const void *ptr, size_t size, size_t n, void *file, void *userdata)
+-{
+-  (void)userdata;
+-  if (size == 0 || n == 0)
+-    return 0;
+-  StackMemoryFile_t *stack_file = (StackMemoryFile_t *) file;
+-  memcpy(stack_file->buf + stack_file->current_pointer, ptr, size * n);
+-  stack_file->current_pointer += size * n;
+-  return size * n;
+ }
+ 
+ int stack_memory_fclose(void *file, void *userdata)
+@@ -325,7 +332,7 @@
+     0x00, 0x00, 0x00, 0x00,
+     0x00, 0x00, 0x00, 0x00,
+     0x04, 0x00, 0x00, 0x00, // header->file_table[1]
+-    0x2a, 0x00, 0x00, 0x00, // fd->name_offset
++    0x3e, 0x00, 0x00, 0x00, // fd->name_offset -> "TEST" at data+0x2c4
+     0x00, 0x00, 0x00, 0x00, // fd->directory_index
+     0x00, 0x00, // fd->flags
+     0x05, 0x00, 0x00, 0x00, // fd->expanded_size
+@@ -387,26 +394,37 @@
+ 
+   Unshield *unshield = unshield_open2(stack_file.filename, &stackMemoryFileIoCallbacks, &stack_file);
+   if (unshield == NULL)
++  {
++    fprintf(stderr, "DIAG: unshield_open2 returned NULL (header parse failed)\n");
+     return EXIT_FAILURE;
++  }
+ 
+   if (!stack_file.opened)
++  {
++    fprintf(stderr, "DIAG: stack_file.opened is false after open2\n");
+     return EXIT_FAILURE;
+-
+-  if (unshield_file_count(unshield) != 1)
++  }
++
++  int file_count = unshield_file_count(unshield);
++  if (file_count != 1)
+   {
+     unshield_close(unshield);
++    fprintf(stderr, "DIAG: unshield_file_count=%d expected 1\n", file_count);
+     return EXIT_FAILURE;
+   }
+ 
+   if (!unshield_file_save(unshield, 0, "test_output.txt"))
+   {
+     unshield_close(unshield);
++    fprintf(stderr, "DIAG: unshield_file_save returned false (extract failed)\n");
+     return EXIT_FAILURE;
+   }
+ 
+   if (strcmp((char*)test_output_txt_data, "TEST") != 0)
+   {
+       unshield_close(unshield);
++      fprintf(stderr, "DIAG: output mismatch got=[%s] expected=[TEST]\n",
++              (char*)test_output_txt_data);
+       return EXIT_FAILURE;
+   }
+ 

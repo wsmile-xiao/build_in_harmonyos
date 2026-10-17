@@ -1,0 +1,79 @@
+# ═══ Draft knowledge entry — 上游自带 Find<Dep>.cmake 的 EQUAL 看门狗每次 configure 都 unset 缓存变量，-D 预置失效，必须喂 CMAKE_INCLUDE_PATH/CMAKE_LIBRARY_PATH ═══
+# Timestamp: 2026-09-19
+# Software: libxeddsa 2.0.0-20231128.d725c81（任何自带 module 模式 Find*.cmake 且用 unset-on-change 守卫的上游）
+# Gate: conan create（cmake.configure 阶段 find_package(<Dep> REQUIRED)）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-libxeddsa-2.0.0-find-sodium-cache-unset-equal-guard
+title: 上游 bundled FindSodium.cmake 用非数值 EQUAL 看门狗在每次 configure 时 unset 全部 sodium_* CACHE 变量，-Dsodium_LIBRARY_RELEASE 等命令行预置被静默删除，find_library 回落默认搜索路径找不到 conan 依赖
+trigger_tool: cmake / conan
+phase: build
+error_signature: Could NOT find Sodium|sodium_LIBRARY_RELEASE-NOTFOUND|CMake Error.*Sodium REQUIRED
+severity: 2
+category: build|cmake|find-module|conan|dependency|cache
+match_keywords: FindSodium, sodium_LIBRARY_RELEASE-NOTFOUND, Could NOT find Sodium,
+  unset CACHE, EQUAL, find_package REQUIRED, module 模式, CMakeDeps 不生效,
+  cmake_file_name, 自带 Find 模块
+keywords: FindSodium.cmake, sodium_USE_STATIC_LIBS, EQUAL 看门狗, unset(sodium_LIBRARY
+  CACHE), -D 注入失效, find_path, find_library, CMAKE_INCLUDE_PATH,
+  CMAKE_LIBRARY_PATH, CMAKE_PREFIX_PATH, module 模式 find_package, CMakeDeps
+  config 模式, self.dependencies package_folder, ohpcd libsodium
+approach: feed-cmake-include-library-path
+root_cause: libxeddsa 自带的 FindSodium.cmake（很多上游 vendor 的 Find 模块同款写法）
+  开头有变更跟踪守卫：`if(NOT (sodium_USE_STATIC_LIBS EQUAL
+  sodium_USE_STATIC_LIBS_LAST)) unset(sodium_LIBRARY CACHE)
+  unset(sodium_LIBRARY_DEBUG CACHE) unset(sodium_LIBRARY_RELEASE CACHE) ...`。
+  上游 CMakeLists 在非 emscripten 分支 `set(sodium_USE_STATIC_LIBS NO)`（普通
+  变量），而 CMake 的 EQUAL 对非数值字符串恒为 false → NOT(false)=true → 每次
+  configure 都无条件 unset 全部 sodium_* CACHE 条目。后果：通过 -D（含 Conan
+  tc.variables 写入 cache 变量）预置的 sodium_INCLUDE_DIR/sodium_LIBRARY_RELEASE
+  在 find_package 执行前就被删除，find_library 以空 HINTS 走默认搜索路径，conan
+  依赖包目录不在其中 → Sodium_FOUND=FALSE → find_package(... REQUIRED) FATAL。
+  另注：conan CMakeDeps 生成的是 config 模式（libsodium-config.cmake），对
+  `find_package(Sodium)`（module 模式、项目自带 FindSodium.cmake 在
+  CMAKE_MODULE_PATH）完全不参与，CMakeDeps"不生效"不是配置错误而是查找模式不同。
+affected_scope: 一切 vendor 了 Find<Dep>.cmake 并用 find_package(<Dep>) module 模式
+  定位依赖的上游（FindSodium/FindPEGTL/自写 FindXXX 等）；特征是模块内有
+  `<dep>_*_LAST` 内部 cache 变量 + unset 守卫
+verification_cmd: 在 CMakeLists 的 find_package 前后 message 打印
+  sodium_LIBRARY_RELEASE；或故意 -Dsodium_LIBRARY_RELEASE=/fake/path 观察
+  configure 输出里 find_library 重新搜索（证明 -D 已被 unset）
+rec_priority: 1
+rec_approach: feed-cmake-include-library-path
+rec_description: 不与看门狗对抗：把 conan 依赖包目录喂给 find_path/find_library 的
+  文档化搜索变量 CMAKE_INCLUDE_PATH 与 CMAKE_LIBRARY_PATH（外加
+  CMAKE_PREFIX_PATH 兜底），值取自 self.dependencies["<dep>"].package_folder。
+  unset 守卫只删 <dep>_* 条目，不碰这三个 CMake 内建变量，查找稳定命中
+rec_command: tc.variables["CMAKE_INCLUDE_PATH"] = <dep>/include；
+  tc.variables["CMAKE_LIBRARY_PATH"] = <dep>/lib；真机 conan create 全绿验证
+rec_auto_fix: false
+rec_impl: conan-recipe-generate
+fallback_priority: 2
+fallback_approach: patch-find-module-guard
+fallback_description: 单一职责补丁删除/修正 EQUAL 守卫（如改为 STREQUAL 或去掉
+  unset），恢复 -D 注入能力；改动上游文件，非必要不用
+fallback_auto_fix: false
+fallback_impl: conan-patch-recipe
+principles: 与上游构建系统的自清理逻辑对抗（比拼 unset vs set 顺序）必输；优先用
+  CMake 文档化的内建搜索变量而非变量注入；CMakeDeps 只服务 config 模式，
+  module 模式 Find 必须另行喂路径
+caused_by: 上游 Find 模块的变更跟踪守卫对非数值变量用 EQUAL 比较（CMake 语义
+  恒 false），守卫退化为无条件 unset
+causes: conan 依赖的 -D/cache 预置被删，find_package REQUIRED 直接 FATAL_ERROR，
+  误诊为"CMakeDeps 配置错误"或"依赖未安装"
+similar_to: E429/E430（HMDFS 环境差异类）、et/7.0.0 的 SODIUM_* 显式传参先例
+conflicts_with:
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-libxeddsa-2.0.0-find-sodium-cache-unset-equal-guard.md
+last_updated: 2026-09-19
+source_event: libxeddsa 2.0.0-20231128.d725c81 适配：原计划 -Dsodium_LIBRARY_RELEASE
+  注入，读 FindSodium.cmake 源码发现 unset 守卫；改 CMAKE_INCLUDE_PATH/
+  CMAKE_LIBRARY_PATH 后 frp 真机 conan create 一次通过（ctest 3/3 +
+  test_package 20/20）
+authors: gcw_6YxinkyD <m13307644603@163.com>
+source_pr: (本 PR)
+source_commit: d12df24fdc
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 1.0
+metrics_last_used: 2026-09-19

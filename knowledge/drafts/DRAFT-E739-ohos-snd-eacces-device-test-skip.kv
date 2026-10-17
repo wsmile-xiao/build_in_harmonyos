@@ -1,0 +1,105 @@
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-E739
+trigger_tool:           conan|ctest|gtest
+phase:                  testing
+
+error_signature: |-
+  cannot open card\([0-9]+\) device \([0-9]+\): Permission denied|
+  /dev/snd: errno=13\(EACCES\) Permission denied|
+  /dev/snd/controlC[0-9]+: errno=13\(EACCES\) Permission denied|
+  pcm_is_ready\(pcm_object\).*Actual: false|
+  mixer_open.*Expected: .mixer_object. != .nullptr.
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               testing, portability, ohos, device, conan-recipe
+prescan_pattern:        sound/asound\.h|/dev/snd|SNDRV_PCM_|mixer_open|pcm_open
+match_keywords: tinyalsa, ALSA, asound, /dev/snd, EACCES, Permission denied, cannot open card, pcm_is_ready, mixer_open, 无音频设备, 设备依赖用例, gtest_filter, 探针, 环境限制, SKIP, 四分项, gtest_list_tests
+title:                  OHOS 上 /dev/snd 存在但全部 EACCES：ALSA 设备依赖用例的探针 + filter + SKIP 计数口径（不写 PASS）
+
+root_cause: |-
+  HarmonyOS PC 内核有 sound 子系统，`/dev/snd` 目录确实存在，但普通进程对目录与
+  `controlC0/C1/C2` 节点一律 `EACCES`（能力位不含 DAC override，也没有音频组权限）。
+  tinyalsa 2.0.0 的 68 条 gtest 注册用例里有 66 条必须在 SetUp 或用例体里打开
+  control/pcm 节点：全量跑的结果是 `66 FAILED`，失败断言只有两类——
+  `pcm_is_ready(...) Actual: false` 与 `mixer_object != nullptr` 实际为 NULL，另有
+  `cannot open card(N) device (N): Permission denied` 的原始错误行。
+  这类失败与被测代码正确性无关，但直接把它们写成 FAIL 会把适配判成大面积红，
+  写成 PASS 是红线；正解是**先取证再分类**：
+  1. 配方 build() 里用 os.open 对 `/dev/snd` 与 controlC* 做探针，把 errno/错误码
+     逐字打进日志（一手证据，不是推测）；
+  2. 探针失败 ⇒ 用 `--gtest_filter` 只跑与设备无关的子集（tinyalsa 是
+     MixerTest.OpenAndClose + PcmTest.FormatToBits 共 2 条），该子集由 ctest 把关，
+     失败即构建失败（不放松判据）；
+  3. 用 `--gtest_list_tests`（配合同一 filter）机械清点 total/ran/skipped 并逐条打印
+     SKIP 名单，四分项 TOTAL = PASS + FAIL + SKIP + NOT_RUN 恒等；
+  4. 探针成功（有设备的机器）⇒ filter 自动放开为 `*` 跑全量。
+affected_scope:         所有依赖 /dev/snd（或同类音频/外设节点）的 Linux UAPI 库与
+  其 gtest/脚本用例在 OHOS、headless CI 上的测试统计；tinyalsa 2.0.0 是首个实测样本，
+  同族音频库（alsa-lib、pulseaudio 客户端、tinycompress 等）与任何「节点在但 EACCES」
+  的 /dev 面测试都适用。
+verification_cmd: |-
+  conan create "$HOME/ws/worktrees/tinyalsa-2.0.0/archives/t/tinyalsa/2.0.0" \
+    -pr:h="$HOME/ws/worktrees/tinyalsa-2.0.0/ci/conan/profiles/ohos-aarch64" \
+    -pr:b="$HOME/ws/worktrees/tinyalsa-2.0.0/ci/conan/profiles/ohos-aarch64" \
+    -c tools.build:jobs=4
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           probe-then-filter-then-counted-skip
+rec_description: |-
+  三段式：①`os.open(node, O_RDONLY/O_RDWR)` 探针（逐个节点记录 errno 与 strerror），
+  结论打成 `[upstream-tests] /dev/snd 探针: ...` 进构建日志；②按探针结果选择
+  gtest_filter——可用则 `*`，不可用则只留设备无关子集，子集用例由 ctest
+  `--output-on-failure` 把关（任何真实回归仍然炸构建）；③用
+  `binary --gtest_list_tests [--gtest_filter=...]` 机械清点 total/ran/skipped，
+  逐条打印 SKIP 行并注明「环境限制，不计 PASS」，最后打一行
+  `UPSTREAM_TESTS total=… ran=… passed=… skipped=… failed_unexpected=0` 作为 PR
+  正文四分项的唯一取数行；可选再跑一次全量（ignore_errors=True）作为 SKIP 归因的
+  原始证据。PR 正文写「上游测试通过率：ran/ran（100%）——清点 N=total，实跑 ran、
+  SKIP skipped、NOT_RUN 0」，并单列失败行证据。
+rec_command: |-
+  # 探针（配方内）
+  #   /dev/snd: errno=13(EACCES) Permission denied | controlC0..C2: errno=13(EACCES)
+  # 清点（构建日志里的可核对行）
+  #   [upstream-tests] 清点 total=68 ran=2 skipped=66
+  #   UPSTREAM_TESTS total=68 ran=2 passed=2 skipped=66 failed_unexpected=0
+  grep -E '清点 total=|UPSTREAM_TESTS|/dev/snd 探针' \
+    "$HOME/tmp/tinyalsa-2.0.0/reports/conan-create.log"
+rec_auto_fix:           false
+rec_impl:               conanfile-build-method
+
+# 回退方案
+fallback_priority:      2
+fallback_approach:      full-run-classify-by-block
+fallback_description: |-
+  不便用 filter 时（如测试框架不支持），全量跑一次并按 gtest 输出的
+  每个用例块归因：块内含 cannot open card / Permission denied / pcm_is_ready Actual:
+  false / mixer_object nullptr 才算设备阻塞，出现任一其它失败必须让构建失败，
+  归因清单与原始输出一并进 PR 证据。
+fallback_command:       grep -E 'cannot open card|Permission denied|pcm_is_ready' reports/conan-create.log
+fallback_auto_fix:      false
+fallback_impl:          manual-triage
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       skipped=66.*passed=68|把 66 条失败改写成 PASS|删除设备依赖用例
+forbid_1_reason:         未经探针取证就把失败改写成通过（或直接删用例）属欺骗类红线（R34/R51）；
+  §3.5 明确「跳过、失败、环境限制必须如实记录，不得写成 PASS」。
+forbid_1_consequence:   W4 按 P0 欺骗判 fail，PR 返工；N 与日志不符还会触发 rule4 少报判定。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             real-evidence-over-assumption, honest-non-pass-accounting, count-with-own-oracle
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E285, E407, E554]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+last_updated:           2026-09-25
+source_event:           archives/t/tinyalsa/2.0.0 (build() 设备探针 + gtest_filter + 清点)
+
+draft:                  true
+contributor_id:         E739

@@ -1,0 +1,91 @@
+#====================================================================
+# Draft knowledge entry - glibc feature-test macros are undefined (not 0)
+#   on OHOS/musl, so glibc-only version gates invert and glibc-only APIs
+#   are selected: sys/sysctl.h include + cpu_set_t/sched_setaffinity use
+#   Source package: mlucas/20.1.1
+#====================================================================
+
+id:                     DRAFT-mlucas-20.1.1-glibc-feature-test-undefined-macro-trap
+trigger_tool:           conan|make|clang
+phase:                  compilation
+error_signature:        sys/sysctl\.h.*file not found|use of undeclared identifier 'cpu_set_t'|use of undeclared identifier 'cpu_set'|__GLIBC__.*undefined
+
+severity:               2
+category:               portability, libc, headers, platform-guard
+match_keywords:         __GLIBC__, __GLIBC_MINOR__, glibc version gate, undefined macro in #if,
+                        sys/sysctl.h, cpu_set_t, CPU_ZERO, CPU_SET, sched_setaffinity,
+                        OS_TYPE_LINUX, __linux__, musl, OHOS, __has_include, capability probe
+title:                  OHOS/musl 下 __GLIBC__/__GLIBC_MINOR__ 未定义（在 #if 中按 0 参与运算），
+                        任何「glibc 版本门」都会反转放行 glibc 专有头文件与专有 API；
+                        同时 OHOS 定义了 __linux__ 会命中源码的 OS_TYPE_LINUX 分支
+
+root_cause:             OHOS 使用 musl libc，clang 预定义 __linux__ 但**不定义** __GLIBC__ /
+                        __GLIBC_MINOR__。C 预处理规则里未定义标识符在 #if 中求值为 0，于是
+                        「__GLIBC__ < 2 || __GLIBC_MINOR__ < 30」这种**为旧 glibc 准备的**
+                        判断在 musl 上恒为真，语义完全反转。mlucas 20.1.1 实测两处同源后果：
+                        (1) src/platform.h 该判断为真 ⇒ `#include <sys/sysctl.h>`（glibc/BSD
+                        专有，OHOS sysroot 无此头）⇒ 20 个 TU 全部 `fatal error:
+                        'sys/sysctl.h' file not found`；
+                        (2) src/threadpool.c 的调度分支用 `#elif defined(OS_TYPE_LINUX)`，而
+                        OS_TYPE_LINUX 由 `__linux__` 派生 ⇒ 进入 glibc 专有代码
+                        `cpu_set_t / CPU_ZERO / CPU_SET / sched_setaffinity`（musl 全无）
+                        ⇒ `error: use of undeclared identifier 'cpu_set_t'`。
+                        两者共同点：**源码把「缺少某个 glibc 特性」表达成了「某个 glibc 宏的
+                        数值比较」或「是不是 Linux」，在 musl 上都会选错分支**。
+affected_scope:         任何把 glibc 版本号写进 #if 的 C/C++ 包（__GLIBC__/__GLIBC_MINOR__/
+                        __GLIBC_PREREQ）、以及任何用 `defined(__linux__)` 圈定 glibc 专有 API
+                        （sched_setaffinity/cpu_set_t、getauxval 之外的扩展、sys/sysctl.h、
+                        sys/sendfile.h 等）的包。OHOS 上这是平台事实，不是上游缺陷。
+verification_cmd:       CC='clang -I<gmp>/include -L<gmp>/lib' bash makemake.sh nosimd
+                        # 修复前 build.log: ".../src/platform.h:1306:11: fatal error: 'sys/sysctl.h'
+                        #   file not found"（20 次）→ 修复后 exit 0，readelf -d 仅 NEEDED libc.so
+
+rec_priority:           1
+rec_approach:           capability-probe-instead-of-glibc-version-gate
+rec_description:        (a) 头文件存在性：把 include 换成能力探测而不是版本判断——
+                        `#if __has_include(<sys/sysctl.h>)` 包住 warning+include；对
+                        glibc/BSD/macOS 行为不变，musl 自然跳过，且**不使用任何平台宏**
+                        （__OHOS__ 守卫是 PF5 会拦的写法，除非按 R8 作为 libc 探针在 PR 说明）。
+                        (b) 专有 API：把调度分支从「是不是 Linux」改为按 C 库能力收敛，
+                        如 `#elif defined(OS_TYPE_LINUX) && defined(__GLIBC__)`，并保留一个
+                        `#elif defined(OS_TYPE_LINUX)` 空分支（上游对 OpenBSD 已有同款写法：
+                        "affinity-setting is up to the OS"）——线程亲和性缺失不影响功能，
+                        只是不再绑定核。
+rec_command:            diff -u src/platform.h.orig src/platform.h; diff -u src/threadpool.c.orig src/threadpool.c
+rec_auto_fix:           false
+rec_impl:               archives/m/mlucas/20.1.1/patches/0001-src-platform.h.patch
+                        + archives/m/mlucas/20.1.1/patches/0002-src-threadpool.c.patch
+
+fallback_priority:      2
+fallback_approach:      ohos-local-equivalent-for-required-capability
+fallback_description:   若被门挡住的确实是必需能力（不是 sysctl.h 这类仅历史遗留的 include），
+                        再退到 E086 的 __OHOS__ 本地等价实现（如 CPU 亲和性用
+                        sched_setaffinity 之外的 syscall 或直接放弃绑定），并在 PR 说明为何
+                        必须引入平台宏。切勿用 `-D__GLIBC__=2` 之类命令行伪造宏——那会污染
+                        整个 TU 的所有 glibc 判断。
+fallback_command:       clang -dM -E -x c /dev/null | grep -E '__GLIBC__|__linux__|__OHOS__'
+                        # 先确认平台真实预定义，再决定改哪一层
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+principles:
+- P011
+
+causes:                 []
+caused_by:              []
+similar_to:             [E086, DRAFT-chipmunk2d-7.0.3-sysctl-apple-guard, DRAFT-msquic-2.6.1-pthread-setaffinity-np-android-guard]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               doc/DRAFT-mlucas-20.1.1-glibc-feature-test-undefined-macro-trap.md
+last_updated:           2026-09-29
+source_event:           mlucas 20.1.1 HarmonyOS adaptation
+
+authors: GaoPengqiang <GaoPengqiang@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+metrics_success_count:   0
+metrics_fail_count:      0
+metrics_confidence:      0.0
+metrics_last_used:

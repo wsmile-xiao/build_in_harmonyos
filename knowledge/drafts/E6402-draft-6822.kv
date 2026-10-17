@@ -1,0 +1,90 @@
+#====================================================================
+# E6402 (draft) — OHOS musl 的 program_invocation_short_name / program_invocation_name：
+#                 头文件不声明、libc.so 不导出，但 libc.a 以弱别名导出——
+#                 自行 extern 声明时静态链接可过可跑、交付的动态链接报 undefined symbol
+# Source: sleepenh 1.8 适配（HarmonyOS PC aarch64）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E6402
+trigger_tool:           clang|ld
+phase:                  compilation|linking
+error_signature:        undefined symbol: program_invocation_short_name|undefined symbol: program_invocation_name|use of undeclared identifier 'program_invocation_short_name'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               musl, libc, linker, portability
+prescan_pattern:        \bprogram_invocation_(short_)?name\b
+match_keywords:         program_invocation_short_name, program_invocation_name, __progname, undefined symbol, ld.lld, libc.a, libc.so, weak alias, -static, static relink, argv[0], 弱别名, 静态重链
+title:                  OHOS musl：program_invocation_short_name/program_invocation_name 头文件无声明、libc.so 不导出、libc.a 却有弱别名——extern 声明在 -static 下可过可跑，交付的动态链接报 undefined symbol
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             musl 在 libc 内部把 program_invocation_short_name / program_invocation_name 定义为 __progname /
+                        __progname_full 的弱别名，OHOS SDK 对三处的处理不一致：sysroot 头文件（errno.h 等）不声明这两个变量，
+                        所以直接引用报 use of undeclared identifier；libc.so 的动态符号表只导出 __progname（llvm-nm -D 仅见
+                        `B __progname`）；静态库 libc.a 却保留了弱别名（llvm-nm 可见 `V program_invocation_short_name`、
+                        `V program_invocation_name`）。于是"补一行 extern char *program_invocation_short_name;"这类修法
+                        在 -static 链接时能通过，程序还能打印出正确的名字，而交付产物的默认动态链接报
+                        ld.lld: error: undefined symbol: program_invocation_short_name。x86 runner 无法运行动态 OHOS 产物，
+                        惯例是用同源 .o 静态重链后经 qemu-aarch64 验证，这条路径恰好走 libc.a，验证结果是假阳性。
+affected_scope:         在 OHOS（SDK sysroot 的 musl 头文件 + libc.so/libc.a）上构建、引用 glibc 扩展变量
+                        program_invocation_short_name / program_invocation_name 的 C/C++ 程序（报错前缀、usage 文本里的程序名），
+                        以及用静态重链副本做功能验证、或配方以 -static 构建的场景：静态构建看不到问题，动态构建才在链接期失败；
+                        E493 与 DRAFT-ohos-musl-glibc-specific-symbols 只覆盖"未声明"这一层，均未涉及静态/动态导出不对称。
+verification_cmd:       NDK=<OHOS SDK>/native; L=$NDK/sysroot/usr/lib/aarch64-linux-ohos; $NDK/llvm/bin/llvm-nm -D $L/libc.so | grep -E 'progname|program_invocation'; $NDK/llvm/bin/llvm-nm $L/libc.a | grep -E ' [BV] (__progname|program_invocation)'; printf '#include <stdio.h>\nextern char *program_invocation_short_name;\nint main(void){puts(program_invocation_short_name);return 0;}\n' > p.c; $NDK/llvm/bin/aarch64-unknown-linux-ohos-clang p.c -o p_dyn (ld.lld undefined symbol); $NDK/llvm/bin/aarch64-unknown-linux-ohos-clang -static p.c -o p_sta && qemu-aarch64 ./p_sta (链接成功并打印 p_sta)
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           progname-from-argv0
+rec_description:        补丁里不再引用 program_invocation_*：main() 开头从 argv[0] 取 basename 存入程序自己的静态变量（glibc 的
+                        program_invocation_short_name 就是这个值），原引用处改用该变量；argv[0] 为空时保留编译期默认名。
+                        纯 C、无平台宏、不依赖 libc 内部符号，glibc/musl、静态/动态链接同一代码路径
+rec_command:            static const char *progname = "<tool>"; ... int main(int argc, char *argv[]) { if (argc > 0 && argv[0] && *argv[0]) { const char *s = strrchr(argv[0], '/'); progname = s ? s + 1 : argv[0]; } ...；原 program_invocation_short_name 引用改为 progname，经 refresh-patch --auto 生成补丁
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      compat-definition-unit
+fallback_description:   引用点分布在大量文件、不便逐个改时，按 DRAFT-ohos-musl-glibc-specific-symbols 的做法由配方编译一个
+                        compat 翻译单元无条件定义 char *program_invocation_short_name（在 main() 里赋值为 argv[0] 的 basename，
+                        或固定名字）；强定义在静态链接时覆盖 libc.a 的弱别名、动态链接时补上 libc.so 缺失的符号，两种链接都成立
+fallback_command:       compat_progname.c: char *program_invocation_short_name = "<tool>"; char *program_invocation_name = "<tool>"; 并在各可执行目标链接该对象
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       extern\s+char\s*\*\s*program_invocation_(short_)?name\s*;
+forbid_1_reason:        只补声明不补定义：头文件缺的只是声明，但 libc.so 同样不导出该符号；-static 与静态重链验证会链接 libc.a 的弱别名而通过，
+                        交付的动态链接产物才暴露问题
+forbid_1_consequence:   本地静态验证/静态配方全绿，conan create 默认动态链接（或 CI）报 ld.lld: error: undefined symbol: program_invocation_short_name
+forbid_2_pattern:       __OHOS__.*__progname|__progname.*__OHOS__
+forbid_2_reason:        E493 的旧方案（__OHOS__ 下改用 __progname）违反 R8（patches/ 默认禁平台宏，PF5 拦截），且 __progname 同样无头文件声明，
+                        需要再补 extern，依赖 libc 内部符号
+forbid_2_consequence:   PF5/审计拦截；glibc 与 musl 走不同代码路径，各需单独验证
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E493, DRAFT-ohos-musl-glibc-specific-symbols]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E6402.md
+last_updated: 2026-09-23
+source_event:           sleepenh 1.8 适配：usage() 引用 program_invocation_short_name，OHOS clang 报 use of undeclared identifier；
+                        探针实测 libc.so 仅导出 __progname、libc.a 含 V program_invocation_short_name / V program_invocation_name，
+                        只加 extern 声明时动态链接 ld.lld undefined symbol，-static 链接成功且静态副本经 qemu-aarch64 实跑 F2（usage 程序名）通过。
+                        engine 对该编译错误命中 E493（签名仅含 program_invocation_name，推荐 __OHOS__ + __progname）；
+                        DRAFT-ohos-musl-glibc-specific-symbols 覆盖未声明层并给出 compat 定义方案，但未记录 libc.a 弱别名与静态验证假阳性
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                lkjing2021345 <1908499668@qq.com>
+source_pr:
+source_commit:
+
+draft: true
+contributor_id: 6822

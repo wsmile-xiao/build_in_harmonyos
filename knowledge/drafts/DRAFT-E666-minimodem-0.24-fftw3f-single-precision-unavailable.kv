@@ -1,0 +1,128 @@
+#====================================================================
+# DRAFT-E666-minimodem-0.24-fftw3f-single-precision-unavailable
+#   ohpcd 制品仓 FFTW3 只有双精度构建：上游写死 pkg-config 名 fftw3f
+#   （单精度）的包在 PKG_CHECK_MODULES 处直接失败
+# 来源: feat/minimodem-0.24（积分赛，minimodem 0.24 适配）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-E666-minimodem-0.24-fftw3f-single-precision-unavailable
+trigger_tool:           pkg-config|configure|conan
+phase:                  configure
+error_signature:        Package\s+'fftw3f',\s+required\s+by\s+'virtual:world',\s+not\s+found|
+                        Package\s+'fftw3f',\s+required\s+by\s+'.*',\s+not\s+found|
+                        No\s+package\s+'fftw3f'\s+found
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               1
+category:               dependency, fftw, pkg-config, autotools, precision
+match_keywords:         fftw3f, fftw3, pkg-config, PKG_CHECK_MODULES, precision,
+                        单精度, 双精度, --enable-single, --enable-float,
+                        libfftw3, DEPS_LIBS, undefined symbol, fftwf_plan,
+                        fftwf_malloc, fftwf_execute, conanfile, ohpcd
+title:                  ohpcd 制品仓 FFTW3 只有双精度构建，上游依赖单精度 fftw3f 的包在 configure 报 No package 'fftw3f' found
+prescan_pattern:        fftw3f|fftwf_plan|fftwf_malloc|fftwf_execute|\-\-enable\-single
+prescan_globs:          configure.ac, */configure.ac, src/*.c, */src/*.c, conanfile.py
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             FFTW3 是同一份源码按精度分别构建的：单精度要 configure
+                        时显式给 --enable-single（产物 libfftw3f + fftw3f.pc，
+                        API 前缀 fftwf_*），缺省或 --enable-double 构建
+                        libfftw3 + fftw3.pc（API 前缀 fftw_*）。ohpcd 制品仓
+                        的 fftw 全系（3.3.10/3.3.10.1/3.3.10.2/3.3.10.3/3.3.11）
+                        都只有双精度构建（配方 configure_args 无
+                        --enable-single，二进制包内只有 lib/pkgconfig/fftw3.pc），
+                        fftw/2.1.5 虽是 float 构建但属 FFTW2 API（sfftw_*），
+                        与 FFTW3 的 fftwf_* 完全不兼容。于是：
+                        ① configure 阶段 PKG_CHECK_MODULES(DEPS, [fftw3f])
+                        经 pkg-config 找不到 fftw3f.pc 直接失败；
+                        ② 即使用别名把 fftw3f.pc 指到 libfftw3，链接期
+                        fftwf_plan_dft_r2c 等符号仍是 undefined symbol——
+                        两层都必须处理，只做 .pc 别名是假修。
+affected_scope:         所有上游写死单精度 FFTW3（pkg-config 名 fftw3f，源码
+                        用 fftwf_* API）的包在 OHOS/ohpcd 环境的适配。判别
+                        两步：conan list -r=ohpcd "fftw/*" 看制品版本；
+                        grep -rn "fftwf_\|fftw3f" 源码确认用点面。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           mechanical-precision-swap-patch
+rec_description:        机械精度替换补丁（本条实证：minimodem 0.24，src/fsk.c
+                        + src/fsk.h + configure.ac 三文件收敛）：
+                        ① configure.ac/Makefile.am 的 deps_packages/
+                        PKG_CHECK_MODULES 里 fftw3f → fftw3；
+                        ② 源码 fftwf_* → fftw_*（malloc/free/execute/
+                        destroy_plan/plan_many_dft_r2c）、fftwf_complex →
+                        fftw_complex、fftwf_plan → fftw_plan；
+                        ③ 变换缓冲类型 float* → double*，样本喂入处的
+                        memcpy 必须改成逐点循环赋值（float 样本 → double
+                        缓冲，sizeof 也随之改）；
+                        ④ 幅值/输出侧保持上游原精度口径（如 band_mag 返回
+                        float），保证测试阈值语义不变。双精度 FFT 只会更
+                        精确，上偏/下偏阈值类测试不受影响（minimodem 0.24
+                        的 amplitude/noise/rate-slop 类用例为实证对象）。
+                        替换完成判据：grep -rn fftwf_ 源码零命中。
+rec_command:            grep -rn "fftwf_" <src>/ | grep -v Binary; conan list -r=ohpcd "fftw/*"
+rec_auto_fix:           false
+rec_impl:               source-patch-per-file-diff
+
+fallback_priority:      2
+fallback_approach:      vendor-single-precision-fftw-build
+fallback_description:   若上游用点面太大（fftwf_ 散布数十文件）不宜机械替换，
+                        评估在配方内捆绑 fftw-3.3.10 tarball 以
+                        --enable-single 构建单精度库并随包私有交付（不是
+                        发布成公共 fftw 包）。代价：包体与构建时长显著上升，
+                        仅在替换不可行时使用。
+fallback_command:       无通用命令，按包评估
+fallback_auto_fix:      false
+fallback_impl:          bundled-dep-build
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       pkg_config_aliases.*fftw3f|set_property.*pkg_config_aliases.*fftw3f
+forbid_1_reason:        禁止只做 .pc 别名（fftw3f.pc 指向 libfftw3）——
+                        configure 能过但链接期 fftwf_* 全部 undefined
+                        symbol，是两层失败面里只修一层的假修
+forbid_1_consequence:   配置绿、链接红，浪费一轮构建；若测试恰好不触碰 FSK
+                        路径还会造成假绿
+forbid_2_pattern:       改用\s*fftw/2\.1\.5|fftw/2\.1\.5.*float.*替代
+forbid_2_reason:        禁止用 fftw/2.1.5 当 float 替代——那是 FFTW2 API
+                        （sfftw_*、fftw_real），与 FFTW3 的 fftwf_* 不是
+                        同一族 API，链接/头文件双失败
+forbid_2_consequence:   从"精度不匹配"升级成"API 代际不匹配"，返工面更大
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             E007（config.guess 平台识别，同为制品仓构建形态差异引发的适配）、
+                        libaudec 0.3.4 的 pkg_config_aliases 先例（samplerate
+                        命名桥接；本条同名机制但**不可**用于精度差异——别名
+                        只解决 .pc 文件名，解决不了符号集）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       conan list -r=ohpcd "fftw/*"
+                        conan download -r=ohpcd "fftw/3.3.10.3:01d92cf349a0dd98ff915f4bd99a04430171517f"
+                        find ~/.conan2/p -path "*fftw*" -name "*.pc"
+                        # 期望：只有 fftw3.pc（无 fftw3f.pc）；源码侧
+                        # grep -rn "fftw3f" <包源码>/ 命中 configure.ac 的
+                        # deps_packages 与 src 的 fftwf_* 用点
+doc_file:               knowledge/drafts/DRAFT-E666-minimodem-0.24-fftw3f-single-precision-unavailable.md
+last_updated:           2026-09-22
+source_event:           feat/minimodem-0.24（积分赛）：上游
+                        PKG_CHECK_MODULES(DEPS, [fftw3f sndfile]) 在 ohpcd
+                        报 No package 'fftw3f' found；按机械替换补丁适配
+                        （验证轮计数见 doc_file 与任务 test-report）
+authors:                minimodem-0.24 task agent
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-22

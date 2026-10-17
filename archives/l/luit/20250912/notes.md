@@ -2,9 +2,9 @@
 
 ## 编译环境
 - 构建系统: autotools
-- 编译日期: 2026-06-15
+- 编译日期: 2026-07-23
 - 编译器: clang/clang++
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
@@ -17,7 +17,7 @@
 7. `make install DESTDIR=$TEST_PREFIX` (staging)
 8. 安全弹窗验证(R7): `luit -V` → `luit - 2.0-20250912`
 9. `make check` → 无批量测试
-10. `ohc-run.py package luit 20250912`
+10. `conan create . luit/20250912` (验证 Conan 配方)
 11. `make install` (无 DESTDIR, 安装到 $DEFAULT_PREFIX)
 12. 用户验证: `$DEFAULT_PREFIX/bin/luit -V` → `luit - 2.0-20250912`
 
@@ -61,9 +61,5 @@ $DEFAULT_PREFIX/bin/luit -V
 - HMDFS 上 umask 077 创建的目录无法写入文件，需要使用 umask 022
 - config.guess/config.sub 需要手动添加 HarmonyOS 支持（GNU 最新版仍不包含）
 
-**编译结束**: 2026-06-15
-**最终状态**: published
----
-
-**编译结束**: 2026-06-15 15:02
-**最终状态**: published
+**编译结束**: 2026-07-23
+**最终状态**: built

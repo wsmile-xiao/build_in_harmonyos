@@ -1,0 +1,904 @@
+#!/bin/bash
+
+# SPDX-FileCopyrightText: 2002-2026 Ole Tange, http://ole.tange.dk and Free Software and Foundation, Inc.
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+install_packages() {
+    # After first run, set this:
+    #   export INSTALL=echo
+    INSTALL=${INSTALL:-"sudo apt -y install"}
+
+    # The testsuite depends on this:
+    test_pkgs="imagemagick expect pv zenity"
+    test_pkgs="$test_pkgs autossh sshpass lsh-client lsh-utils jq"
+    test_pkgs="$test_pkgs libpod-simple-perl libtext-csv-perl"
+    test_pkgs="$test_pkgs libtest-nowarnings-perl pod2pdf"
+    test_pkgs="$test_pkgs xemacs21 csvkit"
+    test_pkgs="$test_pkgs gawk lua5.3 clisp php-cli nodejs guile-3.0 fsharp"
+    test_pkgs="$test_pkgs mono-csharp-shell octave openjdk-11-jdk-headless tcl"
+    test_pkgs="$test_pkgs racket libevent-dev python-is-python3"
+    test_pkgs="$test_pkgs xterm libc6-i386 libcrypt1:i386 virtualbox"
+    test_pkgs="$test_pkgs torsocks net-tools"
+    test_pkgs="$test_pkgs reiserfsprogs btrfs-progs exfatprogs f2fs-tools"
+    test_pkgs="$test_pkgs xfsprogs"
+
+    test_snap_pkgs="groovy julia"
+    
+    # Debian package
+    packaging_pkgs="dpkg-dev build-essential debhelper osc cvs automake"
+    packaging_pkgs="$packaging_pkgs python3-m2crypto alien python3-pip lftp"
+
+    # Shebang Tools
+    shebang_pkgs="gnuplot octave ruby r-base-core"
+
+    # SQL Tools
+    sql_pkgs="libdbd-pg-perl libdbd-sqlite3-perl libdbd-csv-perl"
+    sql_pkgs="$sql_pkgs libdbd-mysql-perl rlwrap"
+
+    # Compression
+    compression_pkgs="zstd clzip lz4 lzop pigz pixz gzip plzip pbzip2"
+    compression_pkgs="$compression_pkgs lzma xz-utils lzip bzip2 lbzip2 lrzip"
+    compression_pkgs_missing="pxz"
+
+    # Shells
+    # (csh = bsd-csh that is broken)
+    # (ash ksh93 gone)
+    shell_pkgs="ash dash fdclone fish fizsh ksh ksh93u+m mksh posh rc rush sash"
+    shell_pkgs="$shell_pkgs tcsh yash zsh busybox-static"
+
+    # Databases
+    database_pkgs="postgresql mysql-server influxdb influxdb-client"
+
+    # Build Tools
+    build_pkgs="bison libxxhash-dev libzstd-dev liblz4-dev libssl-dev"
+    build_pkgs="$build_pkgs python3-cmarkgfm libpod-pom-view-restructured-perl"
+    build_pkgs="$build_pkgs graphviz yodl libreoffice"
+
+    # Alternatives
+    alt_database="sqlite sqlite3"
+    sudo dpkg --add-architecture i386; sudo apt update
+    if $INSTALL $test_pkgs $packaging_pkgs $shebang_pkgs $sql_pkgs \
+		$compression_pkgs $shell_pkgs $database_pkgs $build_pkgs ; then
+	# OK
+	true
+    else
+	echo Packages missing
+	return 1
+    fi
+    if sudo parallel -j1 snap install --classic ::: $test_snap_pkgs; then
+	# OK
+	true
+    else
+	echo Packages missing: $test_snap_pkgs
+	return 1
+    fi
+    if parallel -j1 --tag --halt now,success=1 $INSTALL ::: $alt_database ; then
+	# OK
+	true
+    else
+	echo Cannot install: "$alt_database"
+	return 1
+    fi
+    if \vagrant --help >/dev/null ; then
+	# OK
+	true
+    else
+	# Version 2.3.7 is the last under a free license
+	wget -m https://releases.hashicorp.com/vagrant/2.3.7/vagrant_2.3.7-1_amd64.deb
+	sudo dpkg -i releases.hashicorp.com/vagrant/2.3.7/vagrant_2.3.7-1_amd64.deb
+    fi
+    sudo apt install -y python3-sphinx-rtd-theme || pip install sphinx-rtd-theme
+    sudo apt update &
+}
+
+install_sqlite2() {
+    # sqlite2 already installed
+    sql --dbsize sqlite:///'?select "sqlite2 installed";' && return
+
+    mkdir -p /tmp/sqlite2
+    (
+	cd /tmp/sqlite2
+	git clone https://github.com/sqlite/sqlite
+	cd sqlite
+	git checkout cc83b6e071ba69943f175a038d2625ae3d6abf47
+	# New GCC needs <stdlib.h>, so add that
+	perl -i -pe \
+	     's/echo (.#include <stdio.h>)(.)/printf $1\\n#include <stdlib.h>\\n$2/' \
+	     Makefile.in
+	./configure --prefix=/usr/local && make -j && sudo make install
+    )
+}
+
+install_oracle_client() {
+    . ~/.passwords
+    sql --showtables oracle://SYSTEM:$VM_ORACLE_PWD@/FREE > /dev/null &&
+	echo "oracle client installed OK" && return 0
+    # https://salsa.debian.org/perl-team/modules/packages/libdbd-oracle-perl/blob/master/debian/README.Debian
+    # sql oracle:// && return 0
+    (cd /tmp
+
+     get_rpm_install_deb() {
+	 glob="$1"
+	 url="$oracleurl/$2"
+	 testglob="$3"
+	 if [ ! -e `echo $glob*rpm` ] ; then
+	     wget $url
+	 fi
+	 if [ ! -e `echo $glob*deb` ] ; then
+	     echo Convert `echo $glob*rpm` to deb
+	     fakeroot alien `echo $glob*rpm`
+	 fi
+	 if [ ! -e `echo $testglob` ] ; then
+	     echo Install `echo $glob*deb`
+	     sudo dpkg -i `echo $glob*deb`
+	 fi
+     }
+
+     oracleurl=https://download.oracle.com/otn_software/linux/instantclient/19600
+     client=oracle-instantclient19.6
+     ver=19.6.0.0.0-1.x86_64.rpm
+     get_rpm_install_deb 'oracle-instantclient*devel' $client-devel-$ver /usr/share/doc/oracle-instantclient*-devel/copyright
+     get_rpm_install_deb 'oracle-instantclient*basic'   $client-basic-$ver /usr/share/oracle/*/client*/doc/BASIC_README
+     get_rpm_install_deb 'oracle-instantclient*sqlplus' $client-sqlplus-$ver /usr/lib/oracle/*/client*/bin/sqlplus
+    )     
+
+    echo Add this to .bashrc:
+    ORACLE_HOME=`echo /usr/lib/oracle/*/client*`
+    echo ORACLE_HOME=$ORACLE_HOME
+    if grep -q ORACLE_HOME=/ ~/.bashrc; then
+	perl -i.old -pe "s:ORACLE_HOME=/.*:ORACLE_HOME=$ORACLE_HOME:" ~/.bashrc
+    else
+	echo ORACLE_HOME=$ORACLE_HOME >> ~/.bashrc
+	echo 'PATH=$PATH:$ORACLE_HOME/bin' >> ~/.bashrc
+	echo 'export ORACLE_HOME' >> ~/.bashrc
+	echo 'export ORACLE_SID=XE' >> ~/.bashrc
+    fi
+    # libaio
+    sudo apt install libaio1 || sudo apt install libaio1t64
+    sudo ln -s libaio.so.1t64 /usr/lib/x86_64-linux-gnu/libaio.so.1
+    perl -MCPAN -e 'install DBD::Oracle'
+}
+
+install_oracle_server() {
+    . ~/.passwords
+    sql --showtables oracle://SYSTEM:$VM_ORACLE_PWD@/FREE > /dev/null &&
+	echo "oracle server installed OK" && return 0
+    # set up vagrant oracle server
+    vagrantid=OracleDatabase/26ai-Free
+    git clone https://github.com/oracle/vagrant-projects.git
+    (
+	cd vagrant-projects/"$vagrantid"
+	echo export VM_ORACLE_PWD=`goodpasswd` >> ~/.passwords
+	echo export 'ORACLE_PWD=$VM_ORACLE_PWD' >> ~/.passwords
+	. ~/.passwords
+	vagrant up
+	# test it works:
+	sql --showtables oracle://SYSTEM:$VM_ORACLE_PWD@/FREE &&
+	    (
+		# Pack as box
+		(
+		    nice vagrant package --output vagrant.box
+		    vagrant box add --name "$vagrantid" --force vagrant.box
+		) &
+	    )
+    )
+}
+
+setup_databases() {
+    # DATABASES
+    test_postgres() {
+	sql pg:/// 'create table __test_foo_socket(i int)'
+	sql pg://$me:$me@/ 'create table __test_foo(i int)'
+	sql pg:/// 'drop table __test_foo_socket' &&
+	    sql pg://$me:$me@/ 'drop table __test_foo' &&
+	    echo OK: PostgreSQL
+    }	
+    setup_postgres() {
+	echo '# Create PostgreSQL'
+	(echo; echo "listen_addresses = '*'") |
+	    sudo tee -a /etc/postgresql/*/main/postgresql.conf
+	sudo service postgresql restart
+	
+	# Drop database and user if needed
+	sudo su - postgres -c 'dropdb '$(whoami)
+	sudo su - postgres -c 'dropuser '$(whoami)
+	sudo su - postgres -c 'createdb '$(whoami)
+	sudo su - postgres -c 'createuser '$(whoami)
+	sudo su - postgres -c "sql pg:/// \"ALTER USER \\\"`whoami`\\\" WITH PASSWORD '$(whoami)';\""
+	sudo su - postgres -c "psql -d $(whoami) -c 'GRANT CREATE ON SCHEMA public TO \"$(whoami)\";'"
+    }
+
+    test_mysql() {
+	# Drop database and user if needed
+        sql mysql:/// 'create table __test_foo_socket(i int)'
+        sql mysql://$me:$me@/ 'create table __test_foo(i int)'
+        sql mysql:/// 'drop table __test_foo_socket' &&
+            sql mysql://$me:$me@/ 'drop table __test_foo' &&
+	    echo OK: MySQL
+    }
+    setup_mysql() {
+	mysqlrootpass=${mysqlrootpass:-b+Ydjq4ejT4E}
+	dburl=mysql://root:"$mysqlrootpass"@/mysql
+	me=$(whoami)
+	echo '# Create MySQL'
+	sudo su mysql mysqladmin create $me
+	# Default Debian way of getting "root" access
+	sudo mysql --defaults-file=/etc/mysql/debian.cnf mysql <<< "ALTER USER 'root'@'localhost' IDENTIFIED BY '$mysqlrootpass';"
+
+	# Drop database and user if needed
+	sudo sql "$dburl" "DROP DATABASE $me;DROP USER '$me'@'localhost';"
+	sudo sql "$dburl" "CREATE DATABASE $me;"
+	sudo sql "$dburl" "CREATE USER '$me'@'localhost' IDENTIFIED WITH auth_socket;"
+	sudo sql "$dburl" "ALTER USER '$me'@'localhost' IDENTIFIED BY '$me';"
+	sudo sql "$dburl" "GRANT ALL PRIVILEGES ON $me.* TO '$me'@'localhost';"
+	sudo sql "$dburl" "FLUSH PRIVILEGES;"	
+    }
+    (test_postgres || (setup_postgres && test_postgres) ) &&
+    (test_mysql || (setup_mysql && test_mysql) )
+}
+
+setup_virtual_box_network() {
+    echo "Adding IP-range to virtualbox"
+    sudo mkdir -p /etc/vbox
+    sudo touch /etc/vbox/networks.conf
+    (cat; echo '* 172.27.27.0/24') < /etc/vbox/networks.conf | uniq |
+	sudo tee /etc/vbox/networks.conf
+}
+
+add_server_to_hosts() {
+    add_ssh_key_to_authorized() {
+	(cat vagrant/authorized_keys; cat ~/.ssh/*.pub) |
+	    uniq > vagrant/authorized_keys.$$
+	mv vagrant/authorized_keys.$$ vagrant/authorized_keys
+	# Problem:
+	# https://developer.hashicorp.com/vagrant/docs/v2.4.0/vagrantfile/ssh_settings
+	# says:
+	# 
+	#   (non-interactive SSH connections use the internal SSH
+	#   communicator which is unaffected by this setting).
+	#
+	# We need to force Ruby's Net::SSH to use ~/.ssh/config
+	# or -oKexAlgorithms=diffie-hellman-group1-sha1
+	#
+	# VAGRANT_PREFER_SYSTEM_BIN=1 ought to fix it, but does not.
+	
+
+	# Fix:
+	# could not settle on kex algorithm
+	# Server kex preferences: diffie-hellman-group-exchange-sha1,diffie-hellman-group1-sha1
+	# Client kex preferences: ecdh-sha2-nistp521,ecdh-sha2-nistp384,ecdh-sha2-nistp256,diffie-hellman-group-exchange-sha256,diffie-hellman-group14-sha1>
+#debug2: KEX algorithms: curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,sntrup761x25519-sha512@openssh.com,diffie-hellman-group-exchange-sha256,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,diffie-hellman-group14-sha256,diffie-hellman-group1-sha1,ext-info-c
+#debug2: host key algorithms: ssh-dss,ssh-ed25519-cert-v01@openssh.com,ecdsa-sha2-nistp256-cert-v01@openssh.com,ecdsa-sha2-nistp384-cert-v01@openssh.com,ecdsa-sha2-nistp521-cert-v01@openssh.com,sk-ssh-ed25519-cert-v01@openssh.com,sk-ecdsa-sha2-nistp256-cert-v01@openssh.com,rsa-sha2-512-cert-v01@openssh.com,rsa-sha2-256-cert-v01@openssh.com,ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com,rsa-sha2-512,rsa-sha2-256
+#debug2: ciphers ctos: aes128-ctr,aes192-ctr,aes256-ctr,aes256-cbc,aes192-cbc,aes128-cbc,3des-cbc
+#debug2: ciphers stoc: aes128-ctr,aes192-ctr,aes256-ctr,aes256-cbc,aes192-cbc,aes128-cbc,3des-cbc
+#debug2: MACs ctos: umac-64-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,hmac-sha1-etm@openssh.com,umac-64@openssh.com,umac-128@openssh.com,hmac-sha2-256,hmac-sha2-512,hmac-sha1
+#debug2: MACs stoc: umac-64-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,hmac-sha1-etm@openssh.com,umac-64@openssh.com,umac-128@openssh.com,hmac-sha2-256,hmac-sha2-512,hmac-sha1
+	#
+
+	# Fix: .ssh/config
+ 	#Host centos3 127.0.0.1 
+ 	#  KexAlgorithms +diffie-hellman-group1-sha1 
+ 	#  Ciphers +3des-cbc,aes128-cbc,aes192-cbc,aes256-cbc 
+ 	#  HostKeyAlgorithms +ssh-rsa,ssh-dss
+ 	# sshpass -p vagrant ssh -v -p 50136 vagrant@127.0.0.1
+    }
+    
+    insert_in_etc_hosts() {
+	ip=$1
+	host=$2
+	if grep -q $1 /etc/hosts && grep -q $2 /etc/hosts ; then
+	    # skip
+	    true
+	else
+	    echo "$@" |
+		sudo tee -a /etc/hosts
+	fi
+    }
+    export -f insert_in_etc_hosts
+    add_single_vagrant_to_etc_hosts() {
+	vagrant_ip() {
+	    cd vagrant/*/$1
+	    # .vagrant can contain dirt
+	    rm -rf .vagrant
+	    grep 172 Vagrantfile | grep -v '#' |
+		perl -pe 's/.*(172.27[\.0-9]+).*/$1/';
+	}
+	insert_in_etc_hosts $(vagrant_ip $1) "$@"
+    }
+    export -f add_single_vagrant_to_etc_hosts
+    
+    add_ssh_key_to_authorized
+    insert_in_etc_hosts 127.1.2.3 server
+    
+    insert_in_etc_hosts 127.0.0.2 lo
+    vagrant_names=$(ls vagrant/*/*/Vagrantfile |
+			perl -pe 's:.*/(.*)/Vagrantfile:$1:' | sort -r)
+    parallel -k add_single_vagrant_to_etc_hosts {} parallel-server{#} ::: $vagrant_names
+}
+
+vagrant_up() {
+    # Download and adding .box has to be done manually
+    # This is due to changes on https://vagrantcloud.com incompatible
+    # with vagrant 2.3.7
+    build() {
+	vm=$1
+	echo Testing $vm
+	# If "ssh" works, then "vagrant ssh" probably also works
+	timeout 10 ssh vagrant@$vm echo ssh vagrant@$vm OK && return 0
+	cd "$2" || return 1
+	vagrant ssh -c "echo 'vagrant ssh $vm OK'" && return 0
+	# Fetch .box and do any special config
+	./setup.sh &&
+	    (vagrant up || (echo vagrant up FAILED; false) ) &&
+		 vagrant ssh -c "echo 'vagrant ssh $vm OK'"
+    }
+    export -f build
+    parallel -j0 --ll --rpl '{s} s:/setup.sh::;s:.*/::' --tagstring {s}  build {s} {//} ::: vagrant/*/*/setup.sh
+    #    # Disk I/O is high at the first 30 sec
+    #    parallel --delay 30 -j0 --ll --tag 'cd {//} && vagrant up' ::: vagrant/*/*/Vagrantfile
+    #    # After this you should be able to 'vagrant ssh'
+}
+
+vagrant_centos3() {
+    ssh vagrant@centos3 ssh -oStrictHostKeyChecking=no parallel@172.27.27.1 echo OK: ssh vagrant@centos3 ssh parallel@172.27.27.1 works && return 0
+    echo 'Centos3 can only use an RSA key'
+    if [ -e ~/.ssh/id_rsa ] ; then
+	# OK
+	true
+    else
+	ssh-keygen -P '' -t rsa -f ~/.ssh/id_rsa
+    fi
+    cat ~/.ssh/id_rsa.pub >> vagrant/authorized_keys
+    (
+	# Centos3 only works with some weak ciphers
+	echo 
+	echo 'Host *'
+	echo '  GSSAPIAuthentication no'
+	echo '  KexAlgorithms +diffie-hellman-group1-sha1'
+	echo '  Ciphers +3des-cbc,aes128-cbc,aes192-cbc,aes256-cbc'
+	echo '  HostKeyAlgorithms +ssh-rsa,ssh-dss'
+	echo '  PubkeyAcceptedKeyTypes +ssh-rsa,ssh-dss'
+
+    ) >> ~/.ssh/config
+    (
+	echo KexAlgorithms +diffie-hellman-group1-sha1,curve25519-sha256@libssh.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group-exchange-sha256,diffie-hellman-group14-sha1
+	echo Ciphers +3des-cbc,aes128-cbc,aes192-cbc,aes256-cbc,aes128-ctr,aes192-ctr,aes256-ctr,aes128-gcm@openssh.com,aes256-gcm@openssh.com,chacha20-poly1305@openssh.com
+	echo HostKeyAlgorithms +ssh-rsa,ssh-dss
+	echo PubkeyAcceptedKeyTypes +ssh-rsa,ssh-dss
+	echo MaxStartups 100:30:1000
+	echo MaxAuthTries 10
+    ) | sudo tee /etc/ssh/sshd_config.d/parallel.conf > /dev/null
+    sudo /etc/init.d/ssh restart
+    (
+	ssh vagrant@centos3 echo ssh vagrant@centos3 works || (
+	    cd vagrant/*/centos3 && vagrant up
+	    (cat ../../authorized_keys | vagrant ssh -c "cat >>.ssh/authorized_keys";
+	     vagrant ssh -c "sudo /sbin/ifconfig eth1 172.27.27.3")
+	    ssh-keygen -R centos3
+	    stdout wssh -oStrictHostKeyChecking=accept-new vagrant@centos3 echo OK: ssh centos3 started and works
+	)
+	stdout ssh parallel@lo 'cat .ssh/id*pub' |
+	    ssh vagrant@centos3 "cat >>.ssh/authorized_keys"
+	ssh vagrant@centos3 'yes n | ssh-keygen -t rsa -f .ssh/id_rsa -N "";echo '
+	ssh vagrant@centos3 'cat .ssh/id*pub' |
+	    stdout ssh parallel@lo "cat >>.ssh/authorized_keys"
+	ssh vagrant@centos3 ssh -oStrictHostKeyChecking=no parallel@172.27.27.1 echo OK: ssh vagrant@centos3 ssh parallel@172.27.27.1 works
+    )
+}
+
+add_key_to_auth_key() {
+    sshaddvagrant() {
+	ssh -o PreferredAuthentications=publickey \
+	    -o PasswordAuthentication=no \
+	    -o KbdInteractiveAuthentication=no \
+	    -o StrictHostKeyChecking=yes vagrant@$1 echo ssh vagrant@$1 OK || (
+            ssh-keygen -f ~/.ssh/known_hosts -R $1
+	    cat ~/.ssh/*.pub | (cd vagrant/*/$1 && vagrant ssh -c 'cat >>.ssh/authorized_keys')
+	    sshpass -p vagrant ssh-copy-id -o StrictHostKeyChecking=accept-new vagrant@$1
+	    ssh vagrant@$1 echo ssh vagrant@$1 OK
+	)
+    }
+    export -f sshaddvagrant
+    sshaddlocal() {
+	ssh -o StrictHostKeyChecking=yes $1 echo $1 OK || (
+            ssh-keygen -f ~/.ssh/known_hosts -R $1
+	    ssh-copy-id -o StrictHostKeyChecking=accept-new $1
+	    ssh $1 echo $1 OK
+	)
+    }
+    export -f sshaddlocal
+    ipv6() {
+	ifconfig | perl -nE '/inet6 ([0-9a-f:]+) .*(host|global)/ and say $1'
+    }
+    vagrant_names=$(ls vagrant/*/*/Vagrantfile| perl -pe 's:.*/(.*)/Vagrantfile:$1:')
+    ipv6=$(ipv6)
+    ips="172.27.27.1 127.0.0.1 ::1 $ipv6"
+    
+    cat ~/.ssh/*pub >> ~/.ssh/authorized_keys
+    parallel --tag --timeout 60 sshaddvagrant ::: $vagrant_names parallel-server{1..4}
+    exit=$?
+    parallel --tag --timeout 20 sshaddlocal ::: $ips lo localhost
+    exit=$(($exit + $?))
+    parallel ssh vagrant@{} 'echo "PATH=\$PATH:\$HOME/bin" >> .bashrc' ::: $vagrant_names
+    exit=$(($exit + $?))
+    parallel --tag --timeout 5 ssh {} echo ssh {} OK ::: $ips lo localhost 
+    exit=$(($exit + $?))
+    parallel --tag --timeout 10 ssh vagrant@{} echo ssh vagrant@{} OK ::: $vagrant_names parallel-server{1..4}
+    exit=$(($exit + $?))
+    (exit $exit)
+}
+
+ssh_vm_to_vm() {
+    keygen() {
+	[ -f ~/.ssh/id_rsa ] || ssh-keygen -t rsa -b 2048 -f ~/.ssh/id_rsa -N ""
+	touch ~/.ssh/authorized_keys
+	chmod 600 ~/.ssh/authorized_keys
+	sudo perl -i -ne '/parallel-server/ or print' /etc/hosts
+	echo "$hosts" | sudo tee -a /etc/hosts
+    }
+    export -f keygen
+
+    hosts=$(parallel -k --tag ping -c1 {} "|grep -oE '172.[0-9.]+'" ::: parallel-server{1..4} | uniq | field 2,1)
+    export hosts
+
+    # Generate keys on each server
+    parallel -Svagrant@parallel-server{1..4} --nonall --env keygen --env hosts keygen
+    # Copy keys to all servers
+    pubkey=$(parallel -Svagrant@parallel-server{1..4} --nonall cat .ssh/id_\*.pub)
+    export pubkey
+    parallel 'echo "$pubkey" | ssh {} "cat >>.ssh/authorized_keys"' ::: vagrant@parallel-server{1..4}
+    # Remove known host
+    parallel ssh {1} ssh-keygen -f .ssh/known_hosts -R{2} ::: vagrant@parallel-server{1..4} ::: parallel-server{1..4}
+    # Add known host
+    parallel ssh {1} ssh -o StrictHostKeyChecking=no {2} echo ssh {1} ssh {2} OK ::: vagrant@parallel-server{1..4} ::: vagrant@parallel-server{1..4}
+    # Verify
+    parallel ssh {1} ssh {2} echo ssh {1} ssh {2} OK ::: vagrant@parallel-server{1..4} ::: vagrant@parallel-server{1..4}
+}
+
+install_rsync_on_vagrant() {
+    parallel --tag ssh vagrant@{} "'
+      sudo apt install rsync || sudo yum install -y rsync || sudo pkg install -y rsync;
+      sudo apt install perl || sudo yum install -y perl || sudo pkg install -y perl;
+    '" ::: parallel-server{1..4} centos3 
+}
+
+shellsplus() {
+    shells="bash sh csh ash dash tcsh zsh ksh ksh93 fish fizsh mksh"
+    shells="$shells posh rc sash yash nopathbash nopathcsh"
+    shellsplus="parallel $shells"
+    parallel -k echo ::: $shellsplus
+}
+
+create_shell_logins() {
+    # SHELLS
+    echo '# Create shell logins'
+    touch ~/.zshrc
+    del_add_user() {
+	shell="$1"
+	append-if-not-exists() {
+	    file="$1"
+	    shift
+	    string="$@"
+	    if grep -qF "$string" "$file"; then
+		# It is there already
+		echo "$string is already in $file"
+	    else
+		echo "$string" | sudo tee -a "$file"
+	    fi
+	}
+	SSHPASS=`goodpasswd`
+	export SSHPASS
+	append-if-not-exists /etc/shells $(which $shell ||
+					       which ${shell#"nopath"})
+	sudo killall -u $shell
+	sudo deluser $shell && sudo mv /home/$shell /tmp/$shell.$RANDOM
+	sudo groupdel $shell
+	if echo $shell | grep -qE "parallel|withpassword"; then
+	    # User parallel+withpassword should have /bin/bash
+	    loginshell=/bin/bash
+	else
+	    # Other users should have `which $shell` with nopath removed
+	    loginshell=$(which $shell || which ${shell#"nopath"})
+	fi
+	sudo adduser --shell $loginshell --disabled-password --gecos "$shell for parallel,,," $shell &&
+	    echo "$shell:$SSHPASS" | sudo chpasswd &&
+	    sshpass -e ssh-copy-id $shell@lo &&
+	    echo "$shell created"
+    }
+    export -f del_add_user
+    grep_not_OK() {
+	shell="$1"
+	timeout 30 ssh $shell@lo echo ssh $shell@lo OK >&2 ||
+	    echo $shell
+    }
+    export -f grep_not_OK
+
+    echo '# (Re-)create user'
+    # Racecondition: if multiple adds a group it will the same group ID
+    (shellsplus; echo withpassword) | parallel -j200% grep_not_OK |
+	parallel --lb --halt soon,fail=1 --timeout 1000% --retries 5 --tag -j1 del_add_user ||
+	(echo Creation failed: $?; false)
+    # Homedir must be readable by others
+    umask 0002
+    (shellsplus; echo withpassword) | sudo parallel chmod +rX ~{}
+}
+
+copy_ssh_keys() {
+    make_sshkey() {
+	shell="$1"
+	echo Add server keys for lo and server &&
+	    ssh $shell@lo 'rm -f .ssh/id_rsa; 
+	                   ssh-keyscan lo >>.ssh/known_hosts;
+                           ssh-keyscan server >> .ssh/known_hosts' &&
+	    echo Do ssh-keygen &&
+	    echo | ssh -t $shell@lo ssh-keygen -b 1024 -f .ssh/id_rsa &&
+	    echo Do ssh $shell@lo 'cat .ssh/id_rsa.pub >> .ssh/authorized_keys' &&
+	    ssh $shell@lo 'cat .ssh/id_rsa.pub | tee -a .ssh/authorized_keys' |
+		ssh parallel@lo 'cat >> .ssh/authorized_keys' &&
+	    ssh $shell@lo "echo ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAxg+dh+BL1myqo6A+pHcQCKVV5v7cewdkN8xGtMDqm7xGgh+e5A44W7qKViIx641d6yoWb012XzDz2MKetG4Kosoma8Z/qkS27p6901RmI3ap2JFffzBESlpQtW1FyxQPlMyBfrd4ONy8xW6R/gEkjC3yOcXCQO2494/c46ouXs5gtE84Cusr3RsopR4bI7oloH1GQZ4vsHSFSakq8IwcujaSh1mmribMONLb2TjDpmE7tAY+yfOVWHPQ2J+EU1//Go60EZfSRKOu81oxW7SJ2uGgWfWcs2T1lRtT8Yh+TwVTz8UFV75kVtpZ10x5baN+ncsSpaBK+8sFLfoMvA9yQQ'==' tange@freebsd71.tange.dk >> .ssh/authorized_keys" &&
+	    echo Do env_parallel --install &&
+	    ssh $shell@lo 'mkdir -p .parallel;
+                           touch .parallel/will-cite;
+                           env_parallel --install' &&
+	    echo OK make_sshkey $shell &&
+	    echo >&2 &&
+	    echo OK make_sshkey $shell >&2 &&
+	    echo
+    }
+    export -f make_sshkey
+    grep_not_OK() {
+	shell="$1"
+	timeout 30 ssh $shell@lo "ls .parallel/will-cite >/dev/null && echo ssh $shell@lo OK" >&2 ||
+	    echo $shell
+    }
+    export -f grep_not_OK
+
+    # Do not include 16000 bit key
+    ssh-add -d ~/.ssh/16000/id_rsa
+    echo '# Make and copy sshkey'
+    shellsplus | parallel grep_not_OK | parallel --timeout 40 --retries 5 --tag -j50% make_sshkey
+
+    ssh_a_to_b() {
+	ssh $1@lo ssh $2@lo echo OK ||
+	    (echo failed && false)
+    }
+    export -f ssh_a_to_b
+    echo "# copy id from X to X"
+    shellsplus | parallel --timeout 30 --retries 5 --tag ssh_a_to_b {} {}
+
+    ssh_copy_id() {
+	from="$1"
+	to="$2"
+	ssh $from cat .ssh/id_rsa.pub | ssh $to 'cat >> .ssh/authorized_keys'
+    }
+    export -f ssh_copy_id
+
+    echo '# copy id from any X to any Y'
+    parallel --bar -j3 --timeout 20 --retries 10 --tag \
+	     'ssh_a_to_b {1} {2} || ssh_copy_id {1}@lo {2}@lo' ::: $(shellsplus) ::: $(shellsplus)
+    echo '# Test the copying went well'
+    parallel --bar -j2 --timeout 9 --retries 10 --tag \
+		ssh_a_to_b ::: $(shellsplus) ::: $(shellsplus)
+
+    echo '# change paths to no path'
+    (
+	ssh nopathbash@lo 'echo > .bashrc PATH=/bin:/usr/bin'
+	ssh nopathbash@lo 'echo > .profile PATH=/bin:/usr/bin'
+	# Remove env_parallel from .profile
+	ssh nopathbash@lo 'perl -i.bak -pe s/.*env_parallel.*// .profile .bashrc'
+	ssh nopathcsh@lo 'echo >> .cshrc setenv PATH /bin:/usr/bin'
+	ssh nopathcsh@lo 'echo >> .tcshrc setenv PATH /bin:/usr/bin'
+	ssh nopathcsh@lo 'echo >> .login setenv PATH /bin:/usr/bin'
+	ssh nopathbash@lo 'echo $PATH; echo NOT OK | parallel echo' ||
+	    echo Great - this should FAIL: parallel should not be found
+	ssh nopathcsh@lo 'echo $PATH; echo NOT OK | parallel echo' ||
+	    echo Great - this should FAIL: parallel should not be found
+    )
+}
+
+parallel_versions() {
+    install_version() {
+	/usr/local/bin/parallel-$1 --version && return 0
+	rm -r /tmp/parallel-$1
+	(git clone . /tmp/parallel-$1 || git clone .. /tmp/parallel-$1) &&
+	    cd /tmp/parallel-$1 &&
+	    git checkout $1 &&
+	    sudo cp src/parallel /usr/local/bin/parallel-$1
+    }
+    export -f install_version
+    git tag | grep -E '^20[0-9][0-9][0-9][0-9][0-9][0-9]$' |
+	G --v 2011.... 20120[12345] 20121022 | parallel --tag install_version
+}
+
+lsh_setup() {
+    server=centos3
+    user=vagrant
+    lsh -l $user $server echo lsh -l $user $server OK && return 0
+    ssh-keyscan $server >>~/.ssh/known_hosts
+    ssh-copy-id $user@$server
+
+    # SHELLS: lsh-client against openssh server
+    $INSTALL lsh-client
+    (
+	cd
+	mkdir -p .lsh
+	rm -f ".lsh/yarrow-seed-file"
+	lsh-make-seed -o ".lsh/yarrow-seed-file"
+	# TODO need to enter 'y' here
+	lsh --sloppy-host-authentication \
+	    --capture-to ~/.lsh/host-acls -l $user $server echo Added host-auth
+	rm -f .lsh/identity .lsh/identity.pub
+	lsh-keygen | lsh-writekey -c none
+	export_key_to_local_users() {
+	    lsh-export-key --openssh < ~/.lsh/identity.pub |
+		ssh -l $1 $2 'cat >>.ssh/authorized_keys'
+	}
+	export -f export_key_to_local_users
+	# lsh: Protocol error: No common key exchange method.
+	# It seems
+	# $ lsh --list-algorithms
+	# Supported hostkey algorithms: ssh-dss, spki, none
+	#
+	# $ nmap --script ssh2-enum-algos -sV -p 22 lo
+	# |   server_host_key_algorithms: (4)
+	# |       rsa-sha2-512
+	# |       rsa-sha2-256
+	# |       ecdsa-sha2-nistp256
+	# |       ssh-ed25519
+	# |
+	#
+	export_key_to_local_users $user $server
+    )
+    lsh -l $user $server echo lsh -l $user $server OK
+}
+
+add_freebsd() {
+    echo "# Add public keys to old servers"
+    # freebsd7 is no longer supported as virtualbox
+    # ssh freebsd7 cat .ssh/id_rsa.pub |
+    #    ssh parallel@localhost 'cat >>.ssh/authorized_keys'
+
+    echo Add:
+    echo HostkeyAlgorithms +ssh-dss
+    echo to .ssh/config if you get
+    echo no matching host key type found. Their offer: ssh-dss
+    echo
+    echo Add to /etc/ssh/sshd_config
+    echo Ciphers aes128-ctr,aes192-ctr,aes256-ctr,aes256-cbc,aes192-cbc,aes128-cbc,3des-cbc
+    echo KexAlgorithms diffie-hellman-group-exchange-sha256,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,curve25519-sha256@libssh.org,diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1
+    echo
+    echo If you get:
+    echo Unable to negotiate with server port 22: no matching cipher found.
+    echo Their offer: aes128-cbc,3des-cbc,blowfish-cbc,cast128-cbc,arcfour,aes192-cbc,aes256-cbc,rijndael-cbc@lysator.liu.se
+    echo add this to .ssh/config
+    echo   Ciphers +aes256-cbc
+}
+
+tmux_versions() {
+    (cd /tmp
+     git clone https://github.com/tmux/tmux.git
+     listtags() {
+	 (cd tmux; git tag) |
+	     # version 0.8-1.3 does not have -V
+	     G --v ^0.[89] ^1.[0123]
+     }
+     make_one() {
+	 rsync -a --delete tmux/ tmux$1/
+	 cd tmux$1
+	 git reset --hard
+	 git checkout $1
+	 bash ./autogen.sh;
+	 ./configure &&
+	 make -j2 &&
+	 sudo cp tmux /usr/local/bin/tmux-$1
+     }
+     export -f make_one
+     echo '# Building tmux'
+     listtags |
+	 stdout parallel --lb --tag '/usr/local/bin/tmux-{} -V || make_one {}'
+     listtags |
+	 parallel -k -v /usr/local/bin/tmux-{} -V
+    )
+}
+
+bash_versions() {
+    echo You may have to kill conftest
+    (cd /tmp
+     git clone https://git.savannah.gnu.org/git/bash.git
+     listtags() {
+	 (cd bash;
+	  git tag | grep -v -- '-.*-' | grep -v bash-4.1.11)
+     }
+     make_one() {
+	 rsync -a --delete bash/ $1/
+	 cd $1
+	 git reset --hard
+	 git checkout $1
+	 LDFLAGS=-static ./configure &&
+	     make -j2 &&
+	     sudo cp bash /usr/local/bin/$1
+     }
+     export -f make_one
+     echo '# Building bash'
+     listtags |
+	 stdout parallel --lb --tag \
+		'/usr/local/bin/{} --version || make_one {}'
+     listtags |
+	 parallel -k -v --tag '/usr/local/bin/{} --version'
+    )
+}
+
+rsync_versions() {
+    (cd /tmp
+     git clone https://github.com/WayneD/rsync
+     listtags() {
+	 (cd rsync;
+	  git tag | G --v pre v2.3.3 v2.4.8 v2.5.0 v2.5.7)
+     }
+     make_one() {
+	 configure_make_install() {
+	     ./configure && make -j2 &&
+		 sudo cp rsync /usr/local/bin/rsync-$1
+	 }
+	 configure_make_proto_install() {
+	     ./configure && make proto && make -j2 &&
+		 sudo cp rsync /usr/local/bin/rsync-$1
+	 }
+	 edit_configure.in() {
+	     perl -i.bak -pe '
+		 $printed++ || print "AC_DEFINE([HAVE_LONGLONG], [], [long long support])\n",
+		 	      "AC_DEFINE([HAVE_UTIMBUF], [], [utimbuf is available])\n",
+			      "AC_DEFINE([HAVE_FNMATCH], [], [dummy])\n";
+	         s/AC_DEFINE_UNQUOTED.HAVE_REMSH, .HAVE_REMSH.*/AC_DEFINE_UNQUOTED(HAVE_REMSH, \$HAVE_REMSH,[dummy])/;
+		 s/AC_DEFINE.HAVE_ERRNO_DECL.,/AC_DEFINE(HAVE_ERRNO_DECL,[1],[dummy]),/;
+		 s/AC_CHECK_FUNC\((.*), , AC_LIBOBJ\((.*)\)\)/AC_CHECK_FUNC($1, , [AC_LIBOBJ($2)])/;
+		 s/AC_CHECK_FUNCS\((.*), , AC_LIBOBJ\((.*)\)\)/AC_CHECK_FUNCS($1, , [AC_LIBOBJ($2)])/;
+		 s/AC_DEFINE.HAVE_FNMATCH.,/AC_DEFINE(HAVE_FNMATCH,[1],[dummy]),/;' configure.in
+	 }
+	 build-older() {
+	     # rsync-mbp_bk_export0 rsync-v1.6.4 rsync-v1.6.5
+	     # rsync-v1.6.6 rsync-v1.6.7 rsync-v1.6.8 rsync-v1.6.9
+	     # rsync-v1.7.0 rsync-v1.7.1 rsync-v1.7.2 rsync-v1.7.3
+	     # rsync-v1.7.4 rsync-v2.0.0 rsync-v2.0.1 rsync-v2.0.2
+	     # rsync-v2.0.3 rsync-v2.0.4 rsync-v2.0.5 rsync-v2.0.6
+	     # rsync-v2.0.7 rsync-v2.0.8 rsync-v2.0.9 rsync-v2.0.10
+	     # rsync-v2.0.11 rsync-v2.0.12 rsync-v2.0.13 rsync-v2.0.14
+	     # rsync-v2.0.15 rsync-v2.0.16 rsync-v2.0.17 rsync-v2.0.18
+	     # rsync-v2.0.19 rsync-v2.1.0 rsync-v2.1.1 rsync-v2.2.0
+	     # rsync-v2.2.1 rsync-v2.3.0 rsync-v2.3.1 rsync-v2.3.2
+	     # rsync-v2.4.0 rsync-v2.4.1 rsync-v2.4.2 rsync-v2.4.3
+	     # rsync-v2.4.4 rsync-v2.4.5 rsync-v2.4.6 rsync-v2.5.1
+	     # rsync-v2.5.2 rsync-v2.5.3 rsync-v2.5.4 rsync-v2.5.5
+	     # rsync-v2.5.5.rc1 rsync-v2.5.6 rsync-v2.6.0 rsync-v2.6.1
+	     # rsync-v2.6.2 rsync-v2.6.3 rsync-v2.6.4 rsync-v2.6.5
+	     # rsync-v2.6.6 rsync-v2.6.7 rsync-v2.6.8 rsync-v2.6.9
+	     edit_configure.in
+	     mkdir -p lib
+	     touch lib/addrinfo.h lib/getopt.h
+	     autoreconf -fiv
+	     # strlcat strlcpy 
+	     perl -i -pe 's/void (strlc..)/void _$1/' util.c
+	     # Force FNM_CASEFOLD to be set
+	     export CFLAGS='-Wno-incompatible-pointer-types -D_GNU_SOURCE=1'
+	     configure_make_proto_install $1
+	 }
+	 build-v3.0.0() {
+	     # rsync-v3.0.0 rsync-v3.0.1 rsync-v3.0.2 rsync-v3.0.3
+	     # rsync-v3.0.4 rsync-v3.0.5 rsync-v3.0.6 rsync-v3.0.7
+	     # rsync-v3.0.8 rsync-v3.0.9 rsync-v3.1.0 rsync-v3.1.1
+	     # rsync-v3.1.2 rsync-v3.1.3 rsync-v3.2.0 rsync-v3.2.1
+	     # rsync-v3.2.2 rsync-v3.2.3 rsync-v3.2.4 rsync-v3.2.5
+	     # rsync-v3.2.6 rsync-v3.2.7 rsync-v3.3.0
+	     configure_make_install $1
+	 }
+	 rsync -a --delete rsync/ rsync-$1/
+	 cd rsync-$1
+	 git reset --hard
+	 git checkout $1
+
+	 build-v3.0.0 $1 || build-older $1
+     }
+     export -f make_one
+     echo '# Building rsync'
+     listtags | 
+	 stdout parallel --lb --tag \
+		'/usr/local/bin/rsync-{} --version || make_one {}'
+     listtags | 
+	 parallel -k -v --tag '/usr/local/bin/rsync-{} --version'
+    )
+}
+
+install_tangetools() {
+    stdout echo "tangetools installed OK" && return 0
+    (
+	git clone https://git.data.coop/tange/tangetools ||
+	    (cd tangetools && git pull)
+	cd tangetools &&
+	    make &&
+	    sudo make install || true
+    )
+}
+
+misc() {
+    parallel --record-env
+
+    # Build locale for LC_ALL=zh_TW.big5 perl -e 1
+    echo "zh_TW.Big5 BIG5" | sudo tee -a /etc/locale.gen
+    sudo locale-gen
+
+    p=$(goodpasswd)
+    echo withpassword:$p | sudo chpasswd
+    echo "export withpassword=$p" >> ~/.passwords
+
+    echo TODO
+    echo 'set $withpassword'
+    echo 'set $mysqlrootpassword in .passwords'
+    echo '~/.sql/aliases'
+    echo 'python install python-is-python3'
+}
+
+run() {
+    install_packages &&
+	# fast
+	install_tangetools &&
+	# fast
+	install_sqlite2 &&
+	# fast
+	install_oracle_server &&
+	# fast
+	install_oracle_client &&
+	# fast
+	setup_databases &&
+	# fast
+	setup_virtual_box_network &&
+	# fast
+	add_server_to_hosts &&
+	# fast
+	vagrant_up &&
+	# fast
+	vagrant_centos3 &&
+	# fast
+	add_key_to_auth_key &&
+	ssh_vm_to_vm &&
+	# fast
+	create_shell_logins &&
+	copy_ssh_keys &&
+	# fast
+	lsh_setup &&
+	# fast
+	add_freebsd &&
+	# fast
+	parallel_versions &&
+	# fast
+	tmux_versions &&
+	# fast
+	bash_versions &&
+	# fast
+	rsync_versions &&
+	misc
+}
+
+run2() {
+    install_packages 
+	install_tangetools 
+	install_sqlite2 
+	install_oracle_client 
+	install_oracle_server 
+	setup_databases 
+	setup_virtual_box_network 
+	add_server_to_hosts 
+	vagrant_up 
+	vagrant_centos3 
+	add_key_to_auth_key
+       	ssh_vm_to_vm
+	create_shell_logins 
+	copy_ssh_keys 
+	lsh_setup 
+	add_freebsd 
+	parallel_versions 
+	tmux_versions 
+	bash_versions 
+	rsync_versions 
+	misc
+}

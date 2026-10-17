@@ -1,0 +1,146 @@
+# ═══ Draft knowledge entry — 消费端配方内 DT_NEEDED 裸名归一化（sibling 前缀案 + SONAME-less 绝对路径案）与分级卫生断言 ═══
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/（最终编号由知识库主编确认，不自行编号）
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-ohos-dt-needed-bare-name-normalization
+trigger_tool:           clang|lld|ld-musl|readelf|conan|cmake
+phase:                  linking|package|runtime|testing
+error_signature:        path-qualified DT_NEEDED|Shared library: \[?\.\./|Shared library: \[?/.*\.conan2|Error loading shared library .*/.*\.so.*needed by|unresolvable DT_NEEDED entries
+
+severity:               2
+category:               linking, conan, packaging, ohos, musl, dynamic-loading
+match_keywords:         DT_NEEDED, soname, SONAME-less, ../bin/, NUL padding, NUL-padd, normalize, hygiene assert, readelf, lld baked path, .conan2, musl CWD, _normalize_ohos_needed_names, 裸名归一化, 等长改写
+keywords:               路径形 DT_NEEDED, 绝对路径 NEEDED, 兄弟库 ../bin 前缀, 无 SONAME 依赖, NUL 填充改写, 分级卫生断言
+
+title:                  消费端配方必须在打包期把产物内路径形 DT_NEEDED（兄弟库 ../bin/ 前缀与 SONAME-less 依赖的绝对路径两案）等长 NUL 填充改写为裸 basename 并按 E077 重签，再用分级卫生断言（打包库只允许裸名、测试二进制绝对项必须可解析）守护——因为已发布 KF6/QtMultimedia 制品常缺 DT_SONAME，链接器会把构建期绝对路径烘进 DT_NEEDED，musl 对含 / 的 NEEDED 无搜索回退
+
+root_cause: >
+  机理链（机制本身已由 E537 收录，此处只引不述）：① 已发布 kcoreaddons/
+  ki18n/knotifications/qtmultimedia 等制品仓包的 .so 不带 DT_SONAME（真机
+  readelf 实证，见 verification_cmd 第 1 步）；② 消费端链接时 lld 对无
+  SONAME 的依赖按链接输入原样记录 DT_NEEDED，CMake imported target 给出的是
+  绝对包路径 → 消费产物烘入 /…/.conan2/p/<hash>/p/lib/libKF6*.so；兄弟构建库
+  则以 ../bin/lib*.so 相对形态进入（CMake 记录构建树相对路径）；③ musl 对含
+  / 的 DT_NEEDED 按字面路径解析（相对形态按进程 CWD、绝对形态直接 open），
+  无库搜索回退（DRAFT-musl-relative-soname-downstream-cwd 同族实证）→ 产物
+  离开构建机即整体不可加载。本条的增量是消费端修复模式：在不改依赖配方、不
+  等家族重发的前提下，消费端配方在 package() 内对自有产物做等长 NUL 填充改写
+  （只缩短不改长，.dynstr 原位截断）+ E077 重签，并用分级断言把"恰好可解析"
+  的环境巧合变成显式契约。
+
+affected_scope: >
+  任何链接"无 DT_SONAME 的已发布制品仓依赖"（KF6 家族、部分 Qt6 模块包等）
+  或以 CMake 构建多 .so 目标（QML 插件链兄弟库）的 conan 配方，在 OHOS/musl
+  目标平台上产出需跨机可移植的共享库/QML 插件包时均适用；同样适用于任何
+  对打包产物做 DT_NEEDED 卫生检查的 CI 门禁设计。
+
+verification_cmd:       |
+  # 自包含设备探针（开新 shell 可直接复跑；readelf 用设备路径字面量）：
+  RE=/storage/Users/currentUser/.harmonybrew/bin/readelf
+  # 1) 问题前提：已发布 KF6 制品无 DT_SONAME 但有 NEEDED（SONAME 计数=0）
+  KC=$(ls -d ~/.conan2/p/kcore*/p/lib/libKF6CoreAddons.so \
+           ~/.cache/conan2/p/kcore*/p/lib/libKF6CoreAddons.so 2>/dev/null | head -1)
+  "$RE" -d "$KC" | grep -c '(SONAME)'          # → 0
+  "$RE" -d "$KC" | grep -c '(NEEDED)'          # → >=1
+  # 2) 触发面：无 SONAME 依赖被消费端链接为绝对路径 NEEDED（任一未做归一化的
+  #    消费端构建产物；.so 随包分发，路径形态 NEEDED 计数>0 即复现）
+  "$RE" -d <consumer>.so | grep NEEDED | grep -c '/\.conan2/\|/\.cache/conan2/'
+  # 3) 模式跨库复发计数（L2 门槛：配方树 >=3 处同模式实践）
+  grep -rln '_normalize_ohos_needed_names' archives/ | wc -l   # → 6（kirigami/
+  # kiconthemes x2/kjobwidgets/kirigami-addons/mauikit）
+  # 4) 修复后断言：归一化+重签后的打包产物不得再有路径形 NEEDED
+  for f in <pkg>/lib/lib*.so <pkg>/lib/qml/**/*.so; do
+    "$RE" -d "$f" | grep NEEDED | grep '/' && echo "FAIL: path-qualified NEEDED in $f" || true
+  done
+  # 5) 改写未重签的负判别（衔接 forbid_1 / E517）：改写后不重签 → dlopen Permission denied
+  python3 -c "import ctypes,sys
+try: ctypes.CDLL(sys.argv[1]); print('dlopen: OK')
+except OSError as e: print('dlopen FAIL:', e)" <rewritten-but-unsigned>.so
+
+# ═══ Layer 3: 方案空间 ═══
+rec_priority:           1
+rec_approach:           consumer-recipe-inplace-nul-pad-rewrite-then-resign
+rec_description: >
+  消费端配方 package() 内对自有 lib/**.so* 逐文件做两案归一化：
+  (1) 兄弟案——../bin/ 前缀的兄弟构建库引用（如 QML 插件 → 主库
+  libMauiKit4.so.4）改写为裸 soname；(2) SONAME-less 案——绝对路径 NEEDED
+  （/…/.conan2/p/<hash>/p/lib/libKF6*.so、libQt6Multimedia.so）改写为裸
+  basename。字节级操作必须等长：新串 + NUL 填充到原串长度（.dynstr 原位截断，
+  不移动任何偏移）；匹配收紧到已知 SONAME-less 家族名（libKF6*/libQt6*），
+  防止误伤 .dynstr 其他字符串。改写后必须重签（llvm-objcopy --remove-section
+  .codesign → binary-sign-tool -selfSign 1，E077 流程）。配套分级卫生断言：
+  打包库（被分发的制品）strict——只允许裸 soname；测试二进制（链接自已发布
+  包、合法保留绝对项）resolved——绝对项必须 isfile 可解析（cache-root 桥接
+  保证），相对项（./、../）任何情况下 fatal。诚实权衡：等长改写是产物字节
+  手术，依赖"新名不长于旧名"与家族白名单两个不变量；断言分级不是放水——
+  分发面 strict 保持不放松，只对不随包分发的测试二进制按加载语义放宽。
+rec_auto_fix:           false
+rec_impl:               recipe-package-hook
+
+fallback_priority:      2
+fallback_approach:      dependency-side-soname-flag-rebuild
+fallback_description:   治本退路：在依赖配方侧补 SONAME（-Wl,-soname,<产物名>
+                        或注入平台 SONAME flag，见
+                        DRAFT-cmake-harmonyos-platform-soname-flag；kio
+                        patch 0015、accessibility/26.04.3 先例）并重发家族
+                        包。诚实权衡：治本但需修改依赖配方并全家族重发，
+                        消费端单库 run 无法独立完成、周期不受本库控制；重发
+                        前消费端仍需本条 rec 方案兜底。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          dependency-recipe
+
+fallback_priority_2:    3
+fallback_approach_2:    cache-root-bridge-symlink
+fallback_description_2: 加载面退路：为已发布包内烘焙的 ~/.conan2 绝对路径在
+                        消费端重建 symlink 指向真实 package_folder（kio
+                        6.14.0 test_package _bridge_cache_roots 同源实现，
+                        PR worker 用 ~/.cache/conan2 布局时必需）。诚实权衡：
+                        掩盖而非修复——产物仍带绝对路径、依赖特定 cache 根
+                        布局，仅作测试环境退路；家族 SONAME 重建后应移除
+                        （kio 同源注释已声明）。
+fallback_command_2:     legacy=$(echo "~/.conan2/${folder#*/p/}"); [ -e "$legacy" ] || ln -s "$folder" "$legacy"  # HMDFS 无 ln -s 时用 python os.symlink 探测降级 cp
+fallback_auto_fix_2:    false
+fallback_impl_2:        test-package-generate-hook
+
+forbid_1_pattern:       对已签名 .so 做内容改写（NUL 填充/patchelf/objcopy）后不重签，或以"CI 通过"判定改写安全
+forbid_1_reason:        改写使 .codesign 签名失配，musl 拒绝映射报 dlopen
+                        Permission denied（E517；DRAFT-ohos-signed-so-inplace-
+                        rewrite-dlopen-denied 判别实验坐实），且失败只在
+                        运行期暴露；CI 绿与包可用是两件事。
+forbid_1_consequence:   产物在构建机"测试通过"、在其他 worker/下游整体不可
+                        加载——假阳性交付，返工面扩大到全部消费者。
+
+forbid_2_pattern:       卫生断言整体放宽为"在当前构建机可解析即可"，或以环境恰好成立的隐式闭包替代显式断言
+forbid_2_reason:        "恰好可解析"是构建机 cache 布局巧合（绝对项指向本机
+                        .conan2），换机即失效；与 build-chain-pitfalls「lld
+                        隐式闭包静默跳过」同型——非确定性通过比显式失败更危险。
+forbid_2_consequence:   同一配方在不同 worker 上结论相反（假通过/整体不可
+                        加载），问题延后到下游运行期才暴露，定位成本倍增。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P-SIGN-001, P-PACK-001, P-RUNTIME-002
+
+# ═══ 关系图（与相近条目逐项划界，见同名 .md 去重记录节） ═══
+similar_to:             E537, E077, E517, E505, DRAFT-ohos-signed-so-inplace-rewrite-dlopen-denied, DRAFT-cmake-harmonyos-platform-soname-flag, DRAFT-musl-relative-soname-downstream-cwd, DRAFT-ohos-dlopen-own-dt-needed-closure
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-ohos-dt-needed-bare-name-normalization.md
+last_updated:           2026-09-18
+source_event:           mauikit 4.0.2 适配（run mauikit-4.0.2，分支
+                        feat/mauikit-4.0.2）：首轮权威 CI 构建与 3 项测试全
+                        过，test_package 分级卫生断言拦截测试二进制中 1 处
+                        绝对 NEEDED（SONAME-less libKF6CoreAddons）；回修为
+                        打包期两案归一化（libMauiKit4.so 归一化 4 处、
+                        libMauiKit4plugin.so 1 处）+ 重签 + 断言分级，二轮
+                        CI 全过（L0/L1/L2/L4/L5，ctest 3/3）。模式在配方树
+                        6 处配方同款实现（grep 见 verification_cmd 第 3 步）。
+authors: GoliWie <GoliWie@noreply.gitcode.com>
+note: "拟提升编号：由知识库主编确认（不自行编号）"

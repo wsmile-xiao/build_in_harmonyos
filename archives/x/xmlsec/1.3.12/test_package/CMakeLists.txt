@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(xmlsec_test LANGUAGES C)
+find_package(xmlsec1 REQUIRED CONFIG)
+add_executable(test_package test_package.c)
+target_link_libraries(test_package PRIVATE xmlsec1::xmlsec1)

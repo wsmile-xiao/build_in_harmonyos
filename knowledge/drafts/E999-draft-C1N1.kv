@@ -1,0 +1,32 @@
+#====================================================================
+# E999 draft - OHOS libc open_memstream：fclose 丢弃未冲刷缓冲并返回 EBADF
+# 触发事件: c-json 1.0.0 HarmonyOS PC 适配（archives/c/c-json/1.0.0，任务 #6692）
+# 主从明确：open_memstream 写入与 fflush 正常，但 fclose 返回 EBADF(-9) 且
+#           不把 stdio 缓冲冲刷到内存缓冲——未 fflush 就 fclose 的流内容全部
+#           丢失（静默数据损坏）；close 前补 fflush 即修复，POSIX 等价可回馈上游。
+#====================================================================
+
+id:                     E999
+trigger_tool:           libc|conan|ctest
+phase:                  runtime
+error_signature:        Assertion failed.*string.*strcmp|fclose.*EBADF|open_memstream.*empty|read_string.*rc=0.*out=\(\)
+
+severity:               2
+category:               ohos, libc, stdio, memory-stream, runtime, data-loss
+match_keywords:         open_memstream, fclose, EBADF, fflush, stdio, memory stream, OHOS, musl, c-json, empty string, data loss, 静默数据损坏
+title:                  OHOS libc open_memstream：fclose 丢弃未冲刷缓冲并返回 EBADF——close 前必须 fflush
+
+root_cause:             "OHOS libc（musl 变体）的 open_memstream 实现：fputc/fputs 写入正常，fflush 后缓冲内容立即可见（实测 fputs('hello')+fflush → n=5, s='hello'），但 fclose 返回 EBADF(-9) 且不执行缓冲到内存缓冲的冲刷——未 fflush 就 fclose 的流内容全部丢失（实测 fputs('hello')+直接 fclose → n=0, s=空）。依赖 open_memstream 的库在 OHOS 上表现为'调用成功但返回空串'（c-json 的 c_json_reader_read_string/read_file 即此表象），属静默数据损坏，极易被误判为库自身逻辑错误。"
+
+affected_scope:         "所有在 OHOS 上使用 open_memstream 的库与程序（c-json 1.0.0 实证：上游 test-basic 断言失败 + test-reader 317 样例以空输入假通过）。同族边界：E320（gnucobol 3.2 fmemopen 运行时不可用，configure 运行时探测+临时文件回退方案）是 stdio 内存流读方向的可探测性方案；本条目是写方向 open_memstream 的数据丢失语义与最小修复，二者可叠加使用。"
+
+verification_cmd:       conan create . -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+
+rec_priority:           1
+rec_approach:           fflush-before-fclose-library-api
+rec_description:        "在 open_memstream 流的每个 fclose/c_fclose 关闭点前补 fflush(stream)（fflush 在 OHOS 行为正确、POSIX 等价、无平台宏，数据在 flush 时安全落盘后 fclose 照常执行）。c-json 补丁 0001/0002 在 read_string 与 read_file 两处实施后上游测试 2/2 全过。与 E302 的边界：E302 面向'能力探测+证据绑定禁用'的 CMake 测试基建场景，其 forbid（pre-flush 留下未关闭的坏 cookie 流）针对探测后仍持续使用坏流的写法；库 API 以 memstream 为核心功能、无上游回退路径可禁用，本方案先 flush 使数据落盘、fclose 照常关闭（cookie 清理仍执行，EBADF 返回值被忽略），不引入泄漏也不跳过任何测试。"
+rec_command:            sed -i "s|stream = c_fclose(stream);|fflush(stream);\\n        stream = c_fclose(stream);|" src/c-json-reader.c（c-json 补丁 0001/0002 同型）
+
+related:                E302(open_memstream close 契约缺陷的探测/禁用方案——测试基建场景), E320(fmemopen 运行时探测+回退方案，读方向)
+source_pr:              "!9622"
+last_updated:           2026-09-10

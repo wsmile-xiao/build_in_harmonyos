@@ -1,0 +1,51 @@
+#====================================================================
+# DRAFT-libgal-0.5.0-scanf-long-into-int-lp64-adjacent-zeroing -
+# sscanf 转换符宽度/长度修饰符与目标字段类型不符（%ld 写 int）在
+# LP64 上引发 8 字节存储、静默清零相邻结构体成员（libgal 0.5.0
+# gal_tledec 实测：TLE classification/intldesg 恒为空）。
+#
+# 场景: libgal 0.5.0 在 OHOS PC（aarch64, musl, clang 15）适配：
+#       sgp4/gal_tledec.c 用
+#         sscanf(card2, "%2d %5ld %9lf ...", &cardnumb, &tle->satnum, ...)
+#       解码 TLE 卡 2，而 gal_tle_t.satnum 是 int（4 字节）。LP64 上
+#       %ld 写 8 字节：低 4 字节为 25107 正确，高 4 字节为 0，把布局
+#       相邻的 classification（offset 4）与 intldesg[0..2]（offset 5+）
+#       清零——表现为"只有相邻字段坏、被解析字段和后续字段都好"。
+# 适用: 一切用 sscanf 解析定长记录（TLE/星历卡/气象卡/NMEA/航空电报）
+#       的 C 库；任何 32 位历史代码在 LP64 平台的移植；scanf 系列
+#       （scanf/fscanf/sscanf/vsscanf）全部受影响。
+#
+# 注: 本文件所有字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-libgal-0.5.0-scanf-long-into-int-lp64-adjacent-zeroing
+trigger_tool:           clang|make
+phase:                  testing
+error_signature:       Expected value: U  Actual value: |Actual value: \[\]|classification.*failed|intldesg.*failed
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               lp64, scanf, struct-layout, portability, memory-corruption, autotools
+match_keywords:         libgal, TLE, gal_tledec, sscanf, %ld, %5ld, int, LP64, aarch64, 8-byte store, adjacent member, zeroed, classification, intldesg, struct corruption, silent, musl, glibc, card parser, fixed-width, 32-bit legacy, scanf specifier mismatch, satnum
+title:                  sscanf %ld 写 int 成员：LP64 8 字节存储静默清零结构体相邻字段（libgal TLE 解码实例）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             scanf 转换说明符的长度修饰符决定写入宽度，与变量声明类型无关：%ld 无条件写 sizeof(long)=8 字节（LP64）。int satnum 位于 gal_tle_t 偏移 0、classification 在偏移 4——8 字节存储的高 4 字节（值 0）恰好落在 classification/intldesg[0..2] 上。判据链：①被 sscanf 写坏的只有"紧跟其后的相邻成员"且恒为 0/空串；②被解析成员自身（satnum=25107）与更后面的成员（epochyr=1998 等）全部正确——因为后续成员有自己的正确写入；③-O0 与 -O3 行为一致（排除优化器因素）；④把 %5ld 改成 %5d 后全部字段正确。注意 musl/glibc 都一样：这不是 libc 差异，是 C 标准语义（类型不匹配 = UB）+ LP64 数据模型。
+affected_scope:         全部用 scanf 家族解析定长卡/记录格式的 32 位时代 C 库（TLE 航天、Grib/气象、NMEA、VLF/ham 电报格式）；检索特征是格式串里 %ld/%lx/%lo 与 &int 成员混排。与"越界 UB 被优化器利用"（DRAFT-libgal-0.5.0-vsop87-j0-oob-ub-optimizer-exploited）对照组：那条随优化级变化，本条与优化级无关、与数据模型有关（ILP32 平台不炸）。
+verification_cmd:       ①最小复现：构造含目标字段的 struct，sscanf 后 memcmp 相邻成员 → 偏移 4..7 被清零；②修复验证：%5ld→%5d 后 libgal 上游 sgp4 测试 3144/2 → 3146/0，classification='U'、intldesg='97082D ' 与上游参考一致
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           match-scanf-specifier-to-field-type
+rec_description:        把转换说明符改成与被写变量声明一致的宽度（%5ld→%5d）；一行修复、语义即上游意图（把 5 位十进制读进 int）。反向（把 int 成员改 long）会改变 ABI/结构体布局，禁止。若格式串同时服务 ILP32/LP64 编译目标，用 PRId32/inttypes.h 或分平台宏统一，不要保留任何"碰巧能跑"的宽度不匹配。
+rec_command:            sed -i 's/%2d %5ld %9lf/%2d %5d %9lf/' sgp4/gal_tledec.c && clang -O3 -o tleprobe tleprobe.c <sources> -lm && ./tleprobe
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      manual-field-parse
+fallback_description:   若格式串多处混排无法逐一核对：放弃 sscanf，改用 strtol/strtod 按 TLE 列偏移手工切片解析（列号即文档规范），代码量增加但彻底消除类型失配类；仅当同一格式串存在多处历史失配且无测试兜底时使用。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:

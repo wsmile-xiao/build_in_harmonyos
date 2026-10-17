@@ -1,0 +1,53 @@
+--- a/tests/LinuxSmokeTest/fake-client.sh
++++ b/tests/LinuxSmokeTest/fake-client.sh
+@@ -1,21 +1,35 @@
+ #!/bin/bash
+ set -u
+ 
+ source "$(dirname "$0")/common.sh"
+ 
+ cp server.json fake-client.json forward.json "$TMPDIR"
+ cd "$TMPDIR"
+ 
+ exec 2>> test.log
+ 
+-yes '' | openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 1 -nodes
++# On failure, surface the first real error on stdout: stderr is captured to
++# test.log above, so a bare exit code is all a CI judge would otherwise see.
++dump_log() {
++    echo "=== trojan smoke FAILED at line $1; tail of test.log: ==="
++    tail -n 40 test.log
++}
++trap 'dump_log $LINENO' ERR
++
++# Non-interactive certificate creation: the upstream `yes "" | openssl req`
++# form breaks on build images without coreutils `yes` (openssl then reads its
++# DN prompts from an already-closed stdin and fails). -subj/-batch ask for
++# nothing, and OPENSSL_CONF=/dev/null matches test_package/test_tls.sh (the
++# conan openssl embeds an OPENSSLDIR that does not exist in this image).
++export OPENSSL_CONF=/dev/null
++openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 1 -nodes -subj "/CN=trojan-test" -batch
+ 
+ mkdir true
+ cd true
+ echo true > whoami.txt
+ python3 -m http.server 10081 > server.log 2>&1 &
+ PID1="$!"
+ cd ..
+ 
+ mkdir fake
+ cd fake
+@@ -38,12 +52,13 @@
+ wait_port 10080
+ wait_port 10443
+ wait_port 11080
+ 
+ WHOAMI=$(curl -v --socks5 127.0.0.1:11080 http://127.0.0.1:10081/whoami.txt)
+ WHOAMI2=$(curl -v --insecure https://127.0.0.1:10443/whoami.txt)
+ kill -KILL "$PID1" "$PID2" "$PID3" "$PID4"
+ if [[ "$WHOAMI" != "true" && "$WHOAMI2" = "fake" ]]; then
+     exit 0
+ else
++    echo 'trojan smoke: assertion failed (whoami mismatch)'
+     exit 1
+ fi

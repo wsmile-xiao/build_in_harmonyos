@@ -1,17 +1,7 @@
 # libogg
 
-## 简介
-Ogg multimedia container library
+Ogg multimedia container library packaged from the official Xiph release.
 
-## OHOS 适配
-- 构建系统: autotools
-- 详见各版本 notes.md 获取适配详情
-
-## 依赖
-待补充
-
-## 功能验证
-待补充
-
-## 参考
-- https://xiph.org/ogg/
+The current `1.3.6` candidate uses CMake, supports shared and static packages,
+and has no third-party Conan dependency. See the version notes and test report
+for the exact `2` upstream plus `1` installed-package test accounting.

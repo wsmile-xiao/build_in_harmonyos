@@ -1,0 +1,47 @@
+#====================================================================
+# DRAFT-purelibc-1.0.8-ohos-musl-fopencookie-deviation -
+# OHOS musl 的 fopencookie 回调不在 stdio 操作内同步触发（写回调延迟到进程
+# 退出、close 回调从不触发、fclose 返回 -9/EBADF）：一切基于 cookie 的同步
+# FILE 虚拟化设计在该平台静默失效（purelibc 1.0.8 OHOS arm64 实测）。
+#
+# 场景: purelibc 1.0.8（VirtualSquare，glibc 覆盖库）的 stdio 层经
+#       fopencookie(new_pure_file) 把 FILE 操作转成被截获的系统调用；
+#       在 OHOS PC（aarch64, clang 15.0.4 / OHOS SDK 26.0.0.18）上
+#       conan create 编译、链接全部成功，但消费者测试 fopen+fwrite+fclose
+#       的字节流永远到不了 pure_syscall 处理器，fclose 返回非零。
+# 适用: 所有在 OHOS 上用/移植 fopencookie、funopen 或"回调式 FILE 虚拟化"
+#       的库（虚拟化、审计、透明重定向、日志包装器）；以及"编译链接成功
+#       ≠ 运行时语义可用"的平台 libc 判定场景。
+#
+# 注: 本文件所有字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-purelibc-1.0.8-ohos-musl-fopencookie-deviation
+source_lib:             purelibc 1.0.8
+trigger_tool:           conan|cmake|clang
+phase:                  test
+error_signature:        fclose.*-9|fclose.*EBADF.*fopencookie|cookie callback.*(never invoked|deferred|at exit)|fwrite.*fopencookie.*no data
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               platform, libc, stdio, runtime, portability
+match_keywords:         fopencookie, cookie_write, cookie_close, cookie_io_functions_t, fclose, EBADF, funopen, FILE virtualization, OHOS musl, RTLD_NEXT, dlsym, interposition, stdio overlay
+title:                  OHOS musl 的 fopencookie 回调不同步触发（延迟到退出/close 缺失/fclose=-9）：cookie 式 FILE 虚拟化在该平台不可用，须门控回退 libc
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OHOS 的 musl 变体在 fopencookie 实现上偏离 glibc 与原版 musl：独立探针（30 行、不含任何三方代码）注册 {NULL,cw,NULL,cc} 后 fwrite+fclose，写回调确实两次收到正确的注册 cookie（排除调用方传参错误），但两次触发都发生在 fclose 返回 -9（EBADF）之后的进程退出刷新阶段，close 回调从不触发——即回调不随 stdio 操作同步执行，fclose 以 EBADF 失败。任何依赖"cookie 回调同步到达"的 FILE 虚拟化设计（purelibc stdio 层、BSD funopen 移植、日志/重定向 fd 包装器）因此静默丢数据或报错。上游非回归：purelibc 1.0.10 的 stdio.c 与 1.0.8 仅空白与 glibc-2.39 fileno 兼容差异。
+affected_scope:         fopencookie/funopen 的全部使用者：进程自虚拟化库（purelibc/umview 系）、透明重定向与审计包装器、stdio 单元测试替身；广义命中"符号可链接但运行时语义缺失"类判定（对照 E320 fmemopen、E302 open_memstream 同族）。glibc 环境不受影响。
+verification_cmd:       设备侧最小复现：clang -D_GNU_SOURCE 编译 30 行探针（fopencookie(0x1234,"w",{NULL,cw,NULL,cc}) + fwrite 5 字节 + fclose），期望输出：cw 触发且 cookie==0x1234、触发时机在 fclose 返回 -9 之后、cc 不触发；glibc 机器同程序 fclose=0 且回调同步。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           glibc-guard-fallthrough-to-libc-via-dlsym
+rec_description:        在配方补丁中用 #if defined(__GLIBC__) 门控 cookie 覆盖层：musl 下各 stdio 覆盖函数经惰性 dlsym(RTLD_NEXT,"fopen"/"fdopen"/...) 回退 libc 真实现（glibc 上逐位保持上游行为）；把消费者测试收缩到可移植面（直接 syscall 包装器截获：open/write/close 经 _pure_syscall 到用户处理器，glibc/musl 断言一致）；notes.md/PR 正文写明降级范围并附探针证据，不静默交付会丢数据的层。
+rec_command:            patch -p1 -i patches/0005-stdio.c.patch
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+forbid_1_pattern:       fopencookie\(.*\)\s*;?\s*//\s*OHOS.*(works|fine|ok)
+forbid_1_reason:        在 OHOS 上未经探针验证就假定 fopencookie 可用：回调不同步触发，数据静默丢失且测试可能假绿
+forbid_1_consequence:   stdio 虚拟化静默失效、消费者数据丢失、CI 无法定位的运行期差异

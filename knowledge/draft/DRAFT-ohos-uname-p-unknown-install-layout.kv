@@ -1,0 +1,65 @@
+# ═══ Draft knowledge entry — HarmonyOS 内核 `uname -p` 返回字面量 `unknown`：任何按宿主处理器推导安装子目录的 CMa ═══
+# Timestamp: 2026-09-17
+# Software: filament 1.76.1
+# Gate: HarmonyOS PC conan create（pass 1 + pass 2 + package + test_package 全链路）
+# Status: DRAFT — 需人工/AI 审核后 promote 为 E-entry
+#
+# To promote:
+#   1. 审核 error_excerpt 与实际验证
+#   2. 改名为 E0XX.kv 并移动到 knowledge/graph/
+#   3. 在 knowledge/graph/index.tsv 添加一行
+#   4. 编写 knowledge/doc/E0XX.md
+
+id:                     DRAFT-ohos-uname-p-unknown-install-layout
+trigger_tool:           uname|cmake|conan|ld
+phase:                  package|installation
+error_signature:        /lib/unknown/|
+no static archives found under .*/lib$|
+CMAKE_HOST_SYSTEM_PROCESSOR
+
+severity:               2
+category:               platform-limitation|packaging|conan|cmake
+match_keywords:         uname -p, CMAKE_HOST_SYSTEM_PROCESSOR, DIST_ARCH, DIST_DIR, lib/unknown, install layout, cpp_info.libdirs, libdir, CMakeDeps, package_info, arch subdirectory, host processor, harmonyos
+title:                  HarmonyOS 内核 `uname -p` 返回字面量 `unknown`：任何按宿主处理器推导安装子目录的 CMake 工程都会退化到 `lib/unknown/`，且必须同步声明 Conan 的 `cpp_info.libdirs`
+
+root_cause: >
+  两个独立缺陷叠加：
+    (1) **平台缺陷**：HarmonyOS 内核的 `uname -m` 返回 `aarch64`，但 `uname -p` 返回字面量 `unknown`。CMake 的 `CMAKE_HOST_SYSTEM_PROCESSOR` 取自 `uname -p`，于是任何『未显式给定时回退到 `CMAKE_HOST_SYSTEM_PROCESSOR`』的安装目录推导都会得到 `unknown`。Filament 用 `install(... DESTINATION lib/${DIST_DIR})`（约 28 处），`DIST_DIR` 由 `DIST_ARCH` 推导 → 34 个归档全部落进 `lib/unknown/`。
+    (2) **配方缺陷**：Conan 2 的 `cpp_info.libdir` 是**只读 property**（有 `@property`、**无 setter**），且 getter 在元素数 ≠ 1 时抛异常；可写字段是 `cpp_info.libdirs`（list）。若配方没声明它，默认值是 `lib` —— 与实际的 `lib/unknown/` 不符，消费者拿到一个指向空目录的 `-L`，CMakeDeps 生成的 `LIB_DIRS` 也是错的。
+  两个缺陷都**不在构建期报错**：包能建出来，错误推迟到消费者配置阶段。
+
+trigger_condition: >
+  CMake 工程把安装子目录派生自宿主处理器；在 `uname -p` 返回值不可信的平台（或容器、模拟器）上构建；以及任何需要在 Conan `cpp_info` 中声明非默认 libdir 的场景。
+
+solution: >
+  两端都要修，且必须**自洽**：
+    1. 显式钉住架构名，不要让宿主回退决定 —— `tc.variables["DIST_ARCH"] = "aarch64"`（recipe 侧，覆盖上游的 `set(DIST_ARCH ...)` 回退分支）；
+    2. 在 `package_info()` 里**用复数**声明实际位置 —— `self.cpp_info.libdirs = [f"lib/{DIST_ARCH}"]`；
+    3. 在 `package()` 里加断言：装完后 `lib/<arch>/` 下必须存在归档，否则直接抛错。这样同类问题在**打包阶段**带着清楚原因失败，而不是拖到消费者。
+    consumer 侧同样读复数：`dep.cpp_info.libdirs[0]`。
+
+verification: >
+    1. 赋值实验（隔离 CONAN_HOME）：`cpp_info.libdir = "lib/aarch64"` -> `Error in package_info() method` rc=1；`cpp_info.libdirs = ["lib/aarch64"]` -> `Package created` rc=0；
+    2. 消费者元数据：把**真实** `package_info()` 绑到探针类（不编译）跑 CMakeDeps -> `filament-release-armv8-data.cmake` 写出 `LIB_DIRS=<pkg>/lib/aarch64`，`unknown` 出现 0 次；
+    3. 端到端：`lib/aarch64` 下 34 个 `.a`，`lib/unknown` 为 0。
+
+applicability: >
+  所有按宿主处理器推导安装子目录的 CMake 工程在 HarmonyOS/容器/未知平台上构建；以及任何需要在 Conan 中声明非默认 `libdir` 的配方。
+
+counterexample: >
+  若工程显式给定安装子目录（不依赖宿主回退），(1) 不触发；若归档恰好落在默认 `lib/`，(2) 不触发。但**不要因为'读得到 libdir'就认为可写** —— 见验证 1。
+
+recovery_condition: >
+  撤销 `libdirs` 声明后，消费者将再次拿到指向空目录的 `-L`，configure 报 `not found`。
+
+doc_file:               knowledge/draft/DRAFT-ohos-uname-p-unknown-install-layout.md
+last_updated:           2026-09-17
+source_event:           filament 1.76.1 HarmonyOS PC 适配 (PR #10480)
+
+authors:                ohos-farm
+source_pr:              10480
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-17

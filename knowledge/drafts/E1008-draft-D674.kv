@@ -1,0 +1,85 @@
+#====================================================================
+# E1008-draft-D674.kv
+# make install 前置 default_pcp 重查所有构建目标——build 变量须重传
+# (pcp 7.1.5 适配任务沉淀)
+#====================================================================
+
+id:                     E1008
+trigger_tool:           make|conan
+phase:                  installation
+error_signature:        make.*install.*undefined reference|
+                         \.static.*Error|
+                         cannot find -lpthread.*static|
+                         pmcpp\.static|pmieconf\.static
+
+severity:               2
+category:               install, build-system, cross-compilation
+match_keywords:         make install, default_pcp, STATICTARGETS, .static,
+                         CROSS_COMPILING, prerequisites, conan package,
+                         GNUmakefile, 交叉编译, 静态链接
+
+title:                  `make install`（install :: default_pcp ...）前置重查全部构建目标——build() 的 make 变量未重传到 package() → 触发 .static 重建 → 链接失败
+
+root_cause:             PCP 顶层 GNUmakefile 定义
+                         install :: default_pcp install_pcp。
+                         install 的前置 default_pcp 会重查每个子目录
+                         的 default 目标（make 的 prerequisite 语义：
+                         重新评估依赖是否 up-to-date）。
+                         conan 的 build() 与 package() 是两次独立
+                         self.run，命令行 make 变量不跨调用持久。
+                         若 build() 用 CROSS_COMPILING=yes 构建（为空
+                         STATICTARGETS，跳过 .static 可执行文件），而
+                         package() 的 make install 未重传该变量，
+                         builddefs 重新求值得 CROSS_COMPILING=no →
+                         STATICTARGETS 恢复 → 从未构建的 .static
+                         可执行文件（pmcpp.static 等）被当作待构建
+                         目标重建 → 静态链接失败（OHOS 静态
+                         libpthread.a 缺 pthread_cancel/pthread
+                         _setcancelstate，undefined symbol）。
+                         泛化：构建系统的 build/install 目标共享前置
+                         依赖图时，build 期变量（交叉编译标志、工具
+                         覆盖、LD_LIBRARY_PATH 等）必须一致重传到
+                         install 调用，否则"已构建"状态变成假象。
+affected_scope:         `make install` 会重查 build 目标的多级 make
+                         项目（PCP 型 install :: default_pcp；其他同
+                         结构项目：install 触发 build 目标重评估且
+                         变量变化导致目标不再 up-to-date 时）
+verification_cmd:       grep -n "^install" GNUmakefile   # 看 install 前置是否含 build 目标
+                         grep -rn "CROSS_COMPILING\|STATICTARGETS" src/include/builddefs
+rec_priority:           1
+rec_approach:           shared-override-vars
+rec_description:        把 build() 的 make 变量覆盖（CROSS_COMPILING=
+                         yes + 工具覆盖 + LD_LIBRARY_PATH + PM* 配方
+                         覆盖）抽成共享字符串/方法，package() 的
+                         make install 调用复用同一份，防止 build()/
+                         package() 覆盖漂移（pcp 实例：
+                         archives/p/pcp/7.1.5/conanfile.py 的
+                         _make_override_vars()）。
+                         判定信号：install 阶段出现"本应跳过"的
+                         目标（.static 等）被重建。
+rec_command:            (recipe 结构)
+                         def _make_override_vars(self):
+                             return 'CROSS_COMPILING=yes ...'
+                         build:   self.run(f'... make -j1 {self._make_override_vars()}')
+                         package: self.run(f'... make -j1 install {self._make_override_vars()}')
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      touch-up-to-date
+fallback_description:   临时验证手段：install 前手动 `touch` 相关
+                         .static 目标文件使 make 认为 up-to-date（仅
+                         用于定位根因，不可作为配方提交——掩盖问题）。
+
+forbid_1_pattern:
+principles:
+
+causes:                 []
+
+doc_file:               doc/E1008.md
+last_updated:           2026-10-09
+source_event:           pcp 7.1.5 HarmonyOS PC 适配（task 9361）
+authors:                D674
+source_pr:
+draft:                  true
+contributor_id:         D674

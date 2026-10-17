@@ -1,0 +1,80 @@
+#====================================================================
+# DRAFT-autotools-perl-tmpdir-candidate-vetting
+# autoconf/autoheader 的 TMPDIR 必须能通过 Perl File::Spec->tmpdir() 的 -d/-w 判定，
+# 否则静默回退 cwd，autoheader 把自身刚写的产物判为不可读并 exit 1
+# 来源：libiodbc2 3.52.16（archives/l/libiodbc2/3.52.16）
+#====================================================================
+
+id:                     DRAFT-autotools-perl-tmpdir-candidate-vetting
+trigger_tool:           autoheader|autoreconf|autoconf|autom4te
+phase:                  configuration
+error_signature:        cannot read .*/config\.hin:|
+                         autoheader: warning: missing template:|
+                         required file '.*/ltmain\.sh' not found|
+                         config\.status: error: cannot find input file
+
+severity:               3
+category:               ohos, autotools, tmpdir, perl, conan-recipe, ci-worker
+match_keywords:         autoheader, config.hin, missing template, File::Spec tmpdir,
+                         TMPDIR, uid-mapped mount, HMDFS, exit 1, aclocal, automake,
+                         ltmain.sh, config.status, conan recipe, build_folder tmp
+
+title:                  autotools 引导链的 TMPDIR 必须经 Perl File::Spec 认可，否则 autoheader 静默失败
+
+root_cause:             Perl 的 File::Spec->tmpdir()（autoheader/autom4te 用它定位临时目录）
+                        会逐个丢弃 -d/-w 判定失败的候选，并且在全部候选失败时回退到**当前目录**。
+                        在 OHOS worker 上，若构建树所在的挂载是 uid 映射的（stat 报告的文件属主
+                        与会话 uid 不一致、chmod 不生效），该挂载上 Perl 的 stat 型权限判定恒为假：
+                        配方把 TMPDIR 指向 <build_folder>/tmp 不仅被丢弃，回退后的 cwd 也在同一挂载上。
+                        autoheader 于是在 cwd 下建 ahXXXXXX/ 并写入 config.hin，紧接着用 -r 判定该文件
+                        "不可读"，于是一个模板都识别不出来，把 configure.ac 里所有 AC_DEFINE 都报成
+                        missing template，最后 exit 1（update_file 不会执行，include/config.h.in 永不生成），
+                        后续 automake/autoconf/configure 依次失败。该函数的静默回退使得日志
+                        只表现为 "missing template" 噪音，极易误判为上游 configure.ac 缺模板。
+
+affected_scope:         所有在 autotools 工程里自设 TMPDIR、且构建树落在 uid 映射挂载（OHOS
+                        /storage 用户区常见）上的 conan 配方。实测：libiodbc2 3.52.16，
+                        同一份最小 configure.ac 放在 /storage/... 上 autoheader 失败、放在
+                        /data/storage/el2/base/cache（进程自有 uid）上 rc=0 并正常产出 config.h.in。
+
+verification_cmd:       对照复现（无需完整工程）：
+                        (1) 在 uid 映射挂载与进程自有挂载上各建一个目录，写入含
+                        AC_CONFIG_HEADERS + 至少两个 AC_DEFINE 的最小 configure.ac；
+                        (2) 两处分别执行 autoheader 并比较 rc 与是否产出 include/config.h.in；
+                        (3) 判定探针：perl -e 'exit(-d $ARGV[0] && -w $ARGV[0] ? 0 : 1)' <候选目录>
+                        —— 返回非 0 即该候选会被 File::Spec->tmpdir() 丢弃。
+
+rec_priority:           1
+rec_approach:           perl-usable-tmpdir-probe
+rec_description:        配方选择 TMPDIR 时，除 os.access 外再用与 File::Spec->tmpdir()
+                        相同的 -d/-w 判定探针校验候选目录；保留 <build_folder>/tmp 为首选
+                        （正常 worker 上探针为真，行为与原实现完全一致），不被接受时依次回退到
+                        环境已有的 TMPDIR/TMP/TEMP，最后才退回 <build_folder>/tmp 以便失败时
+                        给出明确错误而非静默使用 /tmp。
+rec_command:            python（conanfile.py）：
+                        perl=$(command -v perl); [ -n "$perl" ] && "$perl" -e
+                        'exit(-d $ARGV[0] && -w $ARGV[0] ? 0 : 1)' "$cand" || true
+                        —— rc==0 才采纳该候选；候选顺序：build_folder/tmp → $TMPDIR → $TMP → $TEMP。
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      ambient-tmpdir-first
+fallback_description:   若不想引入探针，可先直接用环境 TMPDIR（若其存在且可写）再回退
+                        build_folder/tmp；代价是在「环境 TMPDIR 同样落在 uid 映射挂载」的
+                        worker 上仍然失败，故不如探针方案稳妥。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+forbid_1_pattern:       sed -i.*File::Spec|patch.*perl.*File/Spec
+forbid_1_reason:        Perl 的 File::Spec 属宿主工具链，不属于任务自有可改状态；
+                        改宿主库会污染其他并发构建。
+forbid_1_consequence:   构建结果不可复现，且其他任务受害。
+forbid_2_pattern:       chmod 777.*build_folder|chmod -R a\+rwx
+forbid_2_reason:        uid 映射挂载忽略 chmod，且放宽权限不能修正 stat 型权限判定。
+forbid_2_consequence:   无效操作，掩盖真实原因。
+
+principles:             P013,P014
+causes:                 []
+caused_by:              []

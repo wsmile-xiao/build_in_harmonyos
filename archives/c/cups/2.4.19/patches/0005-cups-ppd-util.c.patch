@@ -1,0 +1,126 @@
+--- a/cups/ppd-util.c
++++ b/cups/ppd-util.c
+@@ -32,9 +32,97 @@
+ static int	cups_get_printer_uri(http_t *http, const char *name,
+ 		                     char *host, int hostsize, int *port,
+ 				     char *resource, int resourcesize);
++#ifndef _WIN32
++static int	cups_make_local_ppd(const char *source, const char *target);
+
+
+ /*
++ * 'cups_make_local_ppd()' - Create a caller-owned local PPD file.
++ */
++
++static int				/* O - 0 on success, -1 on failure */
++cups_make_local_ppd(
++    const char *source,			/* I - Source PPD file */
++    const char *target)			/* I - Target PPD file */
++{
++#ifdef HAVE_SYMLINK
++  return (symlink(source, target));
++#else
++  char		buffer[8192],		/* Copy buffer */
++		*bufptr;		/* Pointer into buffer */
++  int		source_fd,		/* Source file descriptor */
++		target_fd,		/* Target file descriptor */
++		saved_errno;		/* Saved error value */
++  ssize_t	bytes,			/* Bytes read */
++		written;		/* Bytes written */
++
++
++  if ((source_fd = open(source, O_RDONLY)) < 0)
++    return (-1);
++
++  if ((target_fd = open(target, O_WRONLY | O_CREAT | O_EXCL, 0600)) < 0)
++  {
++    saved_errno = errno;
++    close(source_fd);
++    errno = saved_errno;
++    return (-1);
++  }
++
++  while ((bytes = read(source_fd, buffer, sizeof(buffer))) != 0)
++  {
++    if (bytes < 0)
++    {
++      if (errno == EINTR)
++        continue;
++
++      goto copy_error;
++    }
++
++    bufptr = buffer;
++    while (bytes > 0)
++    {
++      if ((written = write(target_fd, bufptr, (size_t)bytes)) < 0)
++      {
++        if (errno == EINTR)
++          continue;
++
++        goto copy_error;
++      }
++
++      if (!written)
++      {
++        errno = EIO;
++        goto copy_error;
++      }
++
++      bufptr += written;
++      bytes -= written;
++    }
++  }
++
++  if (close(target_fd))
++  {
++    target_fd = -1;
++    goto copy_error;
++  }
++
++  close(source_fd);
++  return (0);
++
++copy_error:
++  saved_errno = errno;
++  if (target_fd >= 0)
++    close(target_fd);
++  close(source_fd);
++  unlink(target);
++  errno = saved_errno;
++  return (-1);
++#endif /* HAVE_SYMLINK */
++}
++#endif /* !_WIN32 */
++
++
++/*
+  * 'cupsGetPPD()' - Get the PPD file for a printer on the default server.
+  *
+  * For classes, @code cupsGetPPD@ returns the PPD file for the first printer
+@@ -204,7 +292,7 @@
+
+         unlink(buffer);
+
+-	if (symlink(ppdname, buffer) && errno != EEXIST)
++	if (cups_make_local_ppd(ppdname, buffer) && errno != EEXIST)
+         {
+           _cupsSetError(IPP_STATUS_ERROR_INTERNAL, NULL, 0);
+
+@@ -279,13 +367,13 @@
+ 		   (unsigned long)curtime.tv_usec);
+
+ 	 /*
+-	  * Try to make a symlink...
++	 * Make the local PPD available to the caller...
+ 	  */
+
+-	  if (!symlink(ppdname, buffer))
++	  if (!cups_make_local_ppd(ppdname, buffer))
+ 	    break;
+
+-	  DEBUG_printf(("2cupsGetPPD3: Symlink \"%s\" to \"%s\" failed: %s", ppdname, buffer, strerror(errno)));
++	  DEBUG_printf(("2cupsGetPPD3: Unable to create local PPD \"%s\" from \"%s\": %s", buffer, ppdname, strerror(errno)));
+
+ 	  tries ++;
+ 	}

@@ -1,0 +1,83 @@
+#====================================================================
+# E999-draft-MTX2.kv — 知识图谱草稿（路径 B 候选）
+# 主题: Conan CMakeToolchain 的 CppStdBlock 用普通 CMake 变量覆盖项目 cache 变量，
+#       导致 libc++ 下 C++20 语法静默按 C++17 解析
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E999
+trigger_tool:           clang|cmake|conan
+phase:                  compilation|configuration
+error_signature: 'operator<=>' is a single token in C\+\+20|'operator<=' cannot be the name of a variable or data member|expected ';' at end of declaration list|no matching function for call to object of type 'std::not_equal_to<>'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 3
+category: conan|cmake|toolchain|cxx-standard|libcxx
+match_keywords: CppStdBlock, CMAKE_CXX_STANDARD, compiler.cppstd, cache_variables, 普通变量, normal variable, operator<=>, strong_ordering, not_equal_to, 三路比较
+title: Conan 工具链用普通 CMake 变量注入 C++ 标准，项目内 cache_variables 无法覆盖
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: Conan 2 的 CMakeToolchain 由 CppStdBlock 依据 profile 的 compiler.cppstd 生成 `set(CMAKE_CXX_STANDARD <N>)`（普通变量，非 cache 变量），并以 variable_watch 监视。CMake 中普通变量优先级高于 cache 变量，因此 recipe 里 `tc.cache_variables["CMAKE_CXX_STANDARD"] = "20"` 不会生效，库仍按 profile 的 cppstd（如 17）编译。cli11 风格的三路比较 `auto operator<=>(...)` 在 C++17 下不再被识别为单个 token，clang 报 "'operator<=' cannot be the name of a variable or data member"（并伴随 "'operator<=>' is a single token in C++20" 警告）；libc++ 的 std::variant 比较还派生 no matching function for call to object of type 'std::not_equal_to<>'。
+affected_scope: 所有在 recipe 里通过 cache_variables/variables 设置 CMAKE_CXX_STANDARD 来提升标准、而 profile 的 compiler.cppstd 更低的库（OHOS 官方 profile 为 cppstd=17）
+verification_cmd: grep -m2 'C++ Standard' <conan-create.log>   # 期望出现 C++ Standard 20，而非 17
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority: 1
+rec_approach: 在 recipe 的 generate() 中修改 self.settings.compiler.cppstd，让工具链自身按新标准生成
+rec_description: |
+  generate() 首行写:
+      self.settings.compiler.cppstd = "20"
+      tc = CMakeToolchain(self)
+  这样 CppStdBlock 会用 20 生成 set(CMAKE_CXX_STANDARD 20)，链接与编译均按 C++20，
+  且不会触发 CppStdBlock 的 variable_watch 告警。
+  同时可去掉 recipe 里试图提升标准的 tc.cache_variables["CMAKE_CXX_STANDARD"]（无效且误导，
+  保留只会掩盖问题）。若某些源文件仍需特定标准，应在 CMake 侧用 target_compile_features 表达，
+  而不是依赖 recipe 的 cache 变量。
+  判别现象：conan create 日志出现 "Conan toolchain: C++ Standard 17 with extensions OFF"，
+  即工具链实际给出的标准与预期不符。
+rec_command: grep -m2 'C++ Standard' <conan-create.log> && grep -c "operator<=>" <src>/include/*.hpp
+rec_auto_fix: false
+rec_impl: recipe-change
+
+# 回退方案
+fallback_priority: 2
+fallback_approach: 若该库确实只需 C++17，则移除对 C++20 的依赖，或在补丁中把三路比较改写为显式比较运算符
+fallback_description: 适用于无法提升标准（依赖链中存在仅 C++17 的静态库）的场景；改写后需逐个运算符实现 <、<=、>、>=、== 与 !=，并重新跑上游测试。
+fallback_command: grep -rn 'operator<=>' <src>
+fallback_auto_fix: false
+fallback_impl: source-patch
+
+# ★ 禁止策略 ★
+forbid_1_pattern: tools.build:cxxflags.*-std=c\+\+20|CXXFLAGS=.*-std|sed -i.*CMAKE_CXX_STANDARD
+forbid_1_reason: 用全局 cxxflags 强行注入标准会绕过 Conan 的标准协商与 package_id 语义，且在 profile 层叠加时顺序不可控；sed 改生成文件违反 R6
+forbid_1_consequence: 配方不可复现或 CI L0 门禁失败
+
+# ═══ Layer 4: 原则引用 ═══
+principles: P001
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E216]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+platform_only: false
+doc_file:               E999-draft-MTX2.md
+last_updated: 2026-10-01
+source_event: mtxclient 0.10.1 适配（真机编译期 operator<=> 解析失败定位到工具链标准注入）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors: DSH agent session (mtxclient 0.10.1)
+source_pr: 13832
+source_commit: c770174d37
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used: 2026-10-01
+
+draft: true
+contributor_id: MTX2

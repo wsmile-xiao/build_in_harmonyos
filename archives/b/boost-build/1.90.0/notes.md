@@ -84,3 +84,7 @@ common.Clean clean
 5. b2的--version输出为"B2 5.3.2"，而非"boost-build 1.90.0"
 
 ---
+---
+
+**编译结束**: 2026-08-27 14:55
+**最终状态**: built

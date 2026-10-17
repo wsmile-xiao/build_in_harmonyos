@@ -1,0 +1,297 @@
+# ═══ Draft knowledge entry — 上游没有「库」这个产物：手写 Makefile 只编演示程序，无 .so/.a 目标、无 install 规则 ═══
+# Timestamp: 2026-09-20
+# Software: gclib 0.12.8 (GPertea 通用 C++ 工具库；GFFread / StringTie 的共同底座)
+# Gate: L0 (包边界自定) / rule2 (减少说明) / rule4 (上游测试数为 0) / rule12 鸿蒙特有测试
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-libgclib-0.12.8-no-library-target-include-closure
+trigger_tool:           make|clang|clang++|conan
+phase:                  configuration
+error_signature:        all:\s*\w+|OBJS\s*:=|no rule to make target.*\.so|install:\s*$|
+                         undefined reference to.*__gcj_personality|ld:\s*cannot find -l<lib>|
+                         too few template parameters in template redeclaration|
+                         exception specification in declaration does not match previous
+                         declaration|previous declaration is here.*noexcept|
+                         class .* redeclaration|Manually-specified variables were not used
+
+severity:               2
+category:               build-system, packaging, make, conan, portability, headers,
+                         compile-flags, header-conflict, consumer-test,
+                         cpp-standard, noexcept, patch, odr
+match_keywords:         手写 Makefile, no install rule, no library target, OBJS, all: demo,
+                         .o 直接链接, quoted-include 闭包, include closure, 发运头文件集,
+                         library boundary, libgclib, gclib, GFFread, StringTie, htest,
+                         header-only closure, packaging, OHOS,
+                         同名不同签名, class GHash, GHash.hh, GHashMap.hh, GList.hh,
+                         -fno-exceptions, -fno-rtti, BASEFLAGS, cpp_info.cxxflags,
+                         接口级编译开关, 编译簇, compilation cluster,
+                         noexcept mismatch, 声明定义异常规格不一致, 全部头堆一个 TU,
+                         C++17, c++17, noexcept 成为函数类型一部分, 上游 c++11 消费者 c++17,
+                         -fno-exceptions 豁免不了 C++17, 双标准双跑, cppstd 钉回 c++11 是错的,
+                         修头文件而非绕开关, exports_sources, apply patch
+
+title:                  上游没有「库」这个产物（手写 Makefile 的 all: 只编演示程序、
+                        既无 .so/.a 规则也无 install 规则）时，适配必须自定库边界；
+                        发运头文件取「已编译 TU 的 quoted-include 闭包」；
+                        该闭包里的头**必须按编译簇分 TU 包含**；
+                        上游 BASEFLAGS 的开关必须发布给消费者（模板两侧实例化的 ODR）；
+                        且「库编得过」不等于「消费者编得过」——
+                        上游只在 c++11 下编过，c++17 消费者会炸出 c++11 豁免、
+                        c++17 不豁免的头文件违规，必须**打补丁修头**而非靠编译开关绕
+
+root_cause: >
+  gclib 0.12.8 的仓库根只有一份手写 Makefile：
+
+      OBJS := GBase.o GStr.o GArgs.o GResUsage.o
+      all: htest
+      BASEFLAGS := -std=c++11 -Wall -Wextra ${INCDIRS} $(MARCH) -D_REENTRANT -fno-exceptions -fno-rtti
+      LIBS := -lz
+
+  三件事同时成立：
+    (a) 没有库目标 —— 全文件没有任何 `%.so` / `%.a` / `lib%.a` 规则；
+    (b) 没有 install 规则 —— 既不知道要装哪些头，也没有 $(DESTDIR) 之类的落点；
+    (c) `all:` 的目标 `htest` 是一个带 main() 的演示程序，不是库；
+        `OBJS` 只有 4 个 .o，而且是给**下游把自己的可执行文件链接起来**用的
+        （GFFread / StringTie 就是这么干的：直接把 .o 链进自己的程序）。
+  「库的边界」在上游是**未定义**的。于是任何「照抄上游安装集合」的适配思路都会落空：
+  上游根本没有可抄的集合，适配者必须自己划一条边界，并对这条边界负责。
+  划错的典型后果是「发运了却编不过的头」或「漏装了消费者真正需要的头」，
+  而两者都不会在 `conan create` 的编译期自己暴露出来。
+
+  边界划完之后还有两个**只在消费者侧才暴露**的坑，都源于「库编得过 ≠ 消费者
+  编得过」：
+
+  (一) 「库编得过 ≠ 消费者编得过」的第一层：上游只在
+       `-std=c++11 ... -fno-exceptions` 下编过，而这份组合会让 clang **跳过**
+       声明/定义的异常规格等价性检查。于是上游写出了一个错的头也没被拦住：
+       `GList.hh:101` 声明 `GList(GList<OBJ>&& list);`（无 noexcept），
+       `GList.hh:375` 定义 `GList<OBJ>::GList(GList<OBJ>&& other) noexcept:`。
+       本包第一次 CI 正是因为 test_package 写死 `-std=c++11 -O1` 漏掉开关而炸。
+
+       (一·续) 但**发布 `-fno-exceptions` 只解决了一半**。C++17 起 `noexcept`
+       已经是**函数类型的一部分**，这条等价性检查不再受 `-fno-exceptions`
+       影响；而 OHOS 消费者的 `compiler.cppstd` 默认就是 17。实测（CI build
+       #53438）同一份 test_package：`-std=c++11` 那趟 83 条断言全绿，
+       `-std=c++17` 那趟第一行就死在同一处，且带不带 `-fno-exceptions` 都一样。
+       ⇒ 正确处置是**打补丁修头文件**：
+       `patches/0001-glist-move-ctor-noexcept-declaration.patch` 只把 `:101`
+       的声明补成 `noexcept`（与定义一致，保留作者"移动构造不抛"的显式意图；
+       全 24 个发运头里 noexcept 只出现在这一处）。
+       这层教训才是本条目最有价值的一条：**「某个开关能压掉某条诊断」这种
+       豁免往往是 C++11 时代的放宽规则，标准一升就失效，而消费者默认标准
+       恰好比上游新。**
+
+  (一·补) 修完头之后 `-fno-exceptions -fno-rtti` **仍然**要经 `cpp_info.cxxflags`
+       发布，但理由换成 ODR：gclib 是模板密集库，`GList<OBJ>`/`GVec<OBJ>`/
+       `GHash<...>` 同时在库的 16 个 TU 和消费者 TU 里实例化（24 个头全发运），
+       两侧开关不一致 = 同一实体两份语义不同的定义。这本来就是上游 BASEFLAGS
+       给下游定的 ABI 假设。
+
+  (二) 同一批发运头里可能藏着**同名不同签名**的声明，使它们无法共处一个 TU：
+       `GHash.hh:21` 是 `template <class OBJ> class GHash`（char* 键的旧式哈希表），
+       `GHashMap.hh:389` 是 `template <class V, class Hash=…, class Eq=…,
+       typename khInt_t=uint64_t> class GHash`。两者 headerguard 不同、名字相同，
+       而 `GapAssem.h:6 → GHash.hh`、`GFastaIndex.h → GHashMap.hh`。因此
+       「N 个发运头都能被消费者包含」这条契约**不能**用一个「把所有头 #include
+       一遍」的 TU 来证：那样测出来的是头之间的互斥，不是每个头的自洽。
+       正确写法是按编译簇分 TU，每簇一个。
+
+affected_scope: >
+  一切「上游只提供手写 Makefile，且该 Makefile 只编演示程序/工具、不产出库文件、
+  也没有 install 规则」的包。识别判据（三条同时成立即命中）：
+    (1) 仓库根存在 Makefile，但全文件 grep 不到任何库归档/共享库规则
+        （无 `lib.*\.a`、无 `-shared`、无 `%.so`、无 libtool）；
+    (2) 没有 `install:` / `install-*:` 目标；
+    (3) 存在 `OBJS := ...` 这类变量，值是 .o 列表，且没有被任何库规则消费。
+  gclib 0.12.8 实证：22 个 .cpp 中，`GBam.cpp`（需 htslib 的
+  kstring.h/sam.h/bam.h）、`gdimg.cpp`（需 libgd 的 gd.h）、`gff.cpp`
+  （需 boost 的 boost/crc.hpp）三者依赖未随包发布的第三方头且无任何
+  pkg-config/CMake 探测，另有 `htest.cpp`/`mdtest.cpp`/`gtest.cpp` 三个带
+  main() 的文件 —— 可编译的库翻译单元恰好是剩下的 **16 个**。
+  适配后 ABI 侧另有两点必须自己声明（上游没有任何 install 元数据）：
+  头文件集合、以及 shared/static 两种链接形态。
+
+verification_cmd: >
+  # 1) 判定「上游有没有库产物」——三条判据一次跑完，全空即命中本条目：
+  grep -nE '^[^#]*[[:alnum:]_$/.-]+\.(a|so|dylib)[[:space:]]*:' Makefile   # 空
+  grep -nE '^install(-[[:alnum:]]+)?[[:space:]]*:' Makefile                # 空
+  grep -nE 'shared|libtool|-shared|ar[[:space:]]+rcs' Makefile             # 空
+  grep -nE '^[[:space:]]*(all|OBJS)[[:space:]]*[:=]' Makefile              # all: htest / OBJS := ...
+  # 2) 数「哪些 TU 编得过」——逐个编一遍，失败的那几个就是边界之外：
+  for f in *.cpp; do clang++ -std=c++11 -D_REENTRANT -fno-exceptions -fno-rtti \
+      -I. -c "$f" -o /dev/null 2>/dev/null || echo "OUT: $f"; done
+  # 3) 算 include 闭包（发运集合）并对每条做存在性 + 单独编译校验：
+  #    quoted-include 从 16 个已编译 TU 出发做传递闭包 → 24 个头
+  grep -hE '^[[:space:]]*#[[:space:]]*include[[:space:]]*"' *.cpp *.h *.hh |
+      sed -E 's/.*"([^"]+)".*/\1/' | sort -u
+  # 4) 消费者侧实证（本包 test_package 就是这么做的）：
+  #    24 个头逐个单独 #include 一遍，任何一个不自洽都在编译期炸出来
+  #    clang++ -std=c++11 -fno-exceptions -fno-rtti -I<include> -fsyntax-only -x c++ - <<< '#include "GList.hh"'
+  # 4b) 找「同名不同签名的声明」——把同一批头两两配对会炸出硬错误：
+  grep -hoE 'class[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' *.h *.hh | sort | uniq -d
+  #     gclib 命中 GHash（GHash.hh 的 template<class OBJ> vs
+  #     GHashMap.hh 的 template<class V,class Hash,...>）→ 必须按编译簇分 TU
+  # 4c) ★ 把每个头**再按 c++17 编一遍** —— 上游只按 c++11 编过，这一步才是
+  #     "消费者视角"（OHOS profile 的 compiler.cppstd 默认 17）：
+  for h in <24 个头>; do printf '#include "%s"\nint main(){return 0;}\n' "$h" \
+      | clang++ -std=c++17 -fno-exceptions -fno-rtti -I<include> -fsyntax-only -x c++ - \
+      || echo "BAD HEADER (c++17): $h"; done
+  #     未打补丁时命中 GList.hh：
+  #       GList.hh:375:34: error: exception specification in declaration does not
+  #       match previous declaration   （:101 的声明少了 noexcept）
+  #     ★ 关键：加不加 -fno-exceptions **都一样报错** —— c++17 下 noexcept 已是
+  #       函数类型的一部分，这条诊断不再被该开关豁免。所以只能修头，不能绕。
+  # 4d) 单点定位那个不一致的 noexcept（补丁就改这一行）：
+  grep -n noexcept <闭包内所有头>   # gclib 全 24 个头只有 GList.hh:375 一处
+  # 4e) 打完补丁后，4b 与 4c 两趟都要全绿，且两趟的断言数逐条相同
+
+rec_priority:           1
+rec_approach:           define-boundary-as-compilable-tu-set-plus-include-closure
+rec_description: >
+  把库边界定义成两个互相咬合的集合，并且让第二个集合**由第一个集合推导出来**，
+  这样边界就不能被随意拍脑袋：
+  (1) **翻译单元集合** = 逐个试编后能成功的全部 .cpp（gclib 是 16 个）。
+      排除的三类要在 notes.md 里逐条写明理由：缺未随包发布的第三方头
+      （GBam.cpp/gdimg.cpp/gff.cpp）、带 main() 的演示程序
+      （htest.cpp/mdtest.cpp/gtest.cpp）。
+  (2) **发运头文件集合** = 这 16 个 TU 的 quoted-include 传递闭包（gclib 是 24 个）。
+      这个取法有一个可验证的性质：**每个被发运的头都在 build() 里被某个被编译
+      的 TU 真实包含过**，因此不存在「发运了却编不过」的头。被闭包排除的头
+      （GBam.h / gdimg.h / gff.h / GBitVec.h / GIntHash.hh / GIntervalTree.hh）
+      同样逐条写理由。
+  (3) **按编译簇分 TU 做「每个头都能被包含」的实证**。先按
+      `class <Name>` 重名扫描找出互斥对（gclib 是 GHash.hh × GHashMap.hh），
+      再把 24 个头分成「公共 + GHashMap 簇 + GHash 簇」，每簇一个 TU、
+      链接进同一个可执行文件。**禁止**用「把 24 个头堆进一个 TU」来冒充 ——
+      那样只会测出头之间的互斥，还会把人误导到「删掉冲突的头」。
+  (4) **把上游 BASEFLAGS 里带 ABI/接口语义的开关经 `cpp_info.cxxflags` 发布**，
+      并在 test_package 里从 `dependencies[...].cpp_info.cxxflags` 取用
+      （而不是自己写死），这样「开关有没有发布」本身也被测到。
+      gclib 是 `["-fno-exceptions", "-fno-rtti"]`。理由是 **ODR**：模板在库的
+      TU 与消费者 TU 两侧实例化，开关必须一致 —— **不是**为了绕开某条诊断
+      （那个理由在 c++17 下不成立，见 (5)）。
+  (5) **★ 别把"开关能压掉某条诊断"当成解法：把每个头按消费者实际标准再编一遍。**
+      上游只在 `-std=c++11 ... -fno-exceptions` 下编过，而这份组合让 clang 跳过
+      声明/定义的异常规格等价性检查 —— 于是 `GList.hh` 声明无 `noexcept`、
+      定义有 `noexcept` 这个错头一直没被发现。OHOS 消费者的 cppstd 默认 17，
+      而 **C++17 起 noexcept 已是函数类型的一部分，该诊断不再被 `-fno-exceptions`
+      豁免**（CI build #53438：c++11 那趟 83 条全绿，c++17 那趟第一行就死）。
+      正解是 **打补丁修头文件**（`patches/0001-glist-move-ctor-noexcept-declaration.patch`
+      给 `:101` 补 `noexcept`），而不是给消费者加开关；更不能把 cppstd 钉回
+      c++11 —— 那是拿消费者的语言标准为上游的 bug 买单。
+  配方侧再加一道**逐条数校验**：package() 拷贝后统计 staged 头数量，与预期不等
+  即抛 ConanException —— 防止「静默少装」被当成通过（少装的头只有在消费者侧
+  才会炸，而那时已经晚了）。
+  链接形态由适配者自己声明：shared 走 `clang++ -shared -pthread
+  -Wl,-soname,libgclib.so`，static 走 `llvm-ar rcs`；两者都用同一批 .o。
+rec_command:            >
+  conan create archives/l/libgclib/0.12.8 -pr:h <ohos profile> -pr:b <ohos profile> --build="libgclib/*"
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      ship-only-the-four-upstream-OBJS
+fallback_description:   >
+  只照抄上游 `OBJS` 的 4 个 TU（GBase/GStr/GArgs/GResUsage）出一个「最小库」。
+  不可取：这 4 个 .o 只是上游给某个特定下游用的子集，丢掉
+  GList/GVec/GHash/GHashMap（头文件模板，本来就没有 .o）、gdna/codons
+  （碱基与密码子表）、GFastaFile/GFaSeqGet/GFastaIndex（FASTA 解析）等
+  会让「装了这个包」这件事对多数消费者没有意义；而且头文件集合还是会落到
+  「自己划」这一步，等于没有解决问题。仅在确认下游只要这 4 个符号时作为
+  极简替代。
+fallback_command:       （不推荐）
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       \.cpp$.*->.*OUT|rm .*\.cpp|mv .*\.cpp .*\.cpp\.bak|#if 0.*GBam|sed -i.*GBam\.cpp
+forbid_1_reason:        为了「全都能编过」而删掉/注释/改后缀编不过的 TU，或假装它们
+                        不存在。GBam.cpp/gdimg.cpp/gff.cpp 属于「依赖未随包发布」，
+                        正确做法是**如实排除并写明理由**，而不是把它们从树里抹掉 ——
+                        抹掉之后下次维护者会以为上游本来就没有这些文件。
+forbid_1_consequence:   上游身份被篡改，适配边界不可复核，评审直接驳回返工。
+
+forbid_2_pattern:       cat .*\.(h|hh) >|.*\.h.*:.*\.h|touch .*GFastaFile\.h|echo .*> .*\.hh
+forbid_2_reason:        为了凑齐「消费者想要的头」而**凭空造**出树里不存在的头
+                        （拼文件、touch 占位、从别的版本拷）。这类头从没被任何
+                        被编译的 TU 包含过，属于典型「发运了却编不过」。
+forbid_2_consequence:   消费者一 #include 就编译失败，且失败点在消费者工程里，
+                        排查成本极高。
+
+forbid_3_pattern:       compiler\.cppstd|CMAKE_CXX_STANDARD|extra_cxxflags.*std=c\+\+1[4-9]
+forbid_3_reason:        为了绕开「上游按 -std=c++11 编、消费者按 c++17 用」的不一致而
+                        偷偷把库改成高标准编译。正解是**实测**二者能否互链（gclib 全库
+                        零 throw、零 dynamic_cast/typeid，不存在跨标准 ABI 落差），
+                        并用双标准双跑的 test_package 证明；头文件本身的 c++17 违规
+                        要单独修（见 forbid_8），不能靠换标准掩盖。
+forbid_3_consequence:   掩盖了真正的 ABI 事实，换一个标准就复发。
+
+forbid_4_pattern:       test_package/(test_.*)\.cpp.*(skip|SKIP)|#if 0.*test_|assert\(0\)|exit\(0\).*// *skip
+forbid_4_reason:        上游测试数为 0 时，消费者断言是**唯一**的覆盖证据；把它们
+                        跳过或降级等于本包没有任何验证。
+forbid_4_consequence:   通过率造假，rule4/rule12 不成立，PR 驳回。
+
+forbid_5_pattern:       test_package/.*\.cpp.*(#include.*){5,}|把.*头.*堆.*一个 TU|
+                        单文件.*#include.*全部.*头
+forbid_5_reason:        用一个 TU 把「全部发运头」#include 一遍来冒充「每个头都能
+                        被包含」。上游可能有两组同名不同签名的声明（gclib 的
+                        class GHash × 2：GHash.hh 的 template<class OBJ> 与
+                        GHashMap.hh 的 template<class V,class Hash,...>），
+                        堆进一个 TU 必炸 —— 测出来的是头之间的互斥，不是各头的自洽。
+forbid_5_consequence:   消费者侧契约假通过；跟着报错去删头则变成「发运集合缩水」，
+                        把上游真实身份改掉。
+
+forbid_6_pattern:       test_package/.*clang\+\+.*-std=c\+\+1[17].*-O[0-9]|写死.*-std=c\+\+11.*-O1
+forbid_6_reason:        在 test_package 里自己另写一套编译命令、漏掉上游 BASEFLAGS 的
+                        -fno-exceptions/-fno-rtti（消费者必须与库拿到同一套开关，
+                        模板两侧实例化的 ODR 要求）；同时这条也顺带证明了「依赖方
+                        到底有没有把开关发布出来」。
+forbid_6_consequence:   包本身「CI 绿」而消费者工程一 #include 就失败 —— 最坏的一类假绿。
+
+forbid_7_pattern:       只有一趟编译的 test_package|单独.*-std=c\+\+11.*(只跑|一趟)|
+                        (删|去掉|不跑).*(c\+\+17|cxx17|双标准)
+forbid_7_reason:        上游只在 c++11 下编过，「库编得过」与「消费者编得过」是两件事。
+                        gclib 的 GList.hh 声明/定义 noexcept 不一致：c++11 那趟
+                        83 条全绿，**只有**加跑 c++17 那趟才炸得出来 —— 而 OHOS
+                        profile 的 compiler.cppstd 默认就是 17。只跑一趟标准会得到
+                        「CI 绿」的假象。
+forbid_7_consequence:   真实消费者（默认 c++17）一 #include 就失败，而本包 CI 全绿；
+                        这类假绿被合入后排查成本落在下游工程里。
+
+forbid_8_pattern:       cpp_info\.cxxflags.*-std=c\+\+11|compiler\.cppstd.*c\+\+11|
+                        (绕|规避).*GList\.hh.*(noexcept|异常规格)|-fno-exceptions.*(即可|就够了|绕过)
+forbid_8_reason:        用「给消费者加 -fno-exceptions」或「把 cppstd 钉回 c++11」
+                        来规避 GList.hh 的异常规格不一致，而不修头文件。
+                        -fno-exceptions 只在 **C++11** 下豁免这条诊断；C++17 起
+                        noexcept 已是函数类型的一部分，加不加都报同样的错（CI
+                        build #53438 实证）。钉回 c++11 更糟：拿消费者的语言标准
+                        为上游的 bug 买单。
+forbid_8_consequence:   「包里绿、消费者炸」原样复发；或者把一个上游的 bug 固化成
+                        消费者的语言标准上限，下游没法用新标准。
+
+principles:             P005, P003, P014
+causes:                 []
+caused_by:              []
+similar_to:             E097（上游无 configure、只有自定义 Makefile（bearssl 的
+                        mk//conf//SingleUnix.mk）时须手工定义构建与安装；本条目更
+                        进一步 —— 上游连库产物都没有，边界要自己划）、
+                        DRAFT-fusion-1.3.3-cmake-no-install-rule-manual-package
+                        （有 CMake 但没有 install 规则，须手工 package）、
+                        DRAFT-cqrlib-1.1.4-libtool-makefile-direct-compile
+                        （libtool 工程直接 make 编译；同属「上游不提供安装元数据」家族）、
+                        DRAFT-gated-sublib-dual-archive-closure（双归档闭包的另一面：
+                        上游有多产物时如何界定发运集合）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-libgclib-0.12.8-no-library-target-include-closure.md
+last_updated:           2026-09-20
+source_event:           archives/l/libgclib/0.12.8 适配（22 个 .cpp → 16 个库 TU + 24 个闭包头；零第三方依赖；上游测试数 0）
+
+authors:                2301_76770579
+source_pr:              11371
+source_commit:          c4af7434ab099abd40b9b69181b8df11ce628dc2
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20

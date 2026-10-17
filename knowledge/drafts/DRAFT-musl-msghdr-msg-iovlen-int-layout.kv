@@ -1,0 +1,82 @@
+#====================================================================
+# DRAFT-musl-msghdr-msg-iovlen-int-layout -
+# OHOS musl struct msghdr.msg_iovlen 为 int+pad：glibc 风格位置初始化器
+# 整体错位（NULL 撞上 int pad），须用 C99 指定初始化器解耦成员布局。
+#
+# 场景: l2tpns 2.5.0 netlink sendmsg/recvmsg 封装以
+#       (struct msghdr){ &nladdr, sizeof, &iov, 1, NULL, 0, 0 } 位置初始化，
+#       OHOS musl（sys/socket.h）为 int msg_iovlen + int __pad1（64 位按
+#       字节序插入）；真机 clang 报 l2tpns.c:1931/1963 两处
+#       incompatible pointer to integer conversion initializing 'int'
+#       with an expression of type 'void *'（NULL 落在 __pad1）。
+# 适用: 一切对 libc 内部布局敏感的聚合类型位置初始化（msghdr/cmsghdr/
+#       stat 等 musl 与 glibc 布局差异族），尤其 32→64 位兼容层带显式
+#       pad 成员的 libc 衍生版（OHOS musl）。
+#
+# 注: 本文件所有字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-musl-msghdr-msg-iovlen-int-layout
+source_lib:             l2tpns 2.5.0
+trigger_tool:           build
+phase:                  build
+error_signature:        incompatible pointer to integer conversion initializing 'int' with an expression of type 'void|struct msghdr.*int-conversion|initializing 'int' with an expression of type 'void \*'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               1
+category:               musl, glibc, socket, abi, build, compiler, portability
+match_keywords:         msghdr, msg_iovlen, __pad1, struct msghdr, int-conversion, incompatible pointer to integer, designated initializer, sendmsg, recvmsg, netlink, musl, OHOS, sys/socket.h, 位置初始化器, 指定初始化器, 成员布局
+title:                  OHOS musl struct msghdr.msg_iovlen 为 int+pad：位置初始化器错位，须用 C99 指定初始化器
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             struct msghdr 成员类型是 libc 实现细节：glibc 为 size_t msg_iovlen（无 pad），OHOS musl 为 64 位二进制兼容改写为 int msg_iovlen 并按字节序插入 int __pad1（aarch64 小端在 iovlen 之后）。按 glibc 布局书写的位置初始化器整体错位——第 5 个初始化器 NULL 落在 int pad 上，clang 报 incompatible pointer to integer conversion initializing 'int' with an expression of type 'void *'；若压掉诊断继续编译，指针被截断写入 pad、controllen/flags 错位，运行期破坏内存布局。
+affected_scope:         所有以位置初始化器/位置聚合赋值构造 libc 内部布局敏感聚合类型的 C/C++ 源（msghdr/cmsghdr/stat 等 musl 与 glibc 布局差异族）；使用 netlink sendmsg/recvmsg 封装的守护进程与网络工具在 OHOS musl 上高发；32→64 位兼容层带显式 pad 成员的 libc 衍生版必现。
+verification_cmd:       grep -n -A9 'struct msghdr {' ${OHOS_SDK_SYSROOT:-/data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/sysroot}/usr/include/sys/socket.h   （期望看到 int msg_iovlen 与 int __pad1）; printf '#include <sys/socket.h>\nint main(void){struct msghdr m = {0,0,0,1,NULL,0,0}; return m.msg_iovlen;}\n' | clang -x c - -c -o /dev/null   （期望失败: incompatible pointer to integer conversion）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           c99-designated-initializers-for-msghdr
+rec_description:        改用 C99 指定初始化器（.msg_name/.msg_namelen/.msg_iov/.msg_iovlen），与成员顺序解耦，未提及成员按标准零初始化（pad/flags/controllen 归零，语义与上游意图一致）；glibc/musl 双栈可移植。l2tpns 落地为 patches/0003-msghdr-designated-init.patch（sendmsg/recvmsg 两处同文替换）。
+rec_command:            patch -p1 -i patches/0003-msghdr-designated-init.patch
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      memset-plus-member-assignment
+fallback_description:   结构体多处复用、不便整体改初始化器时：memset(&m,0,sizeof m) 归零后逐成员赋值（msg_name/msg_namelen/msg_iov/msg_iovlen），同样与布局解耦；代价是代码量上升且遗漏字段静默为零，需逐字段复核。
+fallback_command:       无单条命令（源码级改写模式，见 rec_description 同类字段赋值）
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+forbid_1_pattern:       -Wno-error=int-conversion|-w\b|CFLAGS.*int-conversion
+forbid_1_reason:        以关闭/降级诊断的方式"消除"错位错误：编译通过后 NULL 指针被截断写入 int pad、controllen/flags 错位，运行期破坏内存布局且难复现
+forbid_1_consequence:   布局破坏推迟到运行期，netlink 收发静默异常或段错误，排查成本远高于编译期修复
+forbid_2_pattern:       struct\s+msghdr\s*\{.*\}.*;|typedef.*struct.*msghdr
+forbid_2_reason:        手写本地 struct msghdr 替代定义或按成员序号+手算 pad 重排位置初始化器：把 libc 实现细节固化进源码（ABI 双源），libc 升级即碎
+forbid_2_consequence:   与系统头 ABI 漂移，跨 libc/版本不可移植，上游拒绝合并
+
+principles:             P-SYSCALL-001, P-CFLAGS-002, P-PATCH-001
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E102, E148]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-musl-msghdr-msg-iovlen-int-layout.md
+last_updated:           2026-09-23
+source_event:           l2tpns 2.5.0 OHOS arm64 适配：首轮 make 命中 l2tpns.c:1931/1963 msghdr 位置初始化器 int-conversion（manual-make3.log 实测；sysroot sys/socket.h 布局核对）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                GoliWie <GoliWie@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-23

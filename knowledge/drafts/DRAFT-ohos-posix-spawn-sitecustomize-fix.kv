@@ -1,0 +1,96 @@
+#====================================================================
+# DRAFT-ohos-posix-spawn-sitecustomize-fix — 上游测试源码内嵌裸名子进程的
+#   **零补丁**修法：构建期注入 sitecustomize 关闭 subprocess._USE_POSIX_SPAWN
+# 触发事件: objgraph 3.6.2 适配（PR #11264）；先例 meson 1.11.0.1（同款修法）
+# 主从明确: E405（裸名命令不搜 PATH）为根条目；本条补充**修复手法**面
+#   —— E405 的 rec_approach（调用方改写路径）对"裸名位于上游测试源码内"不适用
+#====================================================================
+
+id:                     DRAFT-ohos-posix-spawn-sitecustomize-fix
+trigger_tool:           pytest|python|conan|test
+phase:                  testing|build
+error_signature:        FileNotFoundError: \[Errno 2\] No such file or directory: 'dot'|
+                         Image renderer \(dot\) not found|
+                         Image generated as.*fail|
+                         subprocess.*posix_spawn.*dot
+
+severity:               2
+category:               ohos|python|testing|posix_spawn|zero-patch
+match_keywords:         sitecustomize, _USE_POSIX_SPAWN, posix_spawn, dot, graphviz,
+                         GVBINDIR, LD_LIBRARY_PATH, doctest, upstream test suite,
+                         zero-patch, 零补丁, bare-name, PATH resolution,
+                         ConanFile.run env list, conan_file.py:395
+
+title:                  上游测试源码内嵌裸名子进程在 OHOS 上的零补丁修法：sitecustomize 关闭 subprocess._USE_POSIX_SPAWN
+
+root_cause:             与 E405 同根因：OHOS 的 CPython 因 _IS_HARMONYOS 强制 subprocess
+                         走 posix_spawn 快速路径，而 posix_spawn（非 posix_spawnp）不做
+                         PATH 解析 → 上游测试源码内的裸名调用（objgraph 的 'dot'）
+                         直接抛 FileNotFoundError。本条补充的是**修复通道**：裸名调用位于
+                         **上游测试源码**（不能改上游），E405 的"改写调用方为绝对路径/
+                         shell=True/shutil.which"不适用，需零补丁通道——构建期生成
+                         sitecustomize.py 置 subprocess._USE_POSIX_SPAWN=False，测试期将该
+                         目录前置到 PYTHONPATH，使 subprocess 回退 fork/exec → execvpe
+                         正常解析 PATH。附两点实测坑：①ConanFile.run() 的 env 参数是
+                         **环境文件名列表**而非环境变量字典（传 dict 抛
+                         AssertionError，conan_file.py:395），需临时改写 os.environ 并在
+                         finally 还原；②dot 渲染 PNG 需**整条依赖链**的 lib 目录
+                         （仅加 graphviz 自身 lib 会报 Format: "png" not recognized），
+                         另需 GVBINDIR 指向插件目录。
+
+affected_scope:         上游测试源码内含裸名子进程调用、且不能改上游的 Python 包，在 OHOS
+                         上跑测试时（objgraph→dot；meson 同款先例；apertium→python3/cat
+                         用 PATH shim 通道）；以及需要给测试进程注入环境变量的 conan 配方
+
+rec_priority:           1
+rec_approach:           sitecustomize-disable-posix-spawn-fastpath
+rec_description:        conanfile.py build() 内生成 sitecustomize.py（内容
+                         `import subprocess; subprocess._USE_POSIX_SPAWN = False`），
+                         测试期把该目录置于 PYTHONPATH **首位**，零补丁绕过 E405。
+                         若只需补齐几个具体裸名，可改用 PATH shim 通道（建临时 bin 目录
+                         放 symlink 并前置 PATH，apertium 先例）——两者均零补丁。
+                         给测试进程传环境变量时**必须**临时改写 os.environ 并在 finally
+                         还原（不可用 self.run(env=<dict>)）。
+rec_command: >
+  shim = os.path.join(self.build_folder, "sitecustomize"); os.makedirs(shim, exist_ok=True)
+  save(self, os.path.join(shim, "sitecustomize.py"),
+       "import subprocess\nsubprocess._USE_POSIX_SPAWN = False\n")
+  env["PYTHONPATH"] = os.pathsep.join([shim, self.source_folder])
+  # dot 需整链 lib + GVBINDIR
+  lib_dirs = [os.path.join(gv.package_folder, "lib")] + [
+      os.path.join(d.package_folder, "lib") for d in
+      list(self.dependencies.build.values()) + list(self.dependencies.values())
+      if d.package_folder]
+  os.environ["GVBINDIR"] = os.path.join(gv.package_folder, "lib", "graphviz")
+rec_auto_fix:           false
+rec_impl:               conan-recipe-sitecustomize
+
+forbid_1_pattern:       给上游测试源码里的裸名调用打补丁（改成绝对路径 / shell=True）
+forbid_1_reason:        偏离上游、增加维护面、升级时冲突（R8 补丁规范风险）；
+                        sitecustomize 与 PATH shim 均可零补丁达成同样效果
+forbid_1_consequence:   补丁冲突、review 负担、偏离上游
+
+forbid_2_pattern:       self.run(cmd, cwd=..., env=<dict>)  # 传环境变量字典
+forbid_2_reason:        ConanFile.run() 的 env 是**环境文件名列表**（默认 ["conanbuild"]），
+                        传 dict 直接抛 AssertionError（conan_file.py:395）
+forbid_2_consequence:   配方在 build() 阶段直接崩，且报错文本易被误读为配置问题
+
+forbid_3_pattern:       只把 graphviz 自身 lib 加进 LD_LIBRARY_PATH 就调 dot -Tpng
+forbid_3_reason:        dot 动态链接整条传递依赖链（expat/pango/gd/poppler…），且插件
+                        加载需 GVBINDIR
+forbid_3_consequence:   报 Format: "png" not recognized，误判为 graphviz 未装好
+
+principles:             零补丁优先于改上游（P013）; E405 为根条目，本条为修复手法补充;
+                        工具 API 语义先验证再使用（env 参数类型）
+
+verification_cmd:       # 修前: 6 个 doctest 失败（Image renderer (dot) not found）
+                         # 修后: Ran 59 tests in 2.853s → OK (skipped=2)
+                         python3 -c "import subprocess; print(subprocess._USE_POSIX_SPAWN)"
+                         python3 -c "import subprocess as s; s._USE_POSIX_SPAWN=False;
+                           s.run(['dot','-V'])"     # 裸名可解析
+
+related_docs:           doc/E405.md, DRAFT-apertium-ohos-python-bare-name-test-subprocess
+
+source_event:           archives/o/objgraph/3.6.2 PR#11264（先例 archives/m/meson/1.11.0.1/notes.md:31）
+first_seen_project:     objgraph/3.6.2
+last_updated:           2026-09-20

@@ -1,0 +1,45 @@
+# ═══ Draft knowledge entry — 测试 Pd 插件无 libpd 可链接：需自建 Pd 运行时 shim，gensym 必须驻留、sys_trytoopenone 的 dirresult 是「找到文件的目录」 ═══
+# Timestamp: 2026-10-01
+# Software: pd-libdir 1.11（适用于所有 Pd externals / Pd loader 插件的消费者测试）
+# Gate: conan create test_package (L1 / L1e / R34)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: draft-pd-libdir-1.11-pd-plugin-consumer-test-runtime-shim
+title: 测 Pd 插件无 libpd 可链接（Pd 以 -rdynamic 导出符号），须自建 Pd 运行时 shim 并 -rdynamic 导出；两个语义坑：gensym 必须驻留否则覆盖插件已存 atom，sys_trytoopenone 的 dirresult 是找到文件的目录而非传入的搜索条目
+trigger_tool: dlopen / dlsym / clang (test_package build)
+phase: testing
+error_signature: dlopen failed: undefined symbol: (sys_getversion|sys_register_loader|class_new|gensym|namelist_append|sys_trytoopenone)|incompatible integer to pointer conversion assigning to .const char \* from .int.|-Wint-conversion|dlsym\(setup\) failed
+severity: 3
+category: testing|toolchain
+match_keywords: pd, puredata, pd_linux, externals, dlopen, dlsym, -rdynamic, export-dynamic,
+  sys_register_loader, sys_trytoopenone, namelist_append, gensym, class_new, t_symbol, t_atom, m_pd.h, libdir
+keywords: pd, puredata, pd_linux, externals, dlopen, dlsym, -rdynamic, export-dynamic,
+  sys_register_loader, sys_trytoopenone, namelist_append, gensym, class_new, t_symbol, t_atom, m_pd.h, libdir
+approach: 消费者测试自带最小 Pd 运行时 shim，按 `readelf --dyn-syms <plugin>` 列出的 GLOBAL UND
+  逐个提供定义（pd-libdir 1.11 共 15 个：sys_getversion / sys_register_loader / logpost /
+  gensym / class_new / pd_new / pd_typedmess / namelist_append / sys_isabsolutepath /
+  sys_trytoopenone / sys_close / sys_searchpath + canvas_open / open_via_path / canvas_getenv）；
+  测试程序用 `-rdynamic` 编译以导出自己的动态符号表（与 Pd 的 -rdynamic 同理），再
+  `dlopen(plugin, RTLD_NOW|RTLD_LOCAL)` + `dlsym("setup")` + 调用真实 setup()/loader 回调断言行为。
+  三个必须做对的语义：①`gensym` 按名字驻留（每名一个稳定 t_symbol）——插件先
+  `SETSYMBOL(at, gensym("+<dir>"))` 存入 atom，之后才求值 `gensym("pd")` / `gensym("add-to-path")`，
+  复用单槽位 shim 会静默覆盖已存 atom，表现为断言读到 "add-to-path"；②`sys_trytoopenone` 先把
+  `dir + "/" + name + ext` 拼进 dirresult，成功后在最后一个 '/' 截断、*nameresult 指向 basename
+  （对齐 Pd s_path.c:265），**不是**回显传入的 dir——libdir 登记的是 dirresult，原样回显会让插件
+  登记错目录；③`t_class` / `t_pd` 在公开头里只有前置声明，用 `max_align_t[]` 静态存储冒充，
+  不要 `static t_class cls;`（编译报 incomplete type）。把不该走的旧版路径
+  （canvas_open / open_via_path / canvas_getenv）实现成一旦被调用即 exit(1)，顺带钉住调用图。
+root_cause: Pd（puredata 包）是 `package_type = "application"` 的可执行文件，用 `-rdynamic` 链接把
+  Pd API 符号导出给自己的动态符号表；Pd externals（*.pd_linux）因此**不链接任何库**，其全部 Pd
+  符号在 dlopen 时从 Pd 进程映像解析。后果：制品仓里没有 libpd.so 可供消费者链接（本仓
+  archives/l/libpd/0.16.1 是另一条路线，它自建 libpd.so），想测 Pd 插件就不能「链接后调用」，
+  只能「导出同名符号 + dlopen」自造解析环境。三个坑都源于 shim 与 Pd 真实 ABI 语义的细微差异：
+  gensym 的驻留语义、sys_trytoopenone 的 dirresult 语义、以及 t_class/t_pd 的不完整类型。
+rec_approach: dlopen-rtldnow-with-exported-pd-symbol-shim + interning-gensym + faithful-sys-trytoopenone + opaque-storage-for-incomplete-types
+doc: 无（待 promote 后生成）
+
+verification: pd-libdir/1.11 conan create 全绿，test_package 22/22 断言通过，且 CI L1e
+  破坏性反向验证通过（移走 lib/ 后测试确实失败，证明测试真依赖被测包）；两个语义坑在开发中
+  100% 各复现一次（先读到 "add-to-path" 而非 "+<dir>"，再读到搜索根目录而非库目录）。
+related: R34（test 必须实质依赖被测包）；archives/l/libpd/0.16.1（Pd 家族另一个可链接路线）；
+  archives/a/authbind/2.2.0（同样用 dlopen 探针测插件产物，结论：插件可测，不必回退成 echo 空壳）

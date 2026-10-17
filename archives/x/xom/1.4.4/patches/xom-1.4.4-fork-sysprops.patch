@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 +0000
+From: NebulaAGI <gyccc@atomcode.com>
+Date: Wed, 6 Aug 2025 04:00:00 +0000
+Subject: [PATCH] build.xml test target: propagate JAXP/socket-timeout
+ sysproperties to the forked JUnit JVM
+
+The upstream `build.xml` test target uses `<junit fork="true">`
+with the Ant default `forkmode="perTest"`, so every test method
+gets a freshly forked JUnit JVM.  Ant's `<junit fork="true">`
+does **not** automatically inherit the parent Ant JVM's `-D`
+system properties into the forked JVM — only the `<sysproperty>`
+child elements of `<junit>` are passed to the fork JVM command
+line via `CommandlineJava.SysProperties.setSystem()`.
+
+The xom recipe previously launched `ant test` with
+
+    -Djavax.xml.accessExternalDTD=none
+    -Dsun.net.client.defaultConnectTimeout=5000
+    -Dsun.net.client.defaultReadTimeout=5000
+
+on the Ant command line.  These three properties were set on
+the **parent Ant JVM only** and never reached the forked JUnit
+JVM that actually runs `nu.xom.tests.BuilderTest` et al.  The
+fork JVM therefore kept doing real network I/O for every
+`builder.build("http://...")` call (BuilderTest.testChemistry
+pulls a remote DTD from rsc.org; several BuilderTest/
+BaseURITest/IDTest/XPathTest cases fetch remote XML documents
+whose DTDs themselves pull further external entities).  On the
+HarmonyOS PC preflight machine the forked JVMs accumulate
+network sockets / Xerces entity cache state until the whole
+`ant test` process is SIGKILL'd (exit code 137 = 128 +
+SIGKILL), typically at `BuilderTest` after `BaseURITest`'s
+79 URI tests have already run.
+
+Fix: add three `<sysproperty>` child elements to the upstream
+`<junit fork="true">` block in the `test` target so Ant
+propagates them to the forked JUnit JVM:
+
+  1. `javax.xml.accessExternalDTD=none` — JAXP 1.5+ standard
+     property (Xerces 2.12.2 honors it) that makes the parser
+     refuse to load external DTD subsets, so testChemistry's
+     remote DTD fetch fails fast with an IOException instead of
+     hanging on rsc.org.
+
+  2. `sun.net.client.defaultConnectTimeout=5000` — JRE global
+     connect timeout (5 s) applying to every HttpURLConnection
+     in the fork JVM.
+
+  3. `sun.net.client.defaultReadTimeout=5000` — JRE global read
+     timeout (5 s), the backstop for cases
+     `accessExternalDTD=none` does not cover (BuilderTest/
+     BaseURITest/IDTest/XPathTest directly fetching remote XML
+     documents).  Any stuck TCP read raises
+     `java.net.SocketTimeoutException` within 5 s instead of
+     blocking forever.
+
+With these three properties actually present in the fork JVM,
+the already-applied `xom-1.4.4-ci-network.patch` widening of
+`CITestUtil.isNetworkException` (to recognise
+`SocketTimeoutException` and HTTP 4xx/5xx bare IOExceptions)
+and `isRunningInCI` (to recognise `HMBS_INSTALL`) takes effect:
+network-dependent upstream tests hit an IOException /
+SocketTimeoutException, the upstream `shouldIgnore(ex)` guard
+fires, and the test is skipped as upstream intended — no
+assertion is removed or weakened.
+
+This is a portability patch (test-infrastructure only): it
+changes how the test JVM is launched, not the library or the
+test assertions.
+
+---
+ build.xml | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/build.xml b/build.xml
+index 9d62844..41e0115 100644
+--- a/build.xml
++++ b/build.xml
+@@ -567,6 +567,9 @@ XOM Build file
+     <junit fork="true" jvm="${jvm}" failureproperty="testsfailed">
+        <classpath refid="test.class.path" />
+        <sysproperty key="jaxen.data.dir" value="${build.dir}/jaxen-${jaxenversion}"/>
++       <sysproperty key="javax.xml.accessExternalDTD" value="none"/>
++       <sysproperty key="sun.net.client.defaultConnectTimeout" value="5000"/>
++       <sysproperty key="sun.net.client.defaultReadTimeout" value="5000"/>
+        <formatter type="${test.outputFormat}" />
+        <formatter type="brief" usefile="false" />
+        <batchtest fork="true" todir="${testoutput.dir}">

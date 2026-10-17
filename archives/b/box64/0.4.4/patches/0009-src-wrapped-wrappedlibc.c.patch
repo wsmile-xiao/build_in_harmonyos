@@ -1,0 +1,360 @@
+--- a/src/wrapped/wrappedlibc.c
++++ b/src/wrapped/wrappedlibc.c
+@@ -55,24 +55,71 @@
+ #include <spawn.h>
+ #include <fts.h>
+ #include <syslog.h>
+ #include <malloc.h>
+ #include <getopt.h>
+ #include <sys/resource.h>
+ #include <sys/prctl.h>
+ #include <sys/ptrace.h>
+ #include <sys/uio.h>
+ #include <sys/wait.h>
++#if !defined(__OHOS__)
+ #include <error.h>
++#endif
+ #include <sched.h>
+ #undef LOG_INFO
+ #undef LOG_DEBUG
++
++#if defined(__OHOS__)
++// OHOS/musl: glibc's <error.h> and error()/error_at_line() are not available.
++// Minimal GNU-compatible implementation used by my_error/my_error_at_line.
++extern char* program_invocation_name __attribute__((weak));
++static void ohos_error_prefix(void)
++{
++    fflush(stdout);
++    fputs(program_invocation_name ? program_invocation_name : "box64", stderr);
++}
++void error(int status, int errnum, const char* format, ...)
++{
++    va_list ap;
++    ohos_error_prefix();
++    fputs(": ", stderr);
++    va_start(ap, format);
++    vfprintf(stderr, format, ap);
++    va_end(ap);
++    if(errnum)
++        fprintf(stderr, ": %s", strerror(errnum));
++    fputc('\n', stderr);
++    fflush(stderr);
++    if(status)
++        exit(status);
++}
++void error_at_line(int status, int errnum, const char* filename, unsigned int linenum, const char* format, ...)
++{
++    va_list ap;
++    ohos_error_prefix();
++    fputs(":", stderr);
++    if(filename)
++        fprintf(stderr, "%s:%u: ", filename, linenum);
++    else
++        fputs(" ", stderr);
++    va_start(ap, format);
++    vfprintf(stderr, format, ap);
++    va_end(ap);
++    if(errnum)
++        fprintf(stderr, ": %s", strerror(errnum));
++    fputc('\n', stderr);
++    fflush(stderr);
++    if(status)
++        exit(status);
++}
++#endif
+ 
+ #include "wrappedlibs.h"
+ 
+ #include "os.h"
+ #include "box64stack.h"
+ #include "x64emu.h"
+ #include "box64cpu.h"
+ #include "debug.h"
+ #include "wrapper.h"
+ #include "bridge.h"
+@@ -152,21 +199,225 @@
+ }
+ 
+ #define ADDED_INIT()                                                                  \
+     void (**p)(void);                                                                 \
+     p = (void (**)(void))dlsym(lib->w.lib, "error_print_progname");                   \
+     if (p) {                                                                          \
+         native_error_print_progname = *p;                                             \
+         *p = my_wrap_error_print_progname;                                            \
+     }
+ 
++#if defined(__OHOS__)
++// OHOS musl headers alias the LFS64 entry points to the native 64-bit names
++// via macros (e.g. "#define stat64 stat").  Those macros rewrite the member
++// names of the wrapper callback struct (GO(stat64,...) -> GO(stat,...)) and
++// collide with the plain members, so undef them around the struct definition
++// and restore the aliases afterwards for the direct native calls below.
++#undef stat64
++#undef fstat64
++#undef lstat64
++#undef fstatat64
++#undef statfs64
++#undef fstatfs64
++#undef statvfs64
++#undef fstatvfs64
++#undef fopen64
++#undef freopen64
++#undef tmpfile64
++#undef fseeko64
++#undef ftello64
++#undef open64
++#undef openat64
++#undef creat64
++#undef ftw64
++#undef nftw64
++#undef readdir64
++#undef readdir64_r
++#undef scandir64
++#undef alphasort64
++#undef mmap64
++#undef getrlimit64
++#undef setrlimit64
++#undef lseek64
++#undef pread64
++#undef pwrite64
++#undef truncate64
++#undef ftruncate64
++#endif
++
+ #include "wrappercallback.h"
++
++#if defined(__OHOS__)
++#define stat64 stat
++#define fstat64 fstat
++#define lstat64 lstat
++#define fstatat64 fstatat
++#define statfs64 statfs
++#define fstatfs64 fstatfs
++#define statvfs64 statvfs
++#define fstatvfs64 fstatvfs
++#define fopen64 fopen
++#define freopen64 freopen
++#define tmpfile64 tmpfile
++#define fseeko64 fseeko
++#define ftello64 ftello
++#define open64 open
++#define openat64 openat
++#define creat64 creat
++#define ftw64 ftw
++#define nftw64 nftw
++#define readdir64 readdir
++#define readdir64_r readdir_r
++#define scandir64 scandir
++#define alphasort64 alphasort
++#define mmap64 mmap
++#define getrlimit64 getrlimit
++#define setrlimit64 setrlimit
++#define lseek64 lseek
++#define pread64 pread
++#define pwrite64 pwrite
++#define truncate64 truncate
++#define ftruncate64 ftruncate
++
++// GNU qsort_r / scandirat / scandirat64 are absent from OHOS musl (neither the
++// SDK sysroot nor the device runtime export them) while box64 calls them
++// directly.  Provide local implementations.
++typedef int (*__compar_d_fn_t)(const void*, const void*, void*);
++
++static void ohos_qsort_r_swap(unsigned char* a, unsigned char* b, size_t size)
++{
++    unsigned char t;
++    while(size--) { t = *a; *a++ = *b; *b++ = t; }
++}
++static void ohos_qsort_r_rec(unsigned char* base, size_t nmemb, size_t size, __compar_d_fn_t compar, void* arg)
++{
++    while(nmemb > 16) {
++        size_t mid = nmemb/2;
++        unsigned char* a = base;
++        unsigned char* b = base + mid*size;
++        unsigned char* c = base + (nmemb-1)*size;
++        if(compar(a, b, arg) > 0) ohos_qsort_r_swap(a, b, size);
++        if(compar(b, c, arg) > 0) ohos_qsort_r_swap(b, c, size);
++        if(compar(a, b, arg) > 0) ohos_qsort_r_swap(a, b, size);
++        ohos_qsort_r_swap(b, c, size);  // pivot (median) to the last slot
++        size_t store = 0;
++        for(size_t i = 0; i < nmemb-1; ++i)
++            if(compar(base + i*size, c, arg) < 0) {
++                ohos_qsort_r_swap(base + store*size, base + i*size, size);
++                ++store;
++            }
++        ohos_qsort_r_swap(base + store*size, c, size);
++        if(store < nmemb-store-1) {
++            ohos_qsort_r_rec(base, store, size, compar, arg);
++            base += (store+1)*size;
++            nmemb -= store+1;
++        } else {
++            ohos_qsort_r_rec(base + (store+1)*size, nmemb-store-1, size, compar, arg);
++            nmemb = store;
++        }
++    }
++    for(size_t i = 1; i < nmemb; ++i) {
++        size_t j = i;
++        while(j > 0 && compar(base + (j-1)*size, base + j*size, arg) > 0) {
++            ohos_qsort_r_swap(base + (j-1)*size, base + j*size, size);
++            --j;
++        }
++    }
++}
++void qsort_r(void* base, size_t nmemb, size_t size, __compar_d_fn_t compar, void* arg)
++{
++    if(nmemb > 1 && size)
++        ohos_qsort_r_rec((unsigned char*)base, nmemb, size, compar, arg);
++}
++
++int scandirat(int dirfd, const char* dirp, struct dirent*** namelist,
++              int (*filter)(const struct dirent*),
++              int (*compar)(const struct dirent**, const struct dirent**))
++{
++    if(dirfd == AT_FDCWD)
++        return scandir(dirp, namelist, filter, compar);
++    int fd = openat(dirfd, dirp, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
++    if(fd < 0)
++        return -1;
++    char path[64];
++    snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
++    int ret = scandir(path, namelist, filter, compar);
++    close(fd);
++    return ret;
++}
++int scandirat64(int dirfd, const char* dirp, struct dirent64*** namelist,
++                int (*filter)(const struct dirent64*),
++                int (*compar)(const struct dirent64**, const struct dirent64**))
++{
++    return scandirat(dirfd, dirp, (struct dirent***)namelist,
++                     (int (*)(const struct dirent*))filter,
++                     (int (*)(const struct dirent**, const struct dirent**))compar);
++}
++
++// Remaining glibc-isms used by box64 and absent from OHOS musl.
++// __libc_* are glibc's internal allocators that bypass the interposing hooks;
++// resolve the real libc allocators with dlsym(RTLD_NEXT) here as well.
++static void* (*ohos_libc_malloc)(size_t) = NULL;
++static void* (*ohos_libc_calloc)(size_t, size_t) = NULL;
++static void* (*ohos_libc_realloc)(void*, size_t) = NULL;
++static void  (*ohos_libc_free)(void*) = NULL;
++static void* (*ohos_libc_memalign)(size_t, size_t) = NULL;
++
++void* __libc_malloc(size_t size)
++{
++    if(!ohos_libc_malloc) ohos_libc_malloc = (void* (*)(size_t))dlsym(RTLD_NEXT, "malloc");
++    return ohos_libc_malloc ? ohos_libc_malloc(size) : NULL;
++}
++void* __libc_calloc(size_t nmemb, size_t size)
++{
++    if(!ohos_libc_calloc) ohos_libc_calloc = (void* (*)(size_t, size_t))dlsym(RTLD_NEXT, "calloc");
++    return ohos_libc_calloc ? ohos_libc_calloc(nmemb, size) : NULL;
++}
++void* __libc_realloc(void* ptr, size_t size)
++{
++    if(!ohos_libc_realloc) ohos_libc_realloc = (void* (*)(void*, size_t))dlsym(RTLD_NEXT, "realloc");
++    return ohos_libc_realloc ? ohos_libc_realloc(ptr, size) : NULL;
++}
++void __libc_free(void* ptr)
++{
++    if(!ohos_libc_free) ohos_libc_free = (void (*)(void*))dlsym(RTLD_NEXT, "free");
++    if(ohos_libc_free) ohos_libc_free(ptr);
++}
++void* __libc_memalign(size_t alignment, size_t size)
++{
++    if(!ohos_libc_memalign) ohos_libc_memalign = (void* (*)(size_t, size_t))dlsym(RTLD_NEXT, "memalign");
++    return ohos_libc_memalign ? ohos_libc_memalign(alignment, size) : NULL;
++}
++
++// dlinfo/glob64 are exported by the device runtime but not by the sysroot.
++int dlinfo(void* handle, int request, void* info)
++{
++    static int (*real)(void*, int, void*) = NULL;
++    if(!real) real = (int (*)(void*, int, void*))dlsym(RTLD_NEXT, "dlinfo");
++    if(!real) { errno = ENOSYS; return -1; }
++    return real(handle, request, info);
++}
++int glob64(const char* pattern, int flags, int (*errfunc)(const char*, int), glob_t* pglob)
++{
++    static int (*real)(const char*, int, int (*)(const char*, int), glob_t*) = NULL;
++    if(!real) real = (int (*)(const char*, int, int (*)(const char*, int), glob_t*))dlsym(RTLD_NEXT, "glob64");
++    if(!real) { errno = ENOSYS; return -1; }
++    return real(pattern, flags, errfunc, pglob);
++}
++
++#include <math.h>
++double exp10(double x) { return pow(10.0, x); }
++float exp10f(float x) { return powf(10.0f, x); }
++long double exp10l(long double x) { return powl(10.0L, x); }
++int isnanf(float x) { return __builtin_isnan(x); }
++int isinff(float x) { return __builtin_isinf(x); }
++#endif
+ 
+ static int regs_abi[] = {_DI, _SI, _DX, _CX, _R8, _R9};
+ void* getVargN(x64emu_t *emu, int n)
+ {
+     if(n<6)
+         return (void*)emu->regs[regs_abi[n]].q[0];
+     return ((void**)R_RSP)[1+n-6];
+ }
+ typedef int (*inet_pton_chk_f)(int, const char*, void*, size_t);
+ static inet_pton_chk_f real___inet_pton_chk = NULL;
+@@ -3451,20 +3702,36 @@
+                                      | (1<<FEATURE_SSSE3)
+                                      | (1<<FEATURE_MOVBE)
+                                      | (1<<FEATURE_ADX);
+ }
+ #endif
+ 
+ #ifdef ANDROID
+ void ctSetup()
+ {
+ }
++#elif defined(__OHOS__)
++EXPORT const unsigned short int *my___ctype_b;
++EXPORT const int32_t *my___ctype_tolower;
++EXPORT const int32_t *my___ctype_toupper;
++
++void ctSetup()
++{
++    // OHOS: __ctype_*_loc are not declared in the SDK headers and the sysroot
++    // import lib does not export them, but the device runtime does.
++    const unsigned short int** (*b_loc)(void) = (const unsigned short int** (*)(void))dlsym(RTLD_NEXT, "__ctype_b_loc");
++    const int32_t** (*tolower_loc)(void) = (const int32_t** (*)(void))dlsym(RTLD_NEXT, "__ctype_tolower_loc");
++    const int32_t** (*toupper_loc)(void) = (const int32_t** (*)(void))dlsym(RTLD_NEXT, "__ctype_toupper_loc");
++    my___ctype_b = b_loc ? *b_loc() : NULL;
++    my___ctype_tolower = tolower_loc ? *tolower_loc() : NULL;
++    my___ctype_toupper = toupper_loc ? *toupper_loc() : NULL;
++}
+ #else
+ EXPORT const unsigned short int *my___ctype_b;
+ EXPORT const int32_t *my___ctype_tolower;
+ EXPORT const int32_t *my___ctype_toupper;
+ 
+ void ctSetup()
+ {
+     my___ctype_b = *(__ctype_b_loc());
+     my___ctype_toupper = *(__ctype_toupper_loc());
+     my___ctype_tolower = *(__ctype_tolower_loc());
+@@ -4428,21 +4695,21 @@
+ }
+ 
+ EXPORT int my_stime(x64emu_t* emu, const time_t *t)
+ {
+     // TODO?
+     errno = EPERM;
+     return -1;
+ }
+ 
+ int GetTID();
+-#ifdef ANDROID
++#if defined(ANDROID) || defined(__OHOS__)
+ void updateGlibcTidCache() {}
+ #else
+ struct glibc_pthread {
+ #if defined(NO_ALIGN)
+     char header[704];
+ #else
+     void* header[24];
+ #endif
+   void* list[2];
+   pid_t tid;

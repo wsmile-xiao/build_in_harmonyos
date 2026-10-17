@@ -1,0 +1,63 @@
+#====================================================================
+# DRAFT-access_profiler-20260924-ohos-loader-static-globals
+# OHOS PIE loader crash on external-linkage globals: make them static
+#====================================================================
+
+id:                     DRAFT-access_profiler-20260924-ohos-loader-static-globals
+trigger_tool:           clang|clang++|llvm-ar|conan|ld.lld
+phase:                  source|build|package|testing
+error_signature:        Signal 11 \(core dumped\)|exit_code=139|SIGSEGV.*before main|
+                        static initialization.*crash|__init_array|BIND_NOW|PIE.*global
+
+severity:               3
+category:               ohos-loader|static-linking|global-object|signal|portability
+match_keywords:         OHOS, aarch64, HongMeng Kernel, musl, PIE, BIND_NOW,
+                        external linkage, global object, std::mutex, std::unordered_map,
+                        std::vector, pthread_key_t, static initialization, SIGSEGV,
+                        exit 139, loader, init_array, binary bisect
+title:                  OHOS PIE 装载期外部链接全局对象 SIGSEGV -> 改 static 内部链接修复
+
+root_cause:             >
+                        access_profiler 上游在文件作用域以外部链接（默认可见性）
+                        声明 7 个全局对象（std::mutex x2 / std::unordered_map x2 /
+                        int / std::vector<access_t> / pthread_key_t）。用 OHOS
+                        aarch64 工具链（clang 15 + lld，PIE + BIND_NOW）链接后，
+                        程序在 main 之前、静态初始化/装载期 SIGSEGV(139) 退出，
+                        进程内任何探针（main 首行、全局构造器）都不执行。二分
+                        定位：同一组同型全局对象，外部链接形态崩溃（exit 139）、
+                        static 内部链接形态正常（exit 0），触发面是"外部链接全局
+                        对象 x OHOS PIE 装载器"，与具体容器类型无关。
+
+affected_scope:         >
+                        在 OHOS（HongMeng Kernel 1.12 / musl 系 libc）上以 PIE
+                        链接、包含文件作用域外部链接全局对象（std::mutex /
+                        std::unordered_map / std::vector / pthread_key_t 等）的
+                        可执行程序与库消费者。跨库可复用：任何上游声明非 static
+                        容器/互斥量全局对象的 C++ 库都可能命中。
+
+verification_cmd:       >
+                        minimal repro：同一份 globals 声明分别以 extern 与 static
+                        形态编译运行，extern 版 exit 139、static 版 exit 0；
+                        修复后完整库：clang++ -std=c++17 -O2 test.cpp
+                        libaccess_profiler.a -o test && ./test --> exit 0，
+                        stdout=55，access_profile.out = "test / 52: 1"（与上游
+                        README release 输出一致）；conan create 干净构建 exit 0。
+
+rec_priority:           1
+rec_approach:           make-file-local-globals-static
+rec_description:        >
+                        将仅在单个 .cpp 内部使用、未被公开头文件/API 引用的全部
+                        外部链接全局对象声明为 static（内部链接、不可预占、由
+                        主程序直接持有），使 OHOS PIE 装载器初始化路径正常。
+                        判定标准：文件内使用 + 头文件无 extern 声明即可安全
+                        改为 static；补丁使用标准 C++ static 关键字，不含
+                        __OHOS__ 平台宏（符合 R8/PF5）。改后重跑上游测试与
+                        conan-verify 复验。
+
+references:             E444(相关但不同:init_array 构造器未执行类), E457(不同:静态
+                        依赖嵌入.so 双实例运行时崩溃), E234/E236(不同:PIC/libtool
+                        链接配置类)
+similar_to:             E444, E457
+caused_by:              ""
+prerequisite_of:        ""
+conflicts_with:         ""

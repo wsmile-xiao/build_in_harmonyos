@@ -1,0 +1,74 @@
+#====================================================================
+# DRAFT-flang-hmdfs-parallel-mod-corruption
+# flang 报 Must be a constant value：use 关联 kind 参数在 kind 选择器处语义
+# 失败（并行/HMDFS 下跨文件 .mod 非确定性损坏所致；"接口体无 host association
+# 被拒"假设已由最小探针证伪，见 root_cause ③ 与 verification_cmd）
+#
+# 本条目为 draft，不预占正式 E 编号，禁止直接 promote。
+# slug 历史：原名基于已被判别探针证伪的初判机理，2026-09-11 按 Curator 复审
+# 更名（原名明文见 doc_file 勘误节）；promote 前正式定稿归主编。
+# 触发事件: devicexlib 0.9.1 HarmonyOS PC 适配（run devicexlib-0.9.1，2026-09-11）
+#====================================================================
+
+id:                     DRAFT-flang-hmdfs-parallel-mod-corruption
+trigger_tool:           flang-ohos|flang-new|make|cmake|conan
+phase:                  compilation
+error_signature:        error: Must be a constant value|integer\(kind=[a-z_]+\), intent\(in\) :: async_id|error: Semantic errors in .*\.f90
+severity:               2
+category:               toolchain, fortran, hmdfs, compiler
+match_keywords:         flang, flang-new, Must be a constant value, kind selector, integer(kind=, interface body, host association, IMPORT, DXL_ASYNC_DECL, dxl_async_kind, mod file, parallel make, -j, HMDFS, 串行
+title:                  flang 报 Must be a constant value（use 关联 kind 参数作 kind 选择器）：并行/HMDFS 下跨文件 .mod 非确定性损坏所致，串行构建 + CPU 等价默认化消除；"接口体无 host association 被拒"假设已被最小探针证伪
+
+# Layer 2: Diagnosis
+root_cause:             症状：flang-ohos 20.1.1 编译含跨文件模块依赖的 Fortran 库时，在 use 关联 kind 参数（如 integer(kind=dxl_async_kind)，dxl_async_kind = kind(0)，由 devxlib_async 模块导出）的全部 kind 选择器处报 "error: Must be a constant value"（devicexlib 0.9.1 实测 42 处，集中于 devxlib_memcpy.f90:3458-3891 的 h2h_async 接体段），make 报 Error 2。机理核验（2026-09-11 设备实证）：① 最小判别探针——module + use 关联 kind 参数 + interface body + submodule 实现完整结构——在 flang 20.1.1 下串行编译/运行全部通过，IMPORT 变体同样通过，证明"接口体无 host association 被 flang 拒绝"这一机制假设不成立（构造本身 flang 兼容）；② pristine 的 devxlib_memcpy.f90 全文件（5543 行、含全部 168 处该构造）在可信 .mod 依赖下串行 -cpp 编译 0 错误；③ 该错误仅在 -j20 并行构建中出现，且与 "make: jobserver mkfifo: Operation not permitted"（HMDFS 不支持 FIFO jobserver，同 E074）同现，本 run 期间 HMDFS 已多次实证静默丢文件与可见性延迟（patch 生成阶段 scp/tar 文件需重试可见）——综合判定最可能机制为并行构建下跨文件 .mod 读取非确定性损坏，消费侧对导入参数常量值求值失败，kind 选择器是首当其冲的报错点；④ 修复后（串行构建 + DXL_ASYNC_DECL 宏 CPU 等价默认化）8 套件 176/176 上游测试全过（linalg 16、malloc 28、mapping 28、buffer 10、memcpy 28、memcpy_async 28、memset 28、pinned 10，nfail 全 0），错误类消除。
+affected_scope:         任何在 OHOS 设备（HMDFS）上以 flang-ohos 编译、源文件间存在跨文件 .mod 依赖（use 其他模块的导出参数/类型）且使用并行 make/make -jN 的 Fortran 库；QE 生态（devXlib/Quantum ESPRESSO 系）async API 模式普遍使用 module 导出 kind 参数，暴露面大。gfortran 时代构建不暴露此问题（本 run 为该库首次 flang 构建）。
+verification_cmd:       判别序列（设备自包含）：① 写最小判别探针 probe_mod.f90（module probe_impl 内 integer,parameter::dxl_async_kind=kind(0)；module probe_mod use probe_impl 后 interface body 声明 integer(kind=dxl_async_kind) dummy；submodule (probe_mod) 给 module procedure 实现）+ probe_main.f90（call 之），用 flang-ohos 串行编译运行——通过即证明构造 flang 兼容、排除接口体语义拒绝（探针全文见 doc_file 与 run 报告 reports/builder/draft-probes.log，P1-A/P1-B 均 EXIT=0 且 "probe ok"）；② 对真实库：取 pristine 源文件 + 可信 .mod 依赖（上次成功构建的 p/mod 目录）串行 flang -c -cpp 编译，0 错误 = 构造兼容确认（本 run REPRO-EXIT=0，见 reports/builder/repro-real.log）；③ 真实故障重现特征：并行 -jN 构建同一库，出现成批 "Must be a constant value"（仅集中部分区段）且伴随 GMfifo jobserver 告警——非确定性，串行后不可复现即确认本条。
+
+# Layer 3: Solution Space
+rec_priority:           1
+rec_approach:           serial-build-plus-cpu-equivalent-kind-defaulting
+rec_description:        两层修复（本 run 已验证）：1) 构建纪律——含跨文件 .mod 依赖的 Fortran 库在 OHOS/HMDFS 上必须串行构建（CMAKE_BUILD_PARALLEL_LEVEL=1 / cmake --build -j1），这是正确性要求而非性能选择（HMDFS 不支持 make FIFO jobserver，同 E074；并行下 .mod 未生成/损坏即被消费）；2) 消费侧去依赖——把 integer(kind=<use关联参数>) 声明改经 DXL_ASYNC_DECL 宏：CPU-only 配置展开为等价默认 integer（kind(0)==default kind），GPU 能力宏分支展开原文，消除消费侧对导入参数常量保真的依赖。devicexlib 0.9.1 补丁 0002 覆盖 9 个文件 410 处声明，修复后 8 套件 176/176 上游测试全过。
+rec_command:            build(): os.environ["CMAKE_BUILD_PARALLEL_LEVEL"]="1" 后 CMake(self).build()；补丁侧：文件头 #if defined __DXL_CUDAF || defined __DXL_OPENACC || defined __DXL_OPENMP_GPU / #define DXL_ASYNC_DECL integer(kind=dxl_async_kind) / #else / #define DXL_ASYNC_DECL integer / #endif，并全文替换 integer(kind=<param>) → DXL_ASYNC_DECL（conandata patches 注册，flang -cpp 可处理该宏）。
+rec_auto_fix:           false
+rec_impl:               recipe-patch + build-env（补丁随 conandata 注册；串行 env 由 recipe build() 注入）
+
+fallback_priority:      2
+fallback_approach:      interface-body-import-upstream-fix
+fallback_description:   若未来 flang 版本在真机复现出接口体对 use 关联 kind 参数的确定性语义拒绝（当前已证伪，勿预防性实施），上游正解是在 interface body 内显式 import :: <参数>（F2018 接口体无 host association，外部实体须经 IMPORT）。需以最小探针先行确认拒绝真实存在，再改上游源码。
+fallback_command:       在 interface body 的 implicit none 前加 import :: dxl_async_kind（探针变体已验证 flang 20.1.1 接受该写法，P1-B）
+fallback_auto_fix:      false
+fallback_impl:          upstream-source-patch（仅当假设重新成立时）
+
+forbid_1_pattern:       (make|cmake\s+--build).*\s-j[2-9]|CMAKE_BUILD_PARALLEL_LEVEL\s*=\s*[2-9]
+forbid_1_reason:        OHOS/HMDFS 上并行构建含跨文件 .mod 依赖的 Fortran 库会非确定性产生本条语义错误（且 make FIFO jobserver 本身不受支持，E074）；串行是正确性要求。
+forbid_1_consequence:   并行下报成批 "Must be a constant value"/"Cannot parse module file"，失败文件与区段随机，浪费整轮构建（本 run 因此多耗 4 轮）。
+
+forbid_2_pattern:       integer\(kind=<use关联参数>\)(?!.*DXL_ASYNC_DECL)的无守卫全局字面替换|把 kind 参数直接写死为数字且无 GPU 能力宏守卫
+forbid_2_reason:        无条件全局替换/写死会改变 GPU 构建语义（GPU 分支下 dxl_async_kind=cuda_Stream_Kind 等不等于默认 integer），且偏离上游源码。
+forbid_2_consequence:   CPU 下看似修好，GPU 配置（或上游后续版本）语义被静默破坏，接口特征与实现不一致。
+
+# Layer 4: Principles
+principles:             P-TOOLCHAIN-001
+
+# Relations
+causes:                 []
+caused_by:              [HMDFS 静默丢文件/可见性延迟, make FIFO jobserver 不受支持（E074 同族）]
+similar_to:             [E242, E074]
+conflicts_with:         []
+prerequisite_of:        [DRAFT-flang-minimal-runtime-link-contract]
+
+# Metadata
+doc_file:               knowledge/drafts/DRAFT-flang-hmdfs-parallel-mod-corruption.md
+last_updated:           2026-09-11
+source_event:           devicexlib 0.9.1 适配（run devicexlib-0.9.1）：-j20 构建报 42 处 Must be a constant value；最小探针证伪接口体语义拒绝假设；pristine 全文件串行编译 0 错误；串行+宏默认化后 8 套件 176/176 上游测试全过
+
+# Authorship and provenance
+authors: GoliWie <GoliWie@noreply.gitcode.com>
+source_pr: 本 PR
+source_commit: 合并后回填
+
+# Quality metrics
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-11

@@ -1,0 +1,61 @@
+#====================================================================
+# sockstat-0.4.2-ohos-procnet-eacces-abort-vs-degrade
+# OHOS /proc/net 内容 EACCES：上游「缺失即 abort()」与「降级继续」是两类适配面
+# 来源: sockstat 0.4.2 适配 (2026-10-02)
+#====================================================================
+
+id:                     DRAFT-sockstat-0.4.2-ohos-procnet-eacces-abort-vs-degrade
+trigger_tool:           runtime|test
+phase:                  runtime|testing
+error_signature:        can not open file /proc/net/|Permission denied|SIGABRT|rc=134
+match_keywords:         proc, net, EACCES, Permission denied, abort, SIGABRT, 134, sandbox, restricted, sockstat, handle_missing_file
+category:               ohos, selinux, limitation, network, testing
+severity:               2
+status:                 draft
+agent_id:               A7F3
+root_cause: >
+  OHOS 沙箱把 /proc/net 的「目录列举」与「文件内容」权限拆开了：普通 uid 下
+  ls /proc/net/ 能看到 70+ 条目，但逐个读文件内容是 12/12 全拒
+  （route/arp/dev/tcp/udp/unix/sockstat/stat/wireless/protocols/netstat/if_inet6，
+  华为 PC 真机实测，证据 archives/n/net-tools/2.1/reports/manual-runtime-evidence.md）。
+  Linux 上这些文件世界可读，所以同一份源码在 Linux 跑得通、在 OHOS 真机上必然失败。
+  这是平台权限差异而非配方缺陷，但会让「本地能跑」的测试结论无法迁移。
+  更棘手的是上游对「读不到表」有两类截然不同的反应，必须分开对待：
+  (A) 降级继续：net-tools 的 netstat/route/ifconfig 读不到 /proc/net/route
+      就少打印几行，仍 rc=0 并给出可解释的 Limited output；
+  (B) 缺失即 abort()：sockstat 0.4.2 在 main() 里对 6 个 /proc/net 文件 fopen，
+      失败走 handle_missing_file() -> fprintf + abort()，
+      真机上得到 rc=134(SIGABRT) + can not open file /proc/net/tcp, program will be aborted。
+  (B) 类工具若按 Linux 行为写测试（如断言输出含表头），真机必红；
+  若笼统地把一切非零 rc 都算受限，又会把真 bug 一起放过去。
+rec_approach: >
+  按「能否继续执行」而非「是否报错」分流断言，平台受限单列一档：
+  (1) 先读源码确认工具属于 (A) 降级型还是 (B) abort 型，别靠猜；
+  (2) 测试脚本设 PASS / RESTRICTED / SKIP 三态计数，RESTRICTED 判据必须是
+      可falsify 的特征串（如 can not open file /proc/net/ 或 Permission denied），
+      仅该串命中才计受限，其余任何非零 rc 一律硬 FAIL——受限档不能变垃圾桶；
+  (3) 为 abort 型工具额外加「受限态必须给出明确诊断、不得静默输出空表」断言
+      （防上游某天改成静默退化而无人察觉），并断言受限态退出码语义（abort 型 = 134）；
+  (4) 参数解析路径（-h / 非法选项 / 非法端口）在 (B) 型工具里先于读表返回，
+      是真机上稳定可绿的真实断言，应优先铺满以保证 CI 有实质通过项。
+rec_command: >
+  conan create archives/s/sockstat/0.4.2 -pr:h=ci/conan/profiles/ohos-aarch64
+  -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+verification_cmd: >
+  grep -n "handle_missing_file\|abort()" <src>/sockstat.c
+verification_expect: >
+  能定位到 fopen 失败即 abort 的分支即确认为 (B) 型；真机期望输出
+  can not open file /proc/net/tcp, program will be aborted 且 rc=134，
+  而非静默空表。本条已在 sockstat/0.4.2 实测：x86_64+qemu-aarch64 下读表可用
+  rc=0 出真实行；用等价 stub 复现受限分支后 T3 全 11 条转 RESTRICTED、
+  T4 的「受限态 rc=134」与「必须点名 /proc/net 文件」两条转 PASS。
+evidence:
+  - "archives/s/sockstat/0.4.2/notes.md（OHOS 沙箱权限模型 / 执行环境与真实执行取证 节）"
+  - "archives/s/sockstat/0.4.2/test_package/test.sh（T3 11 条 + T4 鸿蒙特有 4 条）"
+  - "archives/s/sockstat/0.4.2/reports/conan-create.log、ci-gate-local.log"
+  - "archives/n/net-tools/2.1/reports/manual-runtime-evidence.md（12/12 EACCES 矩阵）"
+applies_to:
+  - "读 /proc/net/* 的网络诊断类 C 工具（sockstat/netstat 类/ss 类）"
+  - "对缺失输入文件选择 abort() 而非降级的上游程序"
+  - "任何需要在 OHOS 真机与 x86 开发机之间迁移测试结论的适配任务"
+principles:              P005, P011

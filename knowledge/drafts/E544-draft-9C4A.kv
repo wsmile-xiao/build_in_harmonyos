@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E544.kv，填写各字段
+# 对应的人类文档: doc/E544.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E544
+trigger_tool: runtime|test|conan
+phase: runtime
+error_signature: bind\(.*\) failed: Operation not permitted|bind: Operation not permitted \(1\)|AF_UNIX.*EPERM|sockfile.*Operation not permitted
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: socket, hmdfs, ohos, portability
+match_keywords: AF_UNIX, bind, EPERM, EROFS, EACCES, sockfile, SEXPECT_SOCKFILE, abstract socket, sun_path, HMDFS, TMPDIR, FNV-1a, 抽象命名空间, 会合点
+title: OHOS 拒绝 AF_UNIX 路径名 socket：以确定性哈希抽象名透明回退改造既有工具的 sockfile 会合点（sexpect 2.4.0 实例）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: HarmonyOS 普通用户态进程无法创建 AF_UNIX 路径名 socket：HMDFS 上 bind()=EPERM、/tmp 只读=EROFS、/dev/shm 与 /data/local/tmp=EACCES，仅抽象命名空间可用；以 sockfile 路径为客户/服务端会合约定的工具（sexpect 的 SEXPECT_SOCKFILE）接口不允许改名，必须由工具内部透明回退。
+affected_scope: 任何以文件系统路径作 AF_UNIX 会合点的 CLI/守护进程（sexpect sockfile、自定义 IPC）及其把 sockfile 路径写死的上游测试；路径 socket 可用的平台（Linux）不受影响。
+verification_cmd: python3 -c 绑定 $HOME/x.sock → EPERM；sexpect spawn 在路径 bind 被拒时自动改用抽象名；设备实测上游 ctest 25/25 通过
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: transparent-path-then-abstract-fallback
+rec_description: 在 bind/connect 封装层实现透明回退：路径 bind 失败且 errno 属于 EPERM/EACCES/EROFS 时，按 sockfile 路径做 FNV-1a 64 哈希取抽象名 sexpect-<16hex>（server/client 同源推导，与路径长度无关）；client 先试路径再试抽象；仅这三个 errno 触发回退以免掩盖 EADDRINUSE 等真实错误；抽象模式下跳过 realpath()/unlink() 依赖；无平台宏，Linux 行为不变。
+rec_command: patches/0001-common.c.patch + 0003-server.c.patch（sock_bind/sock_connect 封装）
+rec_auto_fix: false
+rec_impl: source-patch
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: relocate-sockfile-or-tcp-loopback
+fallback_description: 若无法改源码，尝试把 sockfile 迁移到平台可 bind 目录（本平台实测不存在，路径 bind 全域被拒）或改成 TCP loopback；两者都需改工具/协议，通常不可行，应如实报告平台限制而非跳过。
+fallback_command: 无（设备实测 TMPDIR/HOME//dev/shm//data/local/tmp 全部 bind 失败）
+fallback_auto_fix: false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern: AF_UNIX.*不可用.*跳过|skip.*socket.*test
+forbid_1_reason: 平台限制可被可移植回退修复（本库实测 22/25 失败 → 25/25 通过），直接跳过会把功能缺失伪装成上游设计。
+forbid_1_consequence: 上游测试假绿，工具在真机不可用。
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to: E024, E461, DRAFT-libdsme-0.67.0-ohos-abstract-af-unix-socket
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file: knowledge/drafts/E544-draft-9C4A.md
+last_updated: 2026-09-26
+source_event: sexpect 2.4.0 设备基线：bind: Operation not permitted 致 22/25 失败；补丁 0001-0003 后 25/25 通过
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors: kasumizawa-miyuu
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 9C4A

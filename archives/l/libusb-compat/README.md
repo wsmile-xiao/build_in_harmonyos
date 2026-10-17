@@ -10,10 +10,11 @@
 
 ## 版本
 
-### 0.1.7 (2026-05-26)
-- **状态**: built
-- **构建系统**: cmake
-- **依赖**: libusb-1.0 (1.0.27)
+### 0.1.7 (2026-08-24)
+- **状态**: built (前置适配完成，待真机验证)
+- **构建系统**: cmake (custom CMakeLists.txt via patch)
+- **依赖**: libusb/1.0.27
+- **源码**: SourceForge (libusb-compat-0.1.7.tar.bz2)
 
 ## 说明
 

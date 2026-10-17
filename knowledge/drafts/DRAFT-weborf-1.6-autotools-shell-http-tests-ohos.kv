@@ -1,0 +1,30 @@
+# DRAFT-weborf-1.6-autotools-shell-http-tests-ohos.kv
+# weborf 1.6 实证：autotools TESTS 的 shell 本机 HTTP 测试套件在 OHOS 真跑
+# 字段值一律单行加引号——draft_review._parse_simple_fields 会跳过缩进行，块标量会被读成空值
+
+id: draft-weborf-1.6-autotools-shell-http-tests-ohos
+title: autotools TESTS 驱动的 shell 本机 HTTP 测试套件在 OHOS 真跑的三处平台偏差（换解释器只能注 LOG_COMPILER、curl/bash 不在非交互 PATH、静态 libmagic 缺 magic.mgc 会造成进程存活但端口从不应答）
+trigger_tool: automake check-TESTS / build-aux/test-driver / curl
+phase: testing
+error_signature: test-driver.*No such file or directory; exit status：126; /bin/sh：cannot execute binary file; curl：command not found; http_code 000; Support for MIME is not available; duplicate symbol：buffer_init
+severity: 2
+category: testing|autotools|platform|ohos
+match_keywords: LOG_COMPILER, TESTS_ENVIRONMENT, am__check_pre, test-driver, automake harness, bin/bash shebang, curl, 127.0.0.1 loopback, 非交互 PATH, magic.mgc, MAGIC, static libmagic, duplicate symbol, buffer_init, http 000, 活进程不监听
+keywords: LOG_COMPILER, TESTS_ENVIRONMENT, test-driver, bin/bash, curl, 非交互 PATH, magic.mgc, 静态库符号撞名, 本机 HTTP 测试, 活进程不监听
+approach: ①先证实 /bin/bash 不存在再把解释器注到 LOG_COMPILER（不是 TESTS_ENVIRONMENT）；②把 curl/bash 所在目录显式 prepend 进 PATH；③链静态库时显式注入其运行时数据路径（libmagic ⇒ MAGIC=<pkg>/share/misc/magic.mgc）；④符号撞名用 llvm-nm 求交集定位后给程序侧改名补丁；⑤make check 走 -j1 绕开 HMDFS 上不可用的 jobserver mkfifo
+root_cause: automake 串行 harness 的 recipe 形如 `$(am__check_pre) $(LOG_DRIVER) … -- $(LOG_COMPILE) $tst`，而 am__check_pre 的末项是 $(AM_TESTS_ENVIRONMENT) $(TESTS_ENVIRONMENT)，它在整个驱动之前展开、语义是环境变量赋值序列而非命令前缀；用它当解释器注入点会变成 `bash /bin/sh build-aux/test-driver` 并报 cannot execute binary file。真正的解释器注入点是 LOG_COMPILE 所引用的 LOG_COMPILER。其二是 OHOS 无 /bin/bash 而上游 shell 测试普遍写＃!/bin/bash（bashism 如 [[ ]]、function、jobs -p、set -mex），driver 直接 exec 得 ENOENT 即 exit 126。其三是 Conan 的 libmagic 制品仅有静态 .a，其编译期写死的 magic 数据库路径在本机不存在，magic_open/magic_load 失败使程序停在 listen() 之前，表现为进程存活、banner 已打印、端口从未应答，极易被误判为沙箱或回环限制
+affected_scope: 所有『上游测试 = autotools TESTS + shell 脚本 + curl/wget 打自己起的本机服务』的包（各类 http/ftp/mail/daemon 的 testsuite/），以及 testsuite 依赖 bashism 的包；不适用 ctest / meson test / pytest 驱动（各有独立的环境与解释器注入通道）
+rec_priority: 1
+rec_approach: make-check-LOG_COMPILER-plus-PATH-prepend-plus-MAGIC-inject
+rec_description: 给 automake 串行 harness 换解释器时注 LOG_COMPILER 而非 TESTS_ENVIRONMENT；显式把 curl/bash 目录 prepend 进 PATH；把静态依赖的运行时数据文件路径注入环境并由包内登记传播；并用『进程存活 + 端口从不应答』这一组合征象反查数据文件缺失，而非直接归因网络限制
+rec_command: make check -j1 LOG_COMPILER=bash; grep -n -A 20 '^TESTS' Makefile.am; grep -n 'LOG_COMPILE|LOG_DRIVER|am__check_pre' Makefile; llvm-nm -g --defined-only *.o | sort -u > o.txt; llvm-nm -g --defined-only <pkg>/lib/libmagic.a | sort -u > l.txt; comm -12 o.txt l.txt
+principles: P004
+safety_boundary: 反向不适用有三例——①测试脚本本就用＃!/bin/sh 且无 bashism 则无需 LOG_COMPILER；②上游用 ctest/meson test/pytest 时注入点完全不同，勿照抄；③『活进程 + 000』也可能是真的沙箱/端口限制，必须先做『设与不设该数据文件环境变量』的对照，只有对照翻口才可归因数据文件，无对照不得下此结论。另注：TESTS_ENVIRONMENT 在部分包看似有效，只是因为它被赋成了纯 VAR=VAL 序列（本就是它的正确用途）
+similar_to: E201, E165, E049, E074, E011
+related: E201（test_run.sh 需要 /bin/bash 而 OHOS 标准路径无）与 E165（OpenHarmony 无传统 /bin，bash 实际位于 /data/service/hnp/bin/bash）已覆盖『测试脚本要 bash 而系统没有』这一半；本条增量在三点此二条目均未给出的判别——①换解释器的正确注入点是 LOG_COMPILER 而非 TESTS_ENVIRONMENT（含 am__check_pre 展开位置这一判据）；②『链上静态可选依赖后进程存活但端口 12 秒从不应答』必须用设/不设数据文件env 的四臂对照才可归因；③静态制品导出通用名符号与程序内部同名 ⇒ lld duplicate symbol，用 llvm-nm 求交集一次定位。E049 是生成脚本硬编码解释器路径的另一签名（不同解法）；E074 与 E011 是本条配套使用的既有条目
+caused_by: 无
+conflicts_with: 无
+verification: weborf/1.6（任务 11856）conan create 实测——未修前 make check 为 TOTAL 15 / PASS 1 / FAIL 14（14 条 exit 126）；误用 TESTS_ENVIRONMENT=bash 时首条即 cannot execute binary file；改 LOG_COMPILER=bash 后 14 条进入真实执行；链 openssl+libmagic 后 15 条仍全 FAIL 且 http_code=000，四臂对照 none/magic/ssl/both 各 12 次轮询均为 alive 而端口不应答，设 MAGIC 后四臂同一命令全部 200；最终 TOTAL 15 / PASS 15 / SKIP 0 / FAIL 0 / ERROR 0，15 条逐条具名 PASS，含 site1https 的真实 TLS 往返与 cgi 的 alarm+execl 子进程路径；消费者测试另计 1 程序 7 断言
+doc_file: knowledge/drafts/DRAFT-weborf-1.6-autotools-shell-http-tests-ohos.md
+last_updated: 2026-09-24
+source_event: archives/w/weborf/1.6

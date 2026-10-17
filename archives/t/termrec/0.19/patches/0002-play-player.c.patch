@@ -1,0 +1,114 @@
+--- a/play/player.c
++++ b/play/player.c
+@@ -21,6 +21,38 @@
+ mutex_t waitm;
+ cond_t waitc;
+ 
++#ifndef HAVE_PTHREAD_CANCEL
++/* Some libcs derived from musl (eg. OpenHarmony's) do not implement POSIX
++   thread cancellation at all, so pthread_cancel()/pthread_setcancelstate()
++   do not link. The playback thread is stopped cooperatively instead:
++   replay_stop() raises player_stop, wakes a thread parked on the frame
++   waiter and the loop exits at its next checkpoint. Frame writes are never
++   interrupted, which is what the former cancelstate disable/enable pair
++   guarded against. */
++static volatile int player_stop;
++
++static int cancel_sleep(const struct timeval *delay)
++{
++    /* Sleep up to *delay in 100ms slices so a stop request is honoured
++       promptly even across long gaps between frames. Returns non-zero when
++       the playback thread should stop. */
++    struct timeval left=*delay;
++
++    while (left.tv_sec>0 || left.tv_usec>0)
++    {
++        struct timeval slice;
++        struct timeval quantum={0, 100000};
++
++        slice=(tcmp(left, quantum)<0)? left: quantum;
++        select(0, 0, 0, 0, &slice);
++        tsub(left, slice);
++        if (player_stop)
++            return 1;
++    }
++    return 0;
++}
++#endif
++
+ static void waitm_unlock(void *arg)
+ {
+     mutex_unlock(waitm);
+@@ -41,25 +73,53 @@
+             gettimeofday(&wall, 0);
+             tsub(tt, wall);
+             if (tt.tv_sec>0 || tt.tv_usec>0)
++            {
++#ifdef HAVE_PTHREAD_CANCEL
+                 select(0, 0, 0, 0, &tt);
++#else
++                if (cancel_sleep(&tt))
++                    return 0;
++#endif
++            }
+             else if (tt.tv_sec<-1) // if not a minimal skip, slow down the clock
+                 tsub(t0, tt);      // (tt is negative)
++#ifdef HAVE_PTHREAD_CANCEL
+             pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, 0);
++#endif
+             fr=nf;
+             tty_write(term, fr->data, fr->len);
++#ifdef HAVE_PTHREAD_CANCEL
+             pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, 0);
++#else
++            if (player_stop)
++                return 0;
++#endif
+         }
+         mutex_lock(waitm);
+         if (!(nf=ttyrec_next_frame(tr, fr)) && !loaded)
+             waiting=1;
+         if (waiting)
+         {
++#ifdef HAVE_PTHREAD_CANCEL
+             pthread_cleanup_push(waitm_unlock, 0);
+             cond_wait(waitc, waitm);
+             pthread_cleanup_pop(0);
++#else
++            /* Re-check under the lock: replay_stop() may have raised the flag
++               between "waiting=1" and acquiring the mutex, in which case its
++               wake-up was delivered to nobody and sleeping here would block
++               forever on streams that never signal again (follow mode,
++               pipes, network sources). */
++            if (!player_stop)
++                cond_wait(waitc, waitm);
++#endif
+             nf=ttyrec_next_frame(tr, fr);
+         }
+         mutex_unlock(waitm);
++#ifndef HAVE_PTHREAD_CANCEL
++        if (player_stop)
++            return 0;
++#endif
+     }
+     while (nf || !loaded);
+     return 0;
+@@ -90,8 +150,18 @@
+     tsub(tc, t0);
+     tmul1000(tc, speed);
+     play_state=0;
++#ifdef HAVE_PTHREAD_CANCEL
+     pthread_cancel(playth);
++#else
++    player_stop=1;
++    mutex_lock(waitm);          // wake a player parked on the frame waiter
++    cond_wake(waitc);
++    mutex_unlock(waitm);
++#endif
+     thread_join(playth);
++#ifndef HAVE_PTHREAD_CANCEL
++    player_stop=0;
++#endif
+     if (loaded && !ttyrec_next_frame(tr, fr))
+         tc=fr->t;               // no stopping past the end
+ }

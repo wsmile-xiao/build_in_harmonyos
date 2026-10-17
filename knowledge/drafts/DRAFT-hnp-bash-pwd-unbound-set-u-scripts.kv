@@ -1,0 +1,58 @@
+#====================================================================
+# DRAFT-hnp-bash-pwd-unbound-set-u-scripts.kv
+# OHOS hnp bash 在 getcwd() 失败的执行上下文启动时内置 PWD 未定义；
+# set -u 脚本引用 ${PWD} 必现 "PWD: unbound variable"——消费者应显式传 PWD。
+# 完整叙事与证据见同目录 .md（成对交付）。
+#====================================================================
+
+id:                     DRAFT (proposed，最终编号由知识库主编确认)
+trigger_tool:           bash|conan|ci|ssh|subprocess
+phase:                  runtime|testing
+error_signature:        PWD: unbound variable|getcwd: cannot access parent directories|shell-init: error retrieving current directory
+severity:               2
+category:               shell, ohos, runtime, environment, conan
+match_keywords:         PWD, unbound variable, getcwd, shell-init, hnp bash, bash 5.3,
+                        set -u, set -euo pipefail, 脚本类应用, script application,
+                        conan test_package, self.run, subprocess, ssh, OHOS
+title:                  OHOS hnp bash 在 getcwd() 失败的执行上下文启动时内置 PWD 未定义，set -u 脚本引用 ${PWD} 必现 "unbound variable"，调用方应显式传 PWD=<工作目录>
+root_cause:             完整因果链（设备实测，2026-09-09 复现）：(1) 工具实现证据——OHOS hnp bash（/data/service/hnp/bin/bash，5.3）启动时若环境未带 PWD，则以 getcwd(2) 初始化内置 PWD；在 ssh 远程命令、清洁 env（env -i / subprocess 空 env）等派生上下文中该 getcwd() 跨目录失败（home 报 Operation not permitted，/tmp 与 /data/service/hnp/bin 报 Permission denied，深层 storage 路径报 Not a tty/Not supported），bash 打印 "shell-init: error retrieving current directory" 且 PWD 保持未定义（探针原文见 verification_cmd）；(2) 触发命令——任何在该上下文以 hnp bash 执行、且启用 set -u（或 set -euo pipefail）后引用 ${PWD} 的脚本（案例 dehydrated 0.7.2 line 9 set -u、line 348 load_config 配置搜索 "${PWD}"）；(3) 失败点——首次 ${PWD} 展开即报 "PWD: unbound variable" 并按 set -u 语义退出，脚本尚未来得及输出业务诊断；(4) 归类——OHOS hnp 域进程的执行上下文语义问题（getcwd 受限 + bash PWD 初始化回退缺失），非库缺陷、非 HMDFS 独有（/tmp 等本地目录同样失败）。间歇性来源：经 conan 聚合 shell / mksh 等会导出 PWD 的父进程间接执行时不复现，故"部分执行上下文"必现。
+affected_scope:         任何在 OHOS 上以 hnp bash（/data/service/hnp/bin/bash）执行、脚本内 set -u 且引用 ${PWD} 或依赖 pwd 内建的项目：脚本类应用包（package_type=application 的纯 bash 软件）的配方自检与消费者测试、conan build()/test_package 直跑冒烟、CI 直跑脚本、subprocess/env -i 派生、ssh 远程执行；与 autotools configure 的 getcwd 失败同根但失败面不同（本条是 set -u 脚本启动崩溃，configure 那类是 re-exec 中止）
+verification_cmd:       设备任意新 shell 可复现（只读探针，不写文件）——
+                        复现: ssh <ohos-host> '/data/service/hnp/bin/bash -c "set -u; echo [\$PWD]"'
+                        → stderr 出现 "shell-init: error retrieving current directory: getcwd: ..." 且报 "/data/service/hnp/bin/bash: line 1: PWD: unbound variable"
+                        修复面: ssh <ohos-host> 'PWD=/tmp /data/service/hnp/bin/bash -c "set -u; echo [\$PWD]"'
+                        → 输出 [/tmp]（getcwd 诊断仍在，但脚本存活）
+                        反面（cd 不救）: ssh <ohos-host> 'cd /tmp && env -u PWD /data/service/hnp/bin/bash -c "set -u; echo [\$PWD]"'
+                        → 仍报 unbound variable（getcwd: Permission denied），证明"先 cd 到可达目录"不是退路
+                        pwd 内建同根: ssh <ohos-host> 'env -i /data/service/hnp/bin/bash -c "pwd"' → pwd: error retrieving current directory
+rec_priority:           1
+rec_approach:           explicit-pwd-env-when-spawning-hnp-bash
+rec_description:        调用方在派生 hnp bash 前显式提供 PWD 环境变量并指向真实工作目录：conan self.run 用命令前缀 'cd "<dir>" && PWD="<dir>" <bash> script'（cd 与 PWD 成对，cwd 参数与 PWD 值一致）；python subprocess 用 env["PWD"]=<脚本所在目录>；CI 直跑脚本前 export PWD=$PWD。一次赋值即同时消除 "shell-init getcwd" 诊断与 "unbound variable" 退出两个症状；不修改被测脚本、不污染上游判定。
+rec_command:            self.run('cd "%s" && PWD="%s" "%s" <script> <args>' % (src, src, bash_path))
+                        # python: env = dict(os.environ); env["PWD"] = script_dir; subprocess.run([bash, script, ...], env=env, cwd=script_dir)
+rec_auto_fix:           false
+rec_impl:               conan-recipe-and-test-launcher
+fallback_priority:      2
+fallback_approach:      parent-shell-pwd-inheritance
+fallback_description:   经由会导出 PWD 的父 shell 间接执行（如 conan 聚合 shell、mksh），依赖父进程 PWD 导出语义使子 bash 免于 getcwd()。诚实权衡：掩盖而非修复——父 shell 是否导出 PWD 属实现细节（实测 zsh/ssh 命令上下文不导出、conan/mksh 导出），换执行器即复发，仅作退路并需在 PR 标注上下文依赖。
+fallback_command:       <parent-shell> -c 'export PWD=<dir>; exec <hnp-bash> <script> <args>'
+fallback_auto_fix:      false
+fallback_impl:          wrapper-only
+forbid_1_pattern:       cd\s+[^&]+&&\s*(?!\s*PWD=)[^&]*bash
+forbid_1_reason:        假设"cd 成功 = PWD 可用"：实测 hnp bash 的 getcwd() 失败横跨 home、/tmp、包目录与深层 storage，cd 只作用于父进程域，bash 启动仍要自己 getcwd()，PWD 依旧未定义。
+forbid_1_consequence:   本机探索通过、CI/ssh 上下文必现 "PWD: unbound variable"（间歇性失败，最难排查的形态）。
+forbid_2_pattern:       env -i\s+.*bash|subprocess\([^)]*env=\{\}
+forbid_2_reason:        以清洁环境派生 hnp bash 执行脚本而不回填 PWD：此时 getcwd() 失败率最高（无任何继承可依赖），set -u 脚本在首个 ${PWD}/pwd 引用处直接退出。
+forbid_2_consequence:   脚本启动即死、无业务输出，误判为脚本本身缺陷而开始改上游源码。
+principles:             P014
+causes:                 []
+caused_by:              []
+similar_to:             [E386,E232]
+conflicts_with:         []
+prerequisite_of:        []
+doc_file:               DRAFT-hnp-bash-pwd-unbound-set-u-scripts.md
+last_updated:           2026-09-09
+source_event:           dehydrated 0.7.2 OHOS PC 适配（run dehydrated-0.7.2，候选 b53a3cc4f7）；Builder 实测发现 + Curator 设备探针独立复核复现
+authors:                sea_crab
+source_pr:              (随库 PR 交付，PR 号待定)
+source_commit:          b53a3cc4f76669e6bf15e9301ca054635f8b4671

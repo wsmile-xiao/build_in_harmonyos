@@ -1,0 +1,189 @@
+--- a/configure
++++ b/configure
+@@ -61,20 +61,41 @@
+ #	test -x "$p" && echo $p
+ #    fi
+ }
+ 
+ 
+ get_stdlib () {
+     # Older versions of ocamlc do not accept -where, so there is a fallback
+     # method:
+     ocamlc -where 2>/dev/null | tr -d '\r' || {
+ 	ocamlc -v | sed -n -e "/Standard library directory/s/.*: \(.*\)/\1/p"; }
++}
++
++# HarmonyOS/OHOS: hmmac refuses to exec interpreter-script binaries directly
++# (EACCES), and the bytecode OCaml tools carry a shebang pointing at ocamlrun.
++# Running them explicitly through ocamlrun works.  No-op on other platforms.
++ocaml_run () {
++    if test -n "$OCAMLRUN" ; then
++	"$OCAMLRUN" "$@"
++    else
++	"$@"
++    fi
++}
++
++# HarmonyOS: the bytecode tools' shebang references a stale ocamlrun path, so
++# the shared stublibs directory must be injected explicitly for dynlinked
++# primitives (dllunix.so, dllstr.so, ...).
++ocaml_setup_runenv () {
++    if test -n "$OCAMLRUN" && test -d "$ocaml_core_stdlib/stublibs" ; then
++	CAML_LD_LIBRARY_PATH="$ocaml_core_stdlib/stublibs${CAML_LD_LIBRARY_PATH:+:$CAML_LD_LIBRARY_PATH}"
++	export CAML_LD_LIBRARY_PATH
++    fi
+ }
+ 
+ 
+ get_lib () {
+     # $1: name of a library to search for
+     # $2...: places to test
+     libname="$1"
+     while [ "$#" != "0" ]; do
+ 	if [ -f "$1/lib${libname}.so" ] || [ -f "$1/lib${libname}.a" ]; then
+ 	    echo "$1"
+@@ -277,20 +298,22 @@
+    echo "configure: cannot determine ocaml's standard library directory" 1>&2
+     exit 1
+ fi
+ if [ -z "$ocaml_major" ]; then ocaml_major=3; fi
+ 
+ if [ ${use_cygpath} -gt 0 ]; then
+     cygpath_to_unix ocaml_core_stdlib
+     # This makes ocaml_core_stdlib a Unix-type path
+ fi
+ 
++ocaml_setup_runenv
++
+ # Set site-lib directory:
+ 
+ if [ -z "$ocaml_sitelib" ]; then
+     case "$ocaml_core_stdlib" in
+ 	/opt/*)		ocaml_sitelib=$(dirname "${ocaml_core_stdlib}")/site-lib
+ 			;;
+ 	*)		ocaml_sitelib="${ocaml_core_stdlib}/site-lib"
+ 			;;
+     esac
+ fi
+@@ -416,31 +439,31 @@
+ 
+ ocaml_autolink="true"
+ 
+ ######################################################################
+ # Does this version of OCaml support DLLs?
+ 
+ echo "Testing DLLs..."
+ 
+ have_dlls="yes"
+ 
+-ocaml -I +unix unix.cma itest-aux/simple.ml >/dev/null || have_dlls="no"
++ocaml_run ocaml -I +unix unix.cma itest-aux/simple.ml >/dev/null || have_dlls="no"
+ 
+ ######################################################################
+ # Does this version of OCaml support extension points?
+ 
+ echo "Testing whether ppxopt can be supported..."
+ 
+ with_ppxopt=1
+ enable_topfind_ppxopt=true
+ 
+-ocaml -I +compiler-libs itest-aux/ppx.ml >/dev/null || {
++ocaml_run ocaml -I +compiler-libs itest-aux/ppx.ml >/dev/null || {
+     with_ppxopt=0
+     enable_topfind_ppxopt=false
+ }
+ 
+ ######################################################################
+ # Check for -opaque
+ 
+ echo "Checking for ocamlc -opaque..."
+ 
+ opaque="-opaque"
+@@ -707,21 +730,21 @@
+ 	\"\$1\" > \"\${1%.in}\""
+ find src -name 'META.in' -type f -exec sh -c "$meta_subst" sh {} \;
+ 
+ ######################################################################
+ 
+ printf "Detecting compiler arguments: "
+ 
+ if make -C tools/extract_args >ocargs.log 2>&1; then
+     printf "(extractor built) "
+     # ocamlbrowser does not work!
+-    if tools/extract_args/extract_args -o src/findlib/ocaml_args.ml ocamlc ocamlcp ocamloptp ocamlmklib ocamlmktop ocamlopt ocamldep ocamldoc >>ocargs.log 2>&1; then
++    if ocaml_run tools/extract_args/extract_args -o src/findlib/ocaml_args.ml ocamlc ocamlcp ocamloptp ocamlmklib ocamlmktop ocamlopt ocamldep ocamldoc >>ocargs.log 2>&1; then
+ 	echo "ok"
+     else
+ 	echo "FAILED (see the file ocargs.log for details)"
+ 	exit 1
+     fi
+ else
+     echo "FAILED (see the file ocargs.log for details)"
+     exit 1
+ fi
+ 
+@@ -749,20 +772,28 @@
+     ocamlpath="${relative_site_lib}${path_sep}${ocamlpath}"
+ else
+     relative_paths="false"
+ fi
+ 
+ {
+     echo "# Makefile.config written by configure"
+     echo "OCAML_CORE_STDLIB=${ocaml_core_stdlib}"
+     echo "OCAML_CORE_BIN=${ocaml_core_bin}"
+     echo "OCAML_CORE_MAN=${ocaml_core_man}"
++    # HarmonyOS: bytecode linking needs the stublibs dir on the loader path
++    # (dllunix.so, dllstr.so, ...) because the tools' shebang cannot relocate it.
++    if test -n "$OCAMLRUN" && test -d "${ocaml_core_stdlib}/stublibs"; then
++	echo "CAML_LD_LIBRARY_PATH=${ocaml_core_stdlib}/stublibs"
++    else
++	echo "CAML_LD_LIBRARY_PATH="
++    fi
++    echo "export CAML_LD_LIBRARY_PATH"
+     echo "OCAML_SITELIB=${ocaml_sitelib}"
+     echo "FINDLIB_PATH=${ocamlpath}"
+     echo "OCAML_THREADS=${ocaml_threads}"
+     echo "OCAMLFIND_BIN=${ocamlfind_bin}"
+     echo "OCAMLFIND_MAN=${ocamlfind_man}"
+     echo "OCAMLFIND_CONF=${ocamlfind_config}"
+     echo "OCAMLFIND_OCAMLFLAGS=${ocamlfind_ocamlflags}"
+     echo "OCAMLFIND_ARCHIVES=${ocamlfind_archives}"
+     echo "OCAML_AUTOLINK=${ocaml_autolink}"
+     echo "OCAML_REMOVE_DIRECTORY=${have_remdir}"
+@@ -781,24 +812,31 @@
+     echo "NUMTOP=${numtop}"
+     echo "SH=${sh}"
+     if [ "$mingw_lib" != "" ]; then
+         echo "OCAMLC_FLAGS=-I \"${mingw_lib}\""
+         echo "OCAMLOPT_FLAGS=-I \"${mingw_lib}\""
+     fi
+     echo "OPAQUE=${opaque}"
+     echo "OCAMLOPT_G=${native_debugging_info}"
+     echo "CHECK_BEFORE_INSTALL=${check_before_install}"
+     echo "CP = cp"
+-    echo "INSTALLDIR = install -d"
+-    echo "# change to INSTALLDIR = mkdir -p   when BSD install is unavavailable"
+-    echo "INSTALLFILE = install -c"
+-    echo "# change to INSTALLFILE = cp   when BSD install is unavailable"
++    # HarmonyOS ships BusyBox/toybox without GNU install(1); fall back to the
++    # portable mkdir -p / cp combination documented above.
++    if in_path install; then
++	echo "INSTALLDIR = install -d"
++	echo "# change to INSTALLDIR = mkdir -p   when BSD install is unavavailable"
++	echo "INSTALLFILE = install -c"
++	echo "# change to INSTALLFILE = cp   when BSD install is unavailable"
++    else
++	echo "INSTALLDIR = mkdir -p"
++	echo "INSTALLFILE = cp"
++    fi
+ } > Makefile.config
+ 
+ echo "SITELIB_META=${generated_META}" >Makefile.packages
+ 
+ # All OK
+ 
+ echo
+ echo "About the OCAML core installation:"
+ echo "    Standard library:      ${ocaml_core_stdlib}"
+ echo "    Binaries:              ${ocaml_core_bin}"

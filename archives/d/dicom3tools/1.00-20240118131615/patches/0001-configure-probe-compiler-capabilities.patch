@@ -1,0 +1,176 @@
+--- a/dicom3tools/config/Configure
++++ b/dicom3tools/config/Configure
+@@ -1,7 +1,7 @@
+ 
+ #!/bin/sh
+ 
+-TMPROOT="/tmp/$0.$$"
++TMPROOT="${TMPDIR:-/tmp}/$0.$$"
+ 
+ if [ -f generic.cf ]; then mv generic.cf generic.cf.bak; fi
+ 
+@@ -472,6 +472,164 @@
+ 	fi
+ fi
+ 
++# ----------------------- compiler capability probes ------------------------
++
++# The settings above are derived from the gcc version number, which says nothing
++# about compilers that are not gcc (clang is only detected when it is installed
++# under the name "gcc"), and nothing at all about the C++ standard library that
++# is actually installed.  Probe the C and C++ compilers that are going to be
++# used instead, so that the right headers and the right feature macros are
++# selected on any system.
++
++tryCompile()		# tryCompile "compiler" "flags" "source file"
++{
++	rm -f $TMPROOT.tryCompile
++	if $1 $2 -o $TMPROOT.tryCompile $3 >$TMPROOT.tryCompile.log 2>&1
++	then
++		rm -f $TMPROOT.tryCompile $TMPROOT.tryCompile.log
++		return 0
++	else
++		rm -f $TMPROOT.tryCompile $TMPROOT.tryCompile.log
++		return 1
++	fi
++}
++
++if [ -z "$usegcc" ] || ! getIsPresent "$usegcc -v"
++then
++	usegcc=""
++	if [ ! -z "$CC" ] && getIsPresent "$CC -v"
++	then
++		usegcc="$CC"
++	elif getIsPresent "clang -v"
++	then
++		usegcc="clang"
++	elif getIsPresent "cc -v"
++	then
++		usegcc="cc"
++	fi
++fi
++if [ -z "$usegpp" ] || ! getIsPresent "$usegpp -v"
++then
++	usegpp=""
++	if [ ! -z "$CXX" ] && getIsPresent "$CXX -v"
++	then
++		usegpp="$CXX"
++	elif getIsPresent "clang++ -v"
++	then
++		usegpp="clang++"
++	elif getIsPresent "c++ -v"
++	then
++		usegpp="c++"
++	fi
++fi
++
++if [ ! -z "$usegcc" -a ! -z "$usegpp" ]
++then
++	echo 1>&2 "Configure: probing C compiler $usegcc"
++	echo 1>&2 "Configure: probing C++ compiler $usegpp"
++
++	echo >>generic.cf "#ifndef AnsiCCmd"
++	echo >>generic.cf "#define AnsiCCmd $usegcc"
++	echo >>generic.cf "#endif"
++	echo >>generic.cf "#ifndef CPlusPlusCmd"
++	echo >>generic.cf "#define CPlusPlusCmd $usegpp"
++	echo >>generic.cf "#endif"
++
++	echo >>generic.cf "#ifndef AnsiCUnoptimizedDebugFlags"
++	echo >>generic.cf "#define AnsiCUnoptimizedDebugFlags NeedMissingPrototypes"
++	echo >>generic.cf "#endif"
++	echo >>generic.cf "#ifndef AnsiCOptimizedDebugFlags"
++	echo >>generic.cf "#define AnsiCOptimizedDebugFlags OptimizeLevel NeedMissingPrototypes"
++	echo >>generic.cf "#endif"
++	echo >>generic.cf "#ifndef CPlusPlusUnoptimizedDebugFlags"
++	echo >>generic.cf "#define CPlusPlusUnoptimizedDebugFlags NeedMissingPrototypes"
++	echo >>generic.cf "#endif"
++	echo >>generic.cf "#ifndef CPlusPlusOptimizedDebugFlags"
++	echo >>generic.cf "#define CPlusPlusOptimizedDebugFlags OptimizeLevel NeedMissingPrototypes"
++	echo >>generic.cf "#endif"
++
++	# Are the C++ standard library headers named with or without the .h suffix ?
++	echo '#include <iostream>'		>$TMPROOT.probe.cc
++	echo '#include <iomanip>'		>>$TMPROOT.probe.cc
++	echo 'int main(void) { std::cout << std::setw(1) << 0 << std::endl; return 0; }' >>$TMPROOT.probe.cc
++	if tryCompile "$usegpp" "" $TMPROOT.probe.cc
++	then
++		echo >>generic.cf "#define UseStandardHeadersWithoutExtension 1"
++		echo >>generic.cf "#define EmitUsingStdNameSpace 1"
++		echo 1>&2 "Configure: C++ headers are iostream and friends, in namespace std"
++	else
++		echo >>generic.cf "#define UseStandardHeadersWithoutExtension 0"
++		echo >>generic.cf "#define EmitUsingStdNameSpace 0"
++		echo 1>&2 "Configure: C++ headers are iostream.h and friends"
++	fi
++
++	# Is streampos in namespace std ?
++	echo '#include <iostream>'		>$TMPROOT.probe.cc
++	echo 'int main(void) { std::streampos p; (void)p; return 0; }' >>$TMPROOT.probe.cc
++	if tryCompile "$usegpp" "" $TMPROOT.probe.cc
++	then
++		echo >>generic.cf "#define HasStdNameSpaceForStreamPos 1"
++	else
++		echo >>generic.cf "#define HasStdNameSpaceForStreamPos 0"
++	fi
++
++	# Which include directories does the compiler search by default ?
++	# (makedepend is given them so that it can resolve system headers.)
++	if [ "$foundallgcc" = "no" ]
++	then
++		echo >>generic.cf "#ifndef AnsiCDependIncludePath"
++		echo >>generic.cf "#define AnsiCDependIncludePath " \
++			`$usegcc -E -v - 2>&1 </dev/null \
++			| sed -e '1,/#include <...> search starts here:/d' \
++			      -e '/End of search list/,$d' \
++			| sed -e 's/^[ 	]*/\"-I/' -e 's/$/\"/'`
++		echo >>generic.cf "#endif"
++		echo >>generic.cf "#ifndef CPlusPlusDependIncludePath"
++		echo >>generic.cf "#define CPlusPlusDependIncludePath " \
++			`$usegpp -E -v - 2>&1 </dev/null \
++			| sed -e '1,/#include <...> search starts here:/d' \
++			      -e '/End of search list/,$d' \
++			| sed -e 's/^[ 	]*/\"-I/' -e 's/$/\"/'`
++		echo >>generic.cf "#endif"
++	fi
++fi
++
++# Are infinity() and quiet_nan() provided by the math headers (old glibc and
++# BSD had them; modern C libraries, musl in particular, do not) ?
++echo '#include <math.h>'				>$TMPROOT.probe.c
++echo 'int main(void) { double d = infinity(); double n = quiet_nan(0); return (int)d + (int)n; }' >>$TMPROOT.probe.c
++if [ ! -z "$usegcc" ] && tryCompile "$usegcc" "" $TMPROOT.probe.c
++then
++	echo >>generic.cf "#define UseDumbInfinityAndNAN 0"
++	echo 1>&2 "Configure: math headers provide infinity() and quiet_nan()"
++else
++	echo >>generic.cf "#define UseDumbInfinityAndNAN 1"
++	echo 1>&2 "Configure: math headers do not provide infinity() and quiet_nan(), using the dumb fallbacks"
++fi
++
++# Does the C library provide gethostid() ?
++echo '#include <unistd.h>'			>$TMPROOT.probe.c
++echo 'int main(void) { return (int)gethostid(); }' >>$TMPROOT.probe.c
++if [ ! -z "$usegcc" ] && tryCompile "$usegcc" "" $TMPROOT.probe.c
++then
++	echo >>generic.cf "#define HasGetHostID 1"
++	echo >>generic.cf "#define HasGetHostIDPrototype 1"
++else
++	echo >>generic.cf "#define HasGetHostID 0"
++	echo 1>&2 "Configure: no gethostid() in the C library"
++fi
++
++# Does struct tm carry tm_gmtoff ?
++echo '#include <time.h>'						>$TMPROOT.probe.c
++echo 'int main(void) { struct tm *lt = localtime(0); return (int)lt->tm_gmtoff; }' >>$TMPROOT.probe.c
++if [ ! -z "$usegcc" ] && tryCompile "$usegcc" "" $TMPROOT.probe.c
++then
++	echo >>generic.cf "#define UseGlibcTimezone 1"
++else
++	echo >>generic.cf "#define UseGlibcTimezone 0"
++fi
++rm -f $TMPROOT.probe.cc $TMPROOT.probe.c
++
+ # ----------------------- OS dependent stuff -------------------------
+ 
+ # see also the GNU stuff ... some of it is OS dependent

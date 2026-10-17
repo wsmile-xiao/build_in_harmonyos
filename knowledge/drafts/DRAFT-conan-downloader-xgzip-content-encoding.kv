@@ -1,0 +1,112 @@
+#====================================================================
+# DRAFT-conan-downloader-xgzip-content-encoding.kv — conan 下载器仅豁免
+#   Content-Encoding: gzip 的尺寸校验；x-gzip 透明解压源恒误报传输中断
+# Timestamp: 2026-09-05（v2 修订：按 Curator path-update 五点修订；主机理收敛为
+#   x-gzip 单课题，musl subprocess 裸名 curl 机理降级为 similar_to E405 引用；
+#   v3 修订：按仓库 KV 规范补全 Layer 分节/Relations/元数据/作者/度量结构，
+#   去除 YAML 块标量，知识内容事实不变）
+# Software: blepvco 0.1.0（上游 smbolton.com）；通用 conan 下载链问题
+# Gate: 设备权威 CI ci/conan/build_and_test.sh（run1 失败 → run4 PASS）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the evidence below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-conan-downloader-xgzip-content-encoding
+trigger_tool:           conan|urllib3|get()|download
+phase:                  source|download
+error_signature:        Transfer interrupted before complete: \d+ < \d+|
+                        ConanConnectionError: Download failed, check server, possibly try again
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan|download|http-server|content-encoding
+match_keywords:         x-gzip, Content-Encoding, Content-Length, urllib3, transparent,
+                        gunzip, decompress, AddEncoding, Transfer interrupted, check_sha256
+title:                  conan 下载器仅豁免 Content-Encoding: gzip 的尺寸校验，对 x-gzip 透明解压源恒误报传输中断，需配方内原始字节回退下载
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             conan/internal/rest/file_downloader.py 的完整性检查把下载字节数与 Content-Length
+                        比较，且豁免分支写死 `response.headers.get("content-encoding") == "gzip"`
+                        （L132 豁免判定，L135 尺寸不等且非 gzip 即 raise）。urllib3/requests 按响应头
+                        声明透明解压，x-gzip 与 gzip 同等解码：从 Apache mod_mime `AddEncoding x-gzip .gz`
+                        （.gz 的默认行为）服务器取源时，iter_content 读到的是解压后字节，与压缩态
+                        Content-Length 永不相等，且 x-gzip 不落入豁免分支 → 恒定抛
+                        ConanConnectionError "Transfer interrupted before complete: A < B"（A 恰为
+                        解压后尺寸，B 为压缩态 Content-Length），与网络无关，重试无效。
+                        实例：blepvco-0.1.0.tar.gz，服务器实测 Content-Encoding: x-gzip /
+                        Content-Length: 94235，解压后 296960 字节 = 报错中的 A。
+affected_scope:         上游服务器对 .tar.gz/.tgz 标注 x-gzip Content-Encoding 的所有 conan 配方
+                        （AddEncoding x-gzip 是 mod_mime 对 .gz 扩展名的默认行为，自建/学术/个人/老派
+                        Apache 托管站点高发）。普通服务器（github、GNU 镜像等）不受影响。
+verification_cmd:       自包含探针（不依赖任何 run 日志）：
+                        curl -sIL https://www.smbolton.com/linux/blepvco-0.1.0.tar.gz |
+                        grep -iE 'content-encoding|content-length'
+                        → 期望 Content-Encoding: x-gzip / Content-Length: 94235；
+                        grep -n 'content-encoding' $(python3 -c 'import
+                        conan.internal.rest.file_downloader as m; print(m.__file__)')
+                        → 期望豁免分支仅 =="gzip"；
+                        复跑：conan create <recipe> -pr:h=<ohos-aarch64 profile>
+                        -pr:b=<ohos-aarch64 profile> --build=missing
+                        → 构建日志出现 "retrying with urllib (server responds
+                        Content-Encoding: x-gzip)" 且构建继续即为回退生效。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           recipe-source-urllib-fallback（配方内回退下载，不改 ci/**）
+rec_description:        conanfile.py source() 中 try get(self, **conan_data["sources"], strip_root=True)，
+                        捕获 ConanException 后用 urllib.request.urlopen 下载到源目录（urllib 不做
+                        Content-Encoding 解码，原始字节落地与 Content-Length/sha256 一致），随后
+                        check_sha256 校验 + unzip(strip_root=True) 解压并删除归档。哈希校验兜底完整性，
+                        回退仅在该服务器故障时触发，其他包/正常服务器路径不变。不换镜像 URL（PF7 只允许
+                        官方源），不让 conanfile 调外部 curl/wget（L0o）。方案为通用 Python（urllib 标准库，
+                        无平台特有依赖），可直接向上游/中心仓提交。
+rec_command:            （见 verification_cmd 的 conan create 复跑行）
+rec_auto_fix:           false
+rec_impl:               conan-recipe-source-urllib-fallback
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:      predl-cache-warm-or-file-url（官方 tarball 预下载 + file:// / 缓存预热）
+fallback_description:   官方 tarball 预先 curl 落地后把 conandata.yml url 临时指向
+                        file://<本地缓存>（跑完还原），或预热 conan 下载缓存。诚实权衡：
+                        绕开了 conan 下载抽象、引入人工/CI 外部步骤、file:// 重写易残留
+                        （须跑完还原），仅作 CI 受阻时的退路，不作为申报方案。
+fallback_command:       curl -sL -o <cache>/blepvco-0.1.0.tar.gz https://www.smbolton.com/linux/blepvco-0.1.0.tar.gz
+fallback_auto_fix:      false
+fallback_impl:          manual-predl-cache-warm
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+forbid_1_pattern:       Content-Encoding:\s*x-gzip（服务器响应头，非配置项）
+forbid_1_reason:        仅豁免 content-encoding=="gzip" 的尺寸校验不会覆盖 x-gzip
+forbid_1_consequence:   反复重试 3 次后 ConanConnectionError，source() 失败，构建失败
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P005, P013
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E405, E347]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+last_updated: 2026-09-05
+source_event: blepvco 0.1.0 HarmonyOS PC 适配权威 CI（run1 x-gzip 下载误报失败；配方内 urllib 原始字节回退后 run4 PASS）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors: GoliWie <GoliWie@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used: 2026-09-05

@@ -1,0 +1,214 @@
+# ═══ Draft knowledge entry — 把 GNU 工具注入 PATH 必须 prepend，且需补齐其外部数据文件 ═══
+# Timestamp: 2026-09-15
+# Software: debugedit 5.3（find-debuginfo 依赖 file/cpio）；机制适用于任何「系统同名工具是
+#           toybox 简化版、需改用 GNU 版」的适配场景
+# Gate: PR #9255 / 真机 conan create + 上游 testsuite 实测（含受控对照与 PATH 解析验证）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-ohos-gnu-tool-injection-needs-prepend-and-datadir
+trigger_tool:           conan|cmake|autotools|make|sh
+phase:                  build|test|test_package|runtime
+error_signature:        Unknown option 'N' \(see "file --help"\)|
+                           Unknown option 'quiet' \(see "cpio --help"\)|
+                           could not find any valid magic files|
+                           Extracting debug info from 0 files|
+                           file: could not find any valid magic files! \(No such file or directory\)
+
+severity:               2
+category:               toolchain, environment, path, toybox, conan, porting, ohos
+match_keywords:         toybox, GNU coreutils, file -N, cpio --quiet, MAGIC, magic.mgc,
+                           append_path, prepend_path, PATH 顺序, 工具遮蔽, shadowed by /bin,
+                           command -v, runenv, buildenv, find-debuginfo
+title:                  OHOS 系统同名工具是 toybox 简化版时，用工包注入 GNU 版必须 prepend_path（append 会被 /bin 遮蔽而不生效），且部分工具还需补齐其外部数据文件（GNU file 需 MAGIC=magic.mgc）
+
+root_cause: >
+  OHOS 的 /bin/* 大量由 toybox 提供简化实现，与 GNU coreutils/工具行为不兼容。
+  适配时常见做法是 require 一个 GNU 版工具包并把它的 bin/ 目录注入 PATH。此处有两个
+  **独立且都极易漏**的陷阱：
+
+  ① **PATH 顺序**：用 `env.append_path("PATH", p)` 会把目录追加到 PATH **末尾**。
+     而 OHOS 的 `/bin`、`/usr/bin` 在 PATH 前面，于是系统 toybox 版先被命中，
+     注入的 GNU 版**从未生效**。实测证据（debugedit 适配）：
+
+         # append_path —— 注入无效
+         $ command -v file
+         /bin/file                     # toybox 0.8.12，不支持 -N
+         $ find ... | file -N -f -
+         file: Unknown option 'N' (see "file --help")   # 枚举到 0 个文件
+
+         # prepend_path —— 生效
+         $ command -v file
+         <conan>/p/file.../bin/file    # file-5.48
+
+     本坑最阴险之处：**注入代码看起来完全正确**（依赖已 require、路径确实进了 PATH、
+     buildenv/runenv 也都生成成功），只是顺序不对。日志里看不到「被遮蔽」的提示，
+     只能靠 `command -v` 实测确认。
+
+  ② **外部数据文件**：部分 GNU 工具的「能力」不在二进制里，而在外部数据文件。
+     GNU `file` 的分类能力来自 magic 数据库（magic.mgc），默认按编译内置路径与
+     `$HOME/.magic.mgc` 等位置查找；conan 包把它放在 `<pkg>/share/misc/magic.mgc`，
+     不在默认搜索路径里，于是即便 PATH 已正确指向 GNU file，仍报：
+
+         file: could not find any valid magic files! (No such file or directory)
+
+     表现为「换了 GNU 工具却依然失败」，与①症状相似但根因完全不同。
+
+  两者叠加时（先 append 到末尾、又没设 MAGIC），现象都是「已有依赖但功能不可用」，
+  极易被误判为「依赖缺失」或「上游工具本身不支持该平台」。
+
+affected_scope: >
+  任何在 OHOS 上适配「构建/测试流程调用系统工具」的库——特别是 autotools/CMake
+  工程里调用 file / cpio / patch / install / sed / awk / grep / tar 等被 toybox
+  替换的工具。典型信号：报 `Unknown option 'X'` 或工具功能静默降级。
+  也适用于消费方 require 了 GNU 工具包却「看起来没生效」的场景。
+  不适用：不调用外部工具、或工具不在 toybox 替换范围内的库。
+
+verification_cmd:       # ① 决定性：确认运行时实际命中哪个二进制（不看配置，看解析结果）
+                           command -v file            # 期望 <conan>/.../p/bin/file，非 /bin/file
+                           command -v cpio
+                           file --version             # 期望 file-5.48（GNU），非 toybox
+                           # ② 确认该 GNU 工具支持所需选项
+                           file -N /dev/null          # 期望正常输出，非 "Unknown option 'N'"
+                           # ③ 若工具依赖外部数据文件，显式验证其可用性
+                           echo '' | file -N -f -     # 无 MAGIC 时报 could not find any valid magic files
+                           # ④ 在**消费方环境**（非交互 shell）复验：testsuite/构建脚本
+                           #    常以子 shell 运行，务必在同等环境下验证
+                           sh -c '. <generators>/conanbuild.sh; command -v file'
+
+rec_priority:           1
+rec_approach:           prepend-gnu-tool-bindirs-and-set-tool-datadir-env
+rec_description: >
+  两步同时做，缺一不可：
+
+  ① **用 prepend_path 而非 append_path** 注入 GNU 工具的 bin 目录：
+
+         for _n, dep in self.dependencies.items():
+             if not dep.package_folder:      # 未解析出二进制的依赖：见下方「相对路径陷阱」
+                 continue
+             for p in dep.cpp_info.bindirs:
+                 env.prepend_path("PATH", p)      # 必须 prepend
+
+     ⚠️ **相对路径陷阱**：`cpp_info.bindirs` / `cpp_info.libdirs` 在依赖**未解析出
+     二进制**（`dep.package_folder` 为 `None`）时返回**相对默认值** `['bin']` /
+     `['lib']`，直接注入会往 PATH/LD_LIBRARY_PATH 里塞进裸 `bin` / `lib` 条目
+     （实测生成的 env 文件：`PATH=…:bin:bin:bin:…`、
+     `LD_LIBRARY_PATH=…:lib:lib:lib:lib:…`）。这些条目既无意义，又会被运行时
+     当前工作目录下的同名目录意外命中。**必须先判 `dep.package_folder` 再取目录**，
+     或自行拼 `dep.package_folder`（但拼接不会消除「None 时无意义」的问题）。
+
+     安全性：依赖包 bin/ 通常只含自身工具（file / cpio / dwz / eu-* 等），
+     前置不会遮蔽系统工具；若某包 bin/ 含通用名工具（如 sed/awk），应逐个确认后再前置。
+
+  ② **对依赖外部数据文件的工具，显式设置其数据文件路径**。以 GNU file 为例：
+
+         if "file" in self.dependencies:
+             magic = os.path.join(self.dependencies["file"].package_folder,
+                                  "share", "misc", "magic.mgc")
+             if os.path.isfile(magic):
+                 env.define("MAGIC", magic)
+
+  ③ **验证方式必须是 `command -v` + 实际调用**，而不是「依赖已 require」「配置已生成」。
+     实测反例：debugedit 适配中 append_path 版本所有配置都正常，但
+     `command -v file` 解析到 /bin/file，功能实际不可用；改正为 prepend 后
+     该项测试组由失败转通过（上游测试通过数 34 → 36）。
+
+  ④ 若同一机制影响多项测试，修一次应扫清整组（本次 PATH prepend 后
+     find-debuginfo 枚举数由 0 → 3 files，多项测试随之转通过）。
+rec_command:            # 配方 generate() 中
+                           for _n, dep in self.dependencies.items():
+                               if not dep.package_folder:   # 跳过未解析出二进制的依赖
+                                   continue
+                               for p in dep.cpp_info.bindirs:
+                                   env.prepend_path("PATH", p)     # ① 必须 prepend
+                           # ② 依赖外部数据文件的工具（GNU file 需 magic.mgc）
+                           if "file" in self.dependencies:
+                               magic = os.path.join(
+                                   self.dependencies["file"].package_folder,
+                                   "share", "misc", "magic.mgc")
+                               if os.path.isfile(magic):
+                                   env.define("MAGIC", magic)
+                           # 验证（在消费方/子 shell 环境下）
+                           #   command -v file   → 必须指向 conan 包而非 /bin
+                           #   file -N /dev/null → 必须不报 Unknown option
+rec_auto_fix:           false
+rec_impl:               manual-recipe-edit
+
+fallback_priority:      2
+fallback_approach:      patch-upstream-to-call-tools-by-absolute-path
+fallback_description: >
+  若不便调整 PATH（例如工具由上游 configure 在构建期硬编码检测、或需要保持
+  buildenv 干净），退路是在补丁里把上游脚本对工具的调用改为绝对路径
+  （如把 `file -N -f -` 改为 `"$FILE_BIN" -N -f -`，并由配方注入 FILE_BIN）。
+  代价：改动上游脚本、上游升级易冲突，且需覆盖所有调用点；仅作为过渡或
+  「上游工具名被硬编码检测」时的兜底。
+fallback_command:       # 补丁思路
+                           #   -  find ... -print | file -N -f - |
+                           #   +  find ... -print | "$FILE" -N -f - |
+                           # 配方：env.define("FILE", <file 包>/bin/file)
+fallback_auto_fix:      false
+fallback_impl:          manual-recipe-edit
+
+forbid_1_pattern:       已 require.*GNU.*即认为生效|依赖已加.*就能用了|配置生成成功.*工具.*就可用
+forbid_1_reason:        require 了 GNU 工具包≠运行时命中它。PATH 顺序会让系统 toybox 版
+                          先被命中，而所有配置、日志都显示「正常」——只有 `command -v`
+                          的实际解析结果能证明是否生效。
+forbid_1_consequence:   修复看似完成但功能未变，反复排查「依赖」方向而找不到真因。
+
+forbid_2_pattern:       用 append_path.*注入.*PATH|env\.append_path\("PATH"
+forbid_2_reason:        append_path 把目录放到 PATH **末尾**，会被 /bin、/usr/bin 的系统
+                          toybox 版遮蔽。系统同名工具存在时，注入必须用 prepend_path。
+forbid_2_consequence:   注入静默失效，且因为「代码里明明写了注入」比完全不写更难怀疑。
+
+forbid_3_pattern:       报 Unknown option.*就断定.*工具版本问题|Unknown option.*一定是.*toybox.*bug
+forbid_3_reason:        `Unknown option 'X'` 有两种可能：① 命中了 toybox 简化版（本条目）；
+                          ② 真的用了不支持该选项的旧版本。先用 `command -v <tool>` +
+                          `<tool> --version` 区分，再决定是调 PATH 还是换版本。
+forbid_3_consequence:   直接去升级/降级工具包版本，而实际问题在 PATH 顺序，白费功夫。
+
+forbid_4_pattern:       换了.*GNU.*工具.*就不用.*数据文件|工具能运行.*即.*功能可用
+forbid_4_reason:        部分 GNU 工具的「能力」来自外部数据文件而非二进制。GNU file 的
+                          分类能力依赖 magic.mgc，缺它时报 `could not find any valid
+                          magic files`——表现为「换了 GNU 工具却依然失败」，
+                          与 PATH 问题症状相似但根因完全不同，不可混淆。
+forbid_4_consequence:   在 PATH 上反复折腾却解决不了「工具已运行但功能失效」的问题。
+
+forbid_5_pattern:       在交互 shell 验证.*即认为.*构建环境.*正常|本机 command -v 通过.*就.*没问题
+forbid_5_reason:        构建/测试脚本常以子 shell 运行，且 conan 的 buildenv/runenv 与
+                          交互 shell 的 PATH 可能不同（依赖注入在 env 对象里，不在当前
+                          shell）。必须在**消费方同等环境**（source 生成的环境脚本后的
+                          子 shell）里复验。
+forbid_5_consequence:   本机手工验证通过、构建/测试仍失败，误判为环境差异而非配置缺陷。
+
+principles:             判定「工具是否被替换成功」要看运行时解析结果（`command -v` +
+                        实际调用），而不是配置或依赖声明；
+                        「工具能运行」与「工具功能可用」是两件事，后者还需其数据文件齐备；
+                        环境注入类改动必须在与消费方一致的环境中验证。
+similar_to:             E188, E106, E510, E254, DRAFT-ohos-configure-probe-self-load-failure-misjudges-version
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-ohos-gnu-tool-injection-needs-prepend-and-datadir.md
+last_updated:           2026-09-15
+source_event:           debugedit 5.3 适配（PR #9255）：上游 find-debuginfo 用
+                        `file -N -f -` 分类 ELF/.a 归档、`cpio -pd0mL --quiet` 搬移
+                        .debug 文件；OHOS /bin/file 与 /bin/cpio 均为 toybox 0.8.12，
+                        分别报 "Unknown option 'N'" 与 "Unknown option 'quiet'"，导致
+                        "Extracting debug info from 0 files" 及多组测试失败。
+                        接入 file/5.48.1 + cpio/2.15 后仍失败，实测 `command -v file`
+                        解析到 /bin/file —— 根因是 append_path 把 conan bin 放在 PATH
+                        末尾；改 prepend_path 并设 MAGIC=<file 包>/share/misc/magic.mgc
+                        后，枚举数由 0 → 3 files，上游测试通过数 34 → 40。
+authors:                jumping_ggjjkk
+source_pr:              9255
+source_commit:          7d7b0c38b
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-15

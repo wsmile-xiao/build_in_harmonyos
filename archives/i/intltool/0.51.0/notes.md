@@ -1,37 +1,45 @@
 # intltool 0.51.0 适配笔记
 
 ## 编译环境
-- 构建系统: autotools
-- 编译日期: 2026-04-20
-- 编译器: N/A（纯 Perl 脚本）
-- 状态: success
+- **构建系统**: autotools（纯 Perl 工具集，无原生编译）
+- **编译日期**: 2026-09-02
+- **平台**: arm64-ohos（OpenHarmony PC）
+- **状态**: built（Conan 配方验证通过）
+- **补丁数量**: 1（0001-configure.patch——跳过 XML::Parser 模块检查）
 
-## 编译步骤
-1. Configure：`./configure --prefix=$DEFAULT_PREFIX`
-   - 补丁跳过 XML::Parser 检查（XS 模块因 HMDFS dlopen 限制无法加载）
-2. Make：`make -j1`（使用 -j1 避免 HMDFS mkfifo 问题）
-3. Make Install：`make install DESTDIR=$TEST_PREFIX`
-4. Make Check：`make check -j1`（1 FAIL - selftest 因 HMDFS 执行限制失败）
+## 编译步骤（conan create 全流程）
 
-## 遇到的问题与解决方案
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-| 1 | XML::Parser 加载失败 | HMDFS dlopen 限制 XS 模块 | 补丁跳过 XML::Parser 检查 |
-| 2 | 并行构建失败 | HMDFS mkfifo 问题 | 使用 -j1 构建 |
-| 3 | selftest 失败 | HMDFS 无法执行 Perl 脚本 | 平台限制，非功能问题 |
+```bash
+conan create archives/i/intltool/0.51.0 --build=missing -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+```
 
-## 源码修改
-| 文件 | 修改内容 | 是否已生成补丁 |
-|------|----------|----------------|
-| configure | 跳过 XML::Parser 检查 | ✅ 0001-configure.patch |
+### 1. 源码获取（source()）
+`get()` 从 conandata 声明的 Launchpad 官方发行下载并 strip_root（目录 intltool-0.51.0）。
 
-## 依赖版本
-- perl
+### 2. 构建（build()）
+- 纯 Perl 脚本集合（intltool-update/intltoolize/intltool-extract/intltool-merge/intltool-prepare）
+- autotools：configure + make（用 -j1 避免 HMDFS mkfifo 并行问题）
+- 0001-configure.patch 跳过 XML::Parser 检查（XS 模块因 HMDFS dlopen 限制无法加载）
 
-## 验证结果
-- intltool-update --version → intltool-update (intltool) 0.51.0 ✅
-- intltoolize --version → intltoolize (GNU intltool) 0.51.0 ✅
+### 3. 打包（package()）
+- 产物：bin/ 下 5 个可执行脚本 + share/intltool 数据
+- 依赖 perl（ohpcd 已发布）
 
-## 注意事项
-- Perl regex 警告（未转义花括号）为非致命，仅影响外观
-- 测试套件 selftest 失败是平台限制，不影响实际功能
+## 上游测试（rule 4）
+- 上游有 selftest 套件（tests/selftest.pl + tests/cases/ 46 个用例文件，
+  tests/Makefile.am 声明 TESTS = selftest），40 个编号用例
+- 真机实测：**40/40（100%）**——selftest exit=0，全部通过
+  （运行方式：E337 解释器桥——从 tests/ 目录 `perl selftest.pl`；HMDFS 仅
+  拒绝 shebang 直接执行，解释器调用可正常运行）
+- 运行时依赖 XML::Parser：以 ohpcd expat 2.7.3 编译 XML-Parser 2.47 +
+  PERL5LIB 注入；无 XML::Parser 时 15/40（25 个 XML 类用例失败），
+  补齐后 40/40 全部通过
+- 适配后：test_package R34 真实执行 intltool-update --version 校验 0.51.0
+
+## 已知限制
+- CI 沙箱 XML::Parser XS 模块因 HMDFS dlopen 限制无法加载——configure 检查
+  用补丁跳过；运行时以 ohpcd expat 编译 XML::Parser + PERL5LIB 注入解决
+---
+
+**编译结束**: 2026-09-02 11:37
+**最终状态**: built

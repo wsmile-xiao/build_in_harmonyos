@@ -1,0 +1,119 @@
+#====================================================================
+# DRAFT-gcc9-ohos-lld-autocodesign-toolchain-route — OHOS SDK ld.lld 链接即
+#   签名路线：gcc 工具链以 lld 为唯一链接器，取消 binary-sign-tool 全链
+# 对应人类文档: knowledge/drafts/DRAFT-gcc9-ohos-lld-autocodesign-toolchain-route.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: gcc/9.5.0.1@ohpcd/stable 适配（路线 B，替代 9.5.0 的 GNU ld + 手动签名）
+#====================================================================
+
+id:                     DRAFT-gcc9-ohos-lld-autocodesign-toolchain-route
+trigger_tool:           gcc|ld.lld|collect2|conan|binary-sign-tool
+phase:                  build
+error_signature:        exec.*rc=126|Permission denied.*executable|
+                         not signed|codesign.*reject|kernel 拒绝执行|
+                         xgcc -print-prog-name=ld.*不匹配
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               ohos, linking, codesign, gcc, lld, conan, toolchain
+match_keywords:         ld.lld, .codesign, binary-sign-tool, DEFAULT_LINKER,
+                         --with-ld, 自动签名, GNU ld 不签名, rc=126,
+                         编译器包装器, 薄包装器, GCC_EXEC_PREFIX
+title:                  OHOS 上编译器工具链路线选型：SDK ld.lld 链接产物自动带
+                        .codesign（内核可加载），GNU ld 不签名被拒（rc=126）；
+                        gcc 用 --with-ld 烘焙 DEFAULT_LINKER + 薄包装器
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             OHOS 内核只加载带 .codesign 节的 ELF。SDK ld.lld 每次链接
+                         自动附加签名；GNU binutils ld（2.45）不签名，产物 execve
+                         被拒（rc=126）。9.5.0 路线 A 用 CC 包装器 + binary-sign-tool
+                         对构建树/安装树全链补签——脆弱（漏签即拒跑）。9.5.0.1 路线 B
+                         改为 lld 唯一链接器，签名零干预：
+                         ① gcc 顶层 configure 不消费 --with-ld，但经 baseargs 原样
+                         转发给 gcc/configure → DEFAULT_LINKER 绝对路径烘焙进 gcc.c/
+                         collect2（对 "ld" 直取，access X_OK）；
+                         ② LD/LD_FOR_TARGET 环境补注；
+                         ③ 包装器仅剩搜索前缀（-B/-isystem/-D），无签名逻辑。
+affected_scope:         OHOS 上任何自带链接器/驱动宿主工具链的 conan 配方
+                         （gcc 系、后续 binutils 用户等）
+verification_cmd:       # all-gcc 后 fail-fast 断言（配方内建）
+                         <build>/gcc/xgcc -B<build>/gcc/ -print-prog-name=ld
+                         # 期望输出 == 烘焙的 SDK ld.lld 绝对路径
+                         # 链接产物断言
+                         llvm-readelf -S <exe> | grep -q .codesign && echo SIGNED
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           lld-baked-default-linker
+rec_description:        1) configure 加 `--with-ld=<SDK ld.lld realpath>`（顶层会
+                            转发给 gcc/configure；gcc/configure 校验可执行 +
+                            "-v | grep GNU"——lld 报 "compatible with GNU linkers"
+                            可过）。
+                         2) 环境 LD=<lld> LD_FOR_TARGET=<lld> 补注。
+                         3) all-gcc 后断言 xgcc -print-prog-name=ld == 烘焙路径，
+                            不匹配即 fail-fast（防走 GNU ld 无签名路线）。
+                         4) 包内驱动包装器（bin/gcc shell）做 lld 可用性检查：
+                            -print-prog-name=ld 解析失败即报错。
+                         5) 拒绝 -fuse-ld* 入 CC：clang 下 -fuse-ld=bfd 会 (a)
+                            对 -E 探测输出 unused-argument 警告 → autoconf
+                            conftest.err 非空 → HAVE_LIMITS_H 误判 no → limits.h
+                            缺失链式崩溃；(b) 同时禁用 lld 自动签名。
+rec_command:            ../gcc-src/configure --with-ld=<SDK>/native/llvm/bin/ld.lld \
+                           LD=<SDK>/native/llvm/bin/ld.lld LD_FOR_TARGET=<同> ... \
+                           --enable-default-pie
+                         make all-gcc
+                         <build>/gcc/xgcc -B<build>/gcc/ -print-prog-name=ld   # == 烘焙路径
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      sign-wrapper-route
+fallback_description:   路线 A（9.5.0）：CC 包装器 + _sign_elf_tree 构建树/安装树
+                         全链 binary-sign-tool 补签。可用但脆弱：漏签任何新产物
+                         （genattr/gencondmd 等构建期生成的宿主程序）即拒跑，
+                         包装器复杂度高（每驱动 ~60 行签名逻辑）
+fallback_command:       binary-sign-tool sign <elf>   # 逐产物补签
+fallback_auto_fix:      false
+fallback_impl:          wrapper-script
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       -fuse-ld=bfd|CC=.*-fuse-ld
+forbid_1_reason:        clang 对 -E 探测输出 unused-argument 警告污染 conftest.err，
+                         autoconf 功能误判 + 禁用 lld 自动签名
+forbid_1_consequence:   limits.h 缺失链式崩溃 / 产物无签名被内核拒绝
+forbid_2_pattern:       链接后再 binary-sign-tool 全树补签作为主路线
+forbid_2_reason:        任何构建期新产生且漏扫的宿主程序都会拒跑；构建树可变产物多，
+                         扫描时机难以穷举（9.5.0 实证）
+forbid_2_consequence:   构建随机中断于 "Permission denied"，且每次复现位置不同
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 ═══
+causes:                 DRAFT-gcc9-ohos-nonpie-copy-reloc-lo12-crash
+caused_by:              DRAFT-ohos-elf-skip-strip-codesign, DRAFT-E077B-ohos-sdk-autocodesign-invalid
+similar_to:             DRAFT-asmc-native-arm64-host-x86-64-elf-ldlld,
+                         DRAFT-aspectc-double-bootstrap-libstdcxx-abi-codesign
+conflicts_with:         []
+prerequisite_of:        DRAFT-gcc9-ohos-dejagnu-torture-evidence
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-gcc9-ohos-lld-autocodesign-toolchain-route.md
+last_updated:           2026-09-22
+source_event:           gcc/9.5.0.1@ohpcd/stable 适配；conan create 全链成功
+                         （包 6b129b068851896169fae42d399fa922d239ce8a）
+
+# ═══ 知识协作 ═══
+
+authors:                ohpcd <ohpcd@localhost>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-22
+
+draft:                  true

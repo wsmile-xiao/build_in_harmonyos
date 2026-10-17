@@ -1,0 +1,62 @@
+# ═══ Draft knowledge entry — Conan2 autotools：tc.environment() 之后才 append 的 extra_cflags/extra_ldflags 静默丢失，依赖 -I/-L 进不了 configure ═══
+# Timestamp: 2026-09-22
+# Software: libextractor 1.13（通用：所有先取 tc.environment() 再追加 extra_* 并把它传回 generate(env=) 的 autotools 配方）
+# Gate: conan-verify G2 conan create 内 configure 真实执行（与 CI 同源）
+# 判重：DRAFT-scrypt-1.3.2-autotoolsdeps-ac-search-libs 与 DRAFT-E2186-autotools-deps-missing-dep-flags
+#   讲的是「漏调 AutotoolsDeps ⇒ 依赖目录不注入」。本条是另一条失效路径：配方自拼 Environment
+#   传回 generate(env=) 时，extra_cflags/extra_ldflags 因取值时机而被丢弃。
+#   症状同为头/库探测失败，但触发条件（调用顺序）与修法（env.define 显式导出／调整顺序）均不同，
+#   按 AGENTS §6.2① 条件 2「同症状、既有条目没写的另一条解法」判 create。
+
+id: DRAFT-libextractor-1.13-autotools-env-define-dep-flags
+severity: 2
+category: autotools|conan|dependency|build-system|ohos-platform
+trigger_tool: conan create / configure
+phase: configuration
+error_signature: "checking for ltdl.h... no|libextractor requires libltdl|CPPFLAGS='-DNDEBUG'|LDFLAGS 为空且无依赖 -I -L"
+match_keywords: AutotoolsToolchain, environment, extra_cflags, extra_ldflags, generate env, CPPFLAGS, LDFLAGS, ltdl.h, libltdl, configure 探测退化, Environment 即时快照
+
+title: Conan2 AutotoolsToolchain.environment() 是即时快照——其后 append 的 extra_cflags/extra_ldflags 不再被合并，且 generate(env=) 不会二次计算，依赖 -I/-L 全程不进 configure，探测退化为搜 /usr/include
+
+approach: 在 generate() 里自己构造 Environment 并传给 tc.generate(env=...) 的 autotools 配方，
+  依赖目录必须显式写进那个 env：先 env = tc.environment()，随后
+  env.define("CPPFLAGS", 各依赖 includedirs 拼 -I)、
+  env.define("LDFLAGS", 各依赖 libdirs 拼 -L)，最后 tc.generate(env=env)；目录统一从
+  self.dependencies[*].cpp_info 遍历取，勿硬编码。若坚持用 extra_cflags/extra_ldflags，
+  则必须在调用 tc.environment()（或不带 env 的 tc.generate()）之前完成追加。
+  需要真 -l 才能命中的探测（候选库名与依赖产物名不一致，如 ncurses 只出 libncursesw）仍应
+  改走 AutotoolsDeps(self).generate()（见 similar_to 的 scrypt 条）。
+
+root_cause: conan 2.29.1 的 conan/tools/gnu/autotoolstoolchain.py 中，environment()（:277）
+  在调用瞬间新建 Environment 并组装 CFLAGS/LDFLAGS，extra_cflags/extra_ldflags 只在那一次
+  组装中被读取（:236、:251）；generate(self, env=None)（:329）里 env = env or
+  self.environment()（:331），调用方自带 env 时不会再算第二次。本包顺序是「先 environment()
+  拿 env → 之后才 extra_cflags.append → 最后 generate(env=env)」，两处追加全部落空。
+  单变量实测（同 CONAN_HOME、同 profile，仅删 env.define 两行、保留 extra_* 赋值）：
+  改前 config.log 为 CPPFLAGS='-DNDEBUG'、LDFLAGS=''，configure 报 checking for ltdl.h... no
+  并以 requires libltdl 终止（G2 FAIL）；交付态 config.log 的 CPPFLAGS 带 10 个依赖 -I、
+  LDFLAGS 带 10 个 -L，探到 libltdl（G2 PASS，src/main 7/7 + src/plugins 23/23 全绿＝30/30；09-22 当时读数 21/21，现 HEAD 重跑 23/23）。
+
+affected_scope: 所有「取过 environment() 或把自建 env 传给 generate(env=)」的 Conan 2.x
+  autotools 配方——OHOS 适配里很常见，因为常要在同一 env 里再注入 MAKEINFO、
+  SHELL/CONFIG_SHELL 路由与 LD_LIBRARY_PATH。不适用：extra_* 在快照之前就已设好的常规配方
+  （正常生效）；CMake/Meson 各有独立 toolchain，不属本条。
+
+verification_cmd: grep -n 'tc.environment()|extra_cflags|extra_ldflags|tc.generate' conanfile.py
+  —— 若 extra_* 的行号晚于 environment() 且随后有 generate(env=)，即命中本条；
+  grep -nE "^CPPFLAGS=|^LDFLAGS=" <build_folder>/config.log —— 只有 -DNDEBUG 或空值即命中，
+  修复后应看到依赖包的 -I/-L；python3 scripts/ohc-run.py conan-verify <name> <ver> 的 G2 应 PASS
+
+rec_priority: 1
+rec_approach: define-cppflags-ldflags-in-env-or-set-extra-flags-before-environment
+prescan_pattern: '\.extra_(cflags|ldflags)\.append'
+prescan_globs: '**/conanfile.py'
+
+safety_boundary: 本条不是「别用 AutotoolsDeps」——两者是不同通道：Deps 会连 -l 一起进 LIBS，
+  本法只给 -I/-L。判据：configure 只需看得见头/库目录（AC_CHECK_HEADER，或上游自己写 -l）
+  用本法；必须有真 -l 才能探到符号时用 Deps。本法代价是依赖目录由配方自维护，升级依赖后
+  漏同步会静默退回搜 /usr/include，故必须走 self.dependencies 遍历而非抄死路径。
+  若只是「缺 Deps」，请照 DRAFT-scrypt-1.3.2-autotoolsdeps-ac-search-libs 补 AutotoolsDeps，
+  不要照抄本条的 define 写法。
+
+similar_to: DRAFT-scrypt-1.3.2-autotoolsdeps-ac-search-libs, DRAFT-E2186-autotools-deps-missing-dep-flags, E467

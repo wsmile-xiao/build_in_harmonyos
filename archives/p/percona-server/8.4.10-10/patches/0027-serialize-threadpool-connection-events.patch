@@ -1,0 +1,119 @@
+diff --git a/sql/threadpool_unix.cc b/sql/threadpool_unix.cc
+index 22c017708f3b79a63f6088210ac7e4856c794082..dfd23d80cce42a107dfc326fc04c3f7e2054edb7 100644
+--- a/sql/threadpool_unix.cc
++++ b/sql/threadpool_unix.cc
+@@ -118,6 +118,7 @@ struct connection_t {
+   bool logged_in;
+   bool bound_to_poll_descriptor;
+   bool waiting;
++  bool event_pending;
+   uint tickets;
+   ulonglong queue_enter_time;
+ };
+@@ -739,12 +740,27 @@ static connection_t *listener(thread_group_t *thread_group) {
+         thread_group->queue.is_empty();
+ 
+     /*
+-      If listener_picks_event is set, listener thread will handle first event,
+-      and put the rest into the queue. If listener_pick_event is not set, all
+-      events go to the queue.
++      If listener_picks_event is set, listener thread will handle the first
++      unique event and put the rest into the queue. Ignore duplicate events for
++      a connection that is already queued or being processed.
+     */
+-    for (int i = (listener_picks_event) ? 1 : 0; i < cnt; i++) {
++    for (int i = 0; i < cnt; i++) {
+       connection_t *c = (connection_t *)native_event_get_userdata(&ev[i]);
++      if (c->event_pending) {
++        continue;
++      }
++      c->event_pending = true;
++
++      if (listener_picks_event && retval == nullptr) {
++        retval = c;
++        if (connection_is_high_prio(*retval)) {
++          thread_group->hp_queue_wait_stats.addValue(0.0);
++        } else {
++          thread_group->queue_wait_stats.addValue(0.0);
++        }
++        continue;
++      }
++
+       mark_queue_enter(c);
+       if (connection_is_high_prio(*c)) {
+         c->tickets--;
+@@ -755,21 +771,14 @@ static connection_t *listener(thread_group_t *thread_group) {
+       }
+     }
+ 
+-    if (listener_picks_event) {
+-      /* Handle the first event. */
+-      retval = (connection_t *)native_event_get_userdata(&ev[0]);
+-      // record 0 wait time to the corresponding stats because we handled event
+-      // here
+-      if (connection_is_high_prio(*retval)) {
+-        thread_group->hp_queue_wait_stats.addValue(0.0);
+-      } else {
+-        thread_group->queue_wait_stats.addValue(0.0);
+-      }
++    if (retval != nullptr) {
+       mysql_mutex_unlock(&thread_group->mutex);
+       break;
+     }
+ 
+-    if (thread_group->active_thread_count == 0) {
++    if (thread_group->active_thread_count == 0 &&
++        (!thread_group->high_prio_queue.is_empty() ||
++         !thread_group->queue.is_empty())) {
+       /* We added some work items to queue, now wake a worker. */
+       if (wake_thread(thread_group)) {
+         /*
+@@ -1033,6 +1042,7 @@ static void queue_put(thread_group_t *thread_group, connection_t *connection) {
+   DBUG_ENTER("queue_put");
+ 
+   mysql_mutex_lock(&thread_group->mutex);
++  connection->event_pending = true;
+   connection->tickets = connection->thd->variables.threadpool_high_prio_tickets;
+   mark_queue_enter(connection);
+   // put new admin connection into high prio queue instead of normal
+@@ -1112,6 +1122,11 @@ static connection_t *get_event(worker_thread_t *current_thread,
+       if (io_poll_wait(thread_group->pollfd, &nev, 1, 0) == 1) {
+         thread_group->io_event_count++;
+         connection = (connection_t *)native_event_get_userdata(&nev);
++        if (connection->event_pending) {
++          connection = nullptr;
++          continue;
++        }
++        connection->event_pending = true;
+         /*
+           Since we are going to perform an out-of-order event processing for the
+           connection, first check whether it is eligible for high priority
+@@ -1241,6 +1256,7 @@ static connection_t *alloc_connection(THD *thd) noexcept {
+     connection->waiting = false;
+     connection->logged_in = false;
+     connection->bound_to_poll_descriptor = false;
++    connection->event_pending = false;
+     connection->abs_wait_timeout = ULLONG_MAX;
+     connection->tickets = 0;
+     connection->queue_enter_time = 0;
+@@ -1458,12 +1474,17 @@ static int start_io(connection_t *connection) {
+   */
+   Vio *vio = connection->thd->get_protocol_classic()->get_vio();
+   int fd = mysql_socket_getfd(vio->mysql_socket);
++  mysql_mutex_lock(&group->mutex);
++  connection->event_pending = false;
++  int result;
+   if (!connection->bound_to_poll_descriptor) {
+     connection->bound_to_poll_descriptor = true;
+-    return io_poll_associate_fd(group->pollfd, fd, connection);
++    result = io_poll_associate_fd(group->pollfd, fd, connection);
++  } else {
++    result = io_poll_start_read(group->pollfd, fd, connection);
+   }
+-
+-  return io_poll_start_read(group->pollfd, fd, connection);
++  mysql_mutex_unlock(&group->mutex);
++  return result;
+ }
+ 
+ static void handle_event(connection_t *connection) {

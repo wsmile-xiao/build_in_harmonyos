@@ -1,0 +1,32 @@
+#====================================================================
+# Draft: fungw 1.2.2 (scconfig build) on OHOS/HMDFS -- three failures that
+#        all look like "upstream is broken" but are platform/tooling gaps:
+#        (1) scconfig bootstraps itself with `cc`, (2) neither symlink nor
+#        hardlink works on the build volume, (3) the shipped .so keeps
+#        undefined genht symbols because the link rule omits src_3rd.
+#====================================================================
+
+id:                     DRAFT-FUNGW-122-SCCONFIG-OHOS-BUILD
+trigger_tool:           conan|make|clang|scconfig
+phase:                  compilation|linking|packaging
+error_signature:        make: cc: No such file or directory|./configure: Permission denied|ln: cannot create symbolic link.*Permission denied|undefined reference due to --no-allow-shlib-undefined|genht/htsp.h: No such file or directory|sccbox
+
+severity:               2
+category:               portability|build-system|ohos-platform|filesystem
+match_keywords:         fungw, scconfig, sccbox, repo.hu, genht, genht_std.a, puplug, cc not found, hard link, symlink, EPERM, EACCES, HMDFS, --no-allow-shlib-undefined, soname alias, .so.1.2.2
+
+title:                  scconfig 系项目（fungw/librnd/pcb-rnd 家族）在 OHOS 上的三个必踩坑：configure 自举要 cc、HMDFS 建不出 symlink/hardlink（SONAME 别名与 genht_std.a）、上游 .so 漏链 src_3rd 目标文件导致消费者链接报 --no-allow-shlib-undefined
+
+root_cause:             (1) 项目根 configure 只有 51 字节：`cd scconfig && make && ./configure "$@"`，scconfig 用 make 内建变量 CC（默认 `cc`）编译 hooks.c；OHOS SDK 只提供 clang，于是第一条命令就 `make: cc: No such file or directory`。(2) 上游用两类链接：src_3rd/genht 的 `genht_std.a: $(LIBA) ; ln -s` 兼容别名（make 直接 Error 2），以及 install_link_ 的 `sccbox ln -f`（实为硬链接，建立 libX.so -> .so.X -> .so.X.Y.Z）；HMDFS 卷上 os.symlink 报 EACCES、os.link 报 EPERM，硬链接那条还被 sccbox 吞掉退出码，于是静默只留下 .so.X.Y.Z。(3) libfungw*.so 的链接规则只写 `$(CC) $(OBJS) -o $@ $(LDFLAGS) -dynamic -shared`，OBJS 不含 src_3rd/genht 的目标文件（上游把 genht 当独立静态库，只有 regression 测试显式链 genht_std.a），共享库因此留下 strhash/htsp_init/htsp_get/htpp_* 等未定义符号；OHOS 的 ld.lld 默认 --no-allow-shlib-undefined，任何消费者链接立即失败。附带：install 规则不装 src_3rd/genht/*.h，而 libfungw/fungw.h 直接 #include <genht/htsp.h>，消费者编译期就挂。
+affected_scope:         用 scconfig 构建的项目（repo.hu 系：fungw / genht / librnd / pcb-rnd / camv-rnd / sch-rnd 等），以及任何把"3rd-party 静态库不并入共享库 + 用 ln/ln -s 建 SONAME 别名"作为安装惯例的上游包；HMDFS（鸿蒙本机存储卷）上的一切 conan 构建目录。
+verification_cmd:       conan create . -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 && conan create . -o shared=False -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+rec_priority:           1
+rec_approach:           inject-cc-copy-instead-of-link-relink-with-3rd-party-objects-ship-missing-headers
+rec_description:        (1) 不要用裸 ${CC}：从 conf `tools.build:compiler_executables` 取 c 编译器，命令前缀 `CC=<clang>`；conan 复制源码会丢 +x，`./configure` 要写成 `sh ./configure`（否则 exit 126）。(2) 凡是上游 Makefile 里出现 `ln -s` / `ln -f` 的目标，都在 make 之前用复制把产物备好（例如先 `make libgenht.a` 再 copy 成 genht_std.a，让 make 的别名规则因目标已存在且更新而跳过）；install_link_ 那类静默失败的 SONAME 别名在 package() 里按 `libX.so.X.Y.Z` 复制出 `.so.X.Y` / `.so.X` / `.so`（HMDFS 只能复制，别指望 symlink/hardlink）。(3) 共享库不自洽时，用 `make -C <dir> LDFLAGS="<原 LDFLAGS> <3rd-party/*.o>"`（命令行变量会传给子 make）把缺失的目标文件链进去，比让消费者补静态库更稳（补静态库虽能过链接，但可执行文件的符号默认不进动态符号表，dlopen 插件时会再炸）。(4) 头文件递归依赖没被 install 的（genht/htsp.h 之类），在 package() 里补拷进 include/。(5) scconfig 无 --with/--without，语言绑定全靠系统探测，探测到 perl/python 等须用 `./configure --disable-<lang>`（hook 见 libfungwbind/scconfig_hooks.h 的 CUSTOM_ARG 列表）。
+rec_command:            CC=<clang> sh ./configure --prefix=<pkg> --disable-perl && CC=<clang> make -C src_3rd/genht libgenht.a && cp src_3rd/genht/libgenht.a src_3rd/genht/genht_std.a && CC=<clang> make -C libfungw LDFLAGS="-rdynamic -fPIC $(ls src_3rd/genht/*.o)" && CC=<clang> make -j1
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# PR 交付后回填（与仓内绝大多数草稿同阶段做法一致）
+source_pr:
+source_commit:

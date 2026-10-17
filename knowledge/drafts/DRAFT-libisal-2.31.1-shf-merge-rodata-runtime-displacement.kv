@@ -1,0 +1,69 @@
+# ═══ Draft knowledge entry — SHF_MERGE 常量段在 OHOS 真机运行时移位，PC 相对寻址取到错位常量 ═══
+# Timestamp: 2026-09-19
+# Software: libisal 2.31.1（任何 .S/.c 把 SIMD 常量表放 .rodata.cst16,"aM" 的库）
+# Gate: make check / 上游功能测试（本例 checksum32_funcs_test 904 用例失败）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-libisal-2.31.1-shf-merge-rodata-runtime-displacement
+title: OHOS 真机上 SHF_MERGE 常量段（.rodata.cst16,"aM"）运行时相对静态布局移位，adrp/adr PC 相对取常量读到错位字节，SIMD 内核静默算错（A 半对 B 半错的典型假象）
+trigger_tool: make / clang / ld.lld / 运行期
+phase: build|testing|runtime
+error_signature: fail checksum rand|checksum.*Failed.*tests|NEON.*wrong.*(high|upper).*(16|half)|fail end test
+severity: 1
+category: platform|ohos|linker|rodata|simd|assembly|runtime
+match_keywords: SHF_MERGE, .rodata.cst16, aM, @progbits, adrp, adr, PC 相对, 常量表,
+  factors, 错位, 移位, displacement, checksum32_funcs_test, adler32, umlal2, no-op,
+  假指令错误, 运行时内存扫描
+keywords: SHF_MERGE, merge section, .rodata.cst16, "aM", adrp, :lo12:, adr 松弛,
+  linker relaxation, PC 相对寻址, SIMD 常量表, 错位加载, isal_adler32, B 和错误,
+  umlal2 no-op 误诊, volatile 微测试假象, 运行时扫描, fn-0x1444, 两份拷贝
+approach: drop-merge-flag-use-plain-rodata
+root_cause: 汇编文件常用 `.section .rodata.cst16,"aM",@progbits,16` 存放 SIMD 常量表
+  （SHF_MERGE 合并段）。在两台 OHOS PC 真机（LAN 直连机与 frp 机、GNU as 2.45 与
+  clang 集成汇编器产物均复现）上，链接后静态布局正确的 merge 段在进程运行时相对
+  静态 VMA 移位（实测常量表与函数的运行时距离 ≠ 链接期距离，且同名 32 字节模式在
+  内存中出现两份、相距 0x1000），adrp+add/adr 取到的 32 字节与源码常量错位，
+  SIMD 内核用错误权重继续运算——不崩溃、不越界，只出错误数值。libisal 实测：
+  adler32 NEON 的 factors 表（32..1 权重）被错位加载，isal_adler32 低 16 位
+  （A 和）正确、高 16 位（B 和）错误，checksum32_funcs_test 904 用例失败。
+affected_scope: 所有把 SIMD/查表常量放 SHF_MERGE 段并用 PC 相对寻址加载的
+  手写汇编（.S）内核；C 编译的大数组 .rodata（如 CRC 表）实测不受影响
+  （libisal crc 系测试全过）。isa-l_crypto 等同类 aarch64 SIMD 库同样暴露。
+verification_cmd: 在测试程序中打印目标函数运行时地址，向前扫描已知常量字节模式，
+  对比链接期静态偏移（objdump -d 里 adr/adrp 目标）与运行时实际命中偏移；
+  或最小化用例：ld1 加载后 st1 落盘逐字节对比源码常量
+rec_priority: 1
+rec_approach: drop-merge-flag-use-plain-rodata
+rec_description: 把常量段的 merge 属性去掉：`.section .rodata,"a",@progbits`
+  （保留 .align），一行补丁；对健康平台零行为差异（只是放弃链接器常量合并）
+rec_command: sed/patch 将 `.section\t.rodata.cst16,"aM",@progbits,16` 改为
+  `.section\t.rodata,"a",@progbits`，重建后运行上游功能测试全绿
+rec_auto_fix: false
+rec_impl: conan-patch-recipe
+fallback_priority: 2
+fallback_approach: register-built-constants
+fallback_description: 对小常量（≤64B）可不打补丁，在汇编内用 movz/movk+ins 在
+  寄存器内构造常量，彻底消除数据段引用；代价是指令数增加
+fallback_auto_fix: false
+fallback_impl: conan-patch-recipe
+principles: 平台运行时不可假设链接期只读数据布局逐字节成立；SIMD 内核的功能
+  测试必须在目标机跑数值断言，编译通过≠正确
+caused_by: OHOS 加载器/内核对 merge 段的映射与静态布局不一致（机制未完全定位，
+  实证两台设备一致复现）
+causes: SIMD 加速函数静默返回错误数值；极易误诊为某条 SIMD 指令是 no-op
+  （本例一度误诊 UMLAL2：volatile 微测试的静态初始化数组也被 clang 放进
+  merge 段，形成同样的错位加载假象，逐寄存器裸汇编 dump 才洗清）
+similar_to: E235（musl/glibc 差异类静默错值）、E429/E430（HMDFS 运行环境差异）
+conflicts_with:
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-libisal-2.31.1-shf-merge-rodata-runtime-displacement.md
+last_updated: 2026-09-19
+source_event: libisal 2.31.1 frp 真机 make check：checksum32_funcs_test 904 用例
+  失败，A 对 B 错；运行时扫描发现常量表移位 + 两份拷贝；去 merge 标志后 16/16 全绿
+authors: gcw_6YxinkyD <m13307644603@163.com>
+source_pr: (本 PR)
+source_commit: d983f4338f
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 1.0
+metrics_last_used: 2026-09-19

@@ -1,0 +1,100 @@
+#====================================================================
+# DRAFT-pytest-filterwarnings-coverage-category-aborts-run — 上游 pytest.ini 的
+#   filterwarnings 引用未安装模块的 Warning 类 → filterwarnings=error 下 pytest
+#   在**配置期**中止，输出无任何 FAILED 行（被误判为"运行器异常退出"）
+# 触发事件: setuptools 84.0.0 适配（PR #11266）CI #52255 失败；本地同配方却通过
+#====================================================================
+
+id:                     DRAFT-pytest-filterwarnings-coverage-category-aborts-run
+trigger_tool:           pytest|conan|pip|python
+phase:                  testing|configuration
+error_signature:        Failed to import filter module '.*': ignore:.*|
+                         PytestConfigWarning: Failed to import filter module|
+                         Couldn't import C tracer:coverage\.exceptions\.CoverageWarning|
+                         upstream pytest 运行器异常退出（exit=1），且未解析到失败用例|
+                         Interrupted: [0-9]+ errors during collection
+
+severity:               2
+category:               ohos|python|testing|dependency|detection
+match_keywords:         pytest, filterwarnings, PytestConfigWarning, filter module,
+                         coverage.exceptions.CoverageWarning, coverage, pytest-cov,
+                         cover extra, test extra, apply_warning_filters, jaraco.test,
+                         Interrupted during collection, 配置期中止, 收集期失败,
+                         本地通过 CI 失败, 环境偶然满足
+
+title:                  上游 pytest.ini 的 filterwarnings 项引用 test extra 未包含的模块（coverage）→ pytest 配置期即中止
+
+root_cause:             三件事：①上游 pyproject 的 test extra 与 **cover** extra 是
+                         **两套**依赖——`pytest.ini` 的 filterwarnings 里却有
+                         `ignore:Couldn't import C tracer:coverage.exceptions.CoverageWarning`
+                         （该 warning 类来自 coverage，只被 cover extra 的 pytest-cov 带入）。
+                         ②pytest.ini 首行是 `error`（警告即错误），于是 coverage 缺失时
+                         pytest 在**配置期**的 apply_warning_filters() 里
+                         `importlib.import_module('coverage.exceptions')` 抛 ImportError
+                         → pytest 改为 `warnings.warn(PytestConfigWarning)` → 被 error
+                         策略升级为异常 → **run 在收集之前就中止**。
+                         ③此时输出里**没有任何 FAILED 行**，若配方按"解析 FAILED 行"判定，
+                         会得到"运行器异常退出"而非"某用例失败"——定位困难（本次 CI 即如此）。
+                         另有同源的第二类：测试文件顶层 import 未声明的收集期依赖
+                         （setuptools/tests/compat/py39.py 顶层 `from jaraco.test.cpython
+                         import ...`）→ `Interrupted: 6 errors during collection`。
+                         两类共同点：**依赖清单只对齐了上游声明的 extra，而 extra 与
+                         实际运行需求不等价**；且本地宿主环境可能恰好装了这些包
+                         （本次本地宿主恰有 coverage 7.8.0 + pytest_cov + jaraco.test）
+                         → 同一配方**本地绿、CI 红**。
+
+affected_scope:         所有在 conanfile 中"按上游 extra 清单手抄测试依赖"再运行上游
+                         pytest 套件的 Python 包配方；尤其上游把测试依赖分散在多个 extra
+                         （test/check/cover/enabler/type/core）而配方只抄 test 时
+
+rec_priority:           1
+rec_approach:           pin-nonexistent-transitive-requirement
+rec_description:         先按**实际报错**补齐隐含依赖，而不是关掉上游严格策略：
+                         ① 配置期报 `Failed to import filter module 'X'` → 把 X 对应的包
+                         补进测试依赖（本例 `coverage`）；② 报 `Interrupted: N errors
+                         during collection` → 逐个补齐收集期 import 的包（本例
+                         `jaraco.test>=5.5`）。**不要**用 `--override-ini=filterwarnings=`
+                         或 `-W ignore` 关掉 error 策略来"解决"——那会一并掩盖真实告警。
+                         验证方式：在**干净环境**（不含宿主 site-packages 的 venv 或
+                         `pip --target` 目录）复验，而非在已装齐的宿主上复验。
+rec_command: >
+  # 1) 复现（隔离环境，勿用已装齐 coverage 的宿主）
+  python3 -m venv /tmp/v && /tmp/v/bin/python -m pip install "pytest>=6"
+  cd <upstream-src> && /tmp/v/bin/python -m pytest --collect-only -q
+  #   → PytestConfigWarning: Failed to import filter module 'coverage': ...
+  # 2) 补齐后复验（配置期 + 收集期都要看）
+  /tmp/v/bin/python -m pip install coverage jaraco.test
+  /tmp/v/bin/python -m pytest setuptools/tests --collect-only -q
+  #   → 961/1012 tests collected (51 deselected)，0 errors
+rec_auto_fix:           false
+rec_impl:               conan-recipe-test-deps-completeness
+
+forbid_1_pattern:       用 `--override-ini=filterwarnings=` / `-W ignore` / `-p no:warnings`
+                        关掉上游的 error 警告策略，以"消除"配置期中止
+forbid_1_reason:        中止的根因是**依赖缺失**，不是策略过严；关掉策略会把上游有意
+                        设置的"警告即错误"门禁一并废掉，掩盖真实告警
+forbid_1_consequence:   表面通过，实际门禁失效；后续真实告警不再被发现
+
+forbid_2_pattern:       只在本地宿主环境跑通就判定配方无误（宿主恰好装了缺的那个包）
+forbid_2_reason:        本例本地宿主恰有 coverage 7.8.0 + pytest_cov + jaraco.test，
+                        而 CI worker 是裸环境 → 同一配方两地结果相反
+forbid_2_consequence:   CI 反复红、反复 /rebuild 无果，误判为"平台/基础设施问题"
+
+forbid_3_pattern:       看到"没有 FAILED 行却 exit!=0"就把该次运行记为"无失败"或直接跳过
+forbid_3_reason:        无 FAILED 行恰恰说明 run 在收集前就中止（配置期异常），
+                        属**未运行的套件**，不是"没有失败"
+forbid_3_consequence:   把没跑成的套件当通过，R51/R9 失真
+
+principles:             测试依赖按实际报错补齐，勿关上游严格策略; 依赖清单须在干净环境
+                        复验（宿主环境可能偶然满足）; "无 FAILED 行 + 非零退出" = 套件未跑成;
+                        上游多 extra 时逐一核对而非只抄 test
+verification_cmd:       # 干净环境复验配置期
+                         python3 -m venv /tmp/v && /tmp/v/bin/python -m pip install "pytest>=6"
+                         cd <src> && /tmp/v/bin/python -m pytest --collect-only -q
+                         # → 修复前: PytestConfigWarning: Failed to import filter module 'coverage'
+                         # → 修复后: 961/1012 tests collected, 0 errors
+
+related_docs:           doc/E543.md, doc/E544.md
+source_event:           archives/s/setuptools/84.0.0 PR#11266 CI#52255（配置期中止）
+first_seen_project:     setuptools/84.0.0
+last_updated:           2026-09-20

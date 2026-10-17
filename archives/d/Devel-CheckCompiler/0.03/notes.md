@@ -86,3 +86,7 @@ OHOS ld.lld 不支持 `-fstack-protector-strong` 标志。
 ---
 
 **最终状态**: ready (准备发布)
+---
+
+**编译结束**: 2026-08-06 06:37
+**最终状态**: built

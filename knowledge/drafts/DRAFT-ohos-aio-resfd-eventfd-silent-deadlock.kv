@@ -1,0 +1,21 @@
+id: DRAFT-E5xx-ohos-aio-resfd-eventfd-silent
+category: kernel/platform/network
+severity: 3
+match_keywords: workflow, io_submit, IOCB_FLAG_RESFD, eventfd, aio, epoll_wait, WFFileIOTask, IOService_linux, hang, timeout, file task
+error_signature: epoll_wait(event_fd)=0 timeout after io_submit=1 | WFFileIOTask hang | upstream tests failed: passed=0 failed=1 (file io suite timeout 1800s)
+error_excerpt: "io_submit=1 errno=0 / epoll_wait(event_fd)=0 errno=0 (never wakes)"
+root_cause: OHOS 内核实现了 io_setup/io_submit/io_getevents（syscall 本身正常，数据读写正确），但 IOCB_FLAG_RESFD 的 eventfd 完成通知路径无效——io_submit 携带 resfd 成功返回后，内核不会向 eventfd 写完成计数，epoll_wait 对该 eventfd 永不唤醒。依赖 Linux AIO eventfd 通知模式的库（如 sogou workflow 的 IOService_linux.cc：io_set_eventfd + poller PD_OP_EVENT）所有异步文件操作永久挂起，且无任何错误日志（静默死锁）。io_submit 对无效组合也不返回错误（EINVAL 只对参数布局错误），加重静默性。
+rec_approach: 1) 复现确认：独立 syscall 复现程序（io_setup→open→iocb{flags=IOCB_FLAG_RESFD, resfd=eventfd}→io_submit→epoll_wait(event_fd, 5s)）——若 epoll_wait 返回 0 超时即命中本条（对照组：不带 resfd 的 io_submit+io_getevents 正常）。2) 修复模式：找库的"AIO 备胎"——多数成熟库自带线程池模拟层（workflow 的 IOService_thread.cc：pthread+pipe+PD_OP_NOTIFY，接口与 linux 版一致，BSD/macOS 平台走它）；若无备胎则需自行实现 worker 线程。3) 关键坑：若库用编译期类布局区分两套实现（workflow 的 IOService_linux.h/IOService_thread.h 类成员不同），切换宏必须全局定义（顶层 CMakeLists add_definitions），子目录级定义会造成不同翻译单元看到不同类布局——vtable/字段错乱（实测 pipe_fd[0] 写进 io_ctx 指针字段，读出垃圾负数 fd；std::mutex try_lock 假性失败）。诊断手段：try_lock 探测+打印对象地址与 sizeof。4) 消费者传导：安装头若含条件编译选择，package_info().cpp_info.defines 必须导出切换宏，否则消费者编译时 include 错误版本的内部头。
+solution: |
+  # workflow 案例（补丁）：
+  # 顶层 CMakeLists.txt：
+  option(USE_THREAD_IOSERVICE "Use thread-pool IOService instead of Linux AIO" OFF)
+  if (USE_THREAD_IOSERVICE)
+      add_definitions(-DWORKFLOW_USE_THREAD_IOSERVICE)   # 全局！
+  endif ()
+  # kernel/CMakeLists.txt 源文件选择 + 两份 Communicator.h + Communicator.cc 的 #ifdef __linux__ 分支全部加 && !defined(WORKFLOW_USE_THREAD_IOSERVICE)
+  # 配方：tc.variables["USE_THREAD_IOSERVICE"]="ON" + cpp_info.defines=["WORKFLOW_USE_THREAD_IOSERVICE"]
+fallback: 若无备胎实现：该库的文件任务功能在 OHOS 上标记不可用（env 限制豁免），网络/计算任务不受影响（poller 的 epoll/eventfd/pipe 自身正常——单独验证过 eventfd+epoll 与 pipe+epoll 两种通知都工作，只有 AIO RESFD 通知坏）。
+verify_builds: 本地 conan create W3 通过 + 上游 38 测试 37 过 1 豁免（workflow/1.1.0，task 7331）
+prescan_pattern: "IOCB_FLAG_RESFD|io_set_eventfd|io_setup\\("
+last_updated: 2026-09-12

@@ -1,0 +1,60 @@
+#====================================================================
+# DRAFT-empty-login-identity-empty-success - OHOS 设备会话 getlogin_r(3)/LOGNAME
+#   空成功语义：身份类软件必须显式拒绝空串并回退候选身份链
+# 对应人类文档: drafts/DRAFT-empty-login-identity-empty-success.md（成对）
+# 阻塞面: L1 上游 make check 门禁（rcs/5.10.1 实测 63 项 shell 测试群失败）
+# 分类（八分类）: musl-libc 差异
+#====================================================================
+
+id:                     DRAFT-empty-login-identity-empty-success
+trigger_tool:           runtime|testing|configure|make|conan
+phase:                  runtime|testing
+error_signature:        invalid identifier `'|co: invalid identifier|ci: invalid identifier|Who are you\?  Please setenv LOGNAME|no password entry for userid|co aborted|ci aborted
+
+severity:               3
+category:               libc, musl, posix, environment, runtime
+match_keywords:         getlogin_r, LOGNAME, USER, getpwuid, pw_name, username, author,
+                        invalid identifier, Who are you, setenv LOGNAME, passwd entry,
+                        empty login, getusername, JAM, identity chain
+title: OHOS 设备会话 getlogin_r(3)/LOGNAME 空成功语义导致身份类软件以空用户名继续运行，应显式拒绝空串并回退候选身份链（env → getlogin_r → getpwuid）
+
+root_cause:             OHOS 设备会话 getlogin_r(3) 返回 0（成功）但缓冲区为空串，LOGNAME 环境变量存在但为空串，且 /etc/passwd 无 HMDFS uid 条目（getpwuid_r 无 pw_name）。上游身份解析链（如 rcs src/b-excwho.c getusername() 的 JAM 宏）不拒绝空串，把"空成功"缓存为有效身份，后续 ci/co 以空用户名参与符号校验与锁归属，触发 checkidentifier 失败（invalid identifier 后接空名）或整体中止，上游测试群失败。
+
+rec_priority:           1
+rec_approach:           reject-empty-identity-then-fallback-chain
+rec_description:        源码层在身份缓存点显式拒绝空串并回退候选链（env → getlogin_r → getpwuid_r），如 rcs src/b-excwho.c 的 `#define JAM(x) (BE (username) = (x) && *(x) ? (x) : NULL)`，补丁遵循上游风格、英文注释说明 OHOS 理由，可向上游提交（P005）；同时配方/会话层注入非空 LOGNAME（构建与测试环境强制非空，如 export LOGNAME=builder），双实例同 run 验证。
+rec_command:            patch src/b-excwho.c: "#define JAM(x)  (BE (username) = (x) && *(x) ? (x) : NULL)"; env: export LOGNAME=builder（conan recipe: if not os.environ.get("LOGNAME"): os.environ["LOGNAME"]="ohos-builder"）
+rec_auto_fix:           false
+rec_impl:               upstreamable-patch-plus-env-injection
+
+fallback_priority:      2
+fallback_approach:      env-only-logname-injection
+fallback_description:   不改源码，仅在配方/会话层注入非空 LOGNAME。诚实权衡：仅掩盖症状——库内"空串=有效身份"的缺陷语义仍在，锁/作者标识为注入的伪造名（多用户语义失真）；对不读 env 身份源的软件无效；换环境（无注入的交互会话）即复发。
+fallback_command:       export LOGNAME=builder && make check ...
+fallback_auto_fix:      false
+
+forbid_1_pattern:       invalid identifier|空用户名.*继续|LOGNAME 为空仍缓存
+forbid_1_reason:        空串是无效符号标识符，把"空成功"缓存为身份等于把无效身份当成功
+forbid_1_consequence:   空名写入 ,v 作者/锁属主字段，后续锁归属与符号校验全部歧义（t900.d/out: co: invalid identifier 后接空名，连锁中止），上游测试群失败
+
+forbid_2_pattern:       PFATAL.*Who are you|getlogin.*失败即中止.*不试.*env
+forbid_2_reason:        getlogin_r 一处失败即 PFATAL 放弃，回退链断裂（上游 5.10.1 原逻辑即反例：提示 "Please setenv LOGNAME" 却不读 env）
+forbid_2_consequence:   存在可用身份源（env/passwd）时仍不可用，修复面被人为缩小
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P005, P013, P014
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E338, E046, E007, E072
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+affected_scope: >
+  libc/musl-libc 差异 场景（关键词: getlogin_r, LOGNAME, USER, getpwuid, pw_name, username, invalid identifier, Who are you, setenv LOGNAME, identity chain）。根因: OHOS 设备会话 getlogin_r(3) 空成功 + LOGNAME 空串 + 无 passwd 条目，身份解析链不拒绝空串时以空用户名继续运行。八分类归 musl-libc 差异；门禁相关: L1 上游 make check。
+
+verification_cmd: cd "$(mktemp -d 2>/dev/null || pwd)" && printf '%s\n' '#include <unistd.h>' '#include <stdio.h>' '#include <string.h>' '#include <pwd.h>' '#include <stdlib.h>' 'int main(void){char b[256];int r=getlogin_r(b,sizeof b);struct passwd*p=getpwuid(getuid());printf("getlogin_r=%d len=%d LOGNAME=[%s] pw_name=[%s]\n",r,r==0?(int)strnlen(b,sizeof b):-1,getenv("LOGNAME")?getenv("LOGNAME"):"(unset)",p&&p->pw_name?p->pw_name:"(none)");return 0;}' > idprobe.c && /data/service/hnp/bin/clang idprobe.c -o idprobe && ./idprobe && echo "shell LOGNAME=[$LOGNAME]"
+doc_file:               DRAFT-empty-login-identity-empty-success.md
+last_updated: 2026-09-07

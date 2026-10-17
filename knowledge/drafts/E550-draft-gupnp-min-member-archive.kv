@@ -1,0 +1,63 @@
+#====================================================================
+# E550-draft-gupnp-min-member-archive
+# 静态依赖单副本教义下，消费者调用中间共享库未导出的依赖 API：
+# ar 提取定义翻译单元组成最小补链归档（gupnp 案例）
+# 触发事件: gupnp 1.6.10 HarmonyOS PC 适配
+#====================================================================
+
+id:                     E550
+trigger_tool:           ld.lld|clang|meson
+phase:                  linking
+error_signature:        undefined symbol: g_uuid_string_random|undefined symbol: g_zlib_compressor_new|undefined symbol.*-Wl,--no-undefined|unable to find library -lffi
+
+severity:               2
+category:               linking, static-libs, pkg-config
+match_keywords:         undefined symbol, no-undefined, static glib, single copy, ar x, archive member, demand-driven, pkg-config Libs, libsoup, cpp_info.libs, PkgConfigDeps, guuid, gzlibcompressor
+title:                  When a consumer needs dependency symbols the intermediary shared library does not export, link a minimal archive of exactly the defining translation units
+
+root_cause:             单副本教义（E 系：GObject 多副本撕裂）要求静态 glib 的
+                        Libs 全部剔出链接命令、g_* 全 UND、运行时解析到
+                        libsoup-3.0.so 导出的唯一 gobject 副本。但
+                        libsoup-3.0.so 只导出它自己引用的 glib 符号（实测
+                        dynsym 4121 个 g_*，不含 g_uuid_string_random 与
+                        g_zlib_compressor_new）。下游（gupnp）一旦调用这两个
+                        依赖 API，meson 对 shared library 默认的
+                        -Wl,--no-undefined 即报未解析；把整档静态库加回链接
+                        则按需拉取级联失控（实测拖入 3812 个定义符号，
+                        glib/gio 大面积复制）。
+
+rec_approach:           link-minimal-archive
+rec_description:        用 `ar x` 从静态库提取**仅有的两个**定义翻译单元
+                        （guuid.c.o 出自 libglib-2.0.a，gzlibcompressor.c.o
+                        出自 libgio-2.0.a），配方本地 `ar qc` 成最小归档，
+                        经 PkgConfigDeps 生成的 glib-2.0.pc Libs 行注入
+                        （-L<dir> -lglib-min）。约束：先对每个成员
+                        `nm -u` 全量核对，其未解析符号必须全部能被
+                        中间共享库导出表或已在链接行上的库满足（实测两成员
+                        全部 g_type_*/g_object_* 引用均被 libsoup 导出满足
+                        → GObject 单副本不破坏）；再 readelf 复核产物
+                        定义符号画像（g_* 仅 8 个＝两成员自身）。
+rec_command:            ar x ${glib2_pkg}/lib/libglib-2.0.a guuid.c.o && ar x ${glib2_pkg}/lib/libgio-2.0.a gzlibcompressor.c.o && ar qc libglib-min.a guuid.c.o gzlibcompressor.c.o
+
+forbid_1_pattern:       Libs:.*-lglib-2\.0(?!-min)|Libs:.*-lgio-2\.0
+forbid_1_reason:        整档静态库回链接在归档按需拉取下级联失控（实测 3812 定义符号），glib/gio 大面积复制且远离"仅类型系统单副本"的可审计边界。
+forbid_1_consequence:   产物画像不可审计；后续维护者无法判断哪些 glib 副本被加载。
+
+doc_file:               knowledge/drafts/E550-draft-gupnp-min-member-archive.md
+last_updated:           2026-09-06
+source_event:           gupnp/1.6.10 HarmonyOS PC 适配
+draft:                  true
+contributor_id:         Awstme
+source_commit:          86955451322c66caaef5f83560d0c14c0ce1bb5e
+patches_referenced:     archives/g/gupnp/1.6.10/conanfile.py
+verification_cmd:       readelf --dyn-syms --wide libgupnp-1.6.so.0.106.10 | awk '$7!="UND"' | wc -l  # 257；g_* 定义 8 个；g_type_/g_object_ 定义 0
+verification_exit:      0
+verification_log:       archives/g/gupnp/1.6.10/reports/conan-verify-supplement.md
+verification_evidence:  链接成功（-Wl,--no-undefined 通过）；两成员全部 UND 被 libsoup 导出满足；7/7 上游测试与 test_package 通过（GObject 多副本撕裂会立即 SIGABRT）；dlopen 实测通过
+value_scope:            GLib 栈（gssdp/gupnp/gupnp-av/gupnp-dlna/rygel 等）静态 glib 单副本架构下，下游库调用 libsoup-3.0.so 未导出的 glib/gio API 场景；同理适用于任何"静态依赖经中间共享库间接提供符号"的链接布局
+limits:                 仅当缺失符号数量少且其翻译单元依赖闭包可被中间 .so 导出表满足时可用；若成员 UND 闭包拉入类型系统定义（g_type_*/g_object_*），说明需要换整链共享化方案（如 ohpcd 发布 shared glib2）
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-06

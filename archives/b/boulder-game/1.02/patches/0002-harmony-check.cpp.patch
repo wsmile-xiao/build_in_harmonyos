@@ -1,0 +1,98 @@
+--- /dev/null
++++ b/harmony/check.cpp
+@@ -0,0 +1,95 @@
++#include "tileset.h"
++#include "editor_world.h"
++#include "image.h"
++#include <SDL.h>
++#include <filesystem>
++#include <iostream>
++#include <stdexcept>
++#include <string>
++#include <cstdlib>
++extern "C" int stb_vorbis_decode_filename(const char*, int*, int*, short**);
++namespace fs = std::filesystem;
++
++static void require(bool ok, const std::string& message) {
++    if (!ok) throw std::runtime_error(message);
++}
++static void assets(const fs::path& root) {
++    require(fs::is_directory(root), "asset directory does not exist");
++    unsigned images = 0, maps = 0, waves = 0, music = 0;
++    C_TileHandler tiles(nullptr);
++    require(tiles.Load(root.string().c_str(), "tiledesc.txt"), "tile descriptions failed to load");
++    require(tiles.m_iTileSize == 32, "unexpected tile size");
++    for (const auto& entry : fs::directory_iterator(root)) {
++        const auto path = entry.path();
++        const auto ext = path.extension().string();
++        if (ext == ".jpg" || ext == ".tga") {
++            bool ok = false;
++            C_Image image(path.string().c_str(), nullptr, &ok);
++            require(ok, "image decode: " + path.filename().string());
++            int width = 0, height = 0;
++            image.GetInfo(&width, &height, nullptr);
++            require(width > 0 && height > 0, "empty decoded image");
++            ++images;
++        } else if (ext == ".map") {
++            C_World world(path.string().c_str(), &tiles);
++            int width = 0, height = 0, diamonds = 0, seconds = 0;
++            world.GetMapSize(&width, &height);
++            world.GetMapParameters(&diamonds, &seconds);
++            require(width > 0 && height > 0, "empty map");
++            require(diamonds >= 0 && seconds > 0, "invalid map parameters");
++            require(world.GetObject(0, 0) != nullptr, "map tile missing");
++            ++maps;
++        } else if (ext == ".wav") {
++            SDL_AudioSpec spec{}; Uint8* bytes = nullptr; Uint32 length = 0;
++            require(SDL_LoadWAV(path.string().c_str(), &spec, &bytes, &length), "WAV decode failed");
++            const bool valid = length > 0 && spec.freq > 0;
++            SDL_FreeWAV(bytes); require(valid, "empty WAV"); ++waves;
++        } else if (ext == ".ogg") {
++            int channels = 0, rate = 0; short* pcm = nullptr;
++            const int frames = stb_vorbis_decode_filename(path.string().c_str(), &channels, &rate, &pcm);
++            const bool valid = frames > 0 && channels > 0 && rate > 0 && pcm;
++            free(pcm); require(valid, "Vorbis music decode failed"); ++music;
++        }
++    }
++    require(images == 14 && maps == 25 && waves == 18 && music == 1, "asset inventory differs from pinned upstream");
++    std::cout << "assets: " << images << " images, " << maps << " maps, "
++              << waves << " effects, " << music << " music stream decoded\n";
++}
++static void roundtrip(const fs::path& root, const fs::path& output) {
++    require(!fs::exists(output), "refusing to overwrite existing map");
++    require(output.string().size() < 256, "map path exceeds upstream limit");
++    C_TileHandler tiles(nullptr);
++    require(tiles.Load(root.string().c_str(), "tiledesc.txt"), "tiles failed to load");
++    C_World world(output.string().c_str(), 12, 10, &tiles);
++    world.SetMapDescription("OHOS roundtrip");
++    world.SetMapParameters(7, 123);
++    world.SetObject(3, 4, OBJ_DIAM_RED);
++    world.SetObject(5, 6, OBJ_KEY, 2);
++    require(world.Save(), "map save failed");
++    world.SetObject(3, 4, OBJ_EMPTY);
++    world.SetMapParameters(1, 5);
++    require(world.Load(), "map reload failed");
++    int w = 0, h = 0, diamonds = 0, seconds = 0;
++    world.GetMapSize(&w, &h); world.GetMapParameters(&diamonds, &seconds);
++    require(w == 12 * tiles.m_iTileSize && h == 10 * tiles.m_iTileSize, "map dimensions changed");
++    require(diamonds == 7 && seconds == 123, "map parameters changed");
++    require(std::string(world.GetMapDescription()) == "OHOS roundtrip", "description changed");
++    require(world.GetObject(3, 4)->m_iObjNumber == OBJ_DIAM_RED, "diamond not restored");
++    require(world.GetObject(5, 6)->m_iObjNumber == OBJ_KEY && world.GetObject(5, 6)->m_iObjParam == 2, "key parameter lost");
++    require(world.GetObject(0, 0)->m_iObjNumber == OBJ_WALL, "border changed");
++    fs::remove(output);
++    std::cout << "roundtrip: dimensions, parameters, description, diamond, key and border preserved\n";
++}
++int main(int argc, char** argv) {
++    try {
++        if (argc == 2 && std::string(argv[1]) == "--version") {
++            std::cout << "Boulder 1.02 adaptation checks\n"; return 0;
++        }
++        if (argc == 3 && std::string(argv[1]) == "assets") { assets(argv[2]); return 0; }
++        if (argc == 4 && std::string(argv[1]) == "roundtrip") { roundtrip(argv[2], argv[3]); return 0; }
++        std::cerr << "Usage: boulder-check assets DATA_DIR | roundtrip DATA_DIR NEW_MAP | --version\n";
++        return 2;
++    } catch (const std::exception& error) {
++        std::cerr << "FAIL: " << error.what() << '\n'; return 1;
++    }
++}

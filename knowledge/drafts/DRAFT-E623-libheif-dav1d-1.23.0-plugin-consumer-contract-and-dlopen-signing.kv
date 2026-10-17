@@ -1,0 +1,127 @@
+id: DRAFT-E623-libheif-dav1d-1.23.0-plugin-consumer-contract-and-dlopen-signing
+status: pending-editor-review
+title: "插件型子包的消费者契约：交付了插件 .so ≠ 插件会被 dlopen；能力断言必须带负对照，dlopen 对象在鸿蒙必须装包后重签"
+category: cmake, libheif, plugin, module-library, dlopen, consumer-contract, codesign, ohos, test-package
+build_system: cmake
+phase: verify
+trigger_tool: conan-create
+severity: 2
+match_keywords: >
+  libheif, libheif-dav1d, libheif-libde265, libheif-openh264, libheif-aom, libheif-jpeg,
+  libheif-openjpeg, libheif-svtenc, heif-dav1d, libheif-dav1d.so, plugin_info,
+  heif_init, heif_have_decoder_for_format, heif_have_encoder_for_format,
+  heif_compression_AV1, heif_compression_HEVC, LIBHEIF_PLUGIN_PATH,
+  LIBHEIF_PLUGIN_DIRECTORY, PLUGIN_DIRECTORY, get_plugin_paths, plugins_unix,
+  插件未装载, 能力缺席, 负对照, negative control, consumer contract, 消费者契约,
+  codesign, .codesign, binary-sign-tool, -selfSign, llvm-objcopy, remove-section codesign,
+  dlopen 失败, 代码签名, 装包后重签, readelf -d NEEDED, 运行期可选依赖,
+  IMPORTED_LOCATION_RELEASE, IMPORTED_LOCATION, PACKAGE_FOLDER_RELEASE, CMakeDeps,
+  INTERFACE IMPORTED, DEPS_TARGET, CMAKE_SYSTEM_NAME, Platform/HarmonyOS.cmake,
+  SONAME, 相对路径 DT_NEEDED, ../libheif.so, cache_variables
+error_signature: >
+  heif_have_decoder_for_format.*==\s*0|
+  Cannot load libheif-.*\.so|dlopen:.*libheif-.*\.so|
+  dlsym:.*plugin_info|
+  AV1 decoder not available, skipping test|
+  Permission denied.*libheif-.*\.so|
+  Operation not permitted.*\.so|
+  Error loading shared library \.\./.*\.so|
+  NEEDED.*\.\./|IMPORTED_LOCATION_RELEASE.*NOTFOUND|
+  plugin artifact under test : /libheif/
+error_excerpt: >
+  修前逐字（test_package 失败段）：
+  "dlopen: Error loading shared library ../libheif.so: (needed by <pkg>/lib/libheif/libheif-dav1d.so)"
+  "plugin artifact under test : /libheif/libheif-dav1d.so"（假路径，IMPORTED_LOCATION 未设置导致）
+  "FAIL  heif_init() scans and loads the plugin directory"
+  "FAIL  AV1 decoder registered  => libheif-dav1d.so was dlopen'd and is functional"
+  "libheif-dav1d consumer contract: 7/13 assertions passed"
+  修后逐字：
+  "plugin artifact under test : <package_folder>/lib/libheif/libheif-dav1d.so"
+  "PASS  heif_init() scans and loads the plugin directory"
+  "PASS  AV1 decoder registered  => libheif-dav1d.so was dlopen'd and is functional"
+  "libheif-dav1d consumer contract: 13/13 assertions passed"
+root_cause: >
+  插件型子包的交付面与「插件是否真的生效」之间隔着三道独立门禁，任何一道过了都不代表插件可用：
+  ① **装载门禁**——libheif 只在 ``heif_init()`` 里扫插件目录并 ``dlopen``
+     （``libheif/init.cc:100-127``；上游 ``heif_library.h:122-125`` 明说不调用它就
+     不会从默认路径装载外部模块）。不调用 init 的消费者测试会全绿而插件从未被加载。
+  ② **路径门禁**——插件目录有两个来源（``libheif/init.cc:51-66``）：环境变量
+     ``LIBHEIF_PLUGIN_PATH`` 优先，为空才回退到编译期宏 ``LIBHEIF_PLUGIN_DIRECTORY``
+     （= ``heif_version.h.in:36`` 的 ``@PLUGIN_DIRECTORY@`` = ``${CMAKE_INSTALL_FULL_LIBDIR}/libheif``）。
+     测试里设了环境变量，证明的就是环境变量而不是交付面。
+  ③ **签名门禁**——``libheif/plugins_unix.cc`` 用 ``dlopen(filename, RTLD_LAZY)`` 装载插件。
+     鸿蒙 PC XPM 要求被 dlopen 的 ``.so`` 带有效 ``.codesign`` 段，而 ``cmake install``
+     的复制会破坏链接器自签，故必须在 ``package()`` 里**装包之后**重签；漏签时编译期与
+     ``readelf -h/-lW`` 静态检查全绿，只在运行期 dlopen 失败。
+  另外，``plugins_unix.cc`` 只识别以 ``.so`` 结尾的文件名，``libheif-<codec>.so.1.23.0``
+  不命中，install 生成的无版本软链是功能必需品。
+affected_scope: >
+  所有「宿主 + 可 dlopen 的 MODULE 插件」形态的包：libheif 的 libde265/openh264/openjpeg/
+  svtenc/aom/dav1d/jpeg 七个同构子包；以及任何产物含 ``add_library(... MODULE ...)``
+  或运行期 ``dlopen`` 的包（gdk-pixbuf loader、PAM 模块、GIO 模块同理）。
+  判定信号：①交付物里有插件目录（``<libdir>/<宿主名>/``）②宿主源码里 ``dlopen``
+  ③消费者要「能力查询 API」而不是「链接符号」才能验证。三条全中即适用。
+rec_priority: 1
+rec_approach: capability-assertion-with-negative-control-and-post-package-resign
+rec_description: >
+  消费者契约测试必须运行真二进制，并同时断言四组：①交付面（插件产物落盘且 ELF；路径由
+  test_package/conanfile.py 的 generate() 用被测包真实 package_folder 注入 cache 变量，
+  **不要**用 ``IMPORTED_LOCATION_RELEASE`` 反推——CMakeDeps 的 ``<pkg>::<pkg>`` 是
+  INTERFACE IMPORTED 目标，该属性恒未设置，会静默退化成 ``/libheif/<插件>.so`` 假路径）；
+  ②装载面（显式 ``heif_init(NULL)``，并断言配方经 ``runenv_info`` 导出的
+  ``LIBHEIF_PLUGIN_PATH`` 确实等于产物所在目录——内置宏是构建期绝对路径，跨构建目录/跨机失效，
+  故此项由配方导出、测试校验，**不**依赖内置路径）；③能力面
+  （``heif_have_decoder_for_format(<本包后端>)==1``）；④负对照
+  （其它后端能力必须为 0，纯解码后端还要断言 ``heif_have_encoder_for_format==0``）。
+  配方侧 ``package()`` 装包后对 ``lib/**`` 的真实 ELF 重签（跳过版本化软链）。
+rec_command: >
+  TASK_DIR=$HOME/tmp/libheif-dav1d-1.23.0; sh "$TASK_DIR/run-upstream-tests.sh"
+rec_auto_fix: false
+rec_impl: >
+  archives/l/libheif-dav1d/1.23.0/conanfile.py（package() 的 _sign_elf）+
+  archives/l/libheif-dav1d/1.23.0/test_package/{test.c,CMakeLists.txt,conanfile.py}；
+  同口径先例 archives/d/dav1d/1.5.0/conanfile.py 的 _sign_binaries
+fallback_priority: 2
+fallback_approach: consumer-side-manual-plugin-path-env
+fallback_description: >
+  若消费者不走 conanrun（例如手工拷贝安装树），可由消费者自行设
+  ``LIBHEIF_PLUGIN_PATH`` 指向 ``<安装前缀>/lib/libheif`` 兜底（libheif/plugins_unix.cc
+  优先读该变量，见 libheif/init.cc:51-66）。注意这只是消费者侧兜底：手工拷贝后内置宏
+  仍指向构建期目录，能力查询会失败，故交付面自洽仍应靠配方导出 + 测试校验（rec_*）。
+fallback_command: >
+  ROOT=$(conan cache path libheif-dav1d/1.23.0:<package_id>); LIBHEIF_PLUGIN_PATH="$ROOT/lib/libheif" ./test_libheif_dav1d
+fallback_auto_fix: false
+fallback_impl: 本任务未采用（本任务采用 rec_*：配方 runenv_info 导出 + 测试校验该导出值）
+forbid_1_pattern: >
+  self\.cpp_info\.libs\s*=\s*\["heif-dav1d"\]|cpp_info\.libs\s*=\s*\["libheif-dav1d"\]
+forbid_1_reason: >
+  插件是 MODULE（dlopen 用），不具备可链接库语义；消费者链接的是宿主 ``heif``。
+  把它写进 cpp_info.libs 会让 test_package 链接失败，或（更坏）在静态库形态下静默链到别的东西。
+forbid_1_consequence: 消费者链接到不可链接的模块，或交付面声明与实际产物语义不符
+forbid_2_pattern: >
+  def package_info\(self\):(?:(?!def ).)*?cpp_info\.libs\s*=\s*\["heif"\](?:(?!def |runenv_info).)*?def \w
+forbid_2_reason: >
+  交付了 dlopen 插件却在 package_info() 里**不导出运行期插件搜索路径**。libheif 的
+  编译期宏 LIBHEIF_PLUGIN_DIRECTORY 是 configure 期的构建目录绝对路径
+  （Conan 的 CMakeToolchain 在 configure 前把 CMAKE_INSTALL_PREFIX 设成构建期
+  package_folder，实测 -DCMAKE_INSTALL_PREFIX=.../p/b/<hash>/p），而 conan create 结束后
+  包会被搬到最终缓存目录 .../p/<name><hash>/p，下载安装的消费者那里更不存在该构建目录。
+  必须由 package_info() 的 runenv_info.define_path("LIBHEIF_PLUGIN_PATH", ...) 导出真实路径。
+forbid_2_consequence: >
+  包能装、静态检查全绿，但消费者运行期 dlopen 不到插件 → 编解码能力静默缺席（假绿）
+prescan_pattern: "dlopen\\(|add_library\\([^)]*MODULE|LIBHEIF_PLUGIN_PATH|LIBHEIF_PLUGIN_DIRECTORY|plugin_info|codesign"
+verification_cmd: >
+  TASK_DIR=$HOME/tmp/libheif-dav1d-1.23.0;
+  sh "$TASK_DIR/run-upstream-tests.sh";
+  P=$(conan cache path libheif-dav1d/1.23.0:<package_id>);
+  /data/service/hnp/bin/llvm-readelf -d "$P/lib/libheif/libheif-dav1d.so" | grep -iE 'NEEDED|RUNPATH';
+  /data/service/hnp/bin/llvm-readelf -S "$P/lib/libheif/libheif-dav1d.so" | grep -i codesign;
+  sha256sum "$P/lib/libheif/libheif-dav1d.so"
+doc_file: knowledge/doc/DRAFT-E623-libheif-dav1d-1.23.0-plugin-consumer-contract-and-dlopen-signing.md
+verify_builds: >
+  libheif-dav1d 1.23.0（HarmonyOS PC aarch64，OHOS SDK ohos-sdk_26.0.0.18 / clang 15.0.4 /
+  libc++ 15004）：conan create rc=0；configure 摘要 "Dav1d AV1 decoder : + separate plugin"、
+  "AVIF decoding YES / encoding NO"；test_package 13/13 PASS；上游 ctest 13 个目标全部构建并运行，
+  用例级 PASS 9 / FAIL 6 / SKIP 20（N=217 声明，N'=35）。原始读数见
+  archives/l/libheif-dav1d/1.23.0/reports/{build-evidence,test-report}.md
+last_updated: 2026-09-20

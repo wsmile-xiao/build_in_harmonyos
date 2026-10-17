@@ -1,0 +1,86 @@
+#====================================================================
+# DRAFT-ksh93-1.0.10-ast-build-system-harmonyos — HarmonyOS 下 AT&T AST bin/package 构建系统适配
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-ksh93-1.0.10-ast-build-system-harmonyos
+trigger_tool:           ast|bin/package|mamake|make
+phase:                  build|testing
+error_signature: mkfifo: .*make\.out\.fifo.*Operation not permitted|ConanException: Error 1 while executing|ln: cannot create symbolic link.*Permission denied|mamake \[lib/libast\]: .*exit code 1|panic: process substitution: FIFO creation failed
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               ohos-build-system-compatibility
+match_keywords: ksh93,AST,bin/package,Mamfile,mkfifo,make.out.fifo,process substitution,symlink,ln -s,libast,HMDFS,AST_NO_DYLIB,quiet make,linux.arm64-64
+title: HarmonyOS 下 AT&T AST bin/package 构建系统适配：HMDFS 禁止 mkfifo 与符号链接
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: AT&T AST 自带构建系统 bin/package 基于 Mamfile，不使用 Meson/CMake/Autotools。默认模式下 bin/package make 会调用 mkfifo 创建 make.out.fifo 用于 tee 输出捕获；链接动态库后会调用 ln -s 创建 libast.so.6、libast.so 等版本化符号链接。HarmonyOS 的 HMDFS 禁止用户进程创建 FIFO，HarmonyOS 安全策略禁止第三方应用调用 symlink(2)，mkfifo(2) 返回 EPERM (Operation not permitted)，symlink(2) 返回 EACCES (Permission denied)，导致构建在链接阶段失败。同时 ksh93 的进程替换 <() / >() 也依赖 FIFO，在运行时测试中同样失败。
+affected_scope: 所有使用 AT&T AST bin/package 构建系统的软件（ksh93、ast-open 系列）；在 HarmonyOS PC（aarch64）上构建时受影响。依赖进程替换或版本化 .so 符号链接的运行时测试也会失败。
+verification_cmd: conan create 成功后，SHELL="<build>/arch/<hosttype>/bin/ksh" SHCOMP="<build>/arch/<hosttype>/bin/shcomp" bash bin/package quiet test 应能完成；消费者测试 ksh -c "echo OK" 应成功。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach: quiet-mode-plus-no-dylib
+rec_description: |
+  在 conanfile.py 的 build() 中使用 bin/package quiet make 替代 bin/package make。
+  quiet=1 时走 cmd="$cmd >> $o" 分支，不创建 make.out.fifo。
+  同时设置 AST_NO_DYLIB=y，跳过动态库构建与版本化符号链接，仅编译静态链接版本。
+  上游 README 明确支持：Export AST_NO_DYLIB to deactivate building dynamically linked libraries.
+rec_command: |
+  conanfile.py build():
+    ccflags = "-O2 -fPIC"
+    ldflags = ""
+    self.run(
+        f'AST_NO_DYLIB=y bash bin/package quiet make '
+        f'CCFLAGS="{ccflags}" LDFLAGS="{ldflags}"'
+    )
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach: patch-bin-package-and-single-thread
+fallback_description: 若无法使用 quiet 模式，可对 bin/package 打补丁，将 mkfifo -m 600 $o.fifo || exit 替换为 true，并配合 MAKEFLAGS=-j1 强制单线程，绕过 GNU make jobserver 的 FIFO 初始化。
+fallback_command: patches/0001-disable-make-fifo.patch
+fallback_auto_fix: false
+fallback_impl: package-patch
+
+forbid_1_pattern: LD_LIBRARY_PATH=.*\.conan2|PATH=.*\.conan2/p/
+forbid_1_reason: test_package 运行环境必须由 VirtualRunEnv 生成，禁止硬编码开发机 Conan 缓存路径修补运行环境。
+forbid_1_consequence: 缓存哈希和目录随机器/配方 revision 变化，测试无法复现。
+
+forbid_2_pattern: mkfifo.*chmod 777|syscall.*mkfifo|LD_PRELOAD.*mkfifo
+forbid_2_reason: 通过修改系统调用或预加载库绕过 HMDFS 限制属于绕过平台安全策略，且不可移植。
+forbid_2_consequence: 产物不可信，可能触发系统安全审计，且在不同 HarmonyOS 版本上行为不一致。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E011]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+ref_pr:
+ref_library: ksh93
+ref_version: 1.0.10
+doc_file:               knowledge/drafts/DRAFT-ksh93-1.0.10-ast-build-system-harmonyos.md
+last_updated: 2026-09-19
+source_event: ksh93/1.0.10 适配 HarmonyOS PC（aarch64）本地验证
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: Rain-Chime

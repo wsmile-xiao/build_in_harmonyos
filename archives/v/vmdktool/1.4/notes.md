@@ -115,5 +115,5 @@ vmdktool --version: "vmdktool version 1.4" (exit 0)
 7. 更新 notes.md 添加对话记录
 ---
 
-**编译结束**: 2026-06-29 21:00
-**最终状态**: published
+**编译结束**: 2026-08-25 00:34
+**最终状态**: built

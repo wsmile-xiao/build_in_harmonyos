@@ -6,10 +6,10 @@ Dev Containers CLI 是用于创建和管理开发容器的命令行工具。
 devcontainer CLI 允许开发者使用容器作为完整的开发环境。支持 VS Code Dev Containers 规范，可以创建、配置和管理开发容器，确保团队开发环境一致性。
 
 ## 已编译版本
-- 0.87.0 (2026-06-17)
+- 0.87.0 (2026-08-06, conan 适配)
 
 ## 依赖
-- Node.js 22.x
+- Node.js 24.13.0
 
 ## 特性
 - 开发容器创建与配置
@@ -33,3 +33,4 @@ devcontainer build
 ## 注意事项
 - npm 项目，仅编译原生模块 node-pty
 - 无需源码修改，无补丁文件
+- Conan 配方: conanfile.py (package_type=application, build system=npm)

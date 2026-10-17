@@ -1,0 +1,81 @@
+# ═══ Draft knowledge entry — Rust GUI 栈 glutin/winit 在 OHOS target 的 cfg 别名分裂：wayland-only feature 开关适配法 ═══
+# Timestamp: 2026-10-08
+# Software: alacritty/0.17.0（winit 0.30.13 + glutin 0.32.3 + crossfont 0.8.1 栈；
+#   同代任何 winit/glutin 消费者——终端模拟器/窗口类 Rust GUI 应用）
+# Gate: 本地 cargo build 实测（三轮：default features 失败→no-features 失败→wayland-only 成功）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-rust-gui-glutin-winit-ohos-free-unix-split
+trigger_tool:           cargo|rustc|conan
+phase:                  compilation
+error_signature:        error\[E0432\]: unresolved import `glutin::platform::x11`|
+                        could not find `x11` in `platform`|
+                        the item is gated here.*x11_platform|
+                        error\[E0599\]: no method named `x11_visual` found|
+                        no variant, associated function, or constant named `EglThenGlx` found|
+                        The platform you're compiling for is not supported by winit
+
+severity:               3
+category:               rust, gui, glutin, winit, ohos, cfg-aliases, feature-flags
+match_keywords:         glutin, winit, x11_platform, wayland_platform, free_unix,
+                        target_env, ohos, cfg_aliases, x11_visual, EglThenGlx,
+                        DisplayApiPreference, compile_error, E0432, E0599,
+                        platform_impl, linux mod, crossfont, raw-window-handle
+
+title:                  glutin 与 winit 的 build.rs cfg_aliases 对 target_env="ohos" 的 free_unix 判定不一致——Rust GUI 应用必须以 --no-default-features --features wayland 构建
+
+root_cause: >
+  同一 Rust GUI 依赖栈里两代 build.rs cfg_aliases 对 OHOS 的态度分裂：
+  (1) glutin 0.32.3 的 free_unix = all(unix, not(apple), not(android), not(ohos_platform))
+      ——把 target_env = "ohos" 排除出 free_unix，连带 x11_platform /
+      wayland_platform（均为 all(feature=..., free_unix)）在 OHOS 上恒 false，
+      glutin 的 x11 平台模块被 #[cfg] 编出；
+  (2) winit 0.30.13 的 free_unix = all(unix, not(apple), not(android_platform),
+      not(emscripten))——不排除 ohos，winit 的 linux 平台模块
+      （any(x11_platform, wayland_platform)）照常编译；
+  (3) glutin 的 egl_backend = all(feature="egl", any(windows, unix), not(apple))
+      ——不排除 ohos，EGL 后端可用。
+  应用侧源码（如 alacritty 0.17.0）的 x11 门控普遍只写
+  not(any(target_os="macos", windows))——OHOS 上为 true，于是引用被编出的
+  glutin::platform::x11 / x11_visual / DisplayApiPreference::EglThenGlx 报
+  E0432/E0599。反之若 --no-default-features 不带任何 feature，winit 因
+  x11_platform||wayland_platform 均为 false 走 compile_error 分支。
+
+affected_scope:         一切消费 winit/glutin/crossfont（或 Smithay 系窗口栈）的
+                        Rust GUI 应用/库在 aarch64-unknown-linux-ohos target 的
+                        适配；与具体应用无关（cfg 分裂是依赖 crate 的 build.rs
+                        行为）。库类（仅 rlib 交付、无平台 feature 透传）不受影响。
+
+solution: |
+  cargo 构建/测试统一带：
+    --no-default-features --features wayland
+  （alacritty 0.17.0 实测三轮定性：default(wayland+x11)→E0432/E0599 六连；
+  零 feature→winit compile_error；wayland-only→全绿构建+262/263 上游测试。）
+  机制链：关闭 x11 feature 后应用侧全部 x11 门控代码自动编出（门控含
+  feature="x11"）；winit 的 wayland_platform（free_unix 不排除 ohos）+ glutin
+  的 egl_backend（不排除 ohos）提供窗口/GL 路径。鸿蒙 PC 即 Wayland 合成器
+  体系，x11 后端在 OHOS 上无意义，无功能损失。配方层落到 conanfile.py
+  build()/test_package 的 cargo 命令与 manifest.yaml configure_options。
+  若上游默认 features 还含其他平台后端（如 wgl/glx），同样在该开关中一并
+  关闭——只保留 wayland（必要时补 egl）。
+
+fallback: >
+  若应用源码存在无条件（无 feature 门控）的 x11/GLX 引用且无法用 feature
+  关闭：走源码补丁路线——给相应引用补 #[cfg(all(feature = "x11",
+  not(target_env = "ohos")))] 守卫（R8 禁止空壳 stub，须真实编译排除）。
+  alacritty 0.17.0 不需要（全部门控点都已挂 feature="x11"）。
+
+verify_builds:          本地三轮实证（2026-10-07/08 设备 alacritty 0.17.0）：
+                        default features 编译失败日志（build3.log E0432×2+E0599×4）；
+                        --no-default-features 失败日志（build2.log winit
+                        compile_error）；wayland-only 成功（build4.log rc=0 2m43s /
+                        build6.log rc=0 6m32s / r1val 冷缓存 15m31s）。
+                        后续 conan create 与 CI #待建 PR 复核。
+
+rec_priority:           1
+rec_approach:           cargo-feature-flag-wayland-only
+rec_description:        cargo --no-default-features --features wayland 构建，
+                        0 源码补丁绕开 glutin/winit cfg 别名分裂
+rec_command:            cargo build --release --locked -j 2 --no-default-features --features wayland
+rec_auto_fix:           true
+rec_impl:               conan-recipe-cargo-wayland-feature-switch

@@ -1,61 +1,43 @@
-# spdlog 1.17.0 编译进度
+# spdlog 1.17.0 编译笔记
 
-**日期**: 2026-04-24
-**状态**: 🔄 编译中
+**日期**: 2026-08-27
+**状态**: ✅ Conan 配方完成
 
-## 步骤记录
+## 背景
 
-| 步骤 | 状态 | 备注 |
-|------|------|------|
-| Step 1 init | ✅ | 2026-04-24 完成 |
-| Step 2 configure | 🔄 | 使用 bundled fmt（任务说明 fmt 已存在，但实际检查未找到） |
-| Step 3 make | ⏳ | |
-| Step 4 install | ⏳ | |
-| Step 5 staging | ⏳ | |
-| Step 6 package | ⏳ | |
-| Step 7 deploy | ⏳ | |
-| Step 8 finish | ⏳ | |
+spdlog 1.11.0 已有完整的鸿蒙 PC conan 配方（fmt/8.1.1 + SPDLOG_FMT_EXTERNAL=ON）。
+spdlog 1.17.0 此前有探索性编译记录（manifest + notes），但未完成 conan 适配。
 
-## 发现与知识
+## 与 1.11.0 的关键差异
 
-### 依赖问题（R15 偏差记录） ✅ 已整理 L3
+### fmt 版本升级
 
-**任务说明**: "依赖：fmt（已存在于系统）"
-**实际情况**: 系统中未找到 fmt 库（pkg-config 找不到，~/usr/local/lib 无 libfmt*）
+- **1.11.0**: `self.requires("fmt/8.1.1")` — spdlog 1.11.0 的 `spdlog/fmt/fmt.h` 引用 `fmt/core.h`（fmt 8 兼容）
+- **1.17.0**: `self.requires("fmt/12.2.0")` — spdlog 1.17.0 的 `spdlog/fmt/fmt.h` 引用 `fmt/base.h`（fmt 10+ 才有的头），fmt 8 不兼容
+- spdlog 1.17.0 内置 bundled fmt 12.1.0，使用 fmt/12.2.0（>=12.1.0）外部构建
 
-**处理方案**: 使用 spdlog 内置的 bundled fmt 库编译（不设置 SPDLOG_FMT_EXTERNAL=ON）
-- 这是 spdlog 的默认推荐方式
-- 编译成功，静态库可用
-- **知识提取**: spdlog 1.17.0 可独立编译，无需外部 fmt
+### 配方继承
 
-### 构建系统 ✅ 已整理 L3
+- 完全继承 1.11.0 的 OHOS 平台适配：
+  - CMAKE_SYSTEM_NAME=OHOS 守卫（避免 cmake "System is unknown" 警告导致 SONAME 缺失）
+  - 二进制签名（_sign_binaries + _resolve_sign_tool）
+  - include 目录检测（避免 fmt/locale.h 遮蔽 musl locale.h）
+  - SPDLOG_FMT_EXTERNAL + SPDLOG_COMPILED_LIB 通过 cpp_info.defines 传给消费方
 
-- CMake 项目，无 autotools
-- 已修正 manifest.yaml build_system 为 cmake
-- 配置选项: `-DSPDLOG_BUILD_PIC=ON -DSPDLOG_INSTALL=ON -DSPDLOG_BUILD_TESTS=OFF`
-
-### CMake 平台识别（L2 平台知识）
-
-CMake 输出 "System is unknown to cmake" 警告，但配置成功继续编译。
-- 影响：仅警告，不阻塞
-- 解决：CMake 自动检测 clang 编译器工作正常
-- **建议**：未来可考虑创建 Platform/HarmonyOS cmake 模块（非必要）
-
-
-## 知识提取记录
+## 知识提取
 
 | # | 发现 | 层级 | 写入位置 | 状态 |
 |---|------|------|----------|------|
-| 1 | spdlog 可用 bundled fmt 独立编译 | L3 | manifest.yaml | ✅ |
-| 2 | CMake 项目无 autotools | L3 | manifest.yaml | ✅ |
-| 3 | CMake 平台识别警告不阻塞 | L2 | 无需新增（已有通用知识） | ✅ |
-
+| 1 | spdlog 1.17.0 需 fmt 10+（fmt/base.h），使用 fmt/12.2.0 | L3 | manifest.yaml | ✅ |
+| 2 | 1.11.0→1.17.0 API 无 breaking change，test_package 可复用 | L3 | notes.md | ✅ |
+| 3 | OHOS 平台适配（CMAKE_SYSTEM_NAME/签名/include检测）与 1.11.0 完全一致 | L3 | conanfile.py | ✅ |
 ---
 
-**编译结束**: 2026-04-21 23:42
-**最终状态**: partial
+**编译结束
 
----
-
-**编译结束**: 2026--04-24 09:37
-**最终状态**: partial
+## 提交状态
+- PR: 已推送至 GitCode
+- W3 本地 CI 模拟: 通过
+- W4 Pre-PR 审计: 通过
+- PR body: 已完成**: 2026-08-27 22:13
+**最终状态**: built

@@ -1,0 +1,149 @@
+#====================================================================
+# DRAFT-ohos-module-ctor-eager-dlopen-sigsegv —— 启动期模块构造函数内
+#   dlopen 失败时，异常发生在模块构造阶段，进程直接 SIGSEGV 而非干净报错，
+#   使「库缺失」被误判为「库崩溃/段错误」
+#
+# 对应文档: knowledge/drafts/DRAFT-ohos-module-ctor-eager-dlopen-sigsegv.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+# 注: 本文件所有字段均为单行值或块值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-ohos-module-ctor-eager-dlopen-sigsegv
+source_lib:             gtkd 3.11.0
+trigger_tool:           make|ldc2|dmd|runtime|test
+phase:                  runtime|testing
+error_signature:        Signal 11 \(core dumped\)|Signal 11 \(SIGSEGV\)|SIGSEGV|
+                         Segmentation fault.*(unittest|test)|
+                         Library load failed.*\n.*Signal 11|
+                         failed to load shared library.*core dumped|
+                         运行期 dlopen 失败.*进程崩
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               runtime, linking, testing, portability, limitation
+match_keywords:         SIGSEGV, Signal 11, core dumped, 段错误, module constructor,
+                         shared static this, static this(), 启动期, 模块构造,
+                         eager binding, 急切绑定, 延迟绑定, lazy binding,
+                         Linker.link, dlopen, dlsym, loadLibrary, 库缺失,
+                         LD_LIBRARY_PATH, 平台限制, probe, deselect,
+                         runtime-dlopen binding, 运行期解析型绑定
+title:                  运行期 dlopen 型绑定的库，其「每模块启动期急切登记全部符号」
+                        设计会把「依赖 .so 缺失」放大成启动期 SIGSEGV——须先探针
+                        实测区分「库缺失」与「库真崩溃」，不可直接判定平台不支持
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  部分库（尤以「运行期 dlopen 型绑定」为典型：每个符号登记为
+  `Linker.link(fn, "name", LIBRARY.X)`，运行时才 dlsym 解析）会在**每个模块的
+  启动期构造器**里急切地把该模块的全部绑定符号一次性登记/解析。当其中某个 .so
+  在目标平台上不存在时，dlopen 失败并在**模块构造阶段**抛异常；而模块构造发生在
+  运行时启动序列的早期（在 main 之前/极早期），此时异常尚无友好的浮现路径，
+  在 OHOS/musl 上表现为**直接 SIGSEGV**（Signal 11, core dumped），而非
+  「Error loading shared library xxx: No such file or directory」这类可读错误。
+  后果是**诊断信息被销毁**：日志里只有一行 Signal 11，看不出缺哪个库，
+  极易被误判为「该库在 OHOS 上崩溃 / 平台不支持 / 需要打补丁」，从而错失
+  「只是运行环境缺一个 .so」这个真实且可修的结论。
+  gtkd 3.11.0 实证：全库 906 个模块合跑时，输出明确打印
+  `Library load failed (librsvg-2.so.2)` 与 `(libharfbuzz-gobject.so.0)`（前者因
+  ohpcd 的 librsvg 是**静态制品**、不提供 librsvg-2.so.2），随后进程 SIGSEGV；
+  而把 4 个上游内嵌 unittest 块**逐个隔离**运行，规律立刻清晰：唯一通过的
+  `generated/gtkd/glib/c/types.d` 是**纯 D 计算**（该文件 Linker.link 调用数为 0，
+  完全不触碰 C 库），另 3 个都经加载器调 gobject/glib 的 C 函数 → 全 SIGSEGV。
+affected_scope: >
+  所有采用「运行期 dlopen/延迟绑定」并在模块启动期急切登记的库，在**依赖 .so
+  不完整**的环境里跑测试或程序时：D 语言的 GtkD 系绑定（Linker.link + 
+  shared static this）、插件式加载器、自带 glad/glew 的图形库、
+  绑定型项目（Python/Rust/Go 对 C 库的 FFI 绑定若用 module init 里批量 dlsym）。
+  尤其在容器/交叉环境里只装了部分依赖（如静态库制品、缺共享版）时高发。
+verification_cmd: >
+  ① 先看是否真缺库（**这一步最关键，别跳过**）：
+     `grep -rn "shared static this\|static this()" <src>` 找启动期构造器；
+     `grep -rn "loadLibrary\|dlopen\|Linker.link" <src>` 找登记点；
+     再对每个登记的名字做可用性检查：
+     `python3 -c "import ctypes; ctypes.CDLL('<soname>')"` 或
+     `for so in <names>; do find <pkg> -name "$so"; done`
+  ② 复现时**捕获 stderr 全文**（不要只看 pytest 汇总行）：SIGSEGV 前的
+     "Library load failed (...)" / "Error loading shared library ..." 就是答案；
+  ③ 隔离运行缩小范围（把合跑拆成逐模块/逐用例），找出通过的与崩溃的差异
+     ——通过的通常是纯计算、不触发加载器的那些，这是判定「环境缺库」而非
+     「库有 bug」的决定性证据；
+  ④ 交叉验证目标库本身可用：用**不经该库**的方式加载同一 .so
+     （ctypes 直连、nm -D 查符号），符号齐备即说明不是平台缺能力。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           probe-then-classify-missing-so-vs-platform-crash
+rec_description: >
+  分三步，顺序不可颠倒：①**先证明是「缺 .so」而非「库崩溃」** —— 用不经该绑定的
+  手段（ctypes 直连 / nm -D）确认目标 .so 的符号齐备且可加载；②**补齐运行期依赖**
+  —— 在配方里把该 dlopen 目标声明为 requires（注意：**静态制品不能替代**，
+  需共享版 .so 出现在 LD_LIBRARY_PATH 上；若 ohpcd 只发布静态版，则须申请共享
+  制品或如实记录为环境缺口）；③**若确实无法补齐，才用探针判定后 deselect** ——
+  探针实测（编译两个互引 .so 的子进程验证），而非硬编码跳过，并在 manifest /
+  notes / MANIFEST 三处如实申报「N 通过 / M 崩溃」及其根因，明确声明
+  **非库本体缺陷**并给出反证（符号可解析 + 加载器本身在同一包的另一路径可用）。
+  交付物可用性须由**消费者测试**独立取证（本例：11/11，同一加载器成功调用
+  gtk_get_major_version() 返回 3）。
+rec_command:            grep -rn "shared static this" <src> ; python3 -c "import ctypes; ctypes.CDLL('<soname>')" ; <按需补 requires 或探针 deselect>
+rec_auto_fix:           false
+rec_impl:               probe-and-classify
+
+fallback_priority:      2
+fallback_approach:      isolate-and-report-crash-honestly
+fallback_description: >
+  补齐依赖不可行时：逐模块隔离运行取真实通过/崩溃数，按 R51 如实申报
+  （不把 SIGSEGV 写成「通过」，也不把它写成「不适用」），并在文档中给出
+  崩溃机制与反证，让评审能独立复核结论。禁止因 SIGSEGV 就笼统断言
+  「该库在 OHOS 上不可用」。
+fallback_command:       <逐模块隔离驱动命令> ; 记录 N 通过 / M SIGSEGV
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       (Signal 11|SIGSEGV|段错误|core dumped).*(平台不支持|不兼容|不可用)|
+                         (Signal 11|SIGSEGV).*(跳过|deselect).*(不|未).*探针
+forbid_1_reason:        SIGSEGV 只是**表象**，根因可能是「运行环境缺一个 .so」这种
+                        完全可修的问题。不先取证就断言平台不支持，会把可修问题
+                        升级成平台限制，且掩盖真实缺口（如制品仓只发了静态版）。
+forbid_1_consequence:   本该补依赖解决的适配被错报为平台限制，下游拿到不可用的
+                        结论；或反过来，把真实缺失说成「库崩溃」误导上游。
+
+forbid_2_pattern:       启动期构造器.*dlopen.*(直接|改成|加).*(try|catch).*(就|即).*解决|
+                        把 module ctor 的 dlopen 包一层 catch 当修法
+forbid_2_reason:        改上游源码给构造器加 try/catch 只是把崩溃变成「静默少符号」，
+                        运行期调用到该符号时仍是空指针崩溃（更晚、更难查）；本条
+                        的正解是补依赖或探针申报，不是掩盖。
+forbid_2_consequence:   崩溃点后移，诊断难度上升；且属改上游源码，须打补丁并解释。
+
+principles:             P013, P015
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E004, E024, DRAFT-libcec-8.1.7-cmake-system-name-linux-soname,
+                         opencsg-1.8.2-dt-needed-verification-for-runtime-dlopen-libs,
+                         DRAFT-test-discovery-per-language-convention]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 (Metadata) ═══
+doc_file:               knowledge/drafts/DRAFT-ohos-module-ctor-eager-dlopen-sigsegv.md
+last_updated:           2026-09-20
+source_event:           gtkd 3.11.0 OHOS aarch64 适配：上游 4 个内嵌 unittest 块
+                        实测 1 通过 / 3 SIGSEGV，根因为模块启动期急切登记全部绑定
+                        符号 + ohpcd 的 librsvg 为静态制品（无 librsvg-2.so.2）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:              11366
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20
+
+draft:                  true
+contributor_id:         3211

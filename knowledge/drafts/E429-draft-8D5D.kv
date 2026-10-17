@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E429.kv，填写各字段
+# 对应的人类文档: doc/E429.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E429
+trigger_tool: cmake|conan|create|clang|compile
+phase: compilation
+error_signature: fatal error: 'libnova/utility.h' file not found
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 3
+category: cmake, build-system, conan
+match_keywords: file not found, indirect include, include_directories, target_link_libraries, XXX_LIBRARIES, XXX_INCLUDE_DIRS, extra_cflags, extra_cxxflags, CMakeToolchain, 老式 CMake, indi, libastro.h, libnova
+title: 上游 CMake 只 `target_link_libraries(... ${NOVA_LIBRARIES})` 而 `include_directories()` 不含该依赖的头目录；当主依赖的头（libindi 的 libastro.h）间接 `#include <libnova/utility.h>` 时编译报 fatal error——修法是用 ConanToolchain 的 extra_cflags/extra_cxxflags 注入依赖头目录（R33 合规，不改上游源码）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: indi-talon6 的头链是 talon6.h → indidome.h（libindi 的头）→ libastro.h → `#include <libnova/utility.h>`。而上游 CMakeLists 里只有 `target_link_libraries(indi_talon6 ${INDI_LIBRARIES} ${NOVA_LIBRARIES})` 与 `include_directories(${INDI_INCLUDE_DIR})`——**没有任何地方把 NOVA 的头目录加进 编译搜索路径**（工程假设 libnova 装在系统 /usr/include）。在 Conan 交叉构建下 libnova 位于独立 package_folder，于是编译失败。
+affected_scope: 所有「用传统 CMake 变量风格（XXX_INCLUDE_DIRS/XXX_LIBRARIES）而非 imported target」的上游工程；在把依赖改为 Conan 包（头文件不再位于系统目录）后必然触发；尤其是"主依赖的头间接包含次级依赖的头"这种二级传递场景
+verification_cmd: 编译日志出现 `fatal error: '<dep>/<header>.h' file not found`；修复后可用 `grep -o -- '-I[^ ]*<dep>[^ ]*' <build>/CMakeFiles/<target>.dir/flags.make` 确认标志已注入
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: inject-dependency-include-dir-via-cmake-toolchain-flags
+rec_description: 在 recipe 的 generate() 里对每个"头目录未被上游传入"的依赖追加编译标志： `tc.extra_cflags.append('-I"%s"' % dep_inc)` 与 `tc.extra_cxxflags.append('-I"%s"' % dep_inc)` （dep_inc 取自该依赖的 cpp_info.includedirs[0] 与 package_folder 拼接）。 走 ConanToolchain 参数而非裸环境变量（R33），与仓库既有做法一致（libindi 配方用同样方式注入 fftw 头）。不改上游源码。
+rec_command: tc.extra_cflags.append('-I"%s"' % nova_inc) && tc.extra_cxxflags.append('-I"%s"' % nova_inc)
+rec_auto_fix: false
+rec_impl: manual
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: patch-cmakelists-to-add-include-directories
+fallback_description: 若上游 CMakeLists 在 configure 后覆盖了工具链标志（罕见），可加补丁把 `include_directories(${NOVA_INCLUDE_DIR})` 补进构建脚本（只用构建脚本层面改动，不改被编译源码）。
+fallback_command: patch -p1 --dry-run < patches/000N-<pkg>-add-nova-include.patch
+fallback_auto_fix: false
+fallback_impl: manual forbid_1_pattern:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:
+forbid_1_reason:
+forbid_1_consequence:
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E429.md
+last_updated: 2026-10-08
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 8D5D

@@ -1,0 +1,97 @@
+#====================================================================
+# E546-draft-3028 — shebang 改成鸿蒙路径后，上游自举测试在非鸿蒙构建机上
+#   大面积「失败」是假象：测到的是构建机有没有该解释器，不是被测工具
+# 触发事件: clitest 0.5.0 适配（上游 test.md 262/286 假失败）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     E546-draft-3028
+trigger_tool:           test
+phase:                  testing
+
+error_signature:        FAIL: [0-9]+ of [0-9]+ tests failed|
+                        \./[a-z0-9_-]+: (No such file or directory|not found)|
+                        bad interpreter: No such file or directory|
+                        cannot execute: required file not found
+
+severity:               2
+category:               testing, ohos, shell, portability, verification
+
+match_keywords:         shebang, /system/bin/sh, /data/service/hnp/bin/bash,
+                        bad interpreter, 自举测试, self-hosted test, 假失败,
+                        false failure, upstream test suite, 解释器映射,
+                        No such file or directory
+
+title:                  给脚本类包打完 shebang 适配补丁（E165）后，用「./工具」形式自举的上游测试会在非鸿蒙构建机上整片失败——失败的是 shebang 路径不存在，不是工具本身；必须建立解释器映射或显式解释器调用来复现，禁止据此判定补丁破坏功能、更禁止改上游用例
+
+root_cause:             E165 要求把脚本 shebang 从 /bin/sh、/bin/bash 改写为鸿蒙真实
+                        路径（/system/bin/sh、/data/service/hnp/bin/bash）。很多脚本类
+                        项目的上游测试是「自举」的——测试用例内部以 `./tool` 形式调用
+                        被测脚本，依赖 shebang 由内核 execve 解析。补丁打完后在**非鸿蒙
+                        主机**（x86 适配机、容器）上跑上游套件，每个调用点都得到
+                        ENOENT，于是几乎所有用例一起失败。失败信息里往往看不到
+                        "bad interpreter" 字样（外层测试框架只报输出不匹配），极易被
+                        误判成「适配补丁破坏了上游功能」，进而走向两条错误路线：
+                        回退正确的 shebang 补丁，或修改上游测试用例来「让它过」。
+
+affected_scope:         所有脚本类包（shell / perl / python 单文件或多脚本工具），
+                        只要同时满足：① 打了 shebang 路径改写补丁；② 上游测试以
+                        ./<tool> 形式自举调用。实测样本: clitest 0.5.0（286 用例中
+                        262 例假失败）。lynis / powerlevel10k / cronic 等仓内脚本包
+                        属同一形态。
+
+verification_cmd:       # ① 判定是不是假失败：直接执行 vs 显式解释器执行
+                        ./<tool> --version            # 假失败场景: No such file or directory
+                        sh ./<tool> --version         # 能正常输出 → 证明脚本本身没坏
+                        head -1 <tool>                # 确认 shebang 指向的路径
+                        ls -l /system/bin/sh          # 构建机上通常不存在
+                        # ② 建立解释器映射后复跑上游套件（构建机准备，不入配方）
+                        mkdir -p /system/bin && ln -sf /bin/dash /system/bin/sh
+                        ./<tool> <upstream-test-entry>   # 应恢复到补丁前的通过数
+
+rec_priority:           1
+rec_approach:           interpreter-mapping-for-verification
+rec_description:        在适配机上建立与鸿蒙同名的解释器映射（/system/bin/sh -> /bin/dash 等），用它复跑上游自举测试，确认补丁前后通过数一致；映射属构建机准备，绝不写进配方或补丁
+rec_command:            mkdir -p /system/bin && ln -sf /bin/dash /system/bin/sh
+                        # 复跑上游套件，通过数应与打补丁前逐一致
+rec_auto_fix:           false
+rec_impl:               host-prepare-symlink
+
+fallback_priority:      2
+fallback_approach:      explicit-interpreter-invocation
+fallback_description:   测试侧一律以「解释器 + 脚本路径」显式调用（sh <pkg>/bin/tool …），不依赖 shebang；shebang 本身改用独立断言覆盖（head -1 比对 + /system/bin/sh 存在时才做直接执行断言，不存在则 SKIP）
+fallback_command:       self.run(f'sh "{test_sh}" "{pkg_bin}"')   # test_package 侧
+fallback_auto_fix:      false
+fallback_impl:          test-explicit-interpreter
+
+forbid_1_pattern:       回退 shebang 补丁|把 shebang 改回 /bin/sh|修改上游测试用例以适配 shebang
+forbid_1_reason:        上游套件的失败源自构建机缺少目标平台解释器，与被测脚本无关；回退补丁会让产物在设备上无法直接执行（commands.json 声明的正是直接执行），改用例则是在掩盖一个根本不存在的缺陷
+forbid_1_consequence:   要么交付一个在鸿蒙上跑不起来的工具，要么在 PR 里提交无谓的上游用例改动——两者在评审中都属硬伤
+
+forbid_2_pattern:       把上游自举测试原样塞进 conanfile 的 build\(\) 里执行
+forbid_2_reason:        build() 在构建机上运行，测到的是构建机的 shebang 支持与 GNU/toybox 工具差异，不是被测工具的行为
+forbid_2_consequence:   CI 上出现与适配质量无关的红，或反过来掩盖真实问题；正确做法是适配阶段完整实跑并留证，平台相关行为交由 test_package 在设备上复验
+
+principles:
+
+causes:                 []
+caused_by:              [E165]
+similar_to:             [E165]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/E546-draft-3028.md
+last_updated:           2026-09-21
+source_event:           clitest 0.5.0 适配：shebang 改 /system/bin/sh 后上游 test.md 由 286/286 跌至 24/286（262 例假失败）；建立 /system/bin/sh -> /bin/dash 映射后恢复 286/286，证明补丁无功能回归
+
+authors:                nyaco3 <aqjCItYW1QmEJQuF.gcw_XDpqZ8sO@noreply.gitcode.com>
+source_pr:              0
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-21
+
+draft:                  true
+contributor_id:         3028

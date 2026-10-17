@@ -1,0 +1,112 @@
+#====================================================================
+# DRAFT-latino-1.4.4-musl-empty-libintl-bison-dgettext — musl 空壳 libintl.h + bison YY_→dgettext 序言：OHOS 编译期隐式声明错误，__GLIBC__ 能力守卫最小修补
+# 触发事件: latino 1.4.4 适配（latparse.c 编译失败）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-latino-1.4.4-musl-empty-libintl-bison-dgettext
+trigger_tool:           clang|cmake|bison
+phase:                  build
+error_signature:        call to undeclared function 'dgettext'|
+                         incompatible integer to pointer conversion passing 'int' to parameter of type 'const char *'|
+                         YY_("syntax error")
+
+severity:               2
+category:               musl, bison-generated-code, translation-api, ohos-platform, compile
+match_keywords:         dgettext, libintl.h, YY_, bison-runtime, 空壳头文件,
+                         隐式声明, implicit-function-declaration, Wint-conversion,
+                         musl, __linux, __GLIBC__, NLS, bison 序言,
+                         libintl 不声明函数, 编译期声明缺失
+title:                  musl 的 libintl.h 是空壳（零函数声明）：bison 生成代码序言在 #ifdef __linux 下把 YY_ 映射为 dgettext，OHOS 编译期报隐式声明 + int→指针转换错误
+
+topic: >
+  上游预生成的 bison 解析器（latino 1.4.4 的 latparse.c，序言源自
+  latparse.y）在 #ifdef __linux 分支包含 <libintl.h> 并
+  #define YY_(Msgid) dgettext("bison-runtime", Msgid)。该映射不受
+  YYENABLE_NLS 守卫控制（序言 #define 先于 bison 默认守卫链短路）。
+  OHOS clang 定义 __linux/__linux__，而 musl 的 libintl.h 仅含
+  __USE_GNU_GETTEXT 宏（零函数声明），libc 亦无 dgettext 符号：
+  #include 成功但函数无声明 → 隐式函数声明（C99 起非法）→ int 传入
+  const char* 报 -Wint-conversion。glibc 下头文件声明齐全且 libc 自带
+  dgettext，上游从未暴露。
+
+root_cause:             musl 不实现 gettext API：libintl.h 为空壳头文件（存在但零声明），与"头文件缺失"（E531 类）和"符号未链接"（E015 类）均不同；bison 序言的 #ifdef __linux 无条件映射 YY_→dgettext 在 musl 目标上必然编译失败
+  1) 上游 latparse.y/latparse.c 序言：#ifdef __linux →
+     #include <libintl.h> + #define YY_(Msgid) dgettext(...)；
+  2) OHOS（musl）sysroot 的 /usr/include/libintl.h 只含
+     __USE_GNU_GETTEXT 宏定义，不声明任何函数；libc.so 无
+     dgettext/gettext 符号（nm -D 实证）；
+  3) 所有 YY_(...) 展开点（syntax error / memory exhausted 等）编译报
+     call to undeclared function 'dgettext' + incompatible integer to
+     pointer conversion。
+
+fix: >
+  上游补丁（打在预生成 src/latparse.c 与 tools/parser/latparse.y 序言，
+  构建不重跑 bison）：
+  #ifdef __linux → #if defined(__linux) && defined(__GLIBC__)
+  glibc 环境保留 dgettext 映射，musl 环境走 bison 默认
+  恒等回退 #define YY_(Msgid) Msgid（latparse.c:398）自然生效，错误
+  消息按原文输出——musl 下 dgettext 本就不可用，零功能损失。
+
+similarity: >
+  E015（链接期 undefined symbol: libintl_dgettext，补 -lintl）：本例
+  编译期即失败，头文件本身是空壳，非链接问题；
+  E027（configure NLS 探测失败，--disable-nls）：本例无 configure NLS
+  探测，CMake 直接编译；
+  E531/E020（musl 缺 glibc 专有符号如 qsort_r）：本例 musl 头文件存在
+  但为空壳，非符号缺失；
+  E092（CMake 无 HarmonyOS 平台模块）：本例是 libc API 层，与 CMake
+  平台无关。四者均不覆盖"musl 空壳头文件 + 编译期声明缺失"。
+
+distinct_from:          E015, E027, E531, E020, E092
+
+safety: >
+  适用条件：Linux 内核 + musl libc（OHOS 及 musl 发行版）上编译序言含
+  #ifdef __linux→dgettext 映射的 bison 生成/手写代码。不适用于 glibc；
+  不适用于链接期缺 -lintl（E015）或 configure NLS 探测失败（E027）。
+  __GLIBC__ 用于按 libc 能力区分真实 gettext/dgettext 支持，不依赖目标平台宏，
+  仅跳过 musl 下本不可用的翻译查找。错误消息退化为英文原文，可接受。
+
+verification: >
+  latino/1.4.4 ohos-aarch64 conan create（shared/static 双包）：
+  打补丁后 latparse.c 编译通过；上游官方测试 coverage.lat 1/1 通过
+  （真机执行）；test_package 3/3 通过（嵌入 API 全链 + CLI 10 项精确
+  输出断言 + --version）；HMBS_UPSTREAM_TEST_RESULT 如实记录。
+  日志 ~/latino-investigate/cc.log、cc_static.log。
+
+verification_cmd: >
+  cd archives/l/latino/1.4.4 && conan create . -pr:h=~/.conan2/profiles/ohos-aarch64 -pr:b=~/.conan2/profiles/ohos-aarch64 --build=missing
+
+limitations: >
+  仅适用于"翻译查找在 musl 上本就不可用"的场景：若软件真的依赖
+  dgettext 运行时翻译（非 bison 消息宏），需评估移植 gettext 或禁用
+  NLS 功能路径，不能简单加守卫。补丁打在预生成文件时，若上游构建会
+  重跑 bison（本例不跑），需同步补 .y 序言，否则重新生成时回归。
+
+rec_priority:           1
+rec_approach:           libc-capability-guard-bison-prologue（__GLIBC__ 能力守卫 + bison 恒等回退）
+rec_description: >
+  三步处置：1) 定性——读 sysroot 的 libintl.h 确认空壳（零函数声明），
+  nm -D libc.so 确认无 dgettext 符号，排除 E015/E027/E531 覆盖；
+  2) 最小补丁——预生成 .c 与 .y 序言同步把 #ifdef __linux 收紧为
+  #if defined(__linux) && defined(__GLIBC__)；3) 证据留痕——conan
+  create 双包 + 上游测试 + 消费者测试全过，HMBS_UPSTREAM_TEST_RESULT
+  如实记录。
+rec_command:            cd archives/l/latino/1.4.4 && conan create . -pr:h=~/.conan2/profiles/ohos-aarch64 -pr:b=~/.conan2/profiles/ohos-aarch64 --build=missing
+rec_auto_fix:           false
+rec_impl:               conan-recipe-source-patch
+
+doc_file:               knowledge/drafts/DRAFT-latino-1.4.4-musl-empty-libintl-bison-dgettext.md
+last_updated:           2026-09-15
+source_event:           latino 1.4.4 适配，latparse.c 序言 YY_→dgettext 映射在 OHOS musl 下编译失败
+authors:                 atomcode-executor
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-15
+
+draft:                  true
+contributor_id:         ffieldd22_-

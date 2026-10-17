@@ -1,4 +1,5 @@
 import os
+import shlex
 from conan import ConanFile
 from conan.tools.build import cross_building
 
@@ -14,18 +15,22 @@ class TestPkg(ConanFile):
         incs = []
         for _ref, _d in self.dependencies.items():
             incs += ["-I" + p for p in _d.cpp_info.includedirs]
-        inc = " ".join(incs)
         libdir = dep.libdirs[0]
-        so = os.path.join(libdir, "libpixman-1.so")
-        cc = os.environ.get("CC", "clang")
-        self.run(f"{cc} test.c -o test_probe {inc} -DTARGET_SO='\"{so}\"' -ldl")
+        so_candidates = [
+            os.path.join(libdir, "libpixman-1.so"),
+            os.path.join(libdir, "libpixman-1.so.0"),
+            os.path.join(libdir, "libpixman-1.so.0.46.4"),
+        ]
+        so = next((path for path in so_candidates if os.path.exists(path)), so_candidates[0])
+        executables = self.conf.get("tools.build:compiler_executables", default={}, check_type=dict) or {}
+        cc = os.environ.get("CC") or executables.get("c") or "clang"
+        args = [cc, "test.c", "-o", "test_probe"]
+        args.extend(incs)
+        args.extend([f"-DTARGET_SO=\"{so}\"", "-ldl"])
+        self.run(" ".join(shlex.quote(arg) for arg in args))
 
     def test(self):
         if cross_building(self):
             self.output.info("cross-building：只验编译+链接")
             return
-        if False:
-            self.output.info("skip_test_run：GUI/app 库只验编译+链接")
-            return
-        bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
-        self.run(f"{bash} -c './test_probe'", env="conanrun")
+        self.run("./test_probe", env="conanrun")

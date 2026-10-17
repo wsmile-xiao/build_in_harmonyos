@@ -1,0 +1,86 @@
+#====================================================================
+# DRAFT-13618-shadow-repo-source-g0e-git-index-staged-root-file
+#   真机 shadow CI：G0e 根目录白名单按 `git ls-files` 读 **git 索引**，
+#   --repo-source 复制的 job repo 会连带继承上游 repo 里**暂存未提交**
+#   的根目录文件，工作区看不到却稳定触发 G0e 拦截
+# 来源: libmicrodns 0.2.0 适配（真机 shadow CI r3-r5 轮实测，
+#       环境为 atomgit OpenHarmonyPCDeveloper/build_in_harmonyos
+#       的 ohos-prepare-isolated-conan-job.sh + ohos-test-runner.sh 隔离 job 流程）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-13618-shadow-repo-source-g0e-git-index-staged-root-file
+trigger_tool:           zsh|bash|git|build_and_test.sh
+phase:                  configuration
+error_signature:        G0e:.*根目录存在非白名单文件|
+                        root whitelist violation|
+                        ^\s*\.ci-result\.json\s*$|
+                        L0_RESULT=skip: blocked_by_G0
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               shadow-ci, environment, git-index, whitelist, g0e
+match_keywords:         G0e, 根目录, 非白名单文件, git ls-files, git 索引, staged,
+                        .ci-result.json, repo-source, 隔离 job, ohos-prepare-isolated-conan-job,
+                        blocked_by_G0, 文件不存在, 工作区干净, watcher 抓不到,
+                        permission denied: git, permission denied: bash,
+                        can't open input file, build_and_test.sh, 真机 shadow CI
+title:                  真机 shadow CI G0e 按 git 索引（`git ls-files`）查根目录白名单：--repo-source 连带继承上游 repo 的暂存文件，工作区干净仍被拦
+prescan_pattern:        G0e.*非白名单文件|git ls-files --full-name
+prescan_globs:          .ci-result.json, *.md, *.json
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             build_and_test.sh 的 G0e 门禁用 `git ls-files --full-name |
+                        grep -v '/'` 枚举根目录文件——这读的是 **git 索引（staged
+                        列表）**，不是工作区目录。真机 shadow CI 的隔离 job 由
+                        ohos-prepare-isolated-conan-job.sh `--repo-source` 从设备上
+                        已有 repo **整目录复制**（含 .git）；若上游 repo（其他包的
+                        agent 工作区）曾把 `.ci-result.json` 之类的根目录文件
+                        `git add` 过而未清理，这个 staged 条目会原样进入新 job 的
+                        索引。于是自己的 job 出现三重矛盾：工作区 `ls -a` 干净、
+                        G0e 稳定报 `根目录存在非白名单文件: .ci-result.json`、
+                        轮询 watcher 永远抓不到该文件出现。
+                        连带环境坑（同轮实测，勿混判）：shadow 设备登录 PATH 无
+                        bash/git（zsh 报 `permission denied: git|bash` 或
+                        `can't open input file: ci/conan/build_and_test.sh`——后者
+                        实为隔离 job repo 复制不完整缺 ci/ 目录）。git/bash 均在
+                        /data/service/hnp/bin。git 不可用时 G0e 反而"通过"
+                        （ls-files 空输出），git 修好后索引问题才暴露——先修 PATH
+                        后出 G0e fail 正是该坑的典型时序。
+
+affected_scope:         所有经 --repo-source 复制的真机 shadow 隔离 job；上游
+                        repo-source 的 agent 有过根目录文件 staged 行为时必命中。
+                        不影响网站 CI（平台 worker 从远端干净 clone，索引无杂物）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           git-rm-cached-in-job-copy
+rec_description:        在 job 的 repo 副本里把残留条目从索引摘除（只动本地副本，
+                        不涉真实仓库、不丢任何文件内容）：
+                          git rm --cached .ci-result.json
+                        判别三步：
+                        ① export PATH=/data/service/hnp/bin:$PATH（让 git/bash 可用）
+                        ② cd <job>/repo/build_in_harmonyos &&
+                           git ls-files --full-name | grep -v '/'
+                           ——列出全部根目录 staged 条目，逐一对照白名单
+                           （.gitignore|.gitattributes|BUILD.gn|CONTRIBUTING.md|
+                           KNOW_YOUR_WHY.md|LICENSE|README.md|SKILL.md|SUMMARY.md|
+                           oh-package.json）
+                        ③ 对非白名单条目逐个 git rm --cached；重跑 `git ls-files`
+                           确认只剩白名单文件后再启动 runner。
+                        注意：不要用 rm 删工作区文件来"修"——文件本来就不在工作
+                        区，删索引才是对症。
+rec_command:            export PATH=/data/service/hnp/bin:$PATH; cd <job_repo_root> && git rm --cached <file> && git ls-files --full-name | grep -v '/'
+rec_auto_fix:           false
+rec_impl:               job-copy-index-cleanup
+
+fallback_priority:      2
+fallback_approach:      fresh-repo-source-or-infra-scp
+fallback_description:   换一个"索引干净"的近期 job 作 --repo-source 重建隔离 job；
+                        或从本机 worktree 打包 infra 目录 scp 补齐 job repo
+                        （r1 的"复制不完整缺 ci/ 等七目录"同法修复）。缺点：无法
+                        保证新 repo-source 索引干净，治标。
+fallback_command:       sh "$HOME/bin/ohos-prepare-isolated-conan-job.sh" --user codex --job <new-job> --package <pkg> --repo-source <clean-repo>
+fallback_auto_fix:      false

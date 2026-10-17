@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E546.kv，填写各字段
+# 对应的人类文档: doc/E546.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E546
+trigger_tool: conan|git|packaging
+phase: testing|packaging
+error_signature: archives/[a-z0-9]/[^/]+/[^/]+/test_package/moved-[a-z0-9._-]+|test_package/(conanbuild|conanrun|deactivate_conan)[a-z]*[.]sh|test_package size (8[0-9]|[0-9]{3,})M|untracked.*test_package/(moved-|conanbuild)
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: conan,packaging,testing,git
+match_keywords: test_package, build_folder, moved-, 归档污染, 87MB, activate 脚本, conanbuild.sh, git add, 入库产物, rmtree
+title: Conan 仓库内 test_package 以自身为 build_folder：测试产物（被测包副本/activate 脚本）会混入归档并被提交
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: Conan 对仓库内的 test_package 直接以该目录自身作为 build_folder，run_test.sh 生成的 moved-<pkg> 副本、conanbuild/conanrun/deactivate 脚本都落在源码树内；若入库前不清理，构建产物会被当作源码提交，使归档体积与 CI 行为随残留状态漂移
+affected_scope: 所有把 test_package 放在仓库内（archives/.../<ver>/test_package）的 Conan 配方，尤其是测试中复制/移动整包做重定位校验的包
+verification_cmd: du -sh <pkg>/test_package; git status --porcelain <pkg>  # 出现 moved-<pkg>/conanbuild.sh 等即为污染
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: 在 test_package/conanfile.py 的 test() 中用 try/finally + shutil.rmtree(moved, ignore_errors=True) 无条件清理 build_folder 产物（成功/失败/异常都清理）；激活脚本交由仓库 .gitignore 兜底
+rec_description: 在 test() 中用 try/finally 确保无论测试成功、断言失败还是抛异常，build_folder 内的被测包副本都被删除；归档只保留纯输入（conandata.yml / conanfile.py / manifest.yaml / notes.md / patches / test_package 源文件）
+rec_command: moved = os.path.join(self.build_folder, "moved-r-base")\ntry:\n    self.run(command, env=None)\nfinally:\n    shutil.rmtree(moved, ignore_errors=True)
+rec_auto_fix: false
+rec_impl: test-package-self-cleanup
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:
+fallback_description:
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern: git add -f .*test_package/(moved-|conanbuild|conanrun|deactivate_conan)|test_package 下保留整个被测包副本
+forbid_1_reason: 把测试运行时产物当作源码入库，归档体积与内容都被污染，且残留状态会让后续 CI 行为不可复现（上一次运行留下的 moved-<pkg> 可能被误认为源码）
+forbid_1_consequence: 归档膨胀到上百 MB（r-base 4.5.1 实测 87 MB / 2025 文件）、diff 噪声大、review 无法看出真实改动
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             [E545]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E546.md
+last_updated: 2026-09-30
+source_event:           r-base/4.5.1/test_package/moved-r-base 87MB/2025 文件被入库；4.5.1.1 在 test() 中加 try/finally rmtree 后归档降至 462KB，两次完整 W3 无残留
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 943F

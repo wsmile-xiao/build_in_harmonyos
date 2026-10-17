@@ -1,0 +1,114 @@
+#====================================================================
+# Draft: 上游脚本 shebang 声明 #!/bin/sh，实现却用 bash 方言
+#        （test ==、$[ ] 算术、echo -n），在 OHOS 的 POSIX shell 下
+#        报 `[: ==: unexpected operator` 并静默丢失功能
+# 对应人类文档: knowledge/drafts/E543-draft-EE19.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: mrename 1.2 适配（feat/mrename-1.2）
+#
+# 与既有条目的关系（互补，非重复）:
+#   E165 / E037 / E049 / E143 —— shebang **路径**不存在（/bin/bash 缺失、
+#     解释器路径需改写）。本条目的 shebang 路径完全正确，问题出在
+#     **同一个 shebang 声明下的语法方言**：脚本自称 POSIX sh，实际用 bash 扩展。
+#   E043 —— bash **变量** ${BASH_SOURCE} 在 toybox ash 下取空。
+#     本条目是 bash **运算符/语法**（test ==、$[ ]、echo -n），
+#     失败现象与修法都不同（E043 改取路径方式，本条目改语法）。
+#   DRAFT-script-hardcoded-fhs-paths-need-patch-to-selflocate —— 脚本写死
+#     /usr/... 绝对路径。本条目的辅助脚本定位走 PATH（execvp），
+#     修法是打包侧 wrapper 注入而非 patch 路径。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E543
+trigger_tool:           runtime|test|install|shell
+phase:                  runtime|testing
+error_signature:        \[: ==: unexpected operator|
+                         \[: [0-9]+: ==: unexpected operator|
+                         \[: .*: unknown operand|
+                         Illegal number:.*\$\[|
+                         ^-n .*$
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               portability, posix, shell, compat
+match_keywords:         unexpected operator, bashism, POSIX shell, dash, toybox ash,
+                         test ==, $[ ], echo -n, shebang /bin/sh, shell script,
+                         mrename, mcpmv, script tool, silent failure
+prescan_pattern:        \[\s+[^]]*==\s|\$\[[^]]*\]|echo\s+-n\s
+prescan_globs:          *.sh, *.bash, bin/*, scripts/*, Makefile*, configure
+title:                  脚本 shebang 写 #!/bin/sh 却使用 bash 方言（test ==、$[ ]、echo -n），在 OHOS 的 POSIX shell 下报 `[: ==: unexpected operator`，且因 test 失败走 else 分支而功能静默丢失
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             Linux 桌面发行版上 /bin/sh 常被链到 bash，脚本即使声明
+                         #!/bin/sh 也按 bash 解释，bash 专有语法（test 的 == 运算符、
+                         早期废弃的 $[ expr ] 算术展开、echo -n）长期不被发现。
+                         HarmonyOS PC 的基础 shell 是严格 POSIX 实现（toybox ash 一类），
+                         这些语法在此直接报错：== 触发 `[: ==: unexpected operator`，
+                         $[ ] 不展开导致计数变量为空，echo -n 原样打印 "-n"。
+                         危险之处在于 test 报错的退出码非 0，脚本会顺着 else/elif
+                         分支继续跑完并以 0 退出——用户看到的是"没有报错但什么都没改"，
+                         不是显式失败。
+affected_scope:         所有 shebang 声明 /bin/sh 但在 bash 下开发的脚本工具包
+                         （常见于 2000 年代的小工具、Debian 下游仍在维护的遗留包）；
+                         适配到 OHOS/musl+toybox 环境时全部命中。CI 若在
+                         /bin/sh -> bash 的镜像上跑测试，同样看不出问题。
+verification_cmd:       dash ./script --help; echo "rc=$?"   # 或 sh 为严格 POSIX 实现的环境；对比 bash ./script --help
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           posix-shell-normalize
+rec_description:        打补丁把 bash 方言改成 POSIX 等价写法，保留 #!/bin/sh：
+                         test 的 == 改 =（并给变量加引号，空值不再让 test 报错）、
+                         $[ expr ] 改 $(( expr ))、echo -n 改 printf '%s'、
+                         传给 find -exec / cp / mv 的参数一律加引号并用 -- 终止选项。
+                         改完用严格 POSIX shell（dash）跑一遍功能用例，
+                         再用 bash 跑一遍确认没有回退，两轮都要进测试报告。
+rec_command:            sed -i 's/\[ \$\([A-Za-z_][A-Za-z0-9_]*\) == "\([^"]*\)" \]/[ "$\1" = "\2" ]/g' script; sed -i 's/\$\[\([^]]*\)\]/$((\1))/g' script; dash ./script -h
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+# 回退方案（不推荐作为交付形态）
+fallback_priority:      2
+fallback_approach:      switch-shebang-to-bash
+fallback_description:   把 shebang 改成 #!/usr/bin/env bash（Debian 对 mrename 的处置
+                         就是改 #!/bin/bash）。改动量最小，但等于给一个"零依赖脚本工具"
+                         引入 bash 运行期依赖；OHOS PC 基础环境不保证有 bash 时，
+                         包在目标机上直接跑不起来。仅当脚本大量依赖数组/关联数组等
+                         无法平价 POSIX 化的 bash 特性时才选它。
+fallback_command:       sed -i '1s|#!/bin/sh|#!/usr/bin/env bash|' script
+fallback_auto_fix:      true
+fallback_impl:          shebang-fix
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       ^\s*#!/data/service/hnp/bin/bash|^\s*#!/system/bin/sh
+forbid_1_reason:        把 shebang 写成设备上的绝对路径（构建机软链路径或系统私有路径）
+                         会让脚本只能在那一类机器上跑，conan 包换台机器或换前缀即失效；
+                         这类路径属于构建机准备，不能进交付产物。
+forbid_1_consequence:   包在其他 OHOS 设备/CI 容器上报 bad interpreter，
+                         且违反"补丁不写平台专有路径"的口径。
+
+forbid_2_pattern:       \[\s+\$[A-Za-z_][A-Za-z0-9_]*\s+==\s
+forbid_2_reason:        修 bashism 时只把变量加引号却保留 == 运算符，
+                         在严格 POSIX shell 下仍然是 unexpected operator。
+forbid_2_consequence:   测试在 bash 上全绿、到目标设备仍然静默失效，
+                         比不修更难定位。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P012
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E043, E165, E037]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E543-draft-EE19.md
+last_updated: 2026-09-21
+source_event:           mrename 1.2 适配：未打补丁时 dash 下 11 条功能用例仅 5 条通过，
+                         报 `[: ==: unexpected operator`；POSIX 化后 dash/bash 各 11/11 通过
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                nyaco3 <aqjCItYW1QmEJQuF.gcw_XDpqZ8sO@noreply.gitcode.com>

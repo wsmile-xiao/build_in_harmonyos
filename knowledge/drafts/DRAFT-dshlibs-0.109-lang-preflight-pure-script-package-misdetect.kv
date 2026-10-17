@@ -1,0 +1,114 @@
+#====================================================================
+# Draft knowledge entry — lang-preflight 纯脚本包结构性误判
+# 来源: PR OpenHarmonyPCDeveloper/build_in_harmonyos!9928（d-shlibs 0.109 适配，
+#       原草稿 knowledge/drafts/E6341-draft-E28B 的 md 为空白模板、id 为模板占位）
+# 单位: 可跨库复用（一类问题），非单库临时补丁
+# 配对人类文档: knowledge/drafts/DRAFT-dshlibs-0.109-lang-preflight-pure-script-package-misdetect.md
+# 待办: 评审通过后 rename 为 E###.kv 移入 knowledge/graph/ 并补 index.tsv 行
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-dshlibs-0.109-lang-preflight-pure-script-package-misdetect
+trigger_tool:           ohc-run.py lang-preflight
+phase:                  preflight
+error_signature:        语言不匹配: task=bash, detected=c → env_unsupported|detected_language["']?: *["']?c["']?|build_system.*make.*source_stats.*c:1
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:              2
+category:              lang-preflight, bash, makefile, env_unsupported, false-positive
+match_keywords:        lang-preflight, lang_detect, detected_language, env_unsupported, bash, 纯脚本包,
+                       install-only Makefile, packaging-only Makefile, autopkgtest fixture, debian/tests,
+                       D.4 边界规则, d-shlibs, dh-* 脚本包, 零编译包
+title:                 纯 bash/sh 脚本 + install-only(packaging-only) Makefile 的包会被 lang-preflight 结构性地判为 c
+                       → 自动写 env_unsupported；按 R47 §D.4 边界规则人工复核判为 bash（工具误报）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:            lang_detect.py 的三级判定对「纯脚本包」结构上无解：
+                       ① _manifest_scan 只按"顶层存在名为 Makefile 的文件"命中即把工程归入 (c/cpp, make)，
+                          而这类包的 Makefile 是 install-only（all: 为空规则，仅 install: 拷贝脚本/man），
+                          不含任何 C/C++ 编译目标；
+                       ② _source_stats 按扩展名统计并把 bash 排除在 total/dominant 之外
+                          （§D.4 视 bash 为辅助脚本），而主体脚本（d-shlibmove / d-devlibdeps）
+                          本身没有扩展名、只有 #!/bin/bash 文件头，永远计不进来；
+                       ③ 唯一被统计到的 .c 文件是上游 autopkgtest 夹具
+                          （debian/tests/uppercase.d/libUppercase.c），属 §D.4"辅助脚本/测试夹具不算主体"，
+                          却成了 source_stats 的 100% 主体。
+                       三者叠加 → detected=c，与 task=bash 不匹配 → 工具自动写终态 env_unsupported。
+                       该工具在此类仓库上结构上无法产出 detected_language=bash。
+affected_scope:        一切"纯 bash/sh 脚本 + install-only 或 packaging-only Makefile"的包
+                       （Debian native 脚本包、dh-* 系列、*-tools 命令行脚本包），
+                       以及源码树内附带 autopkgtest / debian/tests 下 C 夹具的脚本包；
+                       所有走 ohc-run.py lang-preflight 的适配任务
+verification_cmd:      python3 $SKILL_ROOT/scripts/ohc-run.py lang-preflight <软件> <版本> --lang bash --src <源码目录>
+                       # 复核：grep -nE '^[a-zA-Z_-]+:' Makefile（看 all: 是否为空）
+                       # 复核：find <src> -name '*.c' -path '*test*'（夹具是否在测试目录）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:          1
+rec_approach:          manual-boundary-rule-override
+rec_description:       收到 task=bash 但 detected=c / env_unsupported 时，先按 R47 §D.4 边界规则人工复核，
+                       不得直接接受工具终态：
+                       ① 检查顶层 Makefile 的 all: 是否为空、是否存在 C/C++ 编译目标（本例 all: 为空规则）；
+                       ② 检查被统计的 .c/.cpp 是否全部位于测试夹具目录（debian/tests、autopkgtest）；
+                       ③ 确认主体是可执行脚本（无扩展名 + shebang）而非 C/C++ 源码。
+                       三项成立 → 判工具误报，任务语言 bash 成立，继续按 bash 适配；
+                       保留 lang-preflight 完整输出与它自动写入的 env_unsupported result.json 作为证据，
+                       终态用 result 命令覆盖；不改框架、不删除上游夹具、不改写源码树。
+rec_command:           （流程决策；证据记录于 notes.md 的 language_evidence 三项与最终回报）
+rec_auto_fix:          false
+rec_impl:              langpreflight-boundary-review
+
+fallback_priority:     2
+fallback_approach:     report-env-unsupported-with-language-fields
+fallback_description:  若复核后确认主体确非 bash（例如确实以某个 .c/.cpp 为产品源码、
+                       或 Makefile 含真实 C/C++ 编译目标），才按 env_unsupported 上报，
+                       并附 detected_language + language_evidence（build_system / manifest / source_stats）三项
+fallback_command:
+fallback_auto_fix:     false
+fallback_impl:
+
+forbid_1_pattern:      未做 §D.4 复核即接受 detected_language=c|因 detected=c 直接把包判为 C 库或迁移任务语言
+forbid_1_reason:       语言预检在纯脚本包上结构性误报；直接接受会把本可适配的 bash 包误判为 env_unsupported 而放弃
+forbid_1_consequence:  任务被错误终止或错误迁移语言，真实可交付的适配产出丢失
+forbid_2_pattern:      为消除误判而删除上游 autopkgtest/debian 夹具|改写上游 Makefile 使其"看起来"像脚本包
+forbid_2_reason:       改写上游源码/夹具违反零改动原则，且把工具缺陷掩盖成本地 workaround，知识无法复用
+forbid_2_consequence:  上游源码偏离、补丁完整性受影响；同类误判在下个包重复发生
+
+# ═══ Layer 4: 原则引用 ═══
+principles:            R47
+
+# ═══ 关系图 (Relations) ═══
+causes:                []
+caused_by:             []
+similar_to:            E543, E156, E158
+conflicts_with:        []
+prerequisite_of:       []
+
+# ═══ 元数据 ═══
+doc_file:              knowledge/drafts/DRAFT-dshlibs-0.109-lang-preflight-pure-script-package-misdetect.md
+last_updated:          2026-09-18
+source_event:          PR #9928（d-shlibs 0.109 HarmonyOS PC 适配）：lang-preflight --lang bash 输出
+                       detected_language=c（language_evidence: build_system=make，
+                       manifest=顶层 Makefile，source_stats=源文件 1 个 c:1 主体占比 100%），
+                       工具自动写 env_unsupported；按 R47 §D.4 人工复核判误报后继续适配，
+                       test_package 26 条断言全过（ASSERT_PASS=26 ASSERT_FAIL=0）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:               cumt-7
+source_pr:             9928
+source_commit:         db95a8d0
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count: 1
+metrics_fail_count:    0
+metrics_confidence:    1.0
+metrics_last_used:     2026-09-14
+
+draft:                 true

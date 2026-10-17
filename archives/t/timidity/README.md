@@ -8,7 +8,7 @@ TiMidity++ 是一个软件合成器，可以将 MIDI 文件转换为 PCM 波形�
 - **版本**: 2.13.2
 - **许可证**: GPL-2.0
 - **官方网站**: http://www.timidity.jp
-- **源码仓库**: https://github.com/geofft/timidity (临时托管)
+- **源码仓库**: https://sourceforge.net/projects/timidity/ (SourceForge 官方源)
 
 ## 功能特性
 
@@ -115,6 +115,7 @@ TiMidity++ 需要 `timidity.cfg` 配置文件和音色库才能播放 MIDI。
 
 - `0001-config.guess-harmonyos.patch`: 添加 HarmonyOS 平台识别
 - `0002-config.sub-harmonyos.patch`: 添加 HarmonyOS 系统支持
+- `0003-configure-hmdfs-umask.patch`: 修复 HMDFS 文件系统 umask 权限问题
 
 ## 相关链接
 

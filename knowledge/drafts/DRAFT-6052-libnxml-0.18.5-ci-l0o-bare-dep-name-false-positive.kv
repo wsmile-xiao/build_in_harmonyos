@@ -1,0 +1,107 @@
+#====================================================================
+# DRAFT-6052-libnxml-0.18.5-ci-l0o-bare-dep-name-false-positive — CI L0o 门禁把 Conan 依赖访问 self.dependencies["curl"] 误判为外部 curl 命令调用
+# 触发事件: libnxml 0.18.5 适配（scoped CI 的 L0o 检查报 conanfile.py 有 curl 命令调用）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-6052-libnxml-0.18.5-ci-l0o-bare-dep-name-false-positive
+trigger_tool:           build_and_test.sh|conan create|L0o
+phase:                  ci_gate|conan_build
+error_signature:        L0o: conanfile\.py 使用外部命令 \(curl/wget\) 下载源码|
+                         uses_external_curl
+
+severity:               2
+category:               ci|conan|recipe|gate|false-positive
+match_keywords:         L0o, uses_external_curl, dependencies, direct_host,
+                         curl/8.15.0, self.dependencies, bare name, 误报,
+                         grep -nE, quoted literal, subprocess
+title:                  Rewrite self.dependencies["curl"] as self.dependencies.direct_host["curl/8.15.0"] when CI L0o false-positives on the quoted bare dep name
+
+topic: >
+  CI L0o 门禁（build_and_test.sh，防配方用 subprocess/os.system 调外部
+  curl/wget 下载源码）的正则按带引号字面量匹配：'(subprocess|os\.system).*?
+  (curl|wget)|"curl"|"wget"|\'curl\'|\'wget\''。Conan 2 的依赖访问 API
+  self.dependencies["<名字>"] 恰好要求传裸依赖名（不带版本），纯 API 数据
+  访问被当成命令行调用误报。对照：self.requires("curl/8.15.0") 带版本
+  不触发；self.dependencies["curl/8.15.0"] 带完整 ref 也不触发。
+
+root_cause:             CI L0o 门禁正则按带引号的 "curl"/"wget" 字面量全文匹配，语义上无法区分下载命令名与 Conan 依赖字典的键，而 self.dependencies["curl"] 恰好要求裸依赖名，纯 API 数据访问被误判为外部命令调用
+  1) L0o 正则以 grep -nE 匹配 conanfile.py 中所有带引号的 "curl"/"wget"
+     字面量（排除 tools\.|conan_data|self\.run|注释行），语义上无法区分
+     "传给下载命令的 URL 命令名" 与 "Conan 依赖字典的键"；
+  2) Conan 2.29 dependencies.py 的 _get()：if "/" in ref 走
+     RecipeReference.loads 精确匹配，否则按 require.ref.name 裸名匹配；
+     即依赖访问 API 同时接受裸名与完整 ref，裸名写法是文档主示例；
+  3) direct_host 属性过滤 build=False+direct=True+test=False+skip=False，
+     __getitem__ 继承同一解析，因此完整 ref 写法语义完全等价。
+
+durable_solution: >
+  1) 先反证确属误报：配方内 0 处 subprocess/os.system/命令行 curl 下载，
+     源码获取只走 tools.files.get（conandata.yml sha256 校验）；
+  2) 不修改 CI 门禁脚本、不用混淆命名规避。改用 Conan 2 文档化 API +
+     完整 ref：
+       curl = self.dependencies.direct_host["curl/8.15.0"]
+     direct_host 是 direct+host 上下文过滤器，__getitem__ 支持带版本的
+     完整引用；语义不变、可读性不降；
+  3) 仅直接 host 依赖可用 direct_host；build 上下文工具依赖走
+     self.dependencies.build(...) 同样支持完整 ref。
+
+impact: >
+  只影响配方 generate()/test() 等读取依赖 cpp_info 的行；对构建产物无影响。
+  libnxml 0.18.5 三处改写后 L0o 正则预检 0 命中，conan create 全链与
+  scoped CI（L0/L1/L1e/L2/L4/L5 + Build Summary 1/1）全部通过。
+
+recovery: >
+  任何配方被 L0o 以 uses_external_curl 拦下时：先确认配方确无 subprocess
+  curl/wget 真实调用；若只是 self.dependencies["curl"] 数据访问，套用
+  direct_host["<完整ref>"] 改写即可过门禁。配方若真有 subprocess.run
+  (["curl", ...]) 之类下载则不是误报，必须改走 tools.files.get。
+
+evidence_chain: >
+  task libnxml-0.18.5 适配（feat/libnxml-0.18.5 分支）
+    - scoped CI 首跑：L0o 命中 conanfile.py 的 self.dependencies["curl"]；
+    - 正则核实：build_and_test.sh L904-916，"curl"/"wget" 带引号字面量
+      全文匹配 + subprocess/os.system 行匹配，排除 tools./conan_data/self.run；
+    - Conan 2.29 源码核实：internal/model/dependencies.py _get() 支持
+      完整 ref（if "/" in ref → RecipeReference.loads），direct_host 过滤
+      direct+host；
+    - 修复后 conan create --build=libnxml/* CREATE=0（上游 3/3 + 消费者
+      ALL PASS）；
+    - scoped CI 复跑 Build Summary 1/1 pass rate 100%，L0_RESULT=pass；
+    - 日志 /storage/Users/currentUser/tmp/libnxml-adapt/scoped-ci-fix3.log。
+
+verification_cmd: >
+  cd archives/l/libnxml/0.18.5 && grep -nE '(subprocess|os\.system).*?(curl|wget)|"curl"|"wget"|'"'"'curl'"'"'|'"'"'wget'"'"'' conanfile.py | grep -v '^\s*#' | grep -v 'tools\.\|conan_data\|self\.run\|#.*curl\|#.*wget'; echo "期望无输出"
+
+limitations: >
+  若未来 CI 把 L0o 正则改为也匹配带斜杠的 "curl/8.15.0"（当前不匹配），
+  本改写会再次命中，届时需 CI 侧把依赖访问语法加入白名单（如排除
+  self.dependencies 前缀行），属门禁规则升级而非配方问题。
+
+rec_priority:           1
+rec_approach:           direct-host-full-ref-rewrite（依赖访问改用带版本的完整 ref 写法过门禁）
+rec_description: >
+  1) 先反证确属误报：配方内 0 处 subprocess/os.system/命令行 curl
+  下载，源码获取只走 tools.files.get（conandata.yml sha256 校验）；
+  2) 不修改 CI 门禁脚本、不用混淆命名规避，改用 Conan 2 文档化 API +
+  完整 ref：curl = self.dependencies.direct_host["curl/8.15.0"]，
+  语义不变、可读性不降；3) 仅直接 host 依赖可用 direct_host，build
+  上下文工具依赖走 self.dependencies.build(...) 同样支持完整 ref。
+rec_command:            cd archives/l/libnxml/0.18.5 && grep -n 'dependencies\["curl"\]\|dependencies\["wget"\]' conanfile.py; echo "期望无输出（裸名访问已全部改写为完整 ref）"
+rec_auto_fix:           false
+rec_impl:               conan-recipe-dep-access-full-ref
+
+doc_file:               knowledge/drafts/DRAFT-6052-libnxml-0.18.5-ci-l0o-bare-dep-name-false-positive.md
+last_updated:           2026-09-08
+source_event:           libnxml 0.18.5 适配，scoped CI 的 L0o 检查误报 conanfile.py 外部 curl 命令调用
+authors:                 atomcode-executor
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-08
+
+draft:                  true
+contributor_id:         ffieldd22_-

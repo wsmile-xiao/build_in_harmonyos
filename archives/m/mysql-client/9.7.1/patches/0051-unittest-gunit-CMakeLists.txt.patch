@@ -1,0 +1,177 @@
+--- a/unittest/gunit/CMakeLists.txt
++++ b/unittest/gunit/CMakeLists.txt
+@@ -74,13 +74,20 @@
+   PROPERTIES COMPILE_DEFINITIONS "${DISABLE_PSI_DEFINITIONS}"
+ )
+ 
+-ADD_STATIC_LIBRARY(gunit_large
+-  benchmark.cc
+-  gunit_test_main_server.cc
+-  test_utils.cc
+-  thread_utils.cc
+-  LINK_LIBRARIES ext::icu ext::zlib extra::unordered_dense
+-)
++# OHOS client-only (WITHOUT_SERVER): gunit_large is the entry point for the
++# suites that link the whole server. ext::icu is only configured when the
++# server (or its components) are built, so skip the library here. This mirrors
++# the upstream VS2019 + WITHOUT_SERVER combination, which also leaves the
++# server-dependent unit tests out of the build.
++IF(NOT WITHOUT_SERVER)
++  ADD_STATIC_LIBRARY(gunit_large
++    benchmark.cc
++    gunit_test_main_server.cc
++    test_utils.cc
++    thread_utils.cc
++    LINK_LIBRARIES ext::icu ext::zlib extra::unordered_dense
++  )
++ENDIF()
+ 
+ # Add a library for enable_win_jemalloc.cc
+ # and link it with both gunit_small and gunit_large below.
+@@ -91,14 +98,22 @@
+ ENDIF()
+ 
+ ADD_DEPENDENCIES(gunit_small GenError)
+-ADD_DEPENDENCIES(gunit_large GenError)
+ TARGET_LINK_LIBRARIES(gunit_small
+   mysys strings ${GTEST_LIBRARIES} ${UNITTEST_JEMALLOC_LIB} extra::rapidjson)
+-TARGET_LINK_LIBRARIES(gunit_large
+-  ${GTEST_LIBRARIES} ${UNITTEST_JEMALLOC_LIB} extra::rapidjson)
++IF(NOT WITHOUT_SERVER)
++  ADD_DEPENDENCIES(gunit_large GenError)
++  TARGET_LINK_LIBRARIES(gunit_large
++    ${GTEST_LIBRARIES} ${UNITTEST_JEMALLOC_LIB} extra::rapidjson)
++ENDIF()
+ 
+ # Add some defines.
+-ADD_DEFINITIONS(-DMYSQL_SERVER -DEXTRA_CODE_FOR_UNIT_TESTING)
++# OHOS client-only: sql/ headers compiled into the unit tests (e.g.
++# sql/auth/partitioned_rwlock.h) declare their PSI keys under
++# HAVE_PSI_INTERFACE, which is enabled by WITH_PERFSCHEMA_STORAGE_ENGINE.
++# That is off for a client-only build, so define it here; the DISABLE_PSI_*
++# definitions above keep every instrumentation call a no-op.
++ADD_DEFINITIONS(-DMYSQL_SERVER -DEXTRA_CODE_FOR_UNIT_TESTING
++  -DHAVE_PSI_INTERFACE)
+ ADD_DEFINITIONS(-DERRMSG_DIR="${PROJECT_BINARY_DIR}/share")
+ ADD_DEFINITIONS(-DDATA_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+ 
+@@ -351,8 +366,13 @@
+ 
+ ADD_LIBRARY(sqlgunitlib STATIC ${SQL_GUNIT_LIB_SOURCE})
+ ADD_DEPENDENCIES(sqlgunitlib GenError)
++# OHOS client-only: this library compiles a few sql/ sources (mdl.cc, ...)
++# which declare their PSI keys under HAVE_PSI_INTERFACE. That macro is driven
++# by WITH_PERFSCHEMA_STORAGE_ENGINE, which is off in a client-only build, so
++# enable it here. The DISABLE_PSI_* definitions keep every instrumentation
++# call a no-op, so no PSI implementation needs to be linked.
+ SET_TARGET_PROPERTIES(sqlgunitlib
+-  PROPERTIES COMPILE_DEFINITIONS "${DISABLE_PSI_DEFINITIONS}"
++  PROPERTIES COMPILE_DEFINITIONS "${DISABLE_PSI_DEFINITIONS};HAVE_PSI_INTERFACE"
+ )
+ 
+ MYSQL_ADD_EXECUTABLE(merge_small_tests-t ${ALL_SMALL_TESTS}
+@@ -369,17 +389,19 @@
+ 
+ LIST(APPEND ALL_LARGE_TESTS ../../storage/example/ha_example.cc)
+ 
+-MYSQL_ADD_EXECUTABLE(merge_large_tests-t ${ALL_LARGE_TESTS}
+-  ADD_TEST merge_large_tests
+-  ENABLE_EXPORTS
+-  EXCLUDE_FROM_GCOV
+-  LINK_LIBRARIES gunit_large server_unittest_library
+-)
+-IF(TARGET merge_large_tests-t)
+-  IF(MY_COMPILER_IS_GNU)
+-    TARGET_LINK_OPTIONS(merge_large_tests-t PRIVATE -Wno-alloc-size-larger-than)
++IF(NOT WITHOUT_SERVER)
++  MYSQL_ADD_EXECUTABLE(merge_large_tests-t ${ALL_LARGE_TESTS}
++    ADD_TEST merge_large_tests
++    ENABLE_EXPORTS
++    EXCLUDE_FROM_GCOV
++    LINK_LIBRARIES gunit_large server_unittest_library
++  )
++  IF(TARGET merge_large_tests-t)
++    IF(MY_COMPILER_IS_GNU)
++      TARGET_LINK_OPTIONS(merge_large_tests-t PRIVATE -Wno-alloc-size-larger-than)
++    ENDIF()
++    DOWNGRADE_STRINGOP_WARNINGS(merge_large_tests-t)
+   ENDIF()
+-  DOWNGRADE_STRINGOP_WARNINGS(merge_large_tests-t)
+ ENDIF()
+ 
+ FOREACH(test ${TESTS})
+@@ -412,19 +434,21 @@
+     )
+ ENDIF()
+ 
+-FOREACH(test ${SERVER_TESTS})
+-  SET(SRC_FILES ${test}-t.cc)
+-  IF(test MATCHES "table_cache")
+-    LIST(APPEND SRC_FILES ../../storage/example/ha_example.cc)
+-  ENDIF()
+-  MYSQL_ADD_EXECUTABLE(${test}-t ${SRC_FILES}
+-    ENABLE_EXPORTS
+-    EXCLUDE_FROM_ALL
+-    LINK_LIBRARIES gunit_large server_unittest_library
+-    SKIP_INSTALL
+-    ADD_GCOV_TEST ${test}
+-  )
+-ENDFOREACH()
++IF(NOT WITHOUT_SERVER)
++  FOREACH(test ${SERVER_TESTS})
++    SET(SRC_FILES ${test}-t.cc)
++    IF(test MATCHES "table_cache")
++      LIST(APPEND SRC_FILES ../../storage/example/ha_example.cc)
++    ENDIF()
++    MYSQL_ADD_EXECUTABLE(${test}-t ${SRC_FILES}
++      ENABLE_EXPORTS
++      EXCLUDE_FROM_ALL
++      LINK_LIBRARIES gunit_large server_unittest_library
++      SKIP_INSTALL
++      ADD_GCOV_TEST ${test}
++    )
++  ENDFOREACH()
++ENDIF()
+ 
+ ADD_LIBRARY(rpl_channel_credentials_lib STATIC
+   ${CMAKE_SOURCE_DIR}/sql/rpl_channel_credentials.cc
+@@ -456,25 +480,30 @@
+ ENDIF()
+ 
+ ADD_SUBDIRECTORY(ddl_rewriter)
+-ADD_SUBDIRECTORY(innodb)
+-ADD_SUBDIRECTORY(components/mysql_server)
+-ADD_SUBDIRECTORY(components/keyring_common)
+-ADD_SUBDIRECTORY(xplugin)
+-ADD_SUBDIRECTORY(group_replication)
+-ADD_SUBDIRECTORY(libmysqlgcs)
+-ADD_SUBDIRECTORY(temptable)
+ ADD_SUBDIRECTORY(binlogevents)
+ ADD_SUBDIRECTORY(memory)
+ ADD_SUBDIRECTORY(containers)
+ ADD_SUBDIRECTORY(locks)
+-ADD_SUBDIRECTORY(changestreams)
+ ADD_SUBDIRECTORY(libs/gtids)
+ ADD_SUBDIRECTORY(libs/iterators)
+ ADD_SUBDIRECTORY(libs/math)
+ ADD_SUBDIRECTORY(libs/meta)
+ ADD_SUBDIRECTORY(libs/ranges)
+ ADD_SUBDIRECTORY(libs/serialization)
+-ADD_SUBDIRECTORY(libs/sets)
+ ADD_SUBDIRECTORY(libs/strconv)
+ ADD_SUBDIRECTORY(libs/utils)
+ ADD_SUBDIRECTORY(libs/uuids)
++IF(NOT WITHOUT_SERVER)
++  # These suites link the server, the component framework or libs/mysql/sets
++  # (via libchangestreams); none of them exist in a client-only (WITHOUT_SERVER)
++  # build, so keep them out of the ctest list instead of adding broken targets.
++  ADD_SUBDIRECTORY(innodb)
++  ADD_SUBDIRECTORY(components/mysql_server)
++  ADD_SUBDIRECTORY(components/keyring_common)
++  ADD_SUBDIRECTORY(xplugin)
++  ADD_SUBDIRECTORY(group_replication)
++  ADD_SUBDIRECTORY(libmysqlgcs)
++  ADD_SUBDIRECTORY(temptable)
++  ADD_SUBDIRECTORY(changestreams)
++  ADD_SUBDIRECTORY(libs/sets)
++ENDIF()

@@ -199,8 +199,11 @@ python3 $SKILL_ROOT/scripts/ohc-run.py finish libcutl 1.11.0 built
 - libcutl::shared_ptr 是**侵入式**智能指针，需要对象继承自带引用计数的 shared base，不能直接对普通类型使用
 - 此版本源码使用 build2 构建系统，平台无 build2/bpkg，只能手动编译
 - G0 门禁无法通过是预期行为（build2 源码无 configure），不影响实际编译质量
-
 ---
 
-**编译结束**: 2026-06-11 03:50
+**编译结束**: 2026-07-28 16:42
+**最终状态**: built
+---
+
+**编译结束**: 2026-07-28 16:43
 **最终状态**: built

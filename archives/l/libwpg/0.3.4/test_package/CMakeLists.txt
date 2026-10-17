@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(libwpg_consumer LANGUAGES CXX)
+find_package(libwpg CONFIG REQUIRED)
+add_executable(test_wpg test_wpg.cpp)
+target_link_libraries(test_wpg PRIVATE libwpg::libwpg)

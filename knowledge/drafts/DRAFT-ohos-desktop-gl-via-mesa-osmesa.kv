@@ -1,0 +1,185 @@
+# ═══ Draft knowledge entry — OHOS 无桌面 GL 时用 Mesa OSMesa 满足「需要一份 GL 实现」的库 ═══
+# Timestamp: 2026-09-15
+# Software: glu 9.0.3（Mesa GLU）；方法适用于任何「需要 GL 实现但不绑定 GLX」的桌面 GL 时代库
+# Gate: PR #10090 / 真机 conan create 实测（glX 引用 0 + NEEDED 验证）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-ohos-desktop-gl-via-mesa-osmesa
+trigger_tool:           cmake|meson|conan|clang|ld
+phase:                  configure|build|link|runtime
+error_signature:        cannot find -lGL|
+                           fatal error: 'GL/gl\.h' file not found|
+                           fatal error: 'GL/glu\.h' file not found|
+                           Could NOT find OpenGL|
+                           ld\.lld: error: unable to find library -lOSMesa|
+                           dependency\('osmesa'\) found: NO
+
+severity:               2
+category:               graphics, opengl, mesa, osmesa, platform, porting, ohos
+match_keywords:         libOSMesa, OSMesa, mesa, gl_provider, osmesa.pc, 桌面 GL 替代,
+                           desktop GL, libGL.so 缺失, glX, GL/gl.h, GL/glu.h,
+                           no X11, offscreen GL, 软件渲染, 离屏桌面 GL
+title:                  OHOS 无桌面 GL（无 libGL.so/glx.h）时，对「需要一份 GL 实现但不绑定 GLX」的库可用 Mesa OSMesa（libOSMesa.so）替代——先验 glX 引用数，再选 gl_provider=osmesa
+
+root_cause: >
+  OHOS SDK 只提供 EGL + GLES2/GLES3，**没有桌面 OpenGL**：无 `libGL.so`、无
+  `GL/glx.h`、无 `glu.h`。任何「桌面 GL 时代」的库（以 GLU 为典型）在 OHOS 上
+  会直接卡在编译/配置期：
+
+    fatal error: 'GL/gl.h' file not found        （或 'GL/glu.h'）
+    cannot find -lGL
+    Could NOT find OpenGL
+
+  常见误判：把这直接归为「不可适配」。但这里要分清**库到底需要什么**：
+
+    · 需要的是「一份提供 OpenGL API 的**实现**」  → 可适配（本条目）
+    · 需要的是「**GLX / X11 窗口集成**」          → OHOS 无 X11，需另作评估
+    · 需要的是「桌面 GL **固定管线**入口本身」     → 见 E321（gl4es 路线），
+                                                    或如 OHOS 无 GLES1 时自备桩
+
+  以 glu 9.0.3 为例，实测源码对 `glX` 的引用数为 **0**（`grep -r glX src/ include/`），
+  它只需要一份 OpenGL 实现即可，**并不依赖 X11**。而 `mesa/24.3.4.1`（已发布 ohpcd）
+  提供的 **OSMesa** 正是一份离屏软件桌面 GL 实现：
+    · 交付 `libOSMesa.so` + `include/GL/gl.h`
+    · 不需要 X11 / Wayland / DRM
+
+  更关键的是，glu 的构建脚本**原生支持**这一组合 —— 其 meson 选项 `gl_provider`
+  的 choices 就是 `['glvnd', 'gl', 'osmesa']`，用 `-Dgl_provider=osmesa` 即可。
+
+        判据（三步）：① 库是否真有 glX/X11 调用？
+                      ② 是否另有 GL 实现（OSMesa）能满足其 API 需求？
+                      ③ 上游构建系统是否已有 provider 开关？
+
+affected_scope: >
+  任何「面向桌面 OpenGL 但没有 GLX/X11 依赖」的库/工具，尤其在 OHOS 上适配
+  老式 GL 图形库、GL 工具库（GLU 类）、需要 GL 头/上下文做离屏或软件渲染的场景。
+  典型信号：仓库里出现 `GL/gl.h` / `GL/glu.h` 的 include、`-lGL` 的链接需求，
+  但 `glX*` 调用为 0。
+  不适用：真正依赖 GLX/X11 窗口集成的库；需要桌面 GL 固定管线入口本身的库
+  （走 E321 gl4es 或自备桩）。
+
+verification_cmd:       # ① 决定性前置检查：库是否真的依赖 GLX / X11（不是名字里带 GL 就一定依赖）
+                           grep -rn "glX\|GL/glx.h\|XOpenDisplay\|XCreateWindow" <src>/include <src>/src | wc -l
+                           # 期望 0 → 说明只需「一份 GL 实现」，OSMesa 路线可行
+                           # ② 确认目标是桌面 GL 头而非 GLES
+                           grep -rn "include <GL/gl\.h>\|include <GL/glu\.h>" <src> 2>/dev/null | head
+                           # ③ OSMesa 实现可得性（ohpcd 已发布）
+                           conan search "mesa/*" -r=ohpcd          # 期望可见 mesa/24.3.4.1
+                           conan list "mesa/24.3.4.1:*"            # 确认有可安装二进制
+                           # ④ 确认上游是否有 provider 开关
+                           grep -rn "gl_provider\|OSMesa\|osmesa" <src>/meson_options.txt <src>/meson.build 2>/dev/null | head
+                           # ⑤ 链接后验证运行时真正链接上了 OSMesa
+                           readelf -d <pkg>/lib/lib<pkg>.so | grep NEEDED
+                           # 期望含 libOSMesa.so.<N>
+
+rec_priority:           1
+rec_approach:           pick-mesa-osmesa-as-the-gl-implementation-via-upstream-provider-option
+rec_description: >
+  把依赖从「桌面 GL」换成 **Mesa OSMesa**：`requires("mesa/24.3.4.1")` 并在构建时
+  指定上游的 provider 开关（glu 为 `-Dgl_provider=osmesa`）。
+
+  实施要点：
+    ① **先验 glX 引用数为 0** —— 这是路线可行的前提。若库真的调 GLX/X11，
+       本条不适用，需另作评估。
+    ② 用上游 provider 开关，不要自己去改 pkg-config/hardcode 路径。
+       glu 的 meson 已内建 `gl_provider` 的 `osmesa` 选项。
+    ③ **注意 `.pc` 名称是否对得上**：conan 的 `PkgConfigDeps` 按**包名**生成
+       `mesa.pc`，而上游 meson 找的是 `dependency('osmesa')` —— 名字不匹配会
+       直接失败。mesa 包内自带 `lib/pkgconfig/osmesa.pc`，但其 `prefix=/` →
+       `libdir=/lib`，照用会让 pkg-config 发出 `-L/lib` 而找不到 `-lOSMesa`
+       （实测报 `ld.lld: error: unable to find library -lOSMesa`）。
+       解法：在 `generate()` 里把该 `.pc` 复制到生成目录并**修正 prefix**
+       为 mesa 包的 conan `package_folder`。
+    ④ 验证：`readelf -d` 看 NEEDED 是否含 `libOSMesa.so.<N>`；运行期跑一次真实渲染
+       或至少不依赖上下文的 API 调用（glu 用 `gluErrorString`）。
+
+  语义边界如实声明：OSMesa 是**软件渲染**。若消费者需要硬件 GLES，应改用其它
+  provider（glu 亦支持 `gl`/`glvnd`）。
+rec_command:            # 配方侧
+                           #   def requirements(self): self.requires("mesa/24.3.4.1")
+                           #   tc.project_options["gl_provider"] = "osmesa"
+                           # 生成期补 osmesa.pc（对应 upstream dependency('osmesa')）
+                           #   copy(self, "osmesa.pc", src=<mesa_pkg>/lib/pkgconfig, dst=self.generators_folder)
+                           #   replace_in_file(self, <dst>/osmesa.pc, "prefix=/", f"prefix={mesa_pkg}")
+                           # 验证
+                           readelf -d <pkg>/lib/lib<pkg>.so | grep -E 'NEEDED.*OSMesa'
+                           # 期望 libOSMesa.so.8
+rec_auto_fix:           false
+rec_impl:               manual-recipe-edit
+
+fallback_priority:      2
+fallback_approach:      provide-a-libGL-compat-layer-with-gl4es
+fallback_description: >
+  若库确实需要**桌面 GL 固定管线/立即模式入口本身**（glBegin/glMatrixMode/glOrtho/
+  客户端顶点数组等），而非仅需「一份 GL 实现」，则 OSMesa 之外还需固定管线模拟，
+  走 **gl4es**（OpenGL 1.5/2.1 → GLES2 翻译库，内置 FPE 固定管线模拟）提供
+  `libGL.so` 兼容层 —— 即 **E321** 的方案。
+  注意选择顺序：先判断库需要的是「实现」还是「固定管线入口」。
+  GLU 属前者（glX 引用 0）→ OSMesa 足够；纯固定管线游戏（如 assaultcube）属
+  后者 → 必须 gl4es。
+fallback_command:       # 参见 E321：cmake -DNOX11=ON -DNOEGL=OFF -DDEFAULT_ES=2 -DCMAKE_SYSTEM_NAME=Linux
+                           # 运行时 LIBGL_GLES=/system/lib64/libGLESv3.so LIBGL_EGL=/system/lib64/libEGL.so
+fallback_auto_fix:      false
+fallback_impl:          manual-recipe-edit
+
+forbid_1_pattern:       无桌面 GL.*所以.*不可适配|cannot find -lGL.*不可适配|no libGL.*unsupported
+forbid_1_reason:        「无桌面 GL」不等于「不可适配」。先分清库需要的是「一份 GL
+                          **实现**」还是「GLX/X11 窗口集成」还是「固定管线**入口**」。
+                          glu 实测 glX 引用为 0，用 Mesa OSMesa 即可满足，属可适配。
+forbid_1_consequence:   把可适配的库误判为不可适配，错失适配或错误走上【无法适配】流程。
+
+forbid_2_pattern:       名字带 GL.*就.*依赖桌面 GL|库名.*gl.*所以.*需要.*libGL
+forbid_2_reason:        名字带 gl/GLU 不等于依赖桌面 GL 或 GLX。判据是
+                          `grep -rn "glX\|GL/glx.h\|XOpenDisplay"` 的实际引用数，
+                          不是名字。glu 名字里全是 glu 前缀，实测 glX 引用 0。
+forbid_2_consequence:   凭名字误判依赖面，要么误判不可适配，要么引入无谓的 X11 依赖。
+
+forbid_3_pattern:       硬编码.*-L.*libOSMesa|手改.*pc.*路径.*绕过|直接改.*osmesa\.pc.*硬编码
+forbid_3_reason:        `.pc` 的 prefix 问题应在 conan 生成期**动态修正**为实际
+                          package_folder，而不是硬编码某个绝对路径 —— 硬编码会在
+                          CI（不同 cache 路径）与本地之间不一致，本地通过 CI 失败。
+forbid_3_consequence:   本地能链接、CI 报找不到 -lOSMesa，且路径写死难以归因。
+
+forbid_4_pattern:       用.*OSMesa.*当作.*固定管线.*方案|OSMesa.*能跑.*glBegin.*就.*够
+forbid_4_reason:        OSMesa 提供的是「软件渲染的桌面 GL 实现」，不等于「固定管线
+                          入口可用」。若库调用 glBegin/glMatrixMode 等而 OHOS 侧无
+                          这些入口的实现，仍需 gl4es（E321）或自备桩。
+                          （注：桌面 GL 的固定管线在 OSMesa 走的 mesa 版本中可能可用，
+                          但 OHOS 侧的 GLES 栈没有这些入口 —— 需按实际探测结果判断。）
+forbid_4_consequence:   把「能链接」当「能跑固定管线」，运行期才暴露缺失。
+
+forbid_5_pattern:       只验证.*rc=0.*不.*readelf|构建成功.*即认为.*OSMesa.*生效
+forbid_5_reason:        必须用 `readelf -d` 确认 NEEDED 里真有 `libOSMesa.so.<N>`，
+                          否则可能仍链到了别的 GL（或什么都没链上）。
+                          freeglut 案例已证明「构建 rc=0 不代表链接结果正确」。
+forbid_5_consequence:   以为换成了 OSMesa，实际链接目标不对，运行期行为异常。
+
+principles:             选择替代实现前先「验需求面」而非「看名字」——用 grep 数实际
+                        引用（glX/X11 调用数）判定库真正需要什么；
+                        「无某能力」不等于「不可适配」，先找是否有等效实现；
+                        跨平台路径必须动态生成，不得硬编码。
+similar_to:             E321, E471, DRAFT-ohos-hidden-symbol-visibility-exports-zero
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-ohos-desktop-gl-via-mesa-osmesa.md
+last_updated:           2026-09-15
+source_event:           glu 9.0.3 适配（PR #10090）：OHOS SDK 无桌面 GL（无 libGL.so /
+                        glx.h / glu.h）；实测 glu 源码 glX 引用 0、其 meson 原生支持
+                        gl_provider=osmesa；改用 mesa/24.3.4.1（ohpcd 已发布）的
+                        libOSMesa.so 后 conan create EXIT=0，产物 NEEDED 含 libOSMesa.so.8，
+                        test_package 真机执行 PASS。
+authors:                jumping_ggjjkk
+source_pr:              10090
+source_commit:          7b626d0fe
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-15

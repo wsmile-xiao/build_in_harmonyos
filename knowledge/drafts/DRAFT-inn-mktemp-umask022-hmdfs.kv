@@ -1,0 +1,96 @@
+#====================================================================
+# DRAFT-inn-mktemp-umask022-hmdfs.kv
+# HarmonyOS HMDFS(setgid 卷): configure 里硬编码的 umask 077 配 mktemp -d
+# 必 Permission denied; 放宽到 umask 022 即可(与 DRAFT-6507 的结论相反, 有实测反证)
+#====================================================================
+
+id:                     DRAFT-inn-mktemp-umask022-hmdfs
+trigger_tool:           configure|mktemp|config.status|shell
+phase:                  configuration
+error_signature:        can't create .*conf[A-Za-z0-9]+/subs1\.awk.*Permission denied|
+                         config\.status.*could not setup config files machinery|
+                         could not setup config files machinery
+
+severity:               3
+category:               platform, hmdfs, permissions, autotools, configure
+match_keywords:         umask 077, umask 022, mktemp -d, confXXXXXX,
+                         subs1.awk, config.status, config files machinery,
+                         Permission denied, setgid, hmdfs, drwx--S
+
+title:                  HMDFS setgid 卷上 configure 的 umask 077 + mktemp -d 组合必然写不进；放宽成 umask 022 即可，无需改成 mkdir -m 0777
+
+root_cause:             autoconf 生成的 config.status 用
+                         `tmp=\`(umask 077 && mktemp -d "./confXXXXXX")\`` 建临时目录。
+                         HMDFS 是 setgid 卷：目录的 setgid 位会被继承，且磁盘属主
+                         (uid 20001006) 与构建进程 uid(20020085) 不一致，
+                         `umask 077` 建出的目录实测权限为 drwx--S--- (组/其他无权限)，
+                         连创建者在后续跨 uid 语义下也写不进 → 写 subs1.awk 报
+                         Permission denied，config.status 随即
+                         "could not setup config files machinery" 退出。
+                         实测同卷对照(同一目录、同一进程)：
+                           umask 077 && mktemp -d → drwx--S---  写入 FAILED
+                           umask 022 && mktemp -d → drwxr-s--x  写入 OK
+                           umask 002 && mktemp -d → drwxrws--x  写入 OK
+                         mktemp 的最终权限 = 0777 & ~umask，故 umask 放宽确实生效。
+affected_scope:         所有 configure 中硬编码 `umask 077 && mktemp -d` 的
+                         autotools 包在 HarmonyOS PC(hmdfs) 上的适配，例如
+                         inn2/2.7.4、a52dec/0.7.4(同款补丁 0002-configure-umask-022)
+
+verification_cmd:       # 直接对照复现(任一 hmdfs 可写目录)
+                         d=$( (umask 077 && mktemp -d ./tXXXXXX) ); stat -c %A "$d"; echo x > "$d/f"
+                         d=$( (umask 022 && mktemp -d ./tXXXXXX) ); stat -c %A "$d"; echo x > "$d/f"
+
+rec_priority:           1
+rec_approach:           patch-configure-umask-to-022
+rec_description:        在 conandata.yml 里加一个补丁，把 configure(及 config.status
+                         模板)中创建临时目录的两处 `umask 077` 改成 `umask 022`：
+                         主分支 `tmp=\`(umask 077 && mktemp -d "./confXXXXXX")\`` 与
+                         fallback 分支 `(umask 077 && mkdir "$tmp")`。两处都要改，
+                         只改一处会在 mktemp 失败回退到 mkdir 时复现。
+rec_command:            patch: `s/(umask 077 && mktemp -d)/(mktemp -d)/` 或
+                         `s/umask 077 && mktemp -d/umask 022 \&\& mktemp -d/`，
+                         并对 fallback 的 `(umask 077 && mkdir "$tmp")` 同样处理
+rec_auto_fix:           false
+rec_impl:               autotools-patch
+
+fallback_priority:      2
+fallback_approach:      mktemp-to-mkdir-with-explicit-mode
+fallback_description:   若 umask 放宽后仍被拒(例如 chmod 被 SELinux 无视、
+                         或 mktemp 实现恒 0700)，则放弃 mktemp，改用与原 fallback
+                         同构的 `tmp=./conf$$-$RANDOM; (umask 000 && mkdir "$tmp")`——
+                         用创建时定权限绕开 mktemp 的固定模式。
+fallback_auto_fix:      false
+
+forbid_1_pattern:       以 root/sudo 运行 configure 绕过权限
+forbid_1_reason:        CI/conan 沙箱无 root 也无 sudo，本地"过了"但 CI 必红
+forbid_1_consequence:   本地绿、CI 红，浪费一轮 CI
+
+forbid_2_pattern:       跳过 configure 直接手写 Makefile.global
+forbid_2_reason:        绕过而非解决；configure 的探测结果(库/头/路径)全部丢失
+forbid_2_consequence:   产出的二进制路径错误，下游消费者失败
+
+principles:             优先最小补丁而非重构构建流程; 本地复现须与 CI 同环境语义;
+                         不引入需要 root/sudo 的步骤
+
+causes:
+caused_by:              E011(umask 077 家族; 本条为其 mktemp -d 变体的实测澄清)
+similar_to:             DRAFT-6507-cln-mktemp-0700-hmdfs(同场景但结论相反:
+                         其称"umask 放宽无效、须 mkdir -m 0777";
+                         本条实测 umask 022 即生效，可作其修正证据)
+conflicts_with:
+prerequisite_of:
+
+doc_file:               doc/DRAFT-inn-mktemp-umask022-hmdfs.md
+last_updated:           2026-09-25
+source_event:           archives/i/inn2/2.7.4 PR(待提) — conan create G2/W3 通过
+first_seen_project:     inn2/2.7.4
+contributor_id:         ATOMCODE
+
+authors:
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-25

@@ -1,0 +1,66 @@
+#====================================================================
+# DRAFT-azure-core-cpp-1.16.4-cmake-platform-detection — 上游 CMake 平台三分支检测对 HarmonyOS 落入 else() FATAL
+# 触发事件: azure-core-cpp 1.16.4 HarmonyOS PC 适配（archives/a/azure-core-cpp/1.16.4）
+# 主从明确：CMake 惯用 if(WIN32) elseif(UNIX) else() 平台三分支不识别 HarmonyOS，
+#           将其归入 POSIX 分支的最小修复；与 E321（codeload 无扩展名 get() BadZipFile）互补。
+#====================================================================
+
+id:                     E532
+trigger_tool:           cmake|configure
+phase:                  build|configure
+error_signature:        CMake Error.*Unsupported platform|message\(FATAL_ERROR "Unsupported platform|elseif \(UNIX\)|if \(WIN32 OR MINGW|No transport adapter was selected.*libcurl
+
+severity:               3
+category:               platform, detection, ohos, posix, cmake
+match_keywords:         Unsupported platform, CMAKE_SYSTEM_NAME, HarmonyOS, elseif UNIX, WIN32, FATAL_ERROR, cmake configure, platform detection, POSIX branch, transport adapter
+title:                  上游 CMake if(WIN32) elseif(UNIX) else() 平台三分支不识别 HarmonyOS，编译落入 else() 报 Unsupported platform
+
+root_cause:             CMake 在 OHOS 工具链下将 CMAKE_SYSTEM_NAME 设为 "HarmonyOS"，它不是 WIN32 也不是 UNIX。
+                        许多上游项目的 cmake-modules 用
+                          if(WIN32 OR MINGW ...)  ...  elseif(UNIX)  ...  else() message(FATAL_ERROR "Unsupported platform.")
+                        三分支做平台判定（例如 azure-sdk-for-cpp 的 cmake-modules/AzureTransportAdapters.cmake）。
+                        HarmonyOS 平台（POSIX 语义、ELF、libc++）既不满足 WIN32 也不满足 UNIX，落入 else() 直接 FATAL。
+                        配置阶段即失败，尚未进入编译。
+
+affected_scope:         所有以 CMake 构建、且 cmake-modules 使用 if(WIN32)/elseif(UNIX)/else() 三分支
+                        进行平台判定的上游 C/C++ 库的 OHOS 适配。HarmonyOS androidx 平台为默认影响面。
+                        azure-core-cpp 1.16.4 实证：AzureTransportAdapters.cmake:73 message(FATAL_ERROR "Unsupported platform.")
+
+verification_cmd:       conan create . -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 2>&1 | grep -E "Unsupported platform|checking|CMake Error"
+
+# 真实证据: azure-core-cpp 1.16.4 (2026-08-22) conan create 失败
+#   CMake Error at cmake-modules/AzureTransportAdapters.cmake:73 (message): Unsupported platform.
+# 修复: patches/0001-add-harmonyos-platform-support.patch
+#   elseif (UNIX)  →  elseif (UNIX OR CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS")
+
+rec_priority:           1
+rec_approach:           harmonyos-into-unix-branch
+rec_description:        将平台判定条件由 elseif(UNIX) 扩展为 elseif(UNIX OR CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS")，
+                        使 HarmonyOS 落入 POSIX 分支，复用该分支的 curl/libcurl 传输适配与 POSIX 编译选项。
+                        若判定语句写成 if(WIN32 ...) / elseif(UNIX ...) 的完整分支结构，仅需最小一处改动；
+                        注意以 patch 形式提供，避免改动上游源码管理。
+rec_command:            sed -i 's/elseif (UNIX)/elseif (UNIX OR CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS")/' cmake-modules/AzureTransportAdapters.cmake
+rec_auto_fix:           false
+rec_impl:               conanfile-patch
+
+fallback_priority:      2
+fallback_approach:      toolchain-inject-platform-cmake
+fallback_description:   若上游判定逻辑复杂不便打补丁，可考虑注入 Platform/HarmonyOS.cmake（include Platform/Linux）使
+                        CMake 平台模块链认为系统属已知平台；但三分支判定基于独立变量（WIN32/UNIX），注入平台模块不改变
+                        UNIX 变量的判定结果，故对本模式无效。此路仅对"SONAME/平台模块缺失"类问题有效。
+fallback_command:       true
+fallback_auto_fix:      false
+fallback_impl:          toolchain-edit
+
+forbid_1_pattern:       set\(CMAKE_SYSTEM_NAME\s+\"Linux\"\)
+forbid_1_reason:        强行把系统名改成 Linux 会改变大量平台行为（pthread、soname、abi），行为面过宽，不如精确归入 UNIX 分支。
+forbid_1_consequence:   可能掩盖真实平台差异，且与 OHOS 工具链生成的环境变量冲突。
+
+forbid_2_pattern:       message\(FATAL_ERROR "Unsupported platform.\)
+forbid_2_reason:        不做修复直接编译必然在此处失败。
+forbid_2_consequence:   configure 阶段终止，无法进入编译/测试。
+
+doc_file: doc/E532.md
+source_pr: !6204
+last_updated:               2026-08-31
+authors: junshi_liu <liujsh2023@lzu.edu.cn>

@@ -1,0 +1,101 @@
+#====================================================================
+# DRAFT-inn-installsh-no-chown-owner-override.kv
+# install-sh 收到 -o/-g 但环境无 chown/chgrp 可执行文件 → install 中止;
+# 用 CHOWNPROG/CHGRPPROG 覆盖 + 清空 OWNER 解决
+#====================================================================
+
+id:                     DRAFT-inn-installsh-no-chown-owner-override
+trigger_tool:           make|install|install-sh|libtool
+phase:                  installation
+error_signature:        install-sh\[\d+\]: chown: inaccessible or not found|
+                         install-sh.*chgrp: inaccessible or not found|
+                         chown: inaccessible or not found
+
+severity:               2
+category:               install, autotools, permissions, ohos, packaging
+match_keywords:         install-sh, chown, chgrp, inaccessible or not found,
+                         CHOWNPROG, CHGRPPROG, -o news -g news, OWNER=,
+                         DESTDIR, libtool install, make install
+
+title:                  HarmonyOS 无 chown/chgrp 可执行文件，autotools make install 传 -o/-g 时 install-sh 中止；用 CHOWNPROG/CHGRPPROG 覆盖 + 清空 OWNER 解决
+
+root_cause:             HarmonyOS PC 环境**不提供可执行的 chown/chgrp**
+                         （`ls /bin/chown` 即 Permission denied；`command -v chown` 仅得到
+                         别名，执行报 "inaccessible or not found"）。而 INN 的
+                         Makefile.global 定义 `OWNER = -o $(RUNASUSER) -g $(RUNASGROUP)`
+                         （默认 `-o news -g news`），顶层 install 目标对每个目录调用
+                         `support/install-sh $(OWNER) -m 0755 -d $(DESTDIR)$D`；
+                         install-sh 内部执行 `$chownprog $dst` 即失败并 exit 1，
+                         于是 `make install` 在 directories 步中止（exit 2）。
+                         注意：本机也**没有 news 账号**，即便 chown 可用，目标 uid 也不存在。
+affected_scope:         所有 autotools 包在 HarmonyOS 上 `make install` 且
+                         configure/Makefile 携带 owner/group 参数的场景
+                         （autoconf 的 install-sh、automake 生成规则、
+                         libtool 的 install 调用链均会命中）
+
+verification_cmd:       command -v chown && chown --version        # 本机不可用
+                         make install DESTDIR=$DEST OWNER= > /tmp/i.log 2>&1; echo $?
+                         grep -c 'chown: inaccessible' /tmp/i.log  # 期望 0
+
+rec_priority:           1
+rec_approach:           override-install-priv-programs
+rec_description:        利用 install-sh 自身的环境变量覆盖（其头部即
+                         `chownprog=${CHOWNPROG-chown}`、`chgrpprog=${CHGRPPROG-chgrp}`），
+                         把 CHOWNPROG/CHGRPPROG 设为 shell 内建空操作 `:`；
+                         同时把 Makefile 的 OWNER 变量置空以去掉 `-o/-g` 实参。
+                         `:` 是内建、无需可执行位，在 chmod 受限环境同样可用。
+rec_command:            # conanfile.py package() 内
+                         os.environ["CHOWNPROG"] = ":"
+                         os.environ["CHGRPPROG"] = ":"
+                         Autotools(self).install(args=["OWNER="])
+                         # 手工等价: make install DESTDIR=$DEST OWNER= CHOWNPROG=: CHGRPPROG=:
+rec_auto_fix:           true
+rec_impl:               env-override
+
+fallback_priority:      2
+fallback_approach:      patch-install-sh-or-makefile
+fallback_description:   若 install-sh 版本过老、不认 CHOWNPROG/CHGRPPROG
+                         （见 DRAFT-E574 的老版 install-sh 限制），则打补丁
+                         直接删除 install-sh 内的 chown/chgrp 调用，
+                         或在 Makefile.global 中把 OWNER/ROWNER 置空。
+fallback_auto_fix:      false
+
+forbid_1_pattern:       用 root 运行 make install
+forbid_1_reason:        CI/conan 沙箱无 root；且非 root 才是真实消费场景
+forbid_1_consequence:   本地绿、CI 红
+
+forbid_2_pattern:       跳过 make install 手工 cp 产物到 package_folder
+forbid_2_reason:        INN 的 install 同时生成 active/history 数据库与
+                         inn.conf 骨架、设置 setgid 位等，手工 cp 会漏装
+forbid_2_consequence:   包不完整，L5「bin/ 有内容」虽过但消费者功能缺失
+
+forbid_3_pattern:       创建 news 账号或伪造 chown 脚本以让 chown "成功"
+forbid_3_reason:        需要 root；且伪造系统命令属掩盖而非解决
+forbid_3_consequence:   环境不可复现，CI 必然失败
+
+principles:             优先用上游支持的环境变量开关而非打补丁;
+                         不用需要 root 的手段; 不改他人已合入路径
+
+causes:
+caused_by:
+similar_to:             E490(autotools helper 可执行位缺失，同为"环境能力缺失"
+                         类，但那条是 execute 位、本条是 chown/chgrp 缺失);
+                         DRAFT-E574-libosip-installsh-single-file-batch-loss
+                         (老版 install-sh 单文件限制, 同 install 通道)
+conflicts_with:
+prerequisite_of:
+
+doc_file:               doc/DRAFT-inn-installsh-no-chown-owner-override.md
+last_updated:           2026-09-25
+source_event:           archives/i/inn2/2.7.4 — make install exit 2 → 加覆盖后 exit 0
+first_seen_project:     inn2/2.7.4
+contributor_id:         ATOMCODE
+
+authors:
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-25

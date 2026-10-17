@@ -1,0 +1,45 @@
+#====================================================================
+# Draft: GCC 泛化分支里的 x86 专用 "lock; xadd" 内联汇编在 aarch64
+#        上汇编失败 —— 用 __atomic_fetch_add 内建等义替换
+#====================================================================
+# Timestamp: 2026-09-22
+# Software: quickfix 1.15.1（任何把 boost::detail/atomic_count_gcc_x86
+#           风格代码放进 #else 泛化分支的 2010s C++ 库）
+# Gate: conan create build()（首个编译 AtomicCount.h 的 TU 即失败）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: draft-quickfix-1.15.1-atomiccount-x86-xadd-aarch64
+trigger_tool:           clang++|aarch64|inline asm|atomic_count|lock xadd
+phase:                  compile
+error_signature: "unrecognized instruction mnemonic|did you mean: add, addp, adds, addv, fadd, madd"
+
+severity:               1
+category:               arch-portability-inline-asm
+
+match_keywords:         lock xadd, atomic_count, AtomicCount, inline asm, __asm__ __volatile__, unrecognized instruction mnemonic, aarch64, arm64, x86, boost atomic_count_gcc_x86, __atomic_fetch_add, atomic builtin, ISA-specific
+
+title:                   GCC/Clang 泛化分支中的 x86 "lock; xadd" 内联汇编在 aarch64 交叉面必炸：__atomic_fetch_add 内建是零语义漂移的等义替换（返回旧值 + 全屏障）
+
+root_cause: "一些 2010s 库把 boost 的 atomic_count_gcc_x86 实现拷进 '#if _MSC_VER / #elif SUNPRO/AIX / #else' 链的最后一只 #else 分支，分支判据只有编译器厂牌、没有目标架构判据 —— 在 aarch64 上clang 走进这只分支后，x86 专用的 'lock\n\t xadd %1, %0' 内联汇编被本地汇编器拒绝，报 'unrecognized instruction mnemonic: lock'（并把 xadd 误推荐为 add/addp/adds/addv/fadd/madd）。quickfix 1.15.1 的 src/C++/AtomicCount.h:163 即此形态：arm/i386 之外的每一个 GCC/Clang 目标（aarch64/riscv/loongarch…）都会命中。"
+
+affected_scope:         quickfix 1.15.1（AtomicCount.h atomic_exchange_and_add）；同构风险面 = 一切拷贝 boost/detail/atomic_count_gcc_x86.hpp 且未按 __i386__/__x86_64__ 收窄分支的库。判据：报错 TU 的内联汇编来自头文件内嵌 __asm__ __volatile__ 且助记符为 lock/xadd 系。
+
+verification_cmd: "d=\"$PWD/atomiccount-probe\" && mkdir -p \"$d\" && printf 'int main(){ int v=0; return (__atomic_fetch_add(&v,1,__ATOMIC_SEQ_CST)!=0); }\n' > \"$d/probe.c\" && clang -fsyntax-only \"$d/probe.c\" && echo \"builtin OK on this target\""
+
+rec_priority:           1
+rec_approach:           replace-inline-asm-with-atomic-builtin
+rec_description:        把 atomic_exchange_and_add 的内联汇编体替换为 __atomic_fetch_add(pw, dv, __ATOMIC_SEQ_CST)：内建返回"修改前"的旧值，与 xadd 的返回值语义一致；SEQ_CST 提供与原 "memory","cc" clobber 等价的全屏障。函数签名、调用点的 +1/-1 语义都不动，补丁是纯局部替换、全架构可用、可上游化。不要用 mutex 兜底分支（语义漂移 + 性能回退），也不要手写 aarch64 的 ldxr/stxr 内联汇编（维护成本高且 clang 有更好的内建）。
+rec_command:            conan create archives/q/quickfix/1.15.1 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+rec_auto_fix:           false
+rec_impl:               archives/q/quickfix/1.15.1/patches/0002-atomiccount-replace-x86-inline-asm.patch
+
+fallback_priority:      2
+fallback_approach:      add-arch-guard-to-reach-mutex-branch
+fallback_description:   给 x86 分支补 __i386__/__x86_64__ 守卫、让非 x86 目标落到已有的 mutex 兜底分支（quickfix 只有 SUNPRO/AIX 定义了该分支，需自写）。语义从无锁原子退化为互斥锁，正确但慢；仅当上游拒绝内建替换时使用。
+fallback_command:       patch the header guard chain and rebuild with the same conan create command
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       把 lock xadd 手工翻译成 aarch64 ldxr/stxr 循环内联汇编|用非原子 ++/-- 直接替换|关闭优化或 -fno-... 掩盖
+forbid_1_reason:        手写 ldxr/stxr 引入新的架构专属维护面且易写错独占监视器的释放条件；非原子替换是数据竞争（它保护的是会话计数的跨线程读改写）；关优化不改变汇编器对助记符的拒绝。
+forbid_1_consequence:   数据竞争/新的移植债/错误从编译期推迟到运行期。

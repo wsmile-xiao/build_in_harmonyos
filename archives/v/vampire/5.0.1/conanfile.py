@@ -4,8 +4,9 @@
 High-performance theorem prover.
 License: BSD-3-Clause
 
-This template enforces R26: static linking for terminal tools.
-E092: CMAKE_SYSTEM_NAME=Linux for HarmonyOS compatibility.
+R26: static linking for terminal tools (BUILD_SHARED_LIBS=OFF).
+Note: OHOS-adapted Conan 2.29.1 automatically maps os=OHOS to
+      CMAKE_SYSTEM_NAME=HarmonyOS, no manual override needed (E092).
 """
 import os
 
@@ -38,9 +39,6 @@ class VampireConan(ConanFile):
 
     def generate(self):
         tc = CMakeToolchain(self)
-        # E092: CMake doesn't recognize HarmonyOS, force Linux platform
-        tc.variables["CMAKE_SYSTEM_NAME"] = "Linux"
-        tc.variables["CMAKE_SYSTEM_PROCESSOR"] = "aarch64"
         # R26: Terminal tools must be statically linked
         tc.variables["BUILD_SHARED_LIBS"] = "OFF"
         tc.variables["CMAKE_BUILD_TYPE"] = "Release"
@@ -55,7 +53,6 @@ class VampireConan(ConanFile):
     def package(self):
         cmake = CMake(self)
         cmake.install()
-        # Also copy the binary if not installed by cmake.install()
         copy(self, "vampire", src=self.build_folder, dst=os.path.join(self.package_folder, "bin"), keep_path=False)
 
     def package_info(self):

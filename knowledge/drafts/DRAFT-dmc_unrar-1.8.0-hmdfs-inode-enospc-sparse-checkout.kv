@@ -1,0 +1,63 @@
+#====================================================================
+# DRAFT-dmc_unrar-1.8.0-hmdfs-inode-enospc-sparse-checkout
+#   HMDFS inode 池耗尽 -> git worktree 全量检出报 ENOSPC（磁盘未满）
+#   -> sparse-checkout cone 规避
+# 来源: dmc_unrar 1.8.0 适配（PR 待创建），build_in_harmonyos 大仓
+#       （77,768 文件）worktree 创建阶段
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-dmc_unrar-1.8.0-hmdfs-inode-enospc-sparse-checkout
+trigger_tool:           git|worktree
+phase:                  bootstrap
+error_signature:        fatal: cannot create directory at '|No space left on device|unable to create file .*conandata.yml|error: unable to create file|grep.*No space left on device
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               filesystem, hmdfs, git, inode, bootstrap
+match_keywords:         inode, ENOSPC, No space left on device, 磁盘空间, df -i,
+                        inode 耗尽, sparse-checkout, 稀疏检出, worktree,
+                        cannot create directory, HMDFS, /storage, git worktree add
+title:                  HMDFS inode 池耗尽导致 git worktree 全量检出报 "No space left on device"（磁盘未满）：用 sparse-checkout cone 按需映射规避
+prescan_pattern:        fatal: cannot create directory at |No space left on device
+prescan_globs:          **/*.sh, **/*.py, **/conanfile.py
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             HarmonyOS PC 的 /storage 挂载为 HMDFS（分布式文件系统），
+                        inode 总数固定（实测 48,455,677）且被多执行端共享。
+                        大仓库（如 build_in_harmonyos 77,768 个文件）每次全量
+                        checkout 每个文件消耗 1 个 inode；inode 池被并发 worktree
+                        抢占至 100% 后，写任何新文件都返回 ENOSPC
+                        "No space left on device"——尽管 df -h 磁盘剩余数百 GB。
+                        git worktree add 会从字母序中间随机目录失败
+                        （如 archives/w/wren），且失败后回滚整个 worktree，
+                        表现为"换个路径重试还是失败"。
+# ═══ Layer 3: 方案层 (Solution) ═══
+rec_approach:           先 `df -i` 确认是 inode 耗尽而非磁盘满；
+                        改用 git worktree add --no-checkout 建立空 worktree，
+                        再 `git sparse-checkout set --cone <顶层目录...>`
+                        只映射任务需要的顶层目录（如 archives/d、knowledge、
+                        scripts、ci 等 12 个），最后 `git reset --hard` 填充
+                        工作树；reset 遇 ENOSPC 随机失败时循环重试收敛
+                        （已落盘文件被 reset 跳过，指数收敛）。
+                        注意清理自身残留的未完成 worktree（git worktree
+                        prune / remove --force）释放 inode。
+                        基线文件（其他库 .build-closed/.staging-verified 等）
+                        在 index 中仍存在，jc 类门禁需按基线隔离规程处理。
+# ═══ Layer 4: 验证层 (Verification) ═══
+verification:           dmc_unrar 1.8.0：全量检出 5 次失败于不同路径；
+                        sparse-checkout 一次成功（6,663 文件），后续
+                        conan-verify G0-G4 + finish W3 全 PASS。
+                        inode：48455677 总量，耗尽时仅余 ~5k。
+# ═══ Layer 5: 边界层 (Boundary) ═══
+boundary:               仅当 inode 池为硬上限且被并发共享时成立；
+                        ext4/tmpfs（inode 充足）不适用；
+                        稀疏检出后未映射目录对本地工具不可见，
+                        需要工具链容忍（ohc-run.py 只需顶层目录）。
+similar_to:             E497 (git metadata 在 HMDFS 问题)，E079 (HMDFS 硬链接)
+conflicts_with:         (none)
+caused_by:              (none)
+prerequisite_of:        (none)
+last_updated:           2026-09-21

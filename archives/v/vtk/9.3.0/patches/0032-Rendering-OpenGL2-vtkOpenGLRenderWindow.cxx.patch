@@ -1,0 +1,286 @@
+--- a/Rendering/OpenGL2/vtkOpenGLRenderWindow.cxx
++++ b/Rendering/OpenGL2/vtkOpenGLRenderWindow.cxx
+@@ -73,53 +73,51 @@
+   { "Intel", "", "Mesa Intel" },
+   // OpenGL Vendor: X.Org
+   // OpenGL Version: 4.6 (Core Profile) Mesa 20.0.8
+   // OpenGL Renderer: AMD RAVEN (DRM 3.35.0, 5.4.0-42-generic, LLVM 10.0.0)
+   { "X.Org", "", "AMD" },
+ };
+ 
+ const char* defaultWindowName = "Visualization Toolkit - OpenGL";
+ 
+ const char* ResolveShader =
+-  R"***(
+-  //VTK::System::Dec
++  R"***(//VTK::System::Dec
+   in vec2 texCoord;
+-  uniform sampler2DMS tex;
++  uniform highp sampler2DMS tex;
+   uniform int samplecount;
+   //VTK::Output::Dec
+ 
+   void main()
+   {
+     float gamma = 2.2;
+ 
+     // for each sample in the multi sample buffer...
+-    ivec2 itexcoords = ivec2(floor(textureSize(tex) * texCoord));
++    ivec2 itexcoords = ivec2(floor(vec2(textureSize(tex)) * texCoord));
+     vec3 accumulate = vec3(0.0,0.0,0.0);
+     float alpha = 0.0;
+ 
+     for (int i = 0; i < samplecount; i++)
+     {
+-      vec4 sample = texelFetch(tex, itexcoords, i);
++      vec4 sampleValue = texelFetch(tex, itexcoords, i);
+       // apply gamma correction and sum
+-      accumulate += pow(sample.rgb, vec3(gamma));
+-      alpha += sample.a;
++      accumulate += pow(sampleValue.rgb, vec3(gamma));
++      alpha += sampleValue.a;
+     }
+ 
+     // divide and reverse gamma correction
+     accumulate /= float(samplecount);
+     gl_FragData[0] = vec4(pow(accumulate, vec3(1.0/gamma)), alpha/float(samplecount));
+   }
+   )***";
+ 
+ const char* DepthBlitShader =
+-  R"***(
+-  //VTK::System::Dec
++  R"***(//VTK::System::Dec
+   in vec2 texCoord;
+   uniform sampler2D tex;
+   uniform vec2 texLL;
+   uniform vec2 texSize;
+   //VTK::Output::Dec
+ 
+   void main()
+   {
+     gl_FragDepth = texture(tex, texCoord*texSize + texLL).r;
+   }
+@@ -150,22 +148,21 @@
+     z /= 256.0f;
+     float b = mod(z, 256.0f);
+     z -= b;
+     z /= 256.0f;
+     float a = mod(z, 256.0f);
+     gl_FragData[0] = vec4(r / 255.0f, g / 255.0f, b / 255.0f, a / 255.0f);
+   }
+   )***";
+ 
+ const char* FlipShader =
+-  R"***(
+-  //VTK::System::Dec
++  R"***(//VTK::System::Dec
+   in vec2 texCoord;
+   uniform sampler2D tex;
+   //VTK::Output::Dec
+ 
+   void main()
+   {
+     gl_FragData[0] = texture(tex, texCoord);
+   }
+   )***";
+ 
+@@ -1272,20 +1269,22 @@
+     // save any state we mess with
+     vtkOpenGLState::ScopedglEnableDisable stsaver(ostate, GL_SCISSOR_TEST);
+     ostate->vtkglDisable(GL_SCISSOR_TEST);
+ 
+     vtkOpenGLState::ScopedglColorMask colorMaskSaver(ostate);
+     ostate->vtkglColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+ 
+     vtkOpenGLState::ScopedglDepthMask depthMaskSaver(ostate);
+     ostate->vtkglDepthMask(GL_TRUE);
+ 
++    vtkOpenGLState::ScopedglEnableDisable depthEnableSaver(ostate, GL_DEPTH_TEST);
++    ostate->vtkglEnable(GL_DEPTH_TEST);
+     vtkOpenGLState::ScopedglDepthFunc depthTestSaver(ostate);
+     this->GetState()->vtkglDepthFunc(GL_ALWAYS);
+ 
+     source->Activate();
+     double width = source->GetWidth();
+     double height = source->GetHeight();
+     this->DepthBlitQuad->Program->SetUniformi("tex", source->GetTextureUnit());
+     float tmp[2] = { static_cast<float>(srcX / width), static_cast<float>(srcY / height) };
+     this->DepthBlitQuad->Program->SetUniform2f("texLL", tmp);
+     tmp[0] = (srcX2 - srcX) / width;
+@@ -1366,20 +1365,45 @@
+         this->BlitDisplayFramebuffer();
+       }
+     }
+   }
+ }
+ 
+ //------------------------------------------------------------------------------
+ bool vtkOpenGLRenderWindow::ResolveFlipRenderFramebuffer()
+ {
+   bool copiedColor = false;
++#ifdef GL_ES_VERSION_3_0
++  // A renderbuffer must first be resolved without a scale or Y reversal.
++  // A second, single-sample blit can then perform the requested flip.
++  if (this->MultiSamples > 1 && this->FramebufferFlipY &&
++    !this->RenderFramebuffer->GetColorAttachmentAsTextureObject(0))
++  {
++    auto state = this->GetState();
++    int* size = this->RenderFramebuffer->GetLastSize();
++    state->PushFramebufferBindings();
++    this->ResolveFramebuffer->Resize(size[0], size[1]);
++    this->RenderFramebuffer->Bind(GL_READ_FRAMEBUFFER);
++    this->RenderFramebuffer->ActivateReadBuffer(0);
++    this->ResolveFramebuffer->Bind(GL_DRAW_FRAMEBUFFER);
++    this->ResolveFramebuffer->ActivateDrawBuffer(0);
++    state->vtkglBlitFramebuffer(0, 0, size[0], size[1], 0, 0, size[0], size[1],
++      GL_COLOR_BUFFER_BIT, GL_NEAREST);
++    state->PopDrawFramebufferBinding();
++    this->ResolveFramebuffer->Bind(GL_READ_FRAMEBUFFER);
++    this->ResolveFramebuffer->ActivateReadBuffer(0);
++    state->vtkglBlitFramebuffer(0, 0, size[0], size[1], 0, size[1], size[0], 0,
++      GL_COLOR_BUFFER_BIT, GL_NEAREST);
++    state->PopReadFramebufferBinding();
++    return true;
++  }
++#endif
+ 
+   // Some linux drivers have issues reading a multisampled texture
+   bool useTexture = false;
+   if (this->MultiSamples > 1 && this->RenderFramebuffer->GetColorAttachmentAsTextureObject(0))
+   {
+     useTexture = true;
+     const std::string& vendorString = this->GetState()->GetVendor();
+     const std::string& versionString = this->GetState()->GetVersion();
+     const std::string& rendererString = this->GetState()->GetRenderer();
+     size_t numExceptions =
+@@ -1586,20 +1610,65 @@
+   auto ostate = this->GetState();
+   ostate->PushFramebufferBindings();
+ 
+   ostate->vtkglViewport(destX, destY, destWidth, destHeight);
+   ostate->vtkglScissor(destX, destY, destWidth, destHeight);
+ 
+   // ON APPLE OSX you must turn off scissor test for DEPTH blits to work
+   vtkOpenGLState::ScopedglEnableDisable stsaver(ostate, GL_SCISSOR_TEST);
+   ostate->vtkglDisable(GL_SCISSOR_TEST);
+ 
++#ifdef GL_ES_VERSION_3_0
++  if (this->MultiSamples > 1)
++  {
++    // ES rejects blits to an MSAA draw framebuffer. Copy the source region to
++    // textures, then draw it into every destination sample at the requested size.
++    vtkOpenGLState::ScopedglEnableDisable stencilSaver(ostate, GL_STENCIL_TEST);
++    vtkOpenGLState::ScopedglColorMask colorMaskSaver(ostate);
++    ostate->vtkglDisable(GL_STENCIL_TEST);
++    ostate->vtkglColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
++    vtkNew<vtkTextureObject> color;
++    vtkNew<vtkTextureObject> depth;
++    if (bufferMode & GL_COLOR_BUFFER_BIT)
++    {
++      color->SetContext(this);
++      color->Allocate2D(srcWidth, srcHeight, 4, VTK_UNSIGNED_CHAR);
++      color->SetMinificationFilter(interpolation == GL_LINEAR ? vtkTextureObject::Linear : vtkTextureObject::Nearest);
++      color->SetMagnificationFilter(interpolation == GL_LINEAR ? vtkTextureObject::Linear : vtkTextureObject::Nearest);
++      color->CopyFromFrameBuffer(srcX, srcY, 0, 0, srcWidth, srcHeight);
++    }
++    if (bufferMode & GL_DEPTH_BUFFER_BIT)
++    {
++      depth->SetContext(this);
++      depth->AllocateDepth(srcWidth, srcHeight, vtkTextureObject::Float32);
++      depth->CopyFromFrameBuffer(srcX, srcY, 0, 0, srcWidth, srcHeight);
++    }
++    this->RenderFramebuffer->Bind(GL_DRAW_FRAMEBUFFER);
++    this->RenderFramebuffer->ActivateDrawBuffer(0);
++    ostate->vtkglViewport(destX, destY, destWidth, destHeight);
++    if (bufferMode & GL_COLOR_BUFFER_BIT)
++    {
++      vtkOpenGLState::ScopedglEnableDisable blendSaver(ostate, GL_BLEND);
++      vtkOpenGLState::ScopedglEnableDisable depthSaver(ostate, GL_DEPTH_TEST);
++      ostate->vtkglDisable(GL_BLEND);
++      ostate->vtkglDisable(GL_DEPTH_TEST);
++      color->CopyToFrameBuffer(nullptr, nullptr);
++    }
++    if (bufferMode & GL_DEPTH_BUFFER_BIT)
++    {
++      this->TextureDepthBlit(depth);
++    }
++    ostate->PopFramebufferBindings();
++    return;
++  }
++#endif
++
+   // if we are multisampled, then we might have a problem
+   if (this->MultiSamples > 1)
+   {
+     // be safe and always resolve
+     int* fbsize = this->RenderFramebuffer->GetLastSize();
+     this->ResolveFramebuffer->Resize(fbsize[0], fbsize[1]);
+     this->ResolveFramebuffer->Bind(GL_DRAW_FRAMEBUFFER);
+     this->ResolveFramebuffer->ActivateDrawBuffer(0);
+ 
+     ostate->vtkglBlitFramebuffer(srcX, srcY, srcX + srcWidth, srcY + srcHeight, destX, destY,
+@@ -2259,21 +2328,22 @@
+       y_low, x_low + width, y_low + height, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+     this->GetState()->PopDrawFramebufferBinding();
+ 
+     // Now make the resolvedFBO the read buffer and read from it.
+     this->ResolveFramebuffer->Bind(GL_READ_FRAMEBUFFER);
+     this->ResolveFramebuffer->ActivateReadBuffer(0);
+   }
+ 
+ #ifdef GL_ES_VERSION_3_0
+   {
+-    const int depthSize = this->GetDepthBufferSize();
++    // RGBA8 encoding uses at most the 24 exact integer bits of a float.
++    const int depthSize = std::min(this->GetDepthBufferSize(), 24);
+     this->GetState()->PushDrawFramebufferBinding();
+     auto readFramebuffer = resolveMSAA ? this->ResolveFramebuffer : this->RenderFramebuffer;
+     int* fbsize = readFramebuffer->GetLastSize();
+     this->DepthFramebuffer->Bind(GL_DRAW_FRAMEBUFFER);
+     this->DepthFramebuffer->ActivateDrawBuffer(0);
+     this->GetState()->vtkglViewport(0, 0, fbsize[0], fbsize[1]);
+     this->GetState()->vtkglScissor(0, 0, fbsize[0], fbsize[1]);
+ 
+     bool readDepth = this->ReadDepthComponent(depthSize);
+     this->GetState()->PopDrawFramebufferBinding();
+@@ -2285,31 +2355,29 @@
+     }
+     else
+     {
+       this->GetState()->PushReadFramebufferBinding();
+       this->DepthFramebuffer->Bind(GL_READ_FRAMEBUFFER);
+       this->DepthFramebuffer->ActivateReadBuffer(0);
+       std::vector<vtkTypeUInt8> z_data_quarters(width * height * 4, 0);
+       const vtkRecti rect(x_low, y_low, width, height);
+       ConvertGLColor<GL_UNSIGNED_BYTE>(GL_RGBA, rect, z_data_quarters.data(), GL_RGBA);
+       this->GetState()->PopReadFramebufferBinding();
+-      for (int i = 0, j = 0; i < width * height; ++i)
++      const float depthScale = static_cast<float>((1u << depthSize) - 1u);
++      for (int i = 0; i < width * height; ++i)
+       {
+-        vtkTypeUInt32 z_int = z_data_quarters[j++];
+-        z_int += (z_data_quarters[j++] << 8);
+-#if defined(GL_DEPTH_COMPONENT24) || defined(GL_DEPTH_COMPONENT32)
+-        z_int += (z_data_quarters[j++] << 16);
+-#endif
+-#ifdef GL_DEPTH_COMPONENT32
+-        z_int += (z_data_quarters[j++] << 24);
+-#endif
+-        z_data[i] = z_int / float(0xffffff);
++        const size_t j = 4 * static_cast<size_t>(i);
++        const vtkTypeUInt32 z_int = static_cast<vtkTypeUInt32>(z_data_quarters[j]) |
++          (static_cast<vtkTypeUInt32>(z_data_quarters[j + 1]) << 8) |
++          (static_cast<vtkTypeUInt32>(z_data_quarters[j + 2]) << 16) |
++          (static_cast<vtkTypeUInt32>(z_data_quarters[j + 3]) << 24);
++        z_data[i] = z_int / depthScale;
+       }
+     }
+   }
+ #else
+   glReadPixels(x_low, y_low, width, height, GL_DEPTH_COMPONENT, GL_FLOAT, z_data);
+ 
+   this->GetState()->PopReadFramebufferBinding();
+ #endif
+ 
+   if (glGetError() != GL_NO_ERROR)

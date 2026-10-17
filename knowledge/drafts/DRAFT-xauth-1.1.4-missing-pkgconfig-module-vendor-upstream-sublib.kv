@@ -1,0 +1,157 @@
+# ═══ Draft knowledge entry — pkg-config 模块在制品仓无包、但上游有真实提供者且提供者是「某包的子库」：
+#     取提供者官方 tarball 就地编译**最小符号闭包**，而不是伪造 .pc 或手写符号桩 ═══
+# Timestamp: 2026-09-20
+# Software: xauth 1.1.4 (X.Org Xauthority 授权文件管理工具, CLI application)
+# Gate: L0i (依赖已发布) / G2 自包含 / build+test_package
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-xauth-1.1.4-missing-pkgconfig-module-vendor-upstream-sublib
+trigger_tool:           conan|autotools|config
+phase:                  configuration|build
+error_signature:        Package 'xmuu'.*not found|PKG_CHECK_MODULES.*xmuu|
+                         Package requirements \(x11 xau xext xmuu xproto|not met
+error_signature_2:      undefined reference to `XmuGetHostname'|conan list "libxmu.?"? -r ohpcd.*Found 0
+
+severity:               2
+category:               autotools, configure, pkg-config, conan, dependency, portability
+match_keywords:         xmuu, libXmuu, libXmu, PKG_CHECK_MODULES, AC_ARG_VAR,
+                         xmuu.pc, pkg-config, XAUTH_CFLAGS, XAUTH_LIBS, sub-library,
+                         子库, 并列安装, vendored, 最小闭包, XmuGetHostname, SysUtil.h,
+                         xorg, xauth, libXmu-1.3.1, 制品仓覆盖缺口
+
+title:                  PKG_CHECK_MODULES 要求的模块有真实上游提供者、
+                        但提供者是「另一个包的子库」且制品仓无该包时，
+                        取提供者官方 tarball 就地编译最小符号闭包
+
+root_cause: >
+  xauth 1.1.4 的 configure.ac:53 是
+      PKG_CHECK_MODULES(XAUTH, x11 xau xext xmuu xproto >= 7.0.17)
+  其中 xmuu 由 libXmu 的子库 libXmuu 提供 —— 上游 libXmu 一次构建并列发布
+  libXmu.la + libXmuu.la、xmu.pc + xmuu.pc。而 ohpcd 制品仓既没有 libxmu 也没有
+  libxmuu（conan list "libxmu/*" / "libxmuu/*" -r ohpcd → Found 0）。
+  PKG_CHECK_MODULES 的两段语义叠加出两个独立失败入口：(a) $XAUTH_CFLAGS / $XAUTH_LIBS
+  都为空时才调用 pkg-config；(b) 求解失败即 AC_MSG_ERROR 停机。
+  关键区分：这不是 printproto 那类「模块已被并入其它包、独立发行物被撤销」的历史化石 ——
+  提供者是真实存在且有官方 tarball 的库，只是**没有被适配进制品仓**。
+  因此只走 AC_ARG_VAR 逃生口只能解决「不调用 pkg-config」，模块的真实实现
+  （XmuGetHostname）仍无处可寻，会把「configure 找不到模块」变成
+  「链接期 undefined reference」。
+
+affected_scope: >
+  一切「上游 PKG_CHECK_MODULES 要求 A，A 由包 B 的并列子库提供，
+  而制品仓只适配了 B 的一部分或完全没做 B」的包。xauth 1.1.4 实证：
+  制品仓对 libxmu / libxmuu 双空，消费者对 Xmu 的引用只有 parsedpy.c:76 的
+  XmuGetHostname 一个符号（定义在 libXmu 的 src/GetHost.c）。
+  libxaw 是同一缺口的另一受害者（阻塞于 libxmu/1.3.1 未发布）。
+  判据：模块名能在上游发布页找到官方 tarball（不是被撤销/并入的历史化石），
+  且消费者对它的引用面窄到可用 nm 数出来。
+
+verification_cmd: >
+  # 确诊「有真实提供者，只是制品仓没有包」（与 printproto 那类区分）
+  conan list "libxmuu/*" -r ohpcd        # → Found 0 pkg/version recipes
+  conan list "libxmu/*"  -r ohpcd        # → Found 0 pkg/version recipes
+  # 同时上游官方 tarball 与 sha256 可查（xorg.freedesktop.org/archive/individual/lib/）
+  # 数引用面（决定最小闭包大小）
+  grep -rn 'Xmu' --include='*.c' --include='*.h' archives/x/xauth/1.1.4/
+  #   → 只有 <X11/Xmu/SysUtil.h> 与 (void) XmuGetHostname (buf, maxlen);
+  nm -u build/parsedpy.o | grep -i xmu    # → 只有 XmuGetHostname
+  # 确认逃生口存在（tarball 自带 configure，不要 autoreconf）
+  grep -n 'if test -n "\$XAUTH_CFLAGS"' configure   # → 第 11988 行
+  grep -n 'if test -n "\$XAUTH_LIBS"'   configure   # → 第 12005 行
+  # 编译最小闭包并核对
+  llvm-ar t vendor-libxmu/lib/libXmuu.a            # → GetHost.o
+  nm vendor-libxmu/lib/libXmuu.a | grep XmuGetHostname
+
+rec_priority:           1
+rec_approach:           vendor-provider-tarball-compile-minimal-symbol-closure
+rec_description: >
+  做法：(1) 先确诊——查 conan list 双空确认制品仓无包，**并且**查上游官方发布页确认
+  该模块有真实提供者（这一步把本条与 libXp 的 printproto 条目分开）；
+  (2) 数引用面——nm -u 列出消费者对提供者的全部未定义符号（xauth 只有 1 个
+  XmuGetHostname），确定最小闭包；(3) 在 conandata.yml 里并列两个 source
+  （消费者 tarball + 提供者官方 tarball，均带官方 sha256）；(4) source() 里把
+  提供者 tarball 解到 <source_folder>/vendor-<name>/（消费者 tarball 解到
+  source_folder 本身）；(5) build() 里只编译最小闭包所需的 .c
+  （xauth 只编 src/GetHost.c：它的 config.h 引入被 #ifdef HAVE_CONFIG_H 守卫，
+  不定义即不需要跑提供者自己的 configure），头文件直接取 vendor/include；
+  (6) 用 PKG_CHECK_MODULES 自带的 AC_ARG_VAR 逃生口把 PREFIX_CFLAGS / PREFIX_LIBS
+  算好喂进去（绕过 pkg-config），**两条路叠加使用而非二选一** —— 逃生口负责
+  「不调用 pkg-config」，vendored 编译负责「-l 真有东西可链」；
+  (7) 产物命名对齐上游 .pc 里的 -l 名（libXmuu.a 对应 -lXmuu），将来改真依赖时
+  链接行不用改；(8) manifest.yaml 里单列 vendored 块（reason / source_url /
+  source_sha256 / files_compiled / headers_used / notes），notes.md 写明三条路线的
+  取舍 A/B/C 与「为什么只编一个 .c」。
+rec_command: >
+  # conandata.yml 并列两个 source；source() 里
+  #   get(self, **sources["xauth"], strip_root=True)
+  #   get(self, **sources["libxmu"], strip_root=True, destination=<source>/vendor-libxmu)
+  # build() 里
+  clang -fPIC -O2 -I<vendor>/include -c <vendor>/src/GetHost.c -o GetHost.o
+  llvm-ar rcs <vendor>/lib/libXmuu.a GetHost.o
+  # generate() 里
+  env.define("XAUTH_CFLAGS", "-I<vendor>/include -I<dep>/include ...")
+  env.define("XAUTH_LIBS",   "-L<vendor>/lib -lXmuu -L<dep>/lib -lX11 -lXext -lXau")
+rec_auto_fix:           false
+rec_impl:               recipe
+
+fallback_priority:      2
+fallback_approach:      publish-libxmu-as-standalone-conan-recipe
+fallback_description: >
+  给 libxmu/1.3.1 出独立 Conan 配方，发布 libXmu + libXmuu 两个子库与
+  xmu.pc + xmuu.pc 两个模块，消费者改回真 requires 并删除 vendored 块。
+  这是**生态层**的正解，但超出单个消费者 PR 的范围（新增一个包的完整适配），
+  因此本 PR 采用配方内 vendored，同时在 manifest 的「已知限制」里写明
+  何时应改回真依赖（届时 libxaw 的阻塞也会一并解除）。
+fallback_command:       conan create archives/l/libxmu/1.3.1 -pr:h=<profile> -pr:b=<profile>
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       伪造.*xmuu\.pc|PKG_CONFIG_PATH=.*xmuu|echo.*> .*xmuu\.pc
+forbid_1_reason:        伪造一个制品仓里不存在的产物，把「找不到模块」变成
+                        「链接期 undefined reference」；没有任何上游产物支撑，
+                        属伪造事实（同 libXp 条目的禁止策略）。
+forbid_1_consequence:   症状后移且更难定位；一旦被真消费者遇到，排查成本翻倍。
+forbid_2_pattern:       手写.*XmuGetHostname|XmuGetHostname.*\{.*return|stub.*Xmu
+forbid_2_reason:        复制上游实现逻辑，产权不清；等于对工具注入一个自造行为。
+                        xinit/1.4.4 手写 Xlib.h + x11_stub.c 是这条的反面教材。
+forbid_2_consequence:   适配的是「自造的库」而不是上游库；评审不可信。
+forbid_3_pattern:       编译.*ClientWin\.c.*CursorName\.c.*DefErrMsg\.c|
+                        for .* in .*src/.*\.c.*; *do
+forbid_3_reason:        把 libXmuu 全部 5 个 .c 都编进来「以防万一」——多编的 4 个
+                        一个符号都用不到，却引入对 libX11 私有头 <X11/Xlibint.h>
+                        的依赖（私有头跨版本不保证）。
+forbid_3_consequence:   依赖面被人为放大到跨版本不保证的私有头，构建脆弱。
+forbid_4_pattern:       只设.*XAUTH_CFLAGS.*不编.*vendored|escape.*hatch.*only
+forbid_4_reason:        只走 AC_ARG_VAR 逃生口而不解决实现来源，链接期必失败。
+                        逃生口与 vendored 编译是**叠加**关系，不是二选一。
+forbid_4_consequence:   configure 过了但链接不过，白跑一轮 CI。
+
+principles:             P005, P003
+causes:                 []
+caused_by:              []
+similar_to:             E277（库自带 vendored 依赖且 registry 无配方时在 build() 内编译到
+                        staging —— 同族但源码来源不同：E277 的源码在**消费者自己**的
+                        tarball 里，本条目在**提供者自己**的 tarball 里，故多一步
+                        source() 期的第二个 get()）、
+                        DRAFT-libxp-1.0.4-configure-pkgconfig-printproto-module-removed
+                        （同批 X11 家族的姊妹条：printproto 是**被撤销**的历史化石，
+                        方案是纯 AC_ARG_VAR 逃生口；xmuu **有真实提供者只是制品仓没包**，
+                        逃生口必须再叠加 vendored 编译。诊断入口相同、确诊查询不同：
+                        先查「提供者还在不在」再决定走哪条路）、
+                        E002（鸿蒙 /tmp 是 erofs 只读挂载 —— 同批 xauth 适配里
+                        DATADIR/TMPDIR 作用域内改指 build_folder/test-scratch 的依据）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-xauth-1.1.4-missing-pkgconfig-module-vendor-upstream-sublib.md
+last_updated:           2026-09-20
+source_event:           archives/x/xauth/1.1.4 适配（xmuu 模块无包 → vendored libXmuu 最小闭包，5/5 上游场景通过）
+
+authors:                2301_76770579
+source_pr:              11388
+source_commit:          cff10a6b591a22315d07d5f6aa2477f167b3cdc6
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-20

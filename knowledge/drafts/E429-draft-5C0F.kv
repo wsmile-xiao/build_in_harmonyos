@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E429.kv，填写各字段
+# 对应的人类文档: doc/E429.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E429
+trigger_tool: make|cc|clang
+phase: compilation
+error_signature: file not found with <angled> include|fatal error: .*\.h: No such file or directory|No such file or directory.*\.h
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: build-system, makefile, headers, compat
+match_keywords: CFLAGS, conditional assignment, Makefile default, include path lost, env CFLAGS overrides makefile, -Isrc, angled include, recipe build flags, make CFLAGS override
+title: Conan 构建环境导出的 CFLAGS 遮蔽上游 Makefile 的条件赋值默认值，导致项目自带 -I 包含路径丢失
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: 上游 Makefile 用条件赋值（CFLAGS ?=）定义默认编译参数，其中包含项目自身头文件目录（如 -Isrc）；当 recipe 通过构建环境/Toolchain 注入 CFLAGS 时条件赋值不再生效，项目的 -I 全部丢失，编译在第一个以 <subdir/header.h> 形式引用的内部头文件处报 file not found
+affected_scope: 所有以 Makefile 为主构建系统、并用 CFLAGS ?= / CFLAGS += 组织默认编译参数的库；只要 recipe 侧通过 env 或 Toolchain 注入了 CFLAGS 就会触发（webdis 0.1.22、bzip2 类裸 Makefile 项目典型）
+verification_cmd: make -n | grep -c -- '-Isrc'   # 或对比 recipe 传入 CFLAGS 与 Makefile 默认 CFLAGS 的差集
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: replay-upstream-default-cflags
+rec_description: 在 recipe 的 build() 中显式复述上游 Makefile 的默认 CFLAGS（含全部 -I）后再拼接 Conan 工具链与依赖 flag；不要依赖 Makefile 自身的默认值
+rec_command: make CC="${CC}" CFLAGS="<上游默认 CFLAGS 全文> ${依赖 include}" LDFLAGS="${依赖 lib}" -j1
+rec_auto_fix: false
+rec_impl:               # 无内置实现（需 recipe 侧显式传参）
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:
+fallback_description:
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern: sed -i.*#include .*(src|\.\.)/.*\.h>|#include "src/.*\.h"
+forbid_1_reason: 改写上游源码里的 include 路径来绕过 -I 缺失，属于掩盖根因、污染源码，且下游不可维护
+forbid_1_consequence: 补丁无法上游化（违反 P005），后续版本升级冲突，且真正原因是 recipe 传参而非源码
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:             P014    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:             P014
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             [E063, E021]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E429.md
+last_updated: 2026-09-23
+source_event:           webdis/0.1.22 OHOS 适配：make 首错 src/server.h:7 hiredis/async.h file not found（上传 registry 前再核对配方 CFLAGS 是否复述上游默认值）           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 5C0F

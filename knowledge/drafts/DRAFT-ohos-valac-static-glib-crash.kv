@@ -1,0 +1,115 @@
+#====================================================================
+# DRAFT-ohos-valac-static-glib-crash — Vala 编译器（valac）在 OHOS 上
+#   静态链接 glib 时启动即崩（cannot register existing type 'gchar'）——
+#   需用 conan vala 包自带 valac + wrapper 注入 --vapidir 与
+#   LD_LIBRARY_PATH（vala/glib 动态库前置）
+# 对应人类文档: knowledge/drafts/DRAFT-ohos-valac-static-glib-crash.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR zeitgeist/1.0.4 适配 HarmonyOS PC（autotools + Vala）
+#====================================================================
+
+id:                     DRAFT-ohos-valac-static-glib-crash
+trigger_tool:           valac|make|runtime
+phase:                  compilation|runtime
+error_signature:        cannot register existing type 'gchar'|
+                         _g_value_types_init: assertion failed|
+                         GLib-GObject:ERROR.*gvaluetypes\.c|
+                         Bail out! GLib-GObject|
+                         Error loading shared library libglib
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               vala, toolchain, glib, runtime, ohos, portability
+match_keywords:         valac, vala, glib, g_object, cannot register existing type,
+                         g_value_types_init, gvaluetypes, G_TYPE_CHAR, static glib,
+                         LD_LIBRARY_PATH, vapidir, runtime crash, zeitgeist, xmlbird
+title:                  valac 静态链接 glib 启动即崩（cannot register existing
+                         type 'gchar'）——用 conan vala 包自带 valac + wrapper 注入
+                         --vapidir 与 LD_LIBRARY_PATH
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             OHOS 上部分预装 valac（如 usr/local 静态链接 glib 的版本）
+                         在运行时 glib 类型系统初始化阶段崩溃：_g_value_types_init
+                         断言 (type == G_TYPE_CHAR) 失败，报
+                         "cannot register existing type 'gchar'"——进程内存在两份
+                         glib 类型表（静态链接 + 动态加载冲突），或静态 glib 与
+                         运行时库不匹配。即使 `valac --version` 也崩溃。同时
+                         valac 的默认 datadir（编译期硬编码 /usr/share/vala-0.56/
+                         vapi）在 OHOS 不存在，--pkg glib-2.0 等找不到 .vapi；
+                         conan vala 包自带 valac 是动态链接版，需 LD_LIBRARY_PATH
+                         提供 vala/glib 动态库才能运行
+affected_scope:         所有在 OHOS 上用 Vala 编译的库（zeitgeist 即此类）：
+                         系统 valac 不可用（静态 glib 启动即崩），必须用 conan
+                         vala 包（tool_requires）自带的动态链接 valac，且要注入
+                         --vapidir + LD_LIBRARY_PATH（vala 与 glib 的 lib/ 前置）
+verification_cmd:       conan create archives/z/zeitgeist/1.0.4
+                         -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+                         # 期望: 用系统 valac 时 make 启动即崩
+                         #   "cannot register existing type 'gchar'"；
+                         # 用 valac wrapper（--vapidir + LD_LIBRARY_PATH）后
+                         #   libzeitgeist .vala → .c 编译成功
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           valac-wrapper-conan-tool
+rec_description:        build_requirements tool_requires("vala/<ver>")，generate()
+                         里创建 valac wrapper 脚本：exec env LD_LIBRARY_PATH=
+                         "<vala lib>/vala-0.56:<vala lib>:<glib lib>" 调用 conan
+                         vala 包自带 valac，并注入 --vapidir=<vala 包>/share/
+                         vala-0.56/vapi。make 用 VALAC=<wrapper> 编译
+rec_command:            (conanfile.py generate() 中，仿 xmlbird)
+                         valac_bin = <vala pkg>/bin/valac-0.56
+                         vapi_dir = <vala pkg>/share/vala-0.56/vapi
+                         wrapper = "#!/bin/sh\nexec env LD_LIBRARY_PATH=... "
+                                   f'"{valac_bin}" --vapidir="{vapi_dir}" "$@"'
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      vapidir-only-env
+fallback_description:   若系统 valac 能运行（动态链接版），仅注入 --vapidir 即可
+                         （VALAFLAGS/AM_VALAFLAGS 加 --vapidir）——但 OHOS 预装
+                         valac 常为静态 glib 版，启动即崩，此回退通常不可用
+fallback_command:       (AM_VALAFLAGS += --vapidir=<vala 包 vapi>)
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       用系统.*valac|usr/local/bin/valac|跳过.*Vala.*编译
+forbid_1_reason:        系统 valac 静态 glib 启动即崩（实测），用它必失败；
+                         跳过 Vala 编译=丢全部库代码
+forbid_1_consequence:   编译必然失败或产物为空壳，被 CI/R34 打回
+forbid_2_pattern:       只.*--vapidir.*不.*LD_LIBRARY_PATH|漏.*glib.*lib
+forbid_2_reason:        动态链接版 valac 缺 vala/glib 动态库报
+                         "Error loading shared library libglib-2.0.so.0"
+forbid_2_consequence:   valac 无法启动，编译失败
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-ohos-configure-optional-python-hardfail
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-ohos-valac-static-glib-crash.md
+last_updated:           2026-09-06
+source_event:           zeitgeist/1.0.4 HarmonyOS PC 适配（make 在 libzeitgeist
+                         valac 步骤报 cannot register existing type 'gchar'）
+
+# ═══ 知识协作 ═══
+authors:                ohpcd <ohpcd@localhost>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-06
+
+draft:                  true

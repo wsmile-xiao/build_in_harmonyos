@@ -1,0 +1,69 @@
+draft: DRAFT-logstalgia-desktop-gl-shim-gl4es
+status: pending-editor-review
+title: "OHOS 无桌面 GL 栈（无 X11/桌面 OpenGL）时 gl4es 兼容层 + GLU 五函数 Mesa 移植 + GLEW 三符号自写 shim 的组合自解方案"
+category: graphics, conan, pkg-config, platform
+match_keywords: >
+  gl4es, GLU, GLEW, glewInit, gluProject, gluUnProject, gluPerspective,
+  gluBuild2DMipmaps, gluErrorString, 桌面 OpenGL, 固定管线, GLES2 翻译,
+  libGL.so, checking for GL... no, GL_LIBS=no, AX_CHECK_GL, gl.pc, glu.pc,
+  glew.pc, LIBGL_GLES, LIBGL_EGL, headless GL, 桌面 GL, X11
+error_signature: >
+  checking for GL\.\.\. no|checking for GLU\.\.\. no|GL_LIBS=no|undefined reference to `glu[A-Z][A-Za-z]+|undefined reference to `glew[A-Z][A-Za-z]+|fatal error: 'GL/glew\.h' file not found|GLEW_VERSION_[0-9_]+.*undeclared|GL_COMPUTE_SHADER.*undeclared|glBindBuffer.*undeclared|Error loading shared library libGL\.so
+root_cause: >
+  OHOS PC 图形栈只有 EGL + GLESv3（无 X11、无桌面 OpenGL）。依赖桌面 GL 固定
+  管线 + GLU + GLEW 的上游（logstalgia 一类）在三层同时断裂：①头文件与链接
+  层——系统无 GL/gl.h、GL/glew.h、GLU/glu.h 与 libGL.so；②configure 检测层
+  ——AX_CHECK_GL 走 PKG_CHECK_MODULES([GL],[gl]) 找不到 gl.pc，AC_SEARCH_LIBS
+  又无 -L 注入，检测失败后 GL_LIBS=no 传给 conftest 连锁崩；③符号层——即便
+  用 gl4es（桌面 GL→GLES2 翻译层）补了 libGL.so 与 GL/gl.h，gl4es 只带 GLU
+  声明不带 glu* 符号实现，GLEW 则完全缺失（上游 Core 的 gl.h 会 #include
+  <GL/glew.h>，且消费 glewInit/GLEW_VERSION_2_0/GLEW_ERROR_NO_GLX_DISPLAY）。
+  本质是"运行时翻译层 ≠ 头文件完备 ≠ 实用工具库符号齐"三个断层的组合问题。
+solution: |
+  四层组合自解方案（logstalgia 1.1.4 实战，零上游源码补丁）：
+  1. **gl4es 兼容层打底**（制品仓 gl4es/1.1.6）：提供 libGL.so（桌面 GL
+     1.5/2.1 → GLES2 运行时翻译，含 FPE 固定管线模拟）+ GL/gl.h + GL/glext.h。
+  2. **GLU 五函数 shim**（compat/glu_glew_shim.cpp）：先 grep 上游实际用到的
+     GLU 函数清单（logstalgia 仅 5 个：gluPerspective/gluProject/gluUnProject/
+     gluBuild2DMipmaps/gluErrorString + configure conftest 的 gluBeginCurve），
+     按 Mesa 公开域数学实现移植编成 libGLU.a——注意 GL 矩阵约定（列主序）：
+     gluUnProject 的 viewport 逆映射运算序（先除后乘）与 invert_matrix 的
+     转置修正（消元在转置系上运行，inv 实为 (A^-1)^T，列向量乘约定需再转置）
+     是两个实测踩过的坑，已修。
+  3. **GLEW 三符号 shim**（compat/GL/glew.h）：自写头文件——转 include gl4es
+     头 + #define GL_GLEXT_PROTOTYPES 1（gl4es 的 gl.h 只到 GL 1.2 基线，
+     glBindBuffer 等 VBO 原型在 glext.h 且需该宏才可见）+ 定义 GLEW_OK/
+     GLEW_ERROR_NO_GLX_DISPLAY/GLEW_VERSION_2_0（gl4es 目标桌面 GL 2.1，
+     防上游 if(!GLEW_VERSION_2_0) 误触发 ffp 回退）+ GL_COMPUTE_SHADER
+     （0x91B9，GL 4.3 常量，gl4es glext.h 不含但上游引用，运行时不触达）；
+     glewInit/glewGetErrorString/glewExperimental 实现放 libGLU.a（C ABI）。
+  4. **configure 全走 pkg-config + 环境覆盖**（无源码补丁的关键）：配方在
+     PkgConfigDeps 输出目录生成别名 .pc——gl（→gl4es）、glu（→libGLU.a）、
+     glew（→shim 头 + libGLU.a）、freetype2（→conan freetype，版本号写
+     libtool 号满足 >= 检测）；PKG_CONFIG_PATH 注入 generators 目录；
+     --build/--host=aarch64-linux 跳过 config.guess。
+  运行时环境：test_package 注入 LD_LIBRARY_PATH（gl4es lib + /system/lib64）
+  + LIBGL_GLES=/system/lib64/libGLESv3.so LIBGL_EGL=/system/lib64/libEGL.so
+  （gl4es 后端选择，真机实测：Maleoon 916 GPU 上 "Using GLES 2.0 backend"、
+  "Hardware Full NPOT detected"、"LIBGL:loaded: /system/lib64/libGLESv3.so"）。
+  ```bash
+  # 证据采集：上游实际用的 GLU/GLEW 符号清单（决定 shim 面积）
+  grep -rhoE "glu[A-Z][A-Za-z]+\(" src/ | sort -u
+  grep -rhoE "glew[A-Z][A-Za-z]+|GLEW_[A-Z0-9_]+" src/ | sort -u
+  # conftest 探测失败复现：看 config.log 里 GL_LIBS=no 的连锁
+  grep -B2 -A8 "checking for GL" config.log
+  ```
+fallback: >
+  若 gl4es 制品仓包不可用（未发布），降级路径：①换 GLES2 原生重写（工程量
+  大，仅当上游 GL 用法简单时可行）；②EGL PBuffer + 自己初始化上下文绕过
+  桌面 GL 语义（丢失固定管线，需上游支持 GLES）；③无头 CI 下运行时类测试
+  改 GL stub 链接（矩阵数学自测无需真 GL——logstalgia selftest probe 用
+  GL stub 链接通过，headless 下 gl4es loader 初始化崩溃时此法有效）。
+verify_builds: "#42999（CI 绿，本地干净 clone 全绿）；真机 OHOS PC + Maleoon 916 GPU 实测 --help exit 0 + gl4es GLES2 后端初始化成功（2026-09-09）"
+reference_impl: >
+  PR #9149 feat(logstalgia): 1.1.4（已关闭待解冻重开）——commits c1cf281211/
+  f87cb8a007/dd73de5509/9ebd662243（GLU shim 矩阵数学三轮修正）/7dac9124a0
+  （compat 迁移）；.gitignore 吞 include 的迁移教训另报 #2864 issue，本条
+  聚焦 GL 栈本身。
+id: TBD（由主编分配）
+doc_file: doc/TBD.md

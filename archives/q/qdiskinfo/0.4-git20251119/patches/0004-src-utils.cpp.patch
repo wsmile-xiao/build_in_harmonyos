@@ -1,0 +1,175 @@
+--- a/src/utils.cpp
++++ b/src/utils.cpp
+@@ -32,50 +32,87 @@
+         if (foundSeparator) {
+             menuDisk->removeAction(action);
+         } else if (action->isSeparator()) {
+             foundSeparator = true;
+         }
+     }
+ 
+     return currentDeviceName;
+ }
+ 
+-QString utils::getSmartctlPath() {
++QString utils::findExecutable(const QString &executableName)
++{
+     QStringList paths = QString::fromLocal8Bit(qgetenv("PATH")).split(QDir::listSeparator(), Qt::SkipEmptyParts);
+ 
+-    paths << "/usr/sbin" << "/usr/local/sbin";
++    paths << "/usr/sbin" << "/usr/local/sbin" << "/usr/bin" << "/bin";
+ 
+     for (const QString &path : std::as_const(paths)) {
+-        QString absolutePath = QDir(path).absoluteFilePath("smartctl");
++        QString absolutePath = QDir(path).absoluteFilePath(executableName);
+         if (QFile::exists(absolutePath) && QFileInfo(absolutePath).isExecutable()) {
+             return absolutePath;
+         }
+     }
+ 
+     return QString();
+ }
+ 
++QString utils::getSmartctlPath() {
++    return findExecutable("smartctl");
++}
++
++QString utils::getPrivilegeElevator()
++{
++    // HarmonyOS PC 没有 polkit/pkexec。返回空串表示“无提权器可用”，
++    // 调用方应直接执行目标命令，而不是让 QProcess 启动失败后静默返回空结果。
++    return findExecutable("pkexec");
++}
++
++void utils::startProcess(QProcess &process, const QString &program, const QStringList &arguments, bool root)
++{
++    if (program.isEmpty()) {
++        return;
++    }
++
++    const QString elevator = root ? getPrivilegeElevator() : QString();
++
++    if (elevator.isEmpty()) {
++        // 无提权器（HarmonyOS PC）或本来就不需要提权：直接执行，
++        // 权限由进程自身决定（例如以特权用户身份启动时可直接访问磁盘）。
++        process.start(program, arguments);
++    } else {
++        process.start(elevator, QStringList{program} + arguments);
++    }
++}
++
+ QString utils::getSmartctlOutput(const QStringList &arguments, bool root, bool initializing)
+ {
+     QProcess process;
+-    QString command;
++    const QString smartctlPath = getSmartctlPath();
++
++    if (smartctlPath.isEmpty()) {
++        // 没有 smartctl 就无需启动任何进程；仅首次启动时提示并退出。
++        if (initializing) {
++            QMessageBox::critical(nullptr, QObject::tr("QDiskInfo Error"), QObject::tr("smartctl was not found, please install it!"));
++            QTimer::singleShot(0, qApp, &QApplication::quit);
++        }
++        return QString();
++    }
+ 
+     if (root) {
+-        command = "pkexec";
+-    } else {
+-        command = getSmartctlPath();
+-    }
+-
+-    if (!getSmartctlPath().isEmpty()) {
+-        process.start(command, arguments);
+-        process.waitForFinished(-1);
+-    }
++        // 调用方传入的是 shell 包装命令（{"sh", "-c", cmd}）：
++        // 有提权器时执行 `pkexec sh -c cmd`，否则执行 `sh -c cmd`。
++        startProcess(process, arguments.value(0), arguments.mid(1), true);
++    } else {
++        startProcess(process, smartctlPath, arguments, false);
++    }
++
++    process.waitForFinished(-1);
+ 
+     if (process.exitCode() == 126 || process.exitCode() == 127) {
+         QMessageBox::critical(nullptr, QObject::tr("QDiskInfo Error"), QObject::tr("QDiskInfo needs root access in order to read S.M.A.R.T. data!"));
+         if (initializing) {
+             QTimer::singleShot(0, qApp, &QApplication::quit);
+         }
+         return QString();
+     }
+ 
+     if (process.isOpen()) {
+@@ -97,22 +134,22 @@
+     QStringList deviceOutputs;
+ 
+     for (const QJsonValue &value : std::as_const(devices)) {
+         QJsonObject device = value.toObject();
+         QString deviceName = device["name"].toString();
+         commandList.append((smartctlPath + " -x --json=o %1").arg(deviceName));
+     }
+     QString command = commandList.join(" ; ");
+ 
+     if (smartctlPath.isEmpty()) {
+-        QMessageBox::critical(nullptr, QObject::tr("QDiskInfo Error"), QObject::tr("smartctl was not found, please install it!"));
+-        QTimer::singleShot(0, qApp, &QApplication::quit);
++        // getSmartctlOutput() 已经提示过并请求退出，这里不再重复弹窗
++        return QPair<QStringList, QJsonArray>(QStringList(), QJsonArray());
+     }
+ 
+     QString allDevicesOutput = getSmartctlOutput({"sh", "-c", command}, true, initializing);
+ 
+     qsizetype startIndex = 0;
+     qsizetype endIndex = 0;
+ 
+     static const QRegularExpression regex("\\}\\n\\{");
+ 
+     while ((endIndex = allDevicesOutput.indexOf(regex, static_cast<int>(startIndex))) != -1) {
+@@ -132,40 +169,40 @@
+     } else {
+         return QPair<QStringList, QJsonArray>(QStringList(), QJsonArray());
+     }
+ }
+ 
+ QString utils::initiateSelfTest(const QString &testType, const QString &deviceNode)
+ {
+     QProcess process;
+     QString command = getSmartctlPath();
+     QStringList arguments;
+-    arguments << command << "--json=o" << "-x" << "-t" << testType << deviceNode;
+-
+-    process.start("pkexec", arguments);
++    arguments << "--json=o" << "-x" << "-t" << testType << deviceNode;
++
++    startProcess(process, command, arguments, true);
+     process.waitForFinished(-1);
+ 
+     if (process.isOpen()) {
+         return process.readAllStandardOutput();
+     } else {
+         return QString();
+     }
+ }
+ 
+ void utils::cancelSelfTest(const QString &deviceNode)
+ {
+     QProcess process;
+     QString command = getSmartctlPath();
+     QStringList arguments;
+-    arguments << command << "-X" << deviceNode;
+-
+-    process.start("pkexec", arguments);
++    arguments << "-X" << deviceNode;
++
++    startProcess(process, command, arguments, true);
+     process.waitForFinished(-1);
+ 
+     if (process.exitCode() == 126 || process.exitCode() == 127) {
+         QMessageBox::critical(nullptr, QObject::tr("QDiskInfo Error"), QObject::tr("QDiskInfo needs root access in order to abort a self-test!"));
+     } else if (process.exitCode() == QProcess::NormalExit) {
+         QMessageBox::information(nullptr, QObject::tr("Test Requested"), QObject::tr("The self-test has been aborted"));
+     } else {
+         QMessageBox::critical(nullptr, QObject::tr("QDiskInfo Error"), QObject::tr("Error: Something went wrong"));
+     }
+ }

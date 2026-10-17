@@ -1,4 +1,17 @@
-# libvorbis 1.3.7 适配笔记
+# libvorbis 1.3.7 适配记录
+
+## Conan 配方补充（2026-07-29）
+
+- 新增 CMake Conan 配方，依赖 `libogg/1.3.6`，并将 libogg 作为
+  transitive headers/libs 暴露给消费者；`vorbis/codec.h` 公开包含
+  `ogg/ogg.h`，因此 test_package 只依赖 libvorbis 时也应拿到 Ogg 头文件。
+- 使用上游 CMake 构建路径，避开 Autotools `config.status` 临时目录权限问题。
+- 在 `source()` 阶段将上游 `cmake_minimum_required(VERSION 2.8.12)` 提升到
+  `3.5`，避免新版本 CMake 在配置阶段因移除 3.5 以下兼容模式而直接失败。
+- 导出 Conan 组件：`Vorbis::vorbis`、`Vorbis::vorbisenc`、`Vorbis::vorbisfile`。
+- 新增非交互 `test_package/test_libvorbis.c`，覆盖版本字符串、编码初始化、comment API 与 vorbisfile 符号链接。
+- 将上游 v1.3.7 `test/` 中的 `test.c`、`util.c`、`write_read.c` 及对应头文件原样接入
+  `test_package`，在打包后的库上执行上游编码/解码往返测试程序。
 
 ## 编译环境
 - 构建系统: autotools

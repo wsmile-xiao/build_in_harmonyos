@@ -1,0 +1,90 @@
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <minlzma.h>
+
+/*
+ * 鸿蒙专项测试 test_ohos.c — 在 OHOS armv8 目标的 conan create 环境内
+ * 实际编译并运行。与 upstream README 文档化流程、test.c（消费者 API
+ * 冒烟）均不重复，独立覆盖三类行为：
+ *   1. CRC32 校验类型 XZ 流的完整解压 + 内容比对（不同编码路径）
+ *   2. 损坏流的错误处理（XzDecode 失败路径，验证不崩溃）
+ *   3. 大小查询模式（OutputBuffer=NULL, OutputSize=0）
+ * XZ 载荷由 Python lzma.compress(FORMAT_XZ) 实际生成。
+ */
+
+/* CRC32 check 流，payload="OHOS special test: CRC32 integrity check." */
+static const unsigned char XZ_CRC32[] = {
+    0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, 0x00, 0x01, 0x69, 0x22, 0xde, 0x36, 0x02, 0x00, 0x21, 0x01,
+    0x16, 0x00, 0x00, 0x00, 0x74, 0x2f, 0xe5, 0xa3, 0x01, 0x00, 0x28, 0x4f, 0x48, 0x4f, 0x53, 0x20,
+    0x73, 0x70, 0x65, 0x63, 0x69, 0x61, 0x6c, 0x20, 0x74, 0x65, 0x73, 0x74, 0x3a, 0x20, 0x43, 0x52,
+    0x43, 0x33, 0x32, 0x20, 0x69, 0x6e, 0x74, 0x65, 0x67, 0x72, 0x69, 0x74, 0x79, 0x20, 0x63, 0x68,
+    0x65, 0x63, 0x6b, 0x2e, 0x00, 0x00, 0x00, 0x00, 0xa6, 0xfb, 0x88, 0xda, 0x00, 0x01, 0x3d, 0x29,
+    0xf9, 0x65, 0xdc, 0x08, 0x90, 0x42, 0x99, 0x0d, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x59, 0x5a,
+};
+static const unsigned int XZ_CRC32_LEN = 96;
+static const char XZ_CRC32_EXPECTED[] = "OHOS special test: CRC32 integrity check.";
+static const unsigned int XZ_CRC32_EXPECTED_LEN = 41;
+
+/* CRC64 check 流，payload="corrupt me not"（用于损坏流错误处理测试） */
+static const unsigned char XZ_CORRUPT[] = {
+    0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, 0x00, 0x04, 0xe6, 0xd6, 0xb4, 0x46, 0x02, 0x00, 0x21, 0x01,
+    0x16, 0x00, 0x00, 0x00, 0x74, 0x2f, 0xe5, 0xa3, 0x01, 0x00, 0x0d, 0x63, 0x6f, 0x72, 0x72, 0x75,
+    0x70, 0x74, 0x20, 0x6d, 0x65, 0x20, 0x6e, 0x6f, 0x74, 0x00, 0x00, 0x00, 0x5e, 0xb7, 0x0d, 0x3f,
+    0x7b, 0xc1, 0x25, 0xfa, 0x00, 0x01, 0x26, 0x0e, 0x08, 0x1b, 0xe0, 0x04, 0x1f, 0xb6, 0xf3, 0x7d,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x04, 0x59, 0x5a,
+};
+static const unsigned int XZ_CORRUPT_LEN = 72;
+
+static int failures = 0;
+
+static void check(bool cond, const char* what) {
+    if (!cond) {
+        printf("FAIL: %s\n", what);
+        failures++;
+    } else {
+        printf("PASS: %s\n", what);
+    }
+}
+
+int main(void) {
+    uint32_t size = 0;
+    uint8_t* out = NULL;
+    int rc;
+
+    /* 1. 大小查询模式（NULL 输出） */
+    rc = XzDecode(XZ_CRC32, XZ_CRC32_LEN, NULL, &size);
+    check(rc && size == XZ_CRC32_EXPECTED_LEN, "size query mode (CRC32 stream)");
+
+    /* 2. CRC32 流完整解压 + 内容比对 */
+    out = (uint8_t*)malloc(size);
+    check(out != NULL, "malloc");
+    rc = XzDecode(XZ_CRC32, XZ_CRC32_LEN, out, &size);
+    check(rc && !XzChecksumError(), "decode CRC32 stream, no checksum error");
+    check(size == XZ_CRC32_EXPECTED_LEN &&
+          memcmp(out, XZ_CRC32_EXPECTED, XZ_CRC32_EXPECTED_LEN) == 0,
+          "decoded content matches expected");
+    free(out);
+
+    /* 3. 损坏流错误处理（不崩溃、返回失败）
+     * 依据本地字节扫掠实验：XZ 流偏移 24 为 LZMA2 块控制字节
+     * （0x01 = 无压缩 chunk），异或 0xFF 得到非法控制值 0xFE，
+     * XzDecode 必然返回 false（确定性失败断言）。 */
+    {
+        unsigned char bad[256];
+        uint32_t badSize = 64;
+        memcpy(bad, XZ_CORRUPT, XZ_CORRUPT_LEN);
+        bad[24] ^= 0xFF; /* LZMA2 块控制字节 -> 非法值，解码失败 */
+        rc = XzDecode(bad, XZ_CORRUPT_LEN, NULL, &badSize);
+        check(!rc, "corrupt stream rejected safely");
+    }
+
+    if (failures == 0) {
+        printf("RESULT: ALL OHOS TESTS PASSED\n");
+        return 0;
+    }
+    printf("RESULT: %d FAILURES\n", failures);
+    return 1;
+}

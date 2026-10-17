@@ -1,0 +1,156 @@
+--- a/python/zephyr_ctypes.py
++++ b/python/zephyr_ctypes.py
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python
++#!/usr/bin/env python3
+ 
+ """rough bindings for libzephyr"""
+ 
+@@ -8,6 +8,7 @@
+ import ctypes.util
+ import time
+ import sys
++import os
+ from ctypes import c_int, c_uint, c_ushort, c_char, c_ubyte
+ from ctypes import c_uint16, c_uint32
+ from ctypes import POINTER, c_void_p, c_char_p
+@@ -19,21 +20,37 @@
+ except IndexError:
+     __version__ = "unknown"
+ 
++
++def encoded(func):
++    """Encode ``str`` arguments to ``bytes`` for a ctypes function.
++
++    Under Python 3 ctypes refuses ``str`` for ``c_char_p`` parameters, while
++    the upstream (Python 2 era) code and its test suite pass text.  Only the
++    Python-side marshalling is adapted; the C ABI is unchanged.
++    """
++    def wrapper(*args, **kwargs):
++        args = tuple(a.encode("utf-8") if isinstance(a, str) else a
++                     for a in args)
++        return func(*args, **kwargs)
++    wrapper.__name__ = getattr(func, "__name__", "wrapper")
++    return wrapper
++
++
+ def print_line_or_lines(results, indent):
+     """short values on same line, multi-line on later ones..."""
+     if len(results) == 1:
+-        print results[0]
++        print(results[0])
+     else:
+-        print
++        print()
+         for result in results:
+-            print indent + result
++            print(indent + result)
+ 
+ def ctypes_pprint(cstruct, indent=""):
+     """pretty print a ctypes Structure or Union"""
+     
+     for field_name, field_ctype in cstruct._fields_:
+         field_value = getattr(cstruct, field_name)
+-        print indent + field_name,
++        print(indent + field_name, end=' ')
+         next_indent = indent + "    "
+         pprint_name = "pprint_%s" % field_name
+         pformat_name = "pformat_%s" % field_name
+@@ -51,11 +68,11 @@
+             field_value.pprint(next_indent)
+         elif hasattr(field_value, "_fields_"):
+             # generic recursion
+-            print
++            print()
+             ctypes_pprint(field_value, next_indent)
+         else:
+             # generic simple (or unknown/uninteresting) value
+-            print field_value
++            print(field_value)
+ 
+ class Enum(c_int):
+     def pformat(self):
+@@ -118,9 +135,18 @@
+ else:
+     af_base_type = Enum_u16
+ 
++# Python 3: comprehensions in a class body run in their own scope and cannot
++# see other class attributes, so the address-family table is built at module
++# level and simply referenced from the class.
++_socket_af = dict([(v, n) for n, v in list(socket.__dict__.items())
++                   if n.startswith("AF_")])
++_af_values = [_socket_af.get(k, "unknown address family")
++              for k in range(min(_socket_af), max(_socket_af) + 1)]
++
++
+ class AF_(af_base_type):
+-    _socket_af = dict([(v,n) for n,v in socket.__dict__.items() if n.startswith("AF_")])
+-    _values_ = [_socket_af.get(k, "unknown address family") for k in range(min(_socket_af), max(_socket_af)+1)]
++    _socket_af = _socket_af
++    _values_ = _af_values
+ 
+ populate_enum(AF_)
+ 
+@@ -228,7 +254,7 @@
+         #     } z_sender_sockaddr;
+         ]
+     def pprint(self, indent):
+-        print
++        print()
+         if self.sa.sa_family.value == socket.AF_INET:
+             ctypes_pprint(self.ip4, indent + ".ip4:")
+         elif self.sa.sa_family.value == socket.AF_INET6:
+@@ -343,7 +369,7 @@
+         """connect to the library and build the wrappers"""
+         if not library_path:
+             library_path = ctypes.util.find_library("zephyr")
+-        self._lib = ctypes.cdll.LoadLibrary(library_path)
++        self._lib = self._load_library(library_path)
+ 
+         # grab the Zauthtype variable
+         self.Zauthtype = ctypes.c_int.in_dll(self._lib, 'Zauthtype').value
+@@ -482,5 +508,44 @@
+         # struct sockaddr_in ZGetDestAddr (void) {
+         self.ZGetDestAddr.restype = sockaddr_in
+ 
++        # Python 3: ctypes wants bytes for c_char_p parameters (Python 2
++        # accepted str), so text arguments are encoded at the binding
++        # boundary.  Results stay as bytes, matching the char*-based C API.
++        for _bytesfunc in ("ZGetRealm", "ZGetSender", "ZExpandRealm",
++                           "ZCharsetToString", "ZGetCharsetString",
++                           "ZParseNotice", "ZMakeAscii", "ZMakeZcode"):
++            setattr(self, _bytesfunc, encoded(getattr(self, _bytesfunc)))
++
+         # library-specific setup...
+         self.ZInitialize()
++
++    #: probability/probe symbol used to tell whether the process already has
++    #: libzephyr mapped into its global symbol scope.
++    _PROBE_SYMBOL = "ZGetRealm"
++
++    def _load_library(self, library_path):
++        """Load libzephyr, falling back to the process' global symbol scope.
++
++        On the HarmonyOS PC build sandbox ``dlopen`` refuses shared objects
++        located in user directories (the failure is ``Error loading shared
++        library <path>: Permission denied``, independent of the ELF signature),
++        while loading at exec time through ``DT_NEEDED`` works.  The adapted
++        build therefore runs this suite from a launcher that links the freshly
++        built library, and this fallback picks its symbols up from the global
++        scope.  The probe symbol keeps the fallback honest: when the library is
++        not actually mapped, the original loader error is re-raised.
++        """
++        if os.environ.get("ZEPHYR_CTYPES_FORCE_GLOBAL") == "1":
++            return self._global_scope_library()
++        try:
++            return ctypes.cdll.LoadLibrary(library_path)
++        except OSError:
++            return self._global_scope_library()
++
++    def _global_scope_library(self):
++        global_lib = ctypes.CDLL(None)
++        if not hasattr(global_lib, self._PROBE_SYMBOL):
++            raise OSError(
++                "libzephyr is neither loadable by path nor mapped into the "
++                "global symbol scope (%s missing)" % self._PROBE_SYMBOL)
++        return global_lib

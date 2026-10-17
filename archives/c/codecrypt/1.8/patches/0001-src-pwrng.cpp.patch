@@ -1,0 +1,123 @@
+--- a/src/pwrng.cpp
++++ b/src/pwrng.cpp
+@@ -15,43 +15,120 @@
+  * License for more details.
+  *
+  * You should have received a copy of the GNU Lesser General Public License
+  * along with Codecrypt. If not, see <http://www.gnu.org/licenses/>.
+  */
+
+ #include "pwrng.h"
+
+ #include "iohelpers.h"
+ #include <stdlib.h>
++#include <fcntl.h>
+
+ #if (HAVE_READPASSPHRASE == 1)
+ #include <readpassphrase.h>
+ #elif (HAVE_BSDREADPASSPHRASE == 1)
+ #include <bsd/readpassphrase.h>
++#elif !defined(HAVE_GETPASS)
++/* musl (and OHOS) has neither readpassphrase.h nor getpass(3).
++ * Inline a minimal termios-based readpassphrase() equivalent,
++ * after the approach the upstream comment above suggests
++ * (openssh openbsd-compat style). Echo is disabled while typing. */
++#include <termios.h>
++#include <unistd.h>
++#include <stdio.h>
++#include <string.h>
++
++#ifndef RPP_REQUIRE_TTY
++#define RPP_REQUIRE_TTY 0x0002
++#endif
++
++static char* ohos_readpassphrase (const char*prompt, char*buf, size_t bufsiz, int flags)
++{
++	struct termios oldt, newt;
++	int tty = open ("/dev/tty", O_RDWR);
++	FILE* outf;
++	bool restore = false;
++
++	if (tty < 0) {
++		if (flags & RPP_REQUIRE_TTY) return NULL;
++		tty = open ("/dev/stdin", O_RDWR);
++		if (tty < 0) return NULL;
++	}
++
++	outf = fdopen (dup (tty), "w");
++	if (!outf) {
++		close (tty);
++		return NULL;
++	}
++
++	if (tcgetattr (tty, &oldt) == 0) {
++		newt = oldt;
++		newt.c_lflag &= ~ (ECHO);
++		newt.c_lflag |= (ICANON | ISIG);
++		if (tcsetattr (tty, TCSAFLUSH, &newt) == 0)
++			restore = true;
++	}
++
++	fputs (prompt, outf);
++	fflush (outf);
++
++	FILE* inf = fdopen (dup (tty), "r");
++	if (!inf) {
++		fclose (outf);
++		close (tty);
++		return NULL;
++	}
++	if (fgets (buf, (int) bufsiz, inf)) {
++		size_t len = strlen (buf);
++		while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r'))
++			buf[--len] = 0;
++	} else {
++		buf[0] = 0;
++	}
++	fclose (inf);
++
++	fputc ('\n', outf);
++	fflush (outf);
++	fclose (outf);
++
++	if (restore)
++		tcsetattr (tty, TCSAFLUSH, &oldt);
++	close (tty);
++	return buf;
++}
+ #else
+ #warning "Falling back to getpass(3), which is marked obsolete!"
+ /* If you see this, you might as well want to take the readpassphrase()
+  * implementation from e.g. openssh's openbsd-compat and put it here. */
+ #include <unistd.h>
+ #endif
+
+ #define MAX_PW_LEN 1024 //like if someone enjoyed typing that.
+
+ static bool read_password (const std::string&prompt, std::string&pw)
+ {
+ #if (HAVE_READPASSPHRASE == 1 || HAVE_BSDREADPASSPHRASE==1)
+ 	/* readpassphrase reads at most bufsiz-1 bytes and gets the terminating
+ 	 * zero just right */
+ 	std::vector<char> pwbuf;
+ 	pwbuf.resize (MAX_PW_LEN, 0);
+ 	if (!readpassphrase (prompt.c_str(), pwbuf.data(), MAX_PW_LEN,
+ 	                     RPP_REQUIRE_TTY))
++		return false;
++
++	pw = pwbuf.data();
++	return true;
++#elif !defined(HAVE_GETPASS)
++	std::vector<char> pwbuf;
++	pwbuf.resize (MAX_PW_LEN, 0);
++	if (!ohos_readpassphrase (prompt.c_str(), pwbuf.data(), MAX_PW_LEN, 0))
+ 		return false;
+
+ 	pw = pwbuf.data();
+ 	return true;
+ #else
+ 	char* pass = getpass (prompt.c_str());
+ 	if (!pass) return false;
+ 	pw = pass;
+ 	return true;
+ #endif

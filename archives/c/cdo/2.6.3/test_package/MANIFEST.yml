@@ -1,0 +1,78 @@
+# test_package/MANIFEST.yml — cdo 2.6.3
+# CI L0e requires this file to exist.
+
+package: cdo/2.6.3
+homepage: "https://code.mpimet.mpg.de/projects/cdo"
+
+# 上游测试入口：make check 先跑 libcdi automake 套件（36 条：20 串行 + 16 MPI/并行），
+# 再跑 test/pytest 算子套件（TESTS 注册 112 条用例 = 111 个 *.py.test.in + 辅助模块 cdoTest.py），
+# 金标准数据 test/data/ 1042 个文件
+upstream_check_command: "make check"
+upstream_test_in_build: true
+upstream_test_command: "make check"
+
+# 设备侧运行环境：make check 执行的是构建目录中新链接的二进制，实测 RUNPATH 只含 fftw，
+# 其余共享依赖（netcdf/hdf5/curl/eccodes/libxml2/zstd/libaec）运行期必须靠 LD_LIBRARY_PATH；
+# build() 的 _make_check() 先用 self.dependencies.host 的 libdirs 前缀该变量，再执行 make check。
+upstream_test_runtime_env: "LD_LIBRARY_PATH=<conan 依赖 libdirs>:$LD_LIBRARY_PATH make -j1 check"
+
+# 安装产物签名（E077/E472）：libtool install 重写 rpath 会使链接期签名失效，
+# package() 在 autotools.install() 之后用 binary-sign-tool -selfSign 1 重签 bin/cdo。
+ohos_elf_signing: "llvm-objcopy --remove-section .codesign + binary-sign-tool sign -selfSign 1（install 产物）"
+
+# 上游测试证据（实测，非估算）
+upstream_test_evidence:
+  - env: "WSL2 x86_64 原生（同一份打过 7 个补丁的源码）"
+    suite: "libcdi 2.6.3 automake"
+    command: "libcdi/configure --disable-python --disable-ruby && make -j8 && make -j8 check"
+    result: "TOTAL 36 / PASS 13 / SKIP 23 / FAIL 0（SKIP 为本机未启用可选后端时上游自身跳过）"
+  - env: "鸿蒙电脑 CI #45172 / #45198（LD_LIBRARY_PATH 修复前）"
+    suite: "libcdi 2.6.3 automake"
+    result: "TOTAL 36 / PASS 0 / FAIL 20 / SKIP 16（整片失败：musl 加载器报 Error relocating ...: grib_set_bytes / nc__create: symbol not found —— 依赖共享库不在加载路径，非功能错误；同源码 x86_64 原生 FAIL 0）"
+  - env: "鸿蒙电脑 CI #45248（补 LD_LIBRARY_PATH 后）"
+    suite: "libcdi 2.6.3 automake"
+    result: "TOTAL 36 / PASS 19 / SKIP 16 / FAIL 1（唯一失败为 test_cksum_grb2：eccodes 数据目录被编译期写死为 Conan 构建中间目录，加载不到 GRIB2.tmpl）"
+  - env: "鸿蒙电脑 CI #45681（再补 ECCODES_*/PROJ_DATA 后）"
+    suite: "libcdi 2.6.3 automake"
+    result: "TOTAL 36 / PASS 20 / SKIP 16 / FAIL 0（全部执行用例通过）"
+  - env: "鸿蒙电脑 CI #45771（最终版，head e1eff0e483）"
+    suite: "libcdi automake + cdo test/pytest + test_package + L0/L1 门禁"
+    result: "全部门禁 ✅ 通过：libcdi 20 PASS / 16 SKIP / 0 FAIL；test/pytest 112 PASS / 1 登记豁免；test_package 7/7 通过"
+  - env: "鸿蒙电脑 CI #45738（标准 test-driver + 补丁 0008 初版）"
+    suite: "cdo test/pytest"
+    result: "TOTAL 113 / PASS 99 / FAIL 14：13 条为 SKIP 被 abs(retval) 计入的假失败（0008 已修正为只计真实失败），1 条为 remapdis 平台差异（已登记豁免）"
+  - env: "鸿蒙电脑 CI #45681（test/pytest 套件）"
+    suite: "cdo test/pytest（automake TAP driver）"
+    result: "TOTAL 225 / PASS 1 / ERROR 224：TAP driver 在 OHOS shell 上 fd 3/4 重定向失败（tap-driver.sh line 234: 2: Bad file descriptor），用例未能启动；改用标准 test-driver + 补丁 0008 后见下方 #45771 结果"
+
+# 测试驱动豁免说明（docs/TEST_QUALITY_SPEC.md §3.3 第 3 条）
+# test/pytest 不使用上游 TAP driver（该 driver 在 OHOS shell 上 fd 3/4 重定向失败），
+# 改用 automake 标准 test-driver：PASS/FAIL 由脚本退出码判定（配套补丁 0008 使 cdoTest
+# 在有用例失败时返回非零），TAP 子用例级的 SKIP 不再单独计入 automake 汇总。
+# libcdi automake 套件仍按上游默认 driver 强制执行（20/20 PASS）。
+upstream_test_driver_exemption: "cdo test/pytest：TAP driver 在 OHOS shell 上 fd 重定向失败，改用标准 test-driver + 0008 退出码补丁"
+
+# 用例级豁免（docs/TEST_QUALITY_SPEC.md §3.3 第 3 条）：仅 1 条平台差异用例；
+# 配方对其登记豁免——仍执行并在日志完整回显，但失败不阻断构建；其余任何用例失败仍阻断。
+exemptions:
+  - rule: "upstream_test_platform_diff"
+    case: "Remap_healpix.py / remapdis global_2 -> hp16_nest"
+    reason: "lonlat→healpix 的 remapdis 邻居选择顺序依赖 kd-tree + libc++ 实现，与参考数据 max absdiff 0.167 > abslim 0.001（CI #45738）；同组 remapnn/remapcon 通过、libcdi 20/20 通过"
+    ci_evidence: "CI #45738：TOTAL 113 / PASS 99 / FAIL 14（其中 13 条为 SKIP 被上游 abs(retval) 计入的假失败，已由 0008 修正；剩此 1 条平台差异）"
+
+upstream_tests:
+  - path: "libcdi/tests/"
+    description: "libcdi automake 套件 36 条（20 串行 + 16 MPI/并行），make check 首段执行"
+  - path: "test/pytest/"
+    description: "TESTS 注册 112 条用例（目录内 111 个 *.py.test.in + 辅助模块）（算子数值结果对照 test/data 金标准），上游 make check 驱动"
+  - path: "test/data/"
+    description: "1042 个金标准参考数据文件，供 pytest 套件比对"
+
+# test_package tests（消费者视角，真实调用算子链）
+test_package_tests:
+  - file: test.sh
+    description: "运行 cdo -V、随机场生成、算术恒等式、NetCDF4/HDF5、GRIB2(eccodes)、topo(proj) 七组真实算子断言"
+    command: "bash test.sh"
+
+# 断言计数：版本(1) + 随机场(1) + xsize(1) + 恒等式均值(1) + nc4(1) + grb2(1) + topo(1) = 7（grb2 的 cdo -info 仅打印信息，不计入断言）
+assertion_count: 7

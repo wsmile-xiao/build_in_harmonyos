@@ -1,0 +1,57 @@
+#====================================================================
+# DRAFT-libkdumpfile-0.5.6-autotools-prebuilt-utime-pin-rule-strip - tarball 缺 autotools 生成产物: prebuilt 文本携带 + 规则剥离 + os.utime 钉 mtime
+#====================================================================
+
+id:                     DRAFT-libkdumpfile-0.5.6-autotools-prebuilt-utime-pin-rule-strip
+trigger_tool:           make|conan|missing|automake
+phase:                  build
+error_signature:        automake-[0-9.]+: command not found|WARNING.*automake.*missing on your system|Must remake target '(configure|config.status|Makefile)'|Error 127.*Makefile|missing.*automake
+
+severity:               2
+category:               build-system|autotools|timestamp|conan-recipe|ohos-platform
+match_keywords:         autotools, prebuilt, Makefile.in, configure, aclocal.m4, m4, automake, autoconf, aclocal, autoheader, missing, mtime, os.utime, touch, reconfigure, timestamp, 1577836800, 规则剥离
+title:                  tarball 缺 autotools 生成产物时单文件 mtime 对齐不足: 须全套前置文本携带 + 剥离外部工具规则 + os.utime 钉全部输入 mtime
+
+root_cause:             上游发行 tarball 不含预生成 autotools 产物 (configure/Makefile.in/aclocal.m4/m4/*.m4), 而 CI worker 仅有部分 autoconf 工具、无 automake/aclocal, 配方必须随附本地预生成产物。此场景下 E248 式"单文件 mtime 对齐"不足: 完整输入集 (configure, configure.ac, aclocal.m4, m4/*.m4, 各 Makefile.am/Makefile.in, config.h.in) 与多条 make 规则 (Makefile:, $(top_builddir)/config.status:, $(srcdir)/Makefile.in:, $(top_srcdir)/configure:, $(ACLOCAL_M4):, $(srcdir)/config.h.in:, stamp-h1:) 相互作用; conan export/copy2 流水线 mtime 偏斜 (缓存时间与写入时间混杂)、configure 就地改写 (如 E114 式 umask replace_in_file) 在 configure 运行后改变 mtime、make 把"前置文件缺失"视为"刚更新", 任一成立都会触发 $(AUTOMAKE)/$(AUTOCONF)/$(ACLOCAL)/$(AUTOHEADER) recipe, 在缺工具的 worker 上必然 exit 127 崩溃。另本机 shell touch -t 存在 8 小时时区偏移 (实测 1577808000 vs 期望 1577836800), 基于 touch 的修复不可靠。
+
+affected_scope:         autotools tarball 不含预生成产物、CI worker 无 automake/aclocal、配方需随附 prebuilt 产物的 C/C++ 库; libkdumpfile/0.5.6 实测受影响 (G2 连续 4 次失败)。
+verification_cmd:       conan create 成功后: 日志应出现 "mtime 钉扎: 33 个 autotools 输入文件 -> 2020-01-01"; make -d -n all (顶层+各子目录) 危险目标 (configure/config.status/Makefile/Makefile.in/aclocal.m4) remake 为 0; conan-verify G2 + W3 本地 CI 全部 PASS。
+
+rec_priority:           1
+rec_approach:           prebuilt-text-ship-plus-rule-strip-plus-utime-pin
+rec_description:        三段组合: (1) 全套前置以文本形式携带 (12 顶层文件 + m4/*.m4 + 全部 Makefile.in, 共 31 项; GitCode PR diff 不携带二进制文件内容, 且 JC3/PF2 制品闸禁止 tar.gz); (2) 从 prebuilt Makefile.*.in 剥离调用外部工具的 4 类规则块 ($(srcdir)/Makefile.in: $(AUTOMAKE), $(top_srcdir)/configure: $(AUTOCONF), $(ACLOCAL_M4): $(ACLOCAL), $(srcdir)/config.h.in: $(AUTOHEADER)); 保留自修复的 Makefile:/config.status: 规则与空规则 $(am__aclocal_m4_deps):; (3) 全部源码修改完成 (patches/install/就地改写之后)、configure 运行之前, 用 os.utime 把依赖链全部输入 (configure/configure.ac/aclocal.m4/config.h.in/Makefile.in/*.m4/*.am, 共 33 项) 钉到 2020-01-01 (1577836800), 逐文件 stat 校验, 任一未生效即 raise ConanException 快速失败。
+rec_command:            conanfile.py build(): apply_conandata_patches -> _install_prebuilt_autotools (copy2+chmod +x) -> replace_in_file (configure 就地改写) -> _pin_autotools_input_mtimes (os.utime(path,(1577836800,)*2) + int(os.stat(p).st_mtime) 校验) -> Autotools.configure(); 规则剥离: Python 逐行删掉 4 类规则头及其 \t 开头 recipe 行
+rec_auto_fix:           false
+rec_impl:               conan-recipe-plus-prebuilt-artifacts
+
+fallback_priority:      2
+fallback_approach:      e248-single-file-mtime-align
+fallback_description:   仅当 tarball 生成产物齐全、只是 patch 应用顺序造成 Makefile.in/Makefile.am mtime 倒挂 (E248) 时适用: os.utime 把 Makefile.in 对齐到 Makefile.am 即可; 产物缺失场景此兜底不足 (configure:/ACLOCAL_M4:/config.h.in: 规则仍会被触发)。
+fallback_command:       os.utime(makefile_in, ns=(os.stat(makefile_am).st_mtime_ns,)*2)
+fallback_auto_fix:      false
+fallback_impl:          os-utime-align
+
+forbid_1_pattern:       prebuilt.*tar\.gz|shutil\.make_archive
+forbid_1_reason:        prebuilt 以二进制归档提交: GitCode PR diff 机制不携带二进制文件内容 (worker checkout 得到空文件), 且 W3 JC3/PF2 制品闸明确禁止提交压缩/归档文件。
+forbid_1_consequence:   CI worker 的 prebuilt 产物为空或损坏, 构建必失败; 或 W3 JC3 门禁直接 fail。
+
+forbid_2_pattern:       self\.run\(["']touch|touch -t
+forbid_2_reason:        本机 shell touch -t 有 8 小时时区偏移 (实测 28800s 漂移), touch (当前时间) 在 HMDFS 上行为未验证; 且 copy2 后 mtime 偏斜、就地改写持续发生, "统一为当前时间"无法保证输入恒旧于生成文件。
+forbid_2_consequence:   mtime 偏斜仍触发 reconfigure 规则, G2 再次失败 (libkdumpfile/0.5.6 实际发生 4 次)。
+
+principles:             []
+causes:                 []
+caused_by:              []
+similar_to:             [E248]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-libkdumpfile-0.5.6-autotools-prebuilt-utime-pin-rule-strip.md
+last_updated:           2026-09-24
+source_event:           libkdumpfile/0.5.6 G2 CI 连续 4 次失败 (缺产物→automake not found→touch 无效→mtime 偏斜) 根因修复本地验证: conan-verify G2 + W3 本地 CI 全 PASS, make -d 干跑危险 remake 为 0
+authors:                AtomCode (qwen3.8) <noreply@atomgit.com>
+source_pr:              !11680
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     0

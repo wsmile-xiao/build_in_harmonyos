@@ -1,0 +1,91 @@
+# ═══ Draft knowledge entry — PGXS 服务端模块产物不应带构建机 rpath（make rpath=） ═══
+# Software: tdigest 1.4.4 (PostgreSQL server extension)
+# Evidence: OHOS PC aarch64, clang 15.0.4 + OHOS musl, conan 2.29.1, postgresql/18.3 (ohpcd)
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: tdigest-1.4.4-pgxs-module-rpath-build-machine-path
+severity: 1
+category: build-system, linking, packaging, relocatable, conan
+trigger_tool: make|ld|clang|readelf|conan
+phase: linking|packaging
+
+title: PGXS 构建的 PostgreSQL 服务端模块会把构建机绝对路径写进 RUNPATH，需用 make rpath= 去除
+
+keywords: PGXS, MODULE_big, rpathdir, libdir, RUNPATH, $ORIGIN, conan cache path, 可复现, L5 基线
+
+error_signature: Library runpath: \[/.*\.conan2/p/.*\]|RUNPATH.*conan2|rpath.*build machine path
+
+match_keywords: PGXS, MODULE_big, rpathdir, -Wl,-rpath, RUNPATH, readelf -d, conan cache, reproducible build, L5 baseline, dlopen
+
+root_cause: |
+  PostgreSQL 的 PGXS 框架在链接共享模块时使用 src/Makefile.global 的默认变量
+  `rpathdir = $(libdir)`，于是链接行里带上 `-Wl,-rpath,'<libdir>'`。
+  当 pg_config 来自 conan 包时，`libdir` 就是构建机上的 conan 缓存绝对路径
+  （如 /home/<user>/.conan2/p/postgXXXX/p/lib），该路径被永久写进产物的 RUNPATH。
+  对 PostgreSQL 服务端扩展模块而言这个 rpath 没有任何作用：模块由 postgres 进程
+  dlopen，所有 PostgreSQL 符号都在该进程内解析，DT_NEEDED 只需 libc。
+  但它会让产物随构建机/缓存路径变化，破坏可复现性并造成 L5 产物基线漂移。
+
+affected_scope: |
+  所有用 PGXS 构建的 PostgreSQL 扩展（MODULE_big / MODULES 形式的服务端模块），
+  以及任何"依赖 conan 提供的 pg_config 进行 PGXS 构建"的配方。
+
+verification_cmd: |
+  ${READELF:-readelf} -d <built module>.so | grep -E "NEEDED|RUNPATH|RPATH"
+  # 期望：DT_NEEDED 只有 libc.so（+ 运行时依赖），且没有指向 conan 缓存/构建机的 RUNPATH
+
+rec_priority: 1
+rec_approach: pass-empty-rpath-to-pgxs-make
+rec_description: |
+  构建时给 make 传 `rpath=`（空值），覆盖 PGXS 的 `rpath = -Wl,-rpath,'$(rpathdir)'`，
+  产物即不含构建机路径。这是链接标志层面的调整，不触碰上游源码，也不需要补丁。
+rec_command: |
+  make PG_CONFIG="<conan postgresql>/bin/pg_config" rpath= -j1
+  readelf -d tdigest.so | grep -E "NEEDED|RUNPATH"     # 只剩 NEEDED libc.so
+rec_auto_fix: false
+rec_impl: recipe-build-arg
+
+fallback_priority: 2
+fallback_approach: strip-rpath-after-build
+fallback_description: |
+  构建后用 patchelf --remove-rpath / llvm-objcopy 等工具后处理产物；需要额外工具且可能不可得。
+fallback_command: patchelf --remove-rpath tdigest.so
+fallback_auto_fix: false
+fallback_impl: post-build-tool
+
+forbid_1_pattern: rpathdir=.*-Wl,-rpath,'',--enable-new-dtags|rpath=''$
+forbid_1_reason: 空字符串 rpathdir 会被展开成 `-Wl,-rpath,'',--enable-new-dtags`，反而在产物里留下一个畸形的 RUNPATH 条目（实测 RUNPATH = "--enable-new-dtags"），问题没解决。
+forbid_1_consequence: 产物仍带异常 RUNPATH，且比原状态更难排查。
+forbid_2_pattern: 手工 patchelf/十六进制改写已签名产物
+forbid_2_reason: OHOS 上产物需签名后才能执行；改写会破坏签名并可能触发加载失败。
+forbid_2_consequence: 扩展模块无法被 postgres 加载，测试全红。
+
+principles: P012, P014
+
+causes: []
+caused_by: []
+similar_to: []
+conflicts_with: []
+prerequisite_of: []
+
+doc_file: doc/tdigest-1.4.4-pgxs-module-rpath-build-machine-path.md
+
+last_updated: 2026-09-24
+source_event: tdigest 1.4.4 OHOS 适配（PGXS + conan postgresql/18.3）
+
+evidence: |
+  tdigest 1.4.4（postgresql/18.3 @ ohpcd，OHOS PC aarch64）：
+  - 默认链接：`/data/service/hnp/bin/clang ... -shared -o tdigest.so tdigest.o
+      -L<conan pkg>/lib -Wl,--as-needed -Wl,-rpath,'<conan pkg>/lib',--enable-new-dtags`
+    → `readelf -d tdigest.so` 输出
+      `RUNPATH  Library runpath: [/storage/Users/currentUser/.conan2/p/postgfee07d5886c8f/p/lib]`
+  - 传 `rpath=` 后链接行仅剩 `-Wl,--as-needed`，`readelf -d` 输出只有
+      `NEEDED  Shared library: [libc.so]`（无 RUNPATH）。
+  - 反例实测：传 `rpathdir=` 会得到 `RUNPATH: [--enable-new-dtags]`（畸形条目）。
+  - 功能未受影响：去 rpath 后重新安装并跑上游回归套件，10/10 通过；
+    产物 sha256 = 8566e61c373ba0a9914a6239de78e2c623c1b68205da1534ff7bc0a49da52b7f（可复现）。
+
+authors:
+source_pr:
+source_commit:
+draft_date: 2026-09-24

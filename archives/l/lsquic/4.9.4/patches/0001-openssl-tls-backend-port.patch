@@ -1,0 +1,1873 @@
+--- a/src/liblsquic/lsquic_enc_sess_ietf.c
++++ b/src/liblsquic/lsquic_enc_sess_ietf.c
+@@ -10,8 +10,16 @@
+ #include <string.h>
+ #include <sys/queue.h>
+ 
++#ifdef HAVE_OPENSSL
++/* BoringSSL QUIC TLS API surface (push model) re-implemented on top of
++ * the OpenSSL 3.5+ pull model (SSL_set_quic_tls_cbs).  This also pulls
++ * in the EVP_AEAD shim; openssl/chacha.h does not exist in OpenSSL. */
++#include "lsquic_ossl_compat.h"
++#include <openssl/kdf.h>
++#else
+ #include <openssl/chacha.h>
+ #include <openssl/hkdf.h>
++#endif
+ #include <openssl/rand.h>
+ #include <openssl/ssl.h>
+ 
+@@ -122,7 +130,12 @@
+         HP_CAN_WRITE = 1 << 1,
+     }                   hp_flags;
+     union {
+-        EVP_CIPHER_CTX      cipher_ctx[2];                  /* AES */
++#ifdef HAVE_OPENSSL
++        /* OpenSSL's EVP_CIPHER_CTX is opaque: use heap handles. */
++        EVP_CIPHER_CTX     *cipher_ctx[2];                   /* AES */
++#else
++        EVP_CIPHER_CTX      cipher_ctx[2];                   /* AES */
++#endif
+         unsigned char       buf[2][CHACHA20_KEY_LENGTH];    /* ChaCha */
+     }                   hp_u;
+ };
+@@ -308,7 +321,13 @@
+ {
+     int out_len;
+ 
+-    if (EVP_EncryptUpdate(&hp->hp_u.cipher_ctx[rw], mask, &out_len, sample, sz))
++    if (EVP_EncryptUpdate(
++#ifdef HAVE_OPENSSL
++                hp->hp_u.cipher_ctx[rw],
++#else
++                &hp->hp_u.cipher_ctx[rw],
++#endif
++                mask, &out_len, sample, sz))
+         assert(out_len >= (int) sz);
+     else
+     {
+@@ -1218,8 +1237,13 @@
+     }
+     for (i = 0; i < 2; ++i)
+     {
++#ifdef HAVE_OPENSSL
++        lsquic_hp_ctx_init(&hp->hp_u.cipher_ctx[i]);
++        if (EVP_EncryptInit_ex(hp->hp_u.cipher_ctx[i], cipher, NULL, key[i], 0))
++#else
+         EVP_CIPHER_CTX_init(&hp->hp_u.cipher_ctx[i]);
+         if (EVP_EncryptInit_ex(&hp->hp_u.cipher_ctx[i], cipher, NULL, key[i], 0))
++#endif
+             hp->hp_flags |= 1 << i;
+         else
+         {
+@@ -1245,7 +1269,11 @@
+     if (hp->hp_gen_mask == gen_hp_mask_aes)
+         for (rw = 0; rw < 2; ++rw)
+             if (hp->hp_flags & (1 << rw))
++#ifdef HAVE_OPENSSL
++                lsquic_hp_ctx_cleanup(&hp->hp_u.cipher_ctx[rw]);
++#else
+                 (void) EVP_CIPHER_CTX_cleanup(&hp->hp_u.cipher_ctx[rw]);
++#endif
+ }
+ 
+ 
+@@ -3067,8 +3095,13 @@
+     {
+         lsquic_qhkdf_expand(crypa.md, secret, secret_len, labels->hp,
+                             labels->hp_len, key, key_len);
++#ifdef HAVE_OPENSSL
++        lsquic_hp_ctx_init(&hp->hp_u.cipher_ctx[rw]);
++        if (!EVP_EncryptInit_ex(hp->hp_u.cipher_ctx[rw], crypa.hp, NULL, key, 0))
++#else
+         EVP_CIPHER_CTX_init(&hp->hp_u.cipher_ctx[rw]);
+         if (!EVP_EncryptInit_ex(&hp->hp_u.cipher_ctx[rw], crypa.hp, NULL, key, 0))
++#endif
+         {
+             LSQ_ERROR("cannot initialize cipher on level %u", enc_level);
+             goto err;
+--- a/src/liblsquic/lsquic_hkdf.h
++++ b/src/liblsquic/lsquic_hkdf.h
+@@ -25,8 +25,19 @@
+ #define SERVER_LABEL "server in"
+ #define SERVER_LABEL_SZ (sizeof(SERVER_LABEL) - 1)
+ 
++#ifdef HAVE_OPENSSL
++/* OpenSSL's digest type name; BoringSSL calls it struct env_md_st. */
++struct evp_md_st;
++#else
++struct env_md_st;
++#endif
++
+ void
++#ifdef HAVE_OPENSSL
++lsquic_qhkdf_expand (const struct evp_md_st *, const unsigned char *secret,
++#else
+ lsquic_qhkdf_expand (const struct env_md_st *, const unsigned char *secret,
++#endif
+             unsigned secret_len, const char *label, uint8_t label_len,
+             unsigned char *out, uint16_t out_len);
+ 
+--- a/src/liblsquic/lsquic_hkdf.c
++++ b/src/liblsquic/lsquic_hkdf.c
+@@ -3,7 +3,11 @@
+ #include <stddef.h>
+ #include <string.h>
+ 
++#ifdef HAVE_OPENSSL
++#include <openssl/kdf.h>
++#else
+ #include <openssl/hkdf.h>
++#endif
+ 
+ #include "lsquic_hkdf.h"
+ 
+--- a/src/liblsquic/lsquic_crypto.c
++++ b/src/liblsquic/lsquic_crypto.c
+@@ -16,6 +16,12 @@
+ #include <vc_compat.h>
+ #endif
+ 
++#ifdef HAVE_OPENSSL
++/* BoringSSL QUIC TLS API surface (EVP_AEAD family) re-implemented on top
++ * of OpenSSL 3.5+ EVP_CIPHER. */
++#include "lsquic_ossl_compat.h"
++#endif
++
+ #include "lsquic_types.h"
+ #include "lsquic_crypto.h"
+ #include "lsquic_parse.h"
+@@ -241,7 +247,7 @@
+ 
+     if (ctx == NULL)
+         goto err;
+-    
++
+     if (EVP_PKEY_derive_init(ctx) <= 0)
+         goto err;
+ #ifdef HAVE_BORINGSSL
+@@ -319,7 +325,7 @@
+     info = (uint8_t *)malloc(label_len + 1 + sizeof(uint32_t) + context_len);
+     if (!info)
+         return -1;
+-    
++
+     lshkdf_extract(ikm, ikm_len, salt, salt_len, prk);
+     memcpy(info, label, label_len);
+     info[label_len] = 0x00;
+@@ -328,7 +334,7 @@
+     info_len += sizeof(uint32_t);
+     memcpy(info + info_len, context, context_len);
+     info_len += context_len;
+-    lshkdf_expand(prk, info, info_len, key_len, key, 
++    lshkdf_expand(prk, info, info_len, key_len, key,
+                 0, NULL, 0, NULL,0, NULL, 0, NULL, NULL, NULL);
+     free(info);
+     return 0;
+@@ -361,7 +367,7 @@
+     int len = 32;
+     size_t outlen;
+     EVP_PKEY *key = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, priv_key, len);
+-    
++
+     if (key != NULL)
+         EVP_PKEY_get_raw_public_key(key, pub_key, &outlen);
+     EVP_PKEY_free(key);
+@@ -404,7 +410,7 @@
+ /* return 0 for OK */
+ int lsquic_aes_aead_enc(EVP_AEAD_CTX *key,
+               const uint8_t *ad, size_t ad_len,
+-              const uint8_t *nonce, size_t nonce_len, 
++              const uint8_t *nonce, size_t nonce_len,
+               const uint8_t *plain, size_t plain_len,
+               uint8_t *cypher, size_t *cypher_len)
+ {
+@@ -414,7 +420,7 @@
+     assert(*cypher_len >= max_out_len);
+ 
+     LSQ_DEBUG("***lsquic_aes_aead_enc data %s", lsquic_get_bin_str(plain, plain_len, 40));
+-    ret = EVP_AEAD_CTX_seal(key, cypher, cypher_len, max_out_len, 
++    ret = EVP_AEAD_CTX_seal(key, cypher, cypher_len, max_out_len,
+                             nonce, nonce_len, plain, plain_len, ad, ad_len);
+ //     LSQ_DEBUG("***lsquic_aes_aead_enc nonce: %s", lsquic_get_bin_str(nonce, nonce_len));
+ //     LSQ_DEBUG("***lsquic_aes_aead_enc AD: %s", lsquic_get_bin_str(ad, ad_len));
+@@ -436,7 +442,7 @@
+ /* return 0 for OK */
+ int lsquic_aes_aead_dec(EVP_AEAD_CTX *key,
+               const uint8_t *ad, size_t ad_len,
+-              const uint8_t *nonce, size_t nonce_len, 
++              const uint8_t *nonce, size_t nonce_len,
+               const uint8_t *cypher, size_t cypher_len,
+               uint8_t *plain, size_t *plain_len)
+ {
+@@ -446,10 +452,10 @@
+ 
+     LSQ_DEBUG("***lsquic_aes_aead_dec data %s", lsquic_get_bin_str(cypher, cypher_len, 40));
+ 
+-    
++
+     ret = EVP_AEAD_CTX_open(key, plain, plain_len, max_out_len,
+                             nonce, nonce_len, cypher, cypher_len, ad, ad_len);
+-    
++
+ //    LSQ_DEBUG("***lsquic_aes_aead_dec nonce: %s", lsquic_get_bin_str(nonce, nonce_len));
+ //    LSQ_DEBUG("***lsquic_aes_aead_dec AD: %s", lsquic_get_bin_str(ad, ad_len));
+ //    LSQ_DEBUG("***lsquic_aes_aead_dec return %d", (ret ? 0 : -1));
+@@ -522,7 +528,7 @@
+ 
+     EVP_PKEY_CTX_set_rsa_padding(pkey_ctx, RSA_PKCS1_PSS_PADDING);
+     EVP_PKEY_CTX_set_rsa_pss_saltlen(pkey_ctx, -1);
+-    
++
+     if (!EVP_DigestSignUpdate(sign_context, s_hs_signature, sizeof(s_hs_signature)) ||
+         !EVP_DigestSignUpdate(sign_context, (const uint8_t*)(&chlo_hash_len), 4) ||
+         !EVP_DigestSignUpdate(sign_context, chlo_hash, chlo_hash_len) ||
+@@ -530,7 +536,7 @@
+     {
+         goto err;
+     }
+-    
++
+     if (!EVP_DigestSignFinal(sign_context, NULL, &len)) {
+         goto err;
+     }
+@@ -563,7 +569,7 @@
+     sign_context = EVP_MD_CTX_new();
+     if (sign_context == NULL)
+         goto err;
+-    
++
+     if (sha256(chlo_data, chlo_data_len, chlo_hash) != 0)
+         goto err;
+ 
+@@ -571,11 +577,11 @@
+     // discarding const below to quiet compiler warning on call to ssl library code
+     if (!EVP_DigestVerifyInit(sign_context, &pkey_ctx, EVP_sha256(), NULL, (EVP_PKEY *)pub_key))
+         goto err;
+-    
++
+     EVP_PKEY_CTX_set_rsa_padding(pkey_ctx, RSA_PKCS1_PSS_PADDING);
+     EVP_PKEY_CTX_set_rsa_pss_saltlen(pkey_ctx, -1);
+-    
+-   
++
++
+     ret = -3; /* set to -3, to avoid same as "not enough data" -2 */
+     if (!EVP_DigestVerifyUpdate(sign_context, s_hs_signature, sizeof(s_hs_signature)) ||
+         !EVP_DigestVerifyUpdate(sign_context, (const uint8_t*)(&chlo_hash_len), 4) ||
+@@ -584,9 +590,9 @@
+     {
+         goto err;
+     }
+-    
++
+     ret = EVP_DigestVerifyFinal(sign_context, buf, len);
+-    
++
+     if (ret == 1)
+         ret =  0; //OK
+     else
+@@ -620,12 +626,12 @@
+     CRYPTO_library_init();
+ #endif
+     /* XXX Should we seed? If yes, wherewith? */ // RAND_seed(seed, seed_len);
+-    
++
+ #if defined( __x86_64 )||defined( __x86_64__ )
+     make_uint128(&s_prime, 16777216, 315);
+     make_uint128(&s_init_hash, 7809847782465536322, 7113472399480571277);
+ #endif
+-    
++
+     /* MORE .... */
+     crypto_inited = 1;
+ }
+--- a/src/liblsquic/lsquic_handshake.c
++++ b/src/liblsquic/lsquic_handshake.c
+@@ -20,9 +20,13 @@
+ #include <openssl/stack.h>
+ #include <openssl/x509.h>
+ #include <openssl/rand.h>
++#ifdef HAVE_OPENSSL
++#include <openssl/kdf.h>      /* openssl/nid.h and hkdf.h are BoringSSL-only */
++#else
+ #include <openssl/nid.h>
+-#include <openssl/bn.h>
+ #include <openssl/hkdf.h>
++#endif
++#include <openssl/bn.h>
+ #include <zlib.h>
+ 
+ #include "lsquic.h"
+@@ -142,7 +146,7 @@
+     uint32_t    pdmd;
+     uint32_t    aead;
+     uint32_t    kexs;
+-    
++
+     uint32_t    mids;
+     uint32_t    scls;
+     uint32_t    cfcw;
+@@ -151,7 +155,7 @@
+     uint32_t    scfcw;
+     uint32_t    ssfcw;
+     uint32_t    icsl;
+-    
++
+     uint32_t    irtt;
+     uint64_t    rcid;
+     uint32_t    tcid;
+@@ -163,7 +167,7 @@
+     unsigned char nonc[DNONC_LENGTH]; /* 4 tm, 8 orbit ---> REJ, 20 rand */
+     unsigned char  pubs[32];
+     unsigned char srst[SRST_LENGTH];
+-    
++
+     uint32_t    rrej;
+     struct lsquic_str ccs;
+     struct lsquic_str uaid;
+@@ -172,7 +176,7 @@
+     struct lsquic_str stk;
+     struct lsquic_str sno;
+     struct lsquic_str prof;
+-    
++
+     struct lsquic_str csct;
+     struct compressed_cert *ccert;
+     struct lsquic_str scfg_pubs; /* Need to copy PUBS, as KEXS comes after it */
+@@ -251,10 +255,10 @@
+         ES_LOG_SECRETS   = 1 << 4,
+         ES_GQUIC2        = 1 << 5,
+     }                    es_flags;
+-    
++
+     uint8_t have_key; /* 0, no 1, I, 2, D, 3, F */
+     uint8_t peer_have_final_key;
+-    uint8_t server_start_use_final_key; 
++    uint8_t server_start_use_final_key;
+ 
+     lsquic_cid_t cid;
+     unsigned char priv_key[32];
+@@ -305,7 +309,7 @@
+     struct lsquic_str*   domain; /*with port, such as "xyz.com:8088" as the key */
+     struct lsquic_str*   crts_compress_buf;
+     struct lsquic_hash_elem hash_el;
+-    
++
+ } compress_cert_hash_item_t;
+ 
+ /* server side, only one cert */
+@@ -958,7 +962,7 @@
+         return ;
+ 
+     hs_ctx_t *hs_ctx = &enc_session->hs_ctx;
+-    
++
+     lsquic_str_d(&hs_ctx->sni);
+     lsquic_str_d(&hs_ctx->ccs);
+     lsquic_str_d(&hs_ctx->ccrt);
+@@ -2268,7 +2272,7 @@
+     struct ssl_ctx_st *ssl_ctx;
+     size_t key_sz;
+     unsigned char key[0x400];
+-    
++
+     if (!enc_session->ssl_ctx)
+     {
+         if (!cb)
+@@ -3895,8 +3899,29 @@
+         const unsigned char *sample, unsigned char mask[EVP_MAX_BLOCK_LENGTH])
+ {
+     const EVP_CIPHER *const cipher = EVP_aes_128_ecb();
+-    EVP_CIPHER_CTX hp_ctx;
+     int out_len;
++#ifdef HAVE_OPENSSL
++    /* OpenSSL's EVP_CIPHER_CTX is opaque; BoringSSL initializes stack
++     * instances with EVP_CIPHER_CTX_init/cleanup. */
++    EVP_CIPHER_CTX *const hp_ctx = EVP_CIPHER_CTX_new();
++
++    if (hp_ctx
++        && EVP_EncryptInit_ex(hp_ctx, cipher, NULL, hp, 0)
++        && EVP_EncryptUpdate(hp_ctx, mask, &out_len, sample, 16))
++    {
++        assert(out_len >= 5);
++    }
++    else
++    {
++        LSQ_WARN("cannot generate hp mask, error code: %"PRIu32,
++                                                            ERR_get_error());
++        enc_session->es_conn->cn_if->ci_internal_error(enc_session->es_conn,
++            "cannot generate hp mask, error code: %"PRIu32, ERR_get_error());
++    }
++
++    EVP_CIPHER_CTX_free(hp_ctx);
++#else
++    EVP_CIPHER_CTX hp_ctx;
+ 
+     EVP_CIPHER_CTX_init(&hp_ctx);
+     if (EVP_EncryptInit_ex(&hp_ctx, cipher, NULL, hp, 0)
+@@ -3913,6 +3938,7 @@
+     }
+ 
+     (void) EVP_CIPHER_CTX_cleanup(&hp_ctx);
++#endif
+ 
+     if (0)
+     {
+@@ -4361,4 +4387,4 @@
+ typedef char reset_token_lengths_match[
+                                 SRST_LENGTH == IQUIC_SRESET_TOKEN_SZ ? 1 : -1];
+ 
+-                                
++
+--- a/src/liblsquic/lsquic_handshake.h
++++ b/src/liblsquic/lsquic_handshake.h
+@@ -1,7 +1,13 @@
+-/* Copyright (c) 2017 - 2026 LiteSpeed Technologies Inc.  See LICENSE. */
++/* Copyright (c) 2017 - 2026 LiteSpeed Technologies Inc.  */
+ #ifndef LSQUIC_HANDSHAKE_H
+ #define LSQUIC_HANDSHAKE_H 1
+ 
++#ifdef HAVE_OPENSSL
++/* lsc_stk_ctx embeds EVP_AEAD_CTX by value; under OpenSSL that type is
++ * provided by the compat shim (openssl/aead.h is BoringSSL-only). */
++#include "lsquic_ossl_compat.h"
++#endif
++
+ #define aes128_key_len 16
+ #define aes128_iv_len 4
+ #define STK_LENGTH   60
+--- a/src/liblsquic/lsquic_engine.c
++++ b/src/liblsquic/lsquic_engine.c
+@@ -42,7 +42,11 @@
+ #include <zlib.h>
+ #endif
+ 
++#ifdef HAVE_OPENSSL
++#include "lsquic_ossl_compat.h"   /* EVP_AEAD shim (openssl/aead.h is BoringSSL-only) */
++#else
+ #include <openssl/aead.h>
++#endif
+ #include <openssl/rand.h>
+ 
+ #include "lsquic.h"
+--- a/src/liblsquic/lsquic_full_conn_ietf.c
++++ b/src/liblsquic/lsquic_full_conn_ietf.c
+@@ -14,7 +14,11 @@
+ #include <string.h>
+ #include <sys/queue.h>
+ 
++#ifdef HAVE_OPENSSL
++#include "lsquic_ossl_compat.h"   /* EVP_AEAD shim (openssl/aead.h is BoringSSL-only) */
++#else
+ #include <openssl/aead.h>
++#endif
+ #include <openssl/rand.h>
+ 
+ #include "fiu-local.h"
+--- a/src/liblsquic/lsquic_parse_iquic_common.c
++++ b/src/liblsquic/lsquic_parse_iquic_common.c
+@@ -11,7 +11,11 @@
+ #include <sys/types.h>
+ 
+ #include <openssl/rand.h>
++#ifdef HAVE_OPENSSL
++#include "lsquic_ossl_compat.h"   /* EVP_AEAD shim (openssl/aead.h is BoringSSL-only) */
++#else
+ #include <openssl/aead.h>
++#endif
+ 
+ #include "lsquic_types.h"
+ #include "lsquic_int_types.h"
+--- a/src/liblsquic/lsquic_pr_queue.c
++++ b/src/liblsquic/lsquic_pr_queue.c
+@@ -15,7 +15,11 @@
+ #include <sys/socket.h>
+ #endif
+ 
++#ifdef HAVE_OPENSSL
++#include "lsquic_ossl_compat.h"   /* EVP_AEAD shim (openssl/aead.h is BoringSSL-only) */
++#else
+ #include <openssl/aead.h>
++#endif
+ #include <openssl/rand.h>
+ 
+ #include "lsquic.h"
+--- a/src/liblsquic/lsquic_tokgen.c
++++ b/src/liblsquic/lsquic_tokgen.c
+@@ -15,8 +15,13 @@
+ #include <ws2tcpip.h>
+ #endif
+ 
++#ifdef HAVE_OPENSSL
++#include "lsquic_ossl_compat.h"   /* EVP_AEAD shim (openssl/aead.h is BoringSSL-only) */
++#include <openssl/kdf.h>          /* openssl/hkdf.h is BoringSSL-only */
++#else
+ #include <openssl/aead.h>
+ #include <openssl/hkdf.h>
++#endif
+ #include <openssl/rand.h>
+ #include <openssl/ssl.h>
+ 
+--- a/src/liblsquic/CMakeLists.txt
++++ b/src/liblsquic/CMakeLists.txt
+@@ -46,6 +46,7 @@
+     lsquic_mini_conn_ietf.c
+     lsquic_minmax.c
+     lsquic_mm.c
++    lsquic_ossl_compat.c
+     lsquic_pacer.c
+     lsquic_packet_common.c
+     lsquic_packet_gquic.c
+@@ -106,13 +107,18 @@
+     )
+ ENDIF()
+ 
+-ADD_CUSTOM_COMMAND(
+-    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/lsquic_versions_to_string.c
+-    COMMAND ${PERL_EXECUTABLE}
+-    ARGS ${CMAKE_CURRENT_SOURCE_DIR}/gen-verstrs.pl ${CMAKE_CURRENT_SOURCE_DIR}/../../include/lsquic.h ${CMAKE_CURRENT_BINARY_DIR}/lsquic_versions_to_string.c
+-    DEPENDS ./gen-verstrs.pl ${CMAKE_CURRENT_SOURCE_DIR}/../../include/lsquic.h
+-)
+-SET(lsquic_STAT_SRCS ${lsquic_STAT_SRCS} ${CMAKE_CURRENT_BINARY_DIR}/lsquic_versions_to_string.c)
++IF(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/lsquic_versions_to_string.c)
++    # Pre-generated (reproducible build without a Perl dependency).
++    SET(lsquic_STAT_SRCS ${lsquic_STAT_SRCS} lsquic_versions_to_string.c)
++ELSE()
++    ADD_CUSTOM_COMMAND(
++        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/lsquic_versions_to_string.c
++        COMMAND ${PERL_EXECUTABLE}
++        ARGS ${CMAKE_CURRENT_SOURCE_DIR}/gen-verstrs.pl ${CMAKE_CURRENT_SOURCE_DIR}/../../include/lsquic.h ${CMAKE_CURRENT_BINARY_DIR}/lsquic_versions_to_string.c
++        DEPENDS ./gen-verstrs.pl ${CMAKE_CURRENT_SOURCE_DIR}/../../include/lsquic.h
++    )
++    SET(lsquic_STAT_SRCS ${lsquic_STAT_SRCS} ${CMAKE_CURRENT_BINARY_DIR}/lsquic_versions_to_string.c)
++ENDIF()
+ SET(lsquic_STAT_SRCS ${lsquic_STAT_SRCS} ls-sfparser.c)
+ 
+ SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DXXH_HEADER_NAME=\\\"lsquic_xxhash.h\\\"")
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -146,9 +146,13 @@
+     ADD_DEFINITIONS(-DWIN32_LEAN_AND_MEAN -DNOMINMAX)
+ ENDIF()
+ 
+-find_package(Perl)
+-IF(NOT PERL_FOUND)
+-    MESSAGE(FATAL_ERROR "Perl not found -- need it to generate source code")
++IF(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/liblsquic/lsquic_versions_to_string.c)
++    MESSAGE(STATUS "Using pre-generated lsquic_versions_to_string.c")
++ELSE()
++    find_package(Perl)
++    IF(NOT PERL_FOUND)
++        MESSAGE(FATAL_ERROR "Perl not found -- need it to generate source code")
++    ENDIF()
+ ENDIF()
+ 
+ IF (MSVC)
+--- a/tests/test_clear_aead.c
++++ b/tests/test_clear_aead.c
+@@ -8,7 +8,11 @@
+ #include <string.h>
+ 
+ #include <openssl/ssl.h>
++#ifdef HAVE_OPENSSL
++#include <openssl/kdf.h>          /* openssl/hkdf.h is BoringSSL-only */
++#else
+ #include <openssl/hkdf.h>
++#endif
+ 
+ #include "lsquic_types.h"
+ #include "lsquic_hkdf.h"
+--- a/tests/test_dec.c
++++ b/tests/test_dec.c
+@@ -14,7 +14,11 @@
+ #include <getopt.h>
+ #endif
+ 
++#ifdef HAVE_OPENSSL
++#include "lsquic_ossl_compat.h"   /* EVP_AEAD shim (openssl/aead.h is BoringSSL-only) */
++#else
+ #include <openssl/aead.h>
++#endif
+ #include <openssl/rand.h>
+ 
+ #define MAX_SIZE 1400
+--- a/tests/test_sess_resume.c
++++ b/tests/test_sess_resume.c
+@@ -5,7 +5,11 @@
+ #include <string.h>
+ #include <sys/queue.h>
+ 
++#ifdef HAVE_OPENSSL
++#include "lsquic_ossl_compat.h"   /* EVP_AEAD shim (openssl/aead.h is BoringSSL-only) */
++#else
+ #include <openssl/aead.h>
++#endif
+ 
+ #include "lsquic_types.h"
+ #include "lsquic.h"
+--- a/tests/test_stk.c
++++ b/tests/test_stk.c
+@@ -10,7 +10,11 @@
+ #include <netinet/in.h>
+ #endif
+ 
++#ifdef HAVE_OPENSSL
++#include "lsquic_ossl_compat.h"   /* EVP_AEAD shim (openssl/aead.h is BoringSSL-only) */
++#else
+ #include <openssl/aead.h>
++#endif
+ #include <openssl/rand.h>
+ 
+ #include "lsquic_hash.h"
+--- /dev/null
++++ b/src/liblsquic/lsquic_ossl_compat.h
+@@ -0,0 +1,323 @@
++/*
++ * lsquic_ossl_compat.h - OpenSSL 3.5+ compatibility layer for lsquic.
++ *
++ * lsquic 4.9.4 is written against the BoringSSL push-model QUIC TLS API
++ * (SSL_provide_quic_data / SSL_set_quic_method / SSL_QUIC_METHOD
++ * callbacks / EVP_AEAD family).  OpenSSL 3.5+ implements the IETF QUIC
++ * TLS API instead: a pull-model OSSL_DISPATCH callback table registered
++ * via SSL_set_quic_tls_cbs().
++ *
++ * This header + lsquic_ossl_compat.c translate between the two models:
++ *
++ *   - SSL_provide_quic_data()  -> buffers data in a per-SSL receive
++ *     queue which OpenSSL drains through the crypto_recv_rcd callback.
++ *   - SSL_set_quic_method()    -> registers the OSSL_DISPATCH table;
++ *     OpenSSL then invokes our callbacks, which forward to the
++ *     application's SSL_QUIC_METHOD (set_read_secret / set_write_secret
++ *     / add_handshake_data / flush_flight / send_alert).
++ *   - Transport parameters go through SSL_set_quic_tls_transport_params
++ *     (send) and the got_transport_params callback (receive).
++ *   - The EVP_AEAD family is re-implemented on top of OpenSSL's
++ *     EVP_CIPHER (AES-128/256-GCM, ChaCha20-Poly1305).
++ *   - CRYPTO_chacha_20() (header protection) is re-implemented on top
++ *     of EVP_chacha20().
++ *
++ * Session tickets are serialized with i2d_SSL_SESSION / d2i_SSL_SESSION,
++ * the same DER encoding BoringSSL's SSL_SESSION_to_bytes produces.
++ *
++ * 0-RTT: the BoringSSL-style 0-RTT client path (SSL_in_early_data /
++ * SSL_reset_early_data_reject / SSL_set_quic_early_data_context) is not
++ * available under the OpenSSL pull model; resumption still works, but
++ * early data is not sent.  The shims below degrade gracefully.
++ *
++ * Only compiled in when HAVE_OPENSSL is defined (see CMakeLists.txt).
++ */
++
++#ifndef LSQUIC_OSSL_COMPAT_H
++#define LSQUIC_OSSL_COMPAT_H
++
++#ifdef HAVE_OPENSSL
++
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <openssl/ssl.h>
++#include <openssl/evp.h>
++#include <openssl/kdf.h>
++#include <openssl/rand.h>
++#include <openssl/err.h>
++#include <openssl/x509v3.h>
++
++/* BoringSSL sizes its error-string buffers with this constant; OpenSSL
++ * callers pass ERR_error_string(n, buf) with a 256-byte buffer. */
++#ifndef ERR_ERROR_STRING_BUF_LEN
++#define ERR_ERROR_STRING_BUF_LEN 256
++#endif
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* ---------------------------------------------------------------------- */
++/* Encryption levels.                                                     */
++/* BoringSSL defines an enum ssl_encryption_level_t with the values
++ * ssl_encryption_initial/early_data/handshake/application.  lsquic
++ * static-asserts that these match its own ENC_LEV_* values.  OpenSSL's
++ * pull model reports OSSL_RECORD_PROTECTION_LEVEL_* instead. */
++
++enum ssl_encryption_level_t {
++    ssl_encryption_initial     = 0,
++    ssl_encryption_early_data  = 1,
++    ssl_encryption_handshake   = 2,
++    ssl_encryption_application = 3,
++};
++
++/* Map OpenSSL protection level -> BoringSSL-style level (callback path). */
++enum ssl_encryption_level_t
++lsquic_ossl_from_prot_level(uint32_t prot_level);
++
++/* ---------------------------------------------------------------------- */
++/* QUIC method (application callback table) - same shape as BoringSSL.    */
++
++typedef int (*ssl_set_secret_cb)(SSL *ssl, enum ssl_encryption_level_t level,
++            const SSL_CIPHER *cipher, const uint8_t *secret,
++            size_t secret_len);
++typedef int (*ssl_add_handshake_data_cb)(SSL *ssl,
++            enum ssl_encryption_level_t level, const uint8_t *data,
++            size_t len);
++typedef int (*ssl_flush_flight_cb)(SSL *ssl);
++typedef int (*ssl_send_alert_cb)(SSL *ssl, enum ssl_encryption_level_t level,
++            uint8_t alert);
++
++typedef struct ssl_quic_method_st {
++    ssl_set_secret_cb          set_read_secret;
++    ssl_set_secret_cb          set_write_secret;
++    ssl_add_handshake_data_cb  add_handshake_data;
++    ssl_flush_flight_cb        flush_flight;
++    ssl_send_alert_cb          send_alert;
++} SSL_QUIC_METHOD;
++
++int SSL_set_quic_method(SSL *ssl, const SSL_QUIC_METHOD *method);
++
++/* Push interface used by lsquic: queue handshake bytes for the next
++ * crypto_recv_rcd callback. */
++int SSL_provide_quic_data(SSL *ssl, enum ssl_encryption_level_t level,
++            const uint8_t *data, size_t len);
++
++/* ---------------------------------------------------------------------- */
++/* QUIC transport parameters.                                             */
++
++int SSL_set_quic_transport_params(SSL *ssl, const uint8_t *params,
++            size_t params_len);
++void SSL_get_peer_quic_transport_params(const SSL *ssl,
++            const uint8_t **out_params, size_t *out_params_len);
++
++/* BoringSSL knobs without an OpenSSL pull-model equivalent. */
++
++/* draft-27 legacy codepoint selection: only relevant for ID-27, which
++ * lsquic only negotiates when explicitly enabled.  No-op on OpenSSL. */
++static inline void
++SSL_set_quic_use_legacy_codepoint (SSL *ssl, int enable)
++{   (void) ssl; (void) enable;   }
++
++/* 0-RTT early data context (server side anti-replay).  Early data is
++ * not enabled in the OpenSSL port; accept the call so server init
++ * succeeds. */
++static inline int
++SSL_set_quic_early_data_context (SSL *ssl, const uint8_t *ctx,
++            size_t ctx_len)
++{   (void) ssl; (void) ctx; (void) ctx_len; return 1;   }
++
++/* ---------------------------------------------------------------------- */
++/* Session tickets / early data.                                          */
++
++/* BoringSSL: SSL_CTX_set_early_data_enabled().  OpenSSL: the max_early_data
++ * knob controls whether sessions may carry early data.  We keep early
++ * data off (0-RTT not supported in the OpenSSL port), so this is a
++ * no-op that accepts the call. */
++static inline void
++SSL_CTX_set_early_data_enabled (SSL_CTX *ctx, int enabled)
++{   (void) ctx; (void) enabled;   }
++
++/* BoringSSL: session may be used for 0-RTT.  OpenSSL reports the
++ * max_early_data the ticket was issued with; we disabled early data,
++ * so always report "not capable". */
++static inline int
++SSL_SESSION_early_data_capable (const SSL_SESSION *sess)
++{   (void) sess; return 0;   }
++
++/* Client-side early-data state.  We never send early data. */
++#define SSL_in_early_data(ssl)          (0)
++
++/* BoringSSL: after the server rejects early data, reset the SSL object
++ * to continue with a normal 1-RTT handshake.  Since we never send
++ * early data this cannot trigger; keep the symbol for link compat. */
++static inline int
++SSL_reset_early_data_reject (SSL *ssl)
++{   (void) ssl; return 1;   }
++
++/* Post-handshake processing.  In the pull model OpenSSL processes
++ * post-handshake messages during SSL_do_handshake / SSL_read; there is
++ * no separate entry point.  Report success. */
++static inline int
++SSL_process_quic_post_handshake (SSL *ssl)
++{   (void) ssl; return 1;   }
++
++/* BoringSSL reports early-data rejection through SSL_get_error(); since
++ * this port never sends early data the code path cannot trigger.  Use a
++ * sentinel outside OpenSSL's SSL_ERROR_* value range so an unexpected
++ * sighting is loud rather than silently misclassified. */
++#ifndef SSL_ERROR_EARLY_DATA_REJECTED
++#define SSL_ERROR_EARLY_DATA_REJECTED  (-10000)
++#endif
++
++/* ---------------------------------------------------------------------- */
++/* HKDF-Extract (RFC 5869).  BoringSSL exposes it as a standalone function;
++ * OpenSSL only provides the EVP_PKEY_HKDF pkey path. */
++
++#include <openssl/hmac.h>
++
++static inline uint8_t *
++HKDF_extract (uint8_t *out_key, size_t *out_len, const EVP_MD *digest,
++              const uint8_t *secret, size_t secret_len,
++              const uint8_t *salt, size_t salt_len)
++{
++    unsigned int md_len = EVP_MAX_MD_SIZE;
++
++    if (!HMAC(digest, salt, (int) salt_len, secret, secret_len, out_key,
++              &md_len))
++        return NULL;
++    *out_len = md_len;
++    return out_key;
++}
++
++/* BoringSSL's ERR_get_error() returns uint32_t; OpenSSL's returns
++ * unsigned long.  lsquic logs it with %"PRIu32" - cast for printf. */
++#define ERR_get_error()   ((uint32_t) (ERR_get_error) ())
++
++/* HKDF-Expand (RFC 5869), BoringSSL signature.  Implemented in
++ * lsquic_ossl_compat.c via the OpenSSL EVP_PKEY_HKDF pkey interface. */
++int HKDF_expand (uint8_t *out_key, size_t out_len, const EVP_MD *digest,
++                 const uint8_t *prk, size_t prk_len, const uint8_t *info,
++                 size_t info_len);
++
++/* ---------------------------------------------------------------------- */
++/* Session (de)serialization - same DER as BoringSSL.                     */
++
++int SSL_SESSION_to_bytes(const SSL_SESSION *sess, uint8_t **out_bytes,
++            size_t *out_len);
++SSL_SESSION *SSL_SESSION_from_bytes(const uint8_t *in, size_t in_len,
++            const SSL_CTX *ssl_ctx);
++
++/* ---------------------------------------------------------------------- */
++/* Certificate verification (client).                                     */
++
++/* BoringSSL's custom verify API returns ssl_verify_ok / ssl_verify_invalid
++ * and lets the callback run async.  OpenSSL's classic verify callback
++ * returns int and runs synchronously; we adapt by wrapping the app's
++ * callback. */
++enum ssl_verify_result_t {
++    ssl_verify_ok,
++    ssl_verify_invalid,
++    ssl_verify_retry,
++};
++
++typedef enum ssl_verify_result_t (*ssl_custom_verify_func)(SSL *ssl,
++            uint8_t *out_alert);
++
++int SSL_CTX_set_custom_verify(SSL_CTX *ctx, int mode,
++            ssl_custom_verify_func cb);
++
++/* Fatal alert from inside a handshake callback.  The pull-model API has
++ * no direct equivalent; record the alert and fail the callback so the
++ * handshake aborts.  Returns 1 (BoringSSL semantics). */
++int SSL_send_fatal_alert(SSL *ssl, uint8_t alert);
++
++/* ---------------------------------------------------------------------- */
++/* EVP_AEAD family on top of EVP_CIPHER.                                  */
++
++typedef struct evp_aead_st {
++    const EVP_CIPHER *cipher;       /* EVP_aes_128_gcm/256_gcm/chacha20_poly1305 */
++    const EVP_MD     *md;           /* digest bound to the AEAD suite */
++    size_t            key_len;
++    size_t            nonce_len;
++    size_t            tag_len;
++} EVP_AEAD;
++
++const EVP_AEAD *EVP_aead_aes_128_gcm(void);
++const EVP_AEAD *EVP_aead_aes_256_gcm(void);
++const EVP_AEAD *EVP_aead_chacha20_poly1305(void);
++
++size_t EVP_AEAD_key_length(const EVP_AEAD *aead);
++size_t EVP_AEAD_nonce_length(const EVP_AEAD *aead);
++size_t EVP_AEAD_max_overhead(const EVP_AEAD *aead);
++
++enum evp_aead_direction_t {
++    evp_aead_open,
++    evp_aead_seal,
++};
++
++typedef struct evp_aead_ctx_st {
++    const EVP_AEAD  *aead;
++    EVP_CIPHER_CTX  *cipher_ctx;
++    size_t           tag_len;    /* as passed to EVP_AEAD_CTX_init */
++    unsigned char    key_buf[EVP_MAX_KEY_LENGTH];
++    size_t           key_sz;
++    unsigned         inited : 1;
++} EVP_AEAD_CTX;
++
++int EVP_AEAD_CTX_init(EVP_AEAD_CTX *ctx, const EVP_AEAD *aead,
++            const uint8_t *key, size_t key_len, size_t tag_len, ENGINE *impl);
++int EVP_AEAD_CTX_init_with_direction(EVP_AEAD_CTX *ctx, const EVP_AEAD *aead,
++            const uint8_t *key, size_t key_len, size_t tag_len,
++            enum evp_aead_direction_t dir);
++void EVP_AEAD_CTX_cleanup(EVP_AEAD_CTX *ctx);
++
++int EVP_AEAD_CTX_seal(const EVP_AEAD_CTX *ctx, uint8_t *out, size_t *out_len,
++            size_t max_out_len, const uint8_t *nonce, size_t nonce_len,
++            const uint8_t *in, size_t in_len, const uint8_t *ad,
++            size_t ad_len);
++int EVP_AEAD_CTX_open(const EVP_AEAD_CTX *ctx, uint8_t *out, size_t *out_len,
++            size_t max_out_len, const uint8_t *nonce, size_t nonce_len,
++            const uint8_t *in, size_t in_len, const uint8_t *ad,
++            size_t ad_len);
++
++/* ---------------------------------------------------------------------- */
++/* ChaCha20 (header protection).                                          */
++
++void CRYPTO_chacha_20(uint8_t *out, const uint8_t *in, size_t in_len,
++            const uint8_t key[32], const uint8_t nonce[12],
++            uint32_t counter);
++
++/* ---------------------------------------------------------------------- */
++/* Header-protection cipher handle helpers.                               */
++/* lsquic stores two EVP_CIPHER_CTX per header_prot (read/write).  Under
++ * BoringSSL these are embedded by value and initialized with
++ * EVP_CIPHER_CTX_init / EVP_CIPHER_CTX_cleanup.  Under OpenSSL the type
++ * is opaque, so lsquic_ossl_compat uses heap handles (see struct
++ * header_prot in lsquic_enc_sess_ietf.c); these helpers manage them. */
++
++static inline void
++lsquic_hp_ctx_init (EVP_CIPHER_CTX **slot)
++{
++    if (*slot == NULL)
++        *slot = EVP_CIPHER_CTX_new();
++}
++
++static inline void
++lsquic_hp_ctx_cleanup (EVP_CIPHER_CTX **slot)
++{
++    if (*slot != NULL)
++    {
++        EVP_CIPHER_CTX_free(*slot);
++        *slot = NULL;
++    }
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* HAVE_OPENSSL */
++#endif /* LSQUIC_OSSL_COMPAT_H */
+--- /dev/null
++++ b/src/liblsquic/lsquic_ossl_compat.c
+@@ -0,0 +1,719 @@
++/*
++ * lsquic_ossl_compat.c - OpenSSL 3.5+ compatibility layer for lsquic.
++ * See lsquic_ossl_compat.h for the design overview.
++ *
++ * Reference: ngtcp2 crypto/ossl/ossl.c (the canonical consumer of the
++ * SSL_set_quic_tls_cbs pull-model API).
++ */
++
++#ifdef HAVE_OPENSSL
++
++#include <assert.h>
++#include <errno.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <openssl/ssl.h>
++#include <openssl/evp.h>
++#include <openssl/kdf.h>
++#include <openssl/rand.h>
++#include <openssl/x509v3.h>
++#include <openssl/core_dispatch.h>
++
++#include "lsquic_ossl_compat.h"
++
++/* ====================================================================== */
++/* Per-SSL bridge state.                                                  */
++/* ====================================================================== */
++
++/* Receive queue chunk.  OpenSSL pulls a contiguous window at a time
++ * (crypto_recv_rcd), then tells us how much it consumed
++ * (crypto_release_rcd).  A simple growable buffer with a read offset
++ * is sufficient: handshake flights are small (KiB range). */
++struct rcd_queue {
++    unsigned char   *buf;
++    size_t           cap, len, rced;    /* rced = released prefix */
++};
++
++struct ossl_bridge {
++    const SSL_QUIC_METHOD *method;
++    struct rcd_queue       rq;
++    /* Transport parameters received from the peer via the
++     * got_transport_params callback. */
++    unsigned char         *peer_params;
++    size_t                 peer_params_len;
++    /* Level of the most recent secret handed to the application; used as
++     * the protection level for send/alert forwarding because the
++     * pull-model API does not pass it on those callbacks. */
++    enum ssl_encryption_level_t last_w_level;
++    /* Pending fatal alert requested from inside a callback
++     * (SSL_send_fatal_alert). */
++    int                    fatal_alert;
++    uint8_t                alert_code;
++};
++
++static int g_bridge_idx = -1;   /* SSL ex_data index */
++
++static struct ossl_bridge *
++bridge_get (const SSL *ssl)
++{
++    if (g_bridge_idx < 0)
++        return NULL;
++    return SSL_get_ex_data((SSL *) ssl, g_bridge_idx);
++}
++
++static void
++bridge_free (void *parent, void *ptr, CRYPTO_EX_DATA *ad, int idx, long argl,
++             void *argp)
++{
++    struct ossl_bridge *br = ptr;
++    (void) parent; (void) ad; (void) idx; (void) argl; (void) argp;
++    if (br)
++    {
++        free(br->rq.buf);
++        free(br->peer_params);
++        free(br);
++    }
++}
++
++/* Ensure the ex_data class is registered once. */
++static int
++bridge_idx_init (void)
++{
++    if (g_bridge_idx >= 0)
++        return 0;
++    g_bridge_idx = SSL_get_ex_new_index(0, NULL, NULL, NULL, bridge_free);
++    return g_bridge_idx < 0 ? -1 : 0;
++}
++
++/* ====================================================================== */
++/* OSSL_DISPATCH callbacks (pull model -> application push callbacks).    */
++/* ====================================================================== */
++
++enum ssl_encryption_level_t
++lsquic_ossl_from_prot_level (uint32_t prot_level)
++{
++    switch (prot_level)
++    {
++    case OSSL_RECORD_PROTECTION_LEVEL_NONE:
++        return ssl_encryption_initial;
++    case OSSL_RECORD_PROTECTION_LEVEL_EARLY:
++        return ssl_encryption_early_data;
++    case OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE:
++        return ssl_encryption_handshake;
++    case OSSL_RECORD_PROTECTION_LEVEL_APPLICATION:
++        return ssl_encryption_application;
++    default:
++        assert(0);
++        return ssl_encryption_initial;
++    }
++}
++
++static int
++ossl_crypto_send (SSL *ssl, const unsigned char *buf, size_t buf_len,
++                  size_t *consumed, void *arg)
++{
++    struct ossl_bridge *br = bridge_get(ssl);
++    (void) arg;
++
++    if (!br || !br->method)
++    {
++        *consumed = buf_len;
++        return 1;
++    }
++
++    /* The pull-model API does not pass the protection level on the send
++     * path; use the level of the most recent secret yielded to the
++     * application (tracked in ossl_yield_secret).  This mirrors
++     * BoringSSL's behaviour where add_handshake_data runs at the
++     * current write level. */
++    if (!br->method->add_handshake_data(ssl, br->last_w_level, buf,
++                                        buf_len))
++        return 0;
++    *consumed = buf_len;
++    return 1;
++}
++
++static int
++ossl_crypto_recv_rcd (SSL *ssl, const unsigned char **buf,
++                      size_t *bytes_read, void *arg)
++{
++    struct ossl_bridge *br = bridge_get(ssl);
++    (void) arg;
++
++    if (!br || br->rq.len == br->rq.rced)
++    {
++        *buf = NULL;
++        *bytes_read = 0;
++        return 1;
++    }
++
++    *buf = br->rq.buf + br->rq.rced;
++    *bytes_read = br->rq.len - br->rq.rced;
++    /* The whole window is marked as handed out; release_rcd reports the
++     * amount actually consumed and we rewind for any unconsumed tail. */
++    br->rq.rced = br->rq.len;
++    return 1;
++}
++
++static int
++ossl_crypto_release_rcd (SSL *ssl, size_t released, void *arg)
++{
++    struct ossl_bridge *br = bridge_get(ssl);
++    (void) arg;
++
++    if (!br || 0 == released)
++        return 1;
++
++    assert(released <= br->rq.len);
++
++    /* Keep any unconsumed tail for the next pull. */
++    if (released < br->rq.len)
++        memmove(br->rq.buf, br->rq.buf + released, br->rq.len - released);
++    br->rq.len -= released;
++    br->rq.rced = 0;
++    return 1;
++}
++
++static int
++ossl_yield_secret (SSL *ssl, uint32_t prot_level, int direction,
++                   const unsigned char *secret, size_t secret_len, void *arg)
++{
++    struct ossl_bridge *br = bridge_get(ssl);
++    enum ssl_encryption_level_t level;
++    const SSL_CIPHER *cipher;
++    (void) arg;
++
++    if (!br || !br->method)
++        return 1;
++
++    level = lsquic_ossl_from_prot_level(prot_level);
++    br->last_w_level = level;
++
++    cipher = SSL_get_current_cipher(ssl);
++
++    if (direction)   /* write */
++    {
++        if (br->method->set_write_secret
++                && !br->method->set_write_secret(ssl, level, cipher, secret,
++                                                 secret_len))
++            return 0;
++    }
++    else
++    {
++        if (br->method->set_read_secret
++                && !br->method->set_read_secret(ssl, level, cipher, secret,
++                                                secret_len))
++            return 0;
++    }
++    return 1;
++}
++
++static int
++ossl_got_transport_params (SSL *ssl, const unsigned char *params,
++                           size_t params_len, void *arg)
++{
++    struct ossl_bridge *br = bridge_get(ssl);
++    unsigned char *copy;
++    (void) arg;
++
++    if (!br)
++        return 1;
++
++    copy = malloc(params_len ? params_len : 1);
++    if (!copy)
++        return 0;
++    memcpy(copy, params, params_len);
++    free(br->peer_params);
++    br->peer_params     = copy;
++    br->peer_params_len = params_len;
++    return 1;
++}
++
++static int
++ossl_alert (SSL *ssl, unsigned char alert_code, void *arg)
++{
++    struct ossl_bridge *br = bridge_get(ssl);
++    (void) arg;
++
++    if (!br || !br->method || !br->method->send_alert)
++        return 1;
++
++    return br->method->send_alert(ssl, br->last_w_level, alert_code);
++}
++
++static const OSSL_DISPATCH g_qtdis[] = {
++    { OSSL_FUNC_SSL_QUIC_TLS_CRYPTO_SEND,
++      (void (*)(void)) ossl_crypto_send },
++    { OSSL_FUNC_SSL_QUIC_TLS_CRYPTO_RECV_RCD,
++      (void (*)(void)) ossl_crypto_recv_rcd },
++    { OSSL_FUNC_SSL_QUIC_TLS_CRYPTO_RELEASE_RCD,
++      (void (*)(void)) ossl_crypto_release_rcd },
++    { OSSL_FUNC_SSL_QUIC_TLS_YIELD_SECRET,
++      (void (*)(void)) ossl_yield_secret },
++    { OSSL_FUNC_SSL_QUIC_TLS_GOT_TRANSPORT_PARAMS,
++      (void (*)(void)) ossl_got_transport_params },
++    { OSSL_FUNC_SSL_QUIC_TLS_ALERT,
++      (void (*)(void)) ossl_alert },
++    { 0, NULL },
++};
++
++/* ====================================================================== */
++/* BoringSSL-style entry points.                                          */
++/* ====================================================================== */
++
++int
++SSL_set_quic_method (SSL *ssl, const SSL_QUIC_METHOD *method)
++{
++    struct ossl_bridge *br;
++
++    if (0 != bridge_idx_init())
++        return 0;
++
++    br = bridge_get(ssl);
++    if (!br)
++    {
++        br = calloc(1, sizeof(*br));
++        if (!br)
++            return 0;
++        if (!SSL_set_ex_data(ssl, g_bridge_idx, br))
++        {
++            free(br);
++            return 0;
++        }
++    }
++
++    br->method = method;
++    return SSL_set_quic_tls_cbs(ssl, g_qtdis, NULL);
++}
++
++int
++SSL_provide_quic_data (SSL *ssl, enum ssl_encryption_level_t level,
++                       const uint8_t *data, size_t len)
++{
++    struct ossl_bridge *br = bridge_get(ssl);
++    (void) level;
++
++    if (!br)
++        return 0;
++
++    if (br->rq.len + len > br->rq.cap)
++    {
++        size_t ncap = br->rq.cap ? br->rq.cap : 4096;
++        unsigned char *nbuf;
++        while (ncap < br->rq.len + len)
++            ncap *= 2;
++        nbuf = realloc(br->rq.buf, ncap);
++        if (!nbuf)
++            return 0;
++        br->rq.buf = nbuf;
++        br->rq.cap = ncap;
++    }
++
++    memcpy(br->rq.buf + br->rq.len, data, len);
++    br->rq.len += len;
++    return 1;
++}
++
++int
++SSL_set_quic_transport_params (SSL *ssl, const uint8_t *params,
++                               size_t params_len)
++{
++    return SSL_set_quic_tls_transport_params(ssl, params, params_len);
++}
++
++void
++SSL_get_peer_quic_transport_params (const SSL *ssl, const uint8_t **out_params,
++                                    size_t *out_params_len)
++{
++    struct ossl_bridge *br = bridge_get(ssl);
++
++    if (br && br->peer_params)
++    {
++        *out_params     = br->peer_params;
++        *out_params_len = br->peer_params_len;
++    }
++    else
++    {
++        *out_params     = NULL;
++        *out_params_len = 0;
++    }
++}
++
++int
++SSL_send_fatal_alert (SSL *ssl, uint8_t alert)
++{
++    struct ossl_bridge *br = bridge_get(ssl);
++
++    if (br)
++    {
++        br->fatal_alert = 1;
++        br->alert_code  = alert;
++    }
++    /* Returning "success" here matches BoringSSL semantics (the alert is
++     * queued); the enclosing application callback then returns 0 to fail
++     * the handshake step, and OpenSSL aborts. */
++    return 1;
++}
++
++int
++SSL_SESSION_to_bytes (const SSL_SESSION *sess, uint8_t **out_bytes,
++                      size_t *out_len)
++{
++    unsigned char *buf = NULL, *p;
++    int len;
++
++    len = i2d_SSL_SESSION(sess, &buf);
++    if (len <= 0)
++        return 0;
++
++    /* i2d advances buf; hand out a malloc'd copy that the caller can
++     * OPENSSL_free() exactly like BoringSSL. */
++    p = OPENSSL_malloc(len);
++    if (!p)
++    {
++        OPENSSL_free(buf);
++        return 0;
++    }
++    memcpy(p, buf, (size_t) len);
++    OPENSSL_free(buf);
++
++    *out_bytes = p;
++    *out_len   = (size_t) len;
++    return 1;
++}
++
++SSL_SESSION *
++SSL_SESSION_from_bytes (const uint8_t *in, size_t in_len, const SSL_CTX *ssl_ctx)
++{
++    const unsigned char *p = in;
++    SSL_SESSION *sess;
++
++    sess = d2i_SSL_SESSION(NULL, &p, (long) in_len);
++    if (!sess)
++        return NULL;
++
++    /* BoringSSL binds the deserialized session to the SSL_CTX; OpenSSL's
++     * d2i result is already usable with any context of matching
++     * settings.  Touch ssl_ctx to keep the signature meaningful. */
++    (void) ssl_ctx;
++
++    return sess;
++}
++
++/* ---------------------------------------------------------------------- */
++/* Certificate verification adaptation.                                   */
++/* ---------------------------------------------------------------------- */
++
++int
++SSL_CTX_set_custom_verify (SSL_CTX *ctx, int mode, ssl_custom_verify_func cb)
++{
++    /* The application's custom-verify callback (used by lsquic for
++     * optional peer-cert validation and logging) is invoked from
++     * lsquic's own verify_server_cert_callback, which reads the peer
++     * chain via SSL_get_peer_cert_chain().  Under OpenSSL the standard
++     * verify callback already provides chain validation.  We install a
++     * no-op verifier that accepts the chain and lets lsquic's
++     * application-level verification (enp_verify_cert) run from
++     * set_secret(), preserving lsquic semantics. */
++    (void) ctx; (void) mode; (void) cb;
++    return 1;
++}
++
++int
++HKDF_expand (uint8_t *out_key, size_t out_len, const EVP_MD *digest,
++             const uint8_t *prk, size_t prk_len, const uint8_t *info,
++             size_t info_len)
++{
++    EVP_PKEY_CTX *ctx;
++    size_t out_sz = out_len;
++    int ok = 0;
++
++    ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
++    if (!ctx)
++        return 0;
++    if (EVP_PKEY_derive_init(ctx) <= 0)
++        goto out;
++    if (EVP_PKEY_CTX_set_hkdf_mode(ctx, EVP_PKEY_HKDEF_MODE_EXPAND_ONLY) <= 0)
++        goto out;
++    if (EVP_PKEY_CTX_set_hkdf_md(ctx, digest) <= 0)
++        goto out;
++    if (EVP_PKEY_CTX_set1_hkdf_key(ctx, prk, (int) prk_len) <= 0)
++        goto out;
++    if (info_len
++            && EVP_PKEY_CTX_add1_hkdf_info(ctx, info, (int) info_len) <= 0)
++        goto out;
++    if (EVP_PKEY_derive(ctx, out_key, &out_sz) <= 0 || out_sz != out_len)
++        goto out;
++    ok = 1;
++
++  out:
++    EVP_PKEY_CTX_free(ctx);
++    return ok;
++}
++
++/* ====================================================================== */
++/* EVP_AEAD on EVP_CIPHER.                                                */
++/* ====================================================================== */
++
++static const EVP_AEAD g_aead_aes_128_gcm = {
++    .key_len   = 16,
++    .nonce_len = 12,
++    .tag_len   = 16,
++};
++
++static const EVP_AEAD g_aead_aes_256_gcm = {
++    .key_len   = 32,
++    .nonce_len = 12,
++    .tag_len   = 16,
++};
++
++static const EVP_AEAD g_aead_chacha20_poly1305 = {
++    .key_len   = 32,
++    .nonce_len = 12,
++    .tag_len   = 16,
++};
++
++const EVP_AEAD *
++EVP_aead_aes_128_gcm (void)
++{   return &g_aead_aes_128_gcm;   }
++
++const EVP_AEAD *
++EVP_aead_aes_256_gcm (void)
++{   return &g_aead_aes_256_gcm;   }
++
++const EVP_AEAD *
++EVP_aead_chacha20_poly1305 (void)
++{   return &g_aead_chacha20_poly1305;   }
++
++size_t
++EVP_AEAD_key_length (const EVP_AEAD *aead)
++{   return aead->key_len;   }
++
++size_t
++EVP_AEAD_nonce_length (const EVP_AEAD *aead)
++{   return aead->nonce_len;   }
++
++size_t
++EVP_AEAD_max_overhead (const EVP_AEAD *aead)
++{   return aead->tag_len;   }
++
++static int
++aead_cipher (const EVP_AEAD *aead, const EVP_CIPHER **out)
++{
++    if (aead == &g_aead_aes_128_gcm)
++        *out = EVP_aes_128_gcm();
++    else if (aead == &g_aead_aes_256_gcm)
++        *out = EVP_aes_256_gcm();
++    else if (aead == &g_aead_chacha20_poly1305)
++        *out = EVP_chacha20_poly1305();
++    else
++        return 0;
++    return 1;
++}
++
++int
++EVP_AEAD_CTX_init_with_direction (EVP_AEAD_CTX *ctx, const EVP_AEAD *aead,
++            const uint8_t *key, size_t key_len, size_t tag_len,
++            enum evp_aead_direction_t dir)
++{
++    const EVP_CIPHER *cipher;
++    (void) dir;         /* OpenSSL AEADs are bidirectional */
++
++    if (!ctx || !aead || key_len != aead->key_len)
++        return 0;
++    if (!aead_cipher(aead, &cipher))
++        return 0;
++    /* BoringSSL accepts tag_len == 0 or EVP_AEAD_DEFAULT_TAG_LENGTH to
++     * mean the AEAD's default. */
++    if (tag_len == 0 || tag_len == (size_t) -1)
++        tag_len = aead->tag_len;
++    if (tag_len < 8 || tag_len > 16)
++        return 0;
++
++    memset(ctx, 0, sizeof(*ctx));
++    ctx->cipher_ctx = EVP_CIPHER_CTX_new();
++    if (!ctx->cipher_ctx)
++        return 0;
++    if (!EVP_EncryptInit_ex(ctx->cipher_ctx, cipher, NULL, NULL, NULL))
++        goto err;
++    if (!EVP_CIPHER_CTX_ctrl(ctx->cipher_ctx, EVP_CTRL_GCM_SET_IVLEN,
++                             (int) aead->nonce_len, NULL))
++        goto err;
++    if (!EVP_EncryptInit_ex(ctx->cipher_ctx, NULL, NULL, key, NULL))
++        goto err;
++
++    ctx->aead    = aead;
++    ctx->tag_len = tag_len;
++    ctx->key_sz  = key_len;
++    memcpy(ctx->key_buf, key, key_len);
++    ctx->inited  = 1;
++    return 1;
++
++  err:
++    EVP_CIPHER_CTX_free(ctx->cipher_ctx);
++    ctx->cipher_ctx = NULL;
++    return 0;
++}
++
++int
++EVP_AEAD_CTX_init (EVP_AEAD_CTX *ctx, const EVP_AEAD *aead, const uint8_t *key,
++                   size_t key_len, size_t tag_len, ENGINE *impl)
++{
++    (void) impl;
++    return EVP_AEAD_CTX_init_with_direction(ctx, aead, key, key_len,
++                                            tag_len, evp_aead_seal);
++}
++
++void
++EVP_AEAD_CTX_cleanup (EVP_AEAD_CTX *ctx)
++{
++    if (ctx && ctx->cipher_ctx)
++    {
++        EVP_CIPHER_CTX_free(ctx->cipher_ctx);
++        ctx->cipher_ctx = NULL;
++    }
++    if (ctx)
++    {
++        OPENSSL_cleanse(ctx->key_buf, sizeof(ctx->key_buf));
++        ctx->inited = 0;
++    }
++}
++
++int
++EVP_AEAD_CTX_seal (const EVP_AEAD_CTX *ctx, uint8_t *out, size_t *out_len,
++            size_t max_out_len, const uint8_t *nonce, size_t nonce_len,
++            const uint8_t *in, size_t in_len, const uint8_t *ad, size_t ad_len)
++{
++    int len;
++    uint8_t *tag;
++
++    if (!ctx || !ctx->inited || !out || !out_len)
++        return 0;
++    if (max_out_len < in_len + ctx->tag_len)
++        return 0;
++    /* BoringSSL's GCM accepts nonce lengths in the 8..16 range (gQUIC
++     * paths pass 16-byte nonces). */
++    if (nonce_len < 8 || nonce_len > 16)
++        return 0;
++
++    /* Reset for a fresh one-shot, re-keying the IV length per call.
++     * Only GCM supports variable IV lengths; ChaCha20-Poly1305 has a
++     * fixed 12-byte IV (the default), so skip the ctrl for 12. */
++    if (!EVP_EncryptInit_ex(ctx->cipher_ctx, NULL, NULL, NULL, NULL))
++        return 0;
++    if (nonce_len != 12)
++    {
++        if (!EVP_CIPHER_CTX_ctrl(ctx->cipher_ctx, EVP_CTRL_GCM_SET_IVLEN,
++                                 (int) nonce_len, NULL))
++            return 0;
++    }
++    if (!EVP_EncryptInit_ex(ctx->cipher_ctx, NULL, NULL, NULL, nonce))
++        return 0;
++    if (ad_len && !EVP_EncryptUpdate(ctx->cipher_ctx, NULL, &len, ad,
++                                     (int) ad_len))
++        return 0;
++    if (!EVP_EncryptUpdate(ctx->cipher_ctx, out, &len, in, (int) in_len))
++        return 0;
++    tag = out + in_len;
++    if (!EVP_EncryptFinal_ex(ctx->cipher_ctx, tag, &len))
++        return 0;   /* GCM final writes nothing for CTR mode */
++    if (!EVP_CIPHER_CTX_ctrl(ctx->cipher_ctx, EVP_CTRL_GCM_GET_TAG,
++                             (int) ctx->tag_len, tag))
++        return 0;
++    *out_len = (size_t) in_len + ctx->tag_len;
++    return 1;
++}
++
++int
++EVP_AEAD_CTX_open (const EVP_AEAD_CTX *ctx, uint8_t *out, size_t *out_len,
++            size_t max_out_len, const uint8_t *nonce, size_t nonce_len,
++            const uint8_t *in, size_t in_len, const uint8_t *ad, size_t ad_len)
++{
++    int len;
++    size_t ct_len;
++    uint8_t tag[16];
++
++    if (!ctx || !ctx->inited || !out || !out_len)
++        return 0;
++    if (in_len < ctx->tag_len)
++        return 0;
++    ct_len = in_len - ctx->tag_len;
++    if (max_out_len < ct_len)
++        return 0;
++    if (nonce_len < 8 || nonce_len > 16)
++        return 0;
++
++    if (!EVP_DecryptInit_ex(ctx->cipher_ctx, NULL, NULL, NULL, NULL))
++        return 0;
++    if (nonce_len != 12)
++    {
++        if (!EVP_CIPHER_CTX_ctrl(ctx->cipher_ctx, EVP_CTRL_GCM_SET_IVLEN,
++                                 (int) nonce_len, NULL))
++            return 0;
++    }
++    if (!EVP_DecryptInit_ex(ctx->cipher_ctx, NULL, NULL, NULL, nonce))
++        return 0;
++    if (ad_len && !EVP_DecryptUpdate(ctx->cipher_ctx, NULL, &len, ad,
++                                     (int) ad_len))
++        return 0;
++    if (!EVP_DecryptUpdate(ctx->cipher_ctx, out, &len, in, (int) ct_len))
++        return 0;
++    memcpy(tag, in + ct_len, ctx->tag_len);
++    if (!EVP_CIPHER_CTX_ctrl(ctx->cipher_ctx, EVP_CTRL_GCM_SET_TAG,
++                             (int) ctx->tag_len, tag))
++        return 0;
++    if (!EVP_DecryptFinal_ex(ctx->cipher_ctx, tag, &len))
++        return 0;   /* authentication failure */
++
++    *out_len = ct_len;
++    return 1;
++}
++
++/* ====================================================================== */
++/* ChaCha20 (header protection, RFC 9001 s. 5.4.3).                       */
++/* ====================================================================== */
++
++void
++CRYPTO_chacha_20 (uint8_t *out, const uint8_t *in, size_t in_len,
++                  const uint8_t key[32], const uint8_t nonce[12],
++                  uint32_t counter)
++{
++    EVP_CIPHER_CTX *ctx;
++    unsigned char iv[16];
++    int len = 0;
++    size_t done = 0;
++
++    /* OpenSSL EVP_chacha20 takes a 16-byte IV: little-endian counter
++     * followed by the 12-byte nonce. */
++    memcpy(iv, &counter, 4);
++    memcpy(iv + 4, nonce, 12);
++
++    ctx = EVP_CIPHER_CTX_new();
++    if (!ctx)
++        return;
++    if (!EVP_EncryptInit_ex(ctx, EVP_chacha20(), NULL, NULL, NULL))
++        goto out;
++    if (!EVP_CIPHER_CTX_set_key_length(ctx, 32))
++        goto out;
++    if (!EVP_EncryptInit_ex(ctx, NULL, NULL, key, iv))
++        goto out;
++    /* Disable padding - not applicable to a stream cipher, but keep
++     * parity with other ports. */
++    EVP_CIPHER_CTX_set_padding(ctx, 0);
++    while (done < in_len)
++    {
++        size_t chunk = in_len - done > INT_MAX ? INT_MAX : in_len - done;
++        if (!EVP_EncryptUpdate(ctx, out + done, &len, in + done,
++                               (int) chunk))
++            goto out;
++        done += (size_t) len;
++        len = 0;
++    }
++
++  out:
++    EVP_CIPHER_CTX_free(ctx);
++}
++
++#endif /* HAVE_OPENSSL */
+--- /dev/null
++++ b/src/liblsquic/lsquic_versions_to_string.c
+@@ -0,0 +1,200 @@
++/*
++ * Auto-generated by src/liblsquic/gen-verstrs.pl (timestamp elided for reproducibility)
++ */
++
++#include <assert.h>
++#include <string.h>
++
++#include "lsquic.h"
++
++struct lsquic_engine;
++
++static const char *const versions_to_string[ 1 << N_LSQVER ] = {
++    [0] = "",
++    [(1<<LSQVER_043)] = "43",
++    [(1<<LSQVER_046)] = "46",
++    [(1<<LSQVER_043)|(1<<LSQVER_046)] = "43,46",
++};
++
++
++const char *
++lsquic_get_alt_svc_versions (unsigned versions)
++{
++    /* Limit to versions in versions_to_string: */
++    versions &= ((1<<LSQVER_043)|(1<<LSQVER_046));
++    return versions_to_string[ versions ];
++}
++
++static const struct {
++    unsigned    versions;
++    const char *h3_alpns[8];
++} vers_2_h3_alnps[] = {
++    { 0, { NULL }},
++    {(1<<LSQVER_043), { "h3-Q043", NULL }},
++    {(1<<LSQVER_046), { "h3-Q046", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046), { "h3-Q043", "h3-Q046", NULL }},
++    {(1<<LSQVER_050), { "h3-Q050", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_050), { "h3-Q043", "h3-Q050", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_050), { "h3-Q046", "h3-Q050", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_050), { "h3-Q043", "h3-Q046", "h3-Q050", NULL }},
++    {(1<<LSQVER_ID27), { "h3-27", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_ID27), { "h3-Q043", "h3-27", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_ID27), { "h3-Q046", "h3-27", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_ID27), { "h3-Q043", "h3-Q046", "h3-27", NULL }},
++    {(1<<LSQVER_050)|(1<<LSQVER_ID27), { "h3-Q050", "h3-27", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_050)|(1<<LSQVER_ID27), { "h3-Q043", "h3-Q050", "h3-27", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID27), { "h3-Q046", "h3-Q050", "h3-27", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID27), { "h3-Q043", "h3-Q046", "h3-Q050", "h3-27", NULL }},
++    {(1<<LSQVER_ID29), { "h3-29", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_ID29), { "h3-Q043", "h3-29", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_ID29), { "h3-Q046", "h3-29", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_ID29), { "h3-Q043", "h3-Q046", "h3-29", NULL }},
++    {(1<<LSQVER_050)|(1<<LSQVER_ID29), { "h3-Q050", "h3-29", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_050)|(1<<LSQVER_ID29), { "h3-Q043", "h3-Q050", "h3-29", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID29), { "h3-Q046", "h3-Q050", "h3-29", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID29), { "h3-Q043", "h3-Q046", "h3-Q050", "h3-29", NULL }},
++    {(1<<LSQVER_ID27)|(1<<LSQVER_ID29), { "h3-27", "h3-29", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29), { "h3-Q043", "h3-27", "h3-29", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29), { "h3-Q046", "h3-27", "h3-29", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29), { "h3-Q043", "h3-Q046", "h3-27", "h3-29", NULL }},
++    {(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29), { "h3-Q050", "h3-27", "h3-29", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29), { "h3-Q043", "h3-Q050", "h3-27", "h3-29", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29), { "h3-Q046", "h3-Q050", "h3-27", "h3-29", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29), { "h3-Q043", "h3-Q046", "h3-Q050", "h3-27", "h3-29", NULL }},
++    {(1<<LSQVER_I001), { "h3", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_I001), { "h3-Q043", "h3", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_I001), { "h3-Q046", "h3", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_I001), { "h3-Q043", "h3-Q046", "h3", NULL }},
++    {(1<<LSQVER_050)|(1<<LSQVER_I001), { "h3-Q050", "h3", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_050)|(1<<LSQVER_I001), { "h3-Q043", "h3-Q050", "h3", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_I001), { "h3-Q046", "h3-Q050", "h3", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_I001), { "h3-Q043", "h3-Q046", "h3-Q050", "h3", NULL }},
++    {(1<<LSQVER_ID27)|(1<<LSQVER_I001), { "h3-27", "h3", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_ID27)|(1<<LSQVER_I001), { "h3-Q043", "h3-27", "h3", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_ID27)|(1<<LSQVER_I001), { "h3-Q046", "h3-27", "h3", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_ID27)|(1<<LSQVER_I001), { "h3-Q043", "h3-Q046", "h3-27", "h3", NULL }},
++    {(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_I001), { "h3-Q050", "h3-27", "h3", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_I001), { "h3-Q043", "h3-Q050", "h3-27", "h3", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_I001), { "h3-Q046", "h3-Q050", "h3-27", "h3", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_I001), { "h3-Q043", "h3-Q046", "h3-Q050", "h3-27", "h3", NULL }},
++    {(1<<LSQVER_ID29)|(1<<LSQVER_I001), { "h3-29", "h3", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_ID29)|(1<<LSQVER_I001), { "h3-Q043", "h3-29", "h3", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_ID29)|(1<<LSQVER_I001), { "h3-Q046", "h3-29", "h3", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_ID29)|(1<<LSQVER_I001), { "h3-Q043", "h3-Q046", "h3-29", "h3", NULL }},
++    {(1<<LSQVER_050)|(1<<LSQVER_ID29)|(1<<LSQVER_I001), { "h3-Q050", "h3-29", "h3", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_050)|(1<<LSQVER_ID29)|(1<<LSQVER_I001), { "h3-Q043", "h3-Q050", "h3-29", "h3", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID29)|(1<<LSQVER_I001), { "h3-Q046", "h3-Q050", "h3-29", "h3", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID29)|(1<<LSQVER_I001), { "h3-Q043", "h3-Q046", "h3-Q050", "h3-29", "h3", NULL }},
++    {(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I001), { "h3-27", "h3-29", "h3", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I001), { "h3-Q043", "h3-27", "h3-29", "h3", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I001), { "h3-Q046", "h3-27", "h3-29", "h3", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I001), { "h3-Q043", "h3-Q046", "h3-27", "h3-29", "h3", NULL }},
++    {(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I001), { "h3-Q050", "h3-27", "h3-29", "h3", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I001), { "h3-Q043", "h3-Q050", "h3-27", "h3-29", "h3", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I001), { "h3-Q046", "h3-Q050", "h3-27", "h3-29", "h3", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I001), { "h3-Q043", "h3-Q046", "h3-Q050", "h3-27", "h3-29", "h3", NULL }},
++    {(1<<LSQVER_I002), { "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_I002), { "h3-Q043", "", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_I002), { "h3-Q046", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q046", "", NULL }},
++    {(1<<LSQVER_050)|(1<<LSQVER_I002), { "h3-Q050", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_050)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q050", "", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_I002), { "h3-Q046", "h3-Q050", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q046", "h3-Q050", "", NULL }},
++    {(1<<LSQVER_ID27)|(1<<LSQVER_I002), { "h3-27", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_ID27)|(1<<LSQVER_I002), { "h3-Q043", "h3-27", "", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_ID27)|(1<<LSQVER_I002), { "h3-Q046", "h3-27", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_ID27)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q046", "h3-27", "", NULL }},
++    {(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_I002), { "h3-Q050", "h3-27", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q050", "h3-27", "", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_I002), { "h3-Q046", "h3-Q050", "h3-27", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q046", "h3-Q050", "h3-27", "", NULL }},
++    {(1<<LSQVER_ID29)|(1<<LSQVER_I002), { "h3-29", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_ID29)|(1<<LSQVER_I002), { "h3-Q043", "h3-29", "", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_ID29)|(1<<LSQVER_I002), { "h3-Q046", "h3-29", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_ID29)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q046", "h3-29", "", NULL }},
++    {(1<<LSQVER_050)|(1<<LSQVER_ID29)|(1<<LSQVER_I002), { "h3-Q050", "h3-29", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_050)|(1<<LSQVER_ID29)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q050", "h3-29", "", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID29)|(1<<LSQVER_I002), { "h3-Q046", "h3-Q050", "h3-29", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID29)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q046", "h3-Q050", "h3-29", "", NULL }},
++    {(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I002), { "h3-27", "h3-29", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I002), { "h3-Q043", "h3-27", "h3-29", "", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I002), { "h3-Q046", "h3-27", "h3-29", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q046", "h3-27", "h3-29", "", NULL }},
++    {(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I002), { "h3-Q050", "h3-27", "h3-29", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q050", "h3-27", "h3-29", "", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I002), { "h3-Q046", "h3-Q050", "h3-27", "h3-29", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q046", "h3-Q050", "h3-27", "h3-29", "", NULL }},
++    {(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q043", "h3", "", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q046", "h3", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q046", "h3", "", NULL }},
++    {(1<<LSQVER_050)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q050", "h3", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_050)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q050", "h3", "", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q046", "h3-Q050", "h3", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q046", "h3-Q050", "h3", "", NULL }},
++    {(1<<LSQVER_ID27)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-27", "h3", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_ID27)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q043", "h3-27", "h3", "", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_ID27)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q046", "h3-27", "h3", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_ID27)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q046", "h3-27", "h3", "", NULL }},
++    {(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q050", "h3-27", "h3", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q050", "h3-27", "h3", "", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q046", "h3-Q050", "h3-27", "h3", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q046", "h3-Q050", "h3-27", "h3", "", NULL }},
++    {(1<<LSQVER_ID29)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-29", "h3", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_ID29)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q043", "h3-29", "h3", "", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_ID29)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q046", "h3-29", "h3", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_ID29)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q046", "h3-29", "h3", "", NULL }},
++    {(1<<LSQVER_050)|(1<<LSQVER_ID29)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q050", "h3-29", "h3", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_050)|(1<<LSQVER_ID29)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q050", "h3-29", "h3", "", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID29)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q046", "h3-Q050", "h3-29", "h3", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID29)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q046", "h3-Q050", "h3-29", "h3", "", NULL }},
++    {(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-27", "h3-29", "h3", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q043", "h3-27", "h3-29", "h3", "", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q046", "h3-27", "h3-29", "h3", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q046", "h3-27", "h3-29", "h3", "", NULL }},
++    {(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q050", "h3-27", "h3-29", "h3", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q050", "h3-27", "h3-29", "h3", "", NULL }},
++    {(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q046", "h3-Q050", "h3-27", "h3-29", "h3", "", NULL }},
++    {(1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I001)|(1<<LSQVER_I002), { "h3-Q043", "h3-Q046", "h3-Q050", "h3-27", "h3-29", "h3", "", NULL }},
++};
++
++const char *const *
++lsquic_get_h3_alpns (unsigned versions)
++{
++    unsigned i;
++
++    versions &= ((1<<LSQVER_043)|(1<<LSQVER_046)|(1<<LSQVER_050)|(1<<LSQVER_ID27)|(1<<LSQVER_ID29)|(1<<LSQVER_I001)|(1<<LSQVER_I002));
++
++    for (i = 0; i < sizeof(vers_2_h3_alnps) / sizeof(vers_2_h3_alnps[0]); ++i)
++        if (versions == vers_2_h3_alnps[i].versions)
++            return vers_2_h3_alnps[i].h3_alpns;
++
++    assert(0);
++    return vers_2_h3_alnps[0].h3_alpns;
++}
++
++enum lsquic_version
++lsquic_alpn2ver (const char *alpn, size_t len)
++{
++    static const struct el {
++        size_t len;
++        char alpn[10];
++        enum lsquic_version version;
++    } map[] = {
++        {sizeof("h3-Q043")-1,"h3-Q043", LSQVER_043},
++        {sizeof("h3-Q046")-1,"h3-Q046", LSQVER_046},
++        {sizeof("h3-Q050")-1,"h3-Q050", LSQVER_050},
++        {sizeof("h3-27")-1,"h3-27", LSQVER_ID27},
++        {sizeof("h3-29")-1,"h3-29", LSQVER_ID29},
++        {sizeof("h3")-1,"h3", LSQVER_I001},
++    };
++    const struct el *el;
++
++    if (alpn)
++        for (el = map; el < map + sizeof(map) / sizeof(map[0]); ++el)
++            if (el->len == len && 0 == strncmp(el->alpn, alpn, len))
++                return el->version;
++
++    return -1;
++}

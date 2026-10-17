@@ -1,0 +1,88 @@
+#====================================================================
+# DRAFT-ohos-poll-based-test-infinite-loop — 受限平台上「轮询直到出现」型测试会
+#   **挂死**而非失败：上游超时判定写在循环体内 → 真无限循环
+# 触发事件: psutil 7.2.2 适配（PR #11263）—— 一个用例把全套从 33 秒拖成"外推 7 小时"
+#   教训: 受限平台禁止用完成速率线性外推总耗时
+#====================================================================
+
+id:                     DRAFT-ohos-poll-based-test-infinite-loop
+trigger_tool:           pytest|python|testing|psutil
+phase:                  testing
+error_signature:        test.*never finishes|elapsed.*grows.*cpu.*flat|
+                         while True.*for .*open_files|timeout looking for test file|
+                         pytest.*hang.*no progress|rc=124
+
+severity:               3
+category:               ohos|testing|platform-restriction|infinite-loop
+match_keywords:         infinite loop, hang, 挂死, 无限循环, poll, 轮询, call_until,
+                         waits_for, giveup_at, GLOBAL_TIMEOUT, while True, break in for,
+                         open_files, fdinfo, cpu_ticks, 外推, rc=124, deselect
+
+title:                  受限平台上轮询型测试因数据源恒空触发上游超时判定位置缺陷 → 真无限循环（表现为挂死而非失败）
+
+root_cause:             上游用例把**超时判定写在循环体内部**：psutil
+                         tests/test_linux.py:1863-1873 的 get_test_file 为
+                         `while True: for file in p.open_files(): if match: return
+                         file; elif time.time() > giveup_at: break` ——
+                         外层 while 内只有 for，超时 break 在 for 内部。当某平台上
+                         `p.open_files()` 恒返回空列表时，for 体一次都不执行 → 超时
+                         判定**永不求值** → 外层 while 无退出路径 → 真无限循环，末尾
+                         的 raise RuntimeError("timeout...") 也到不了。
+                         OHOS 上恒空的原因：无 /proc/self/fdinfo（实测 FileNotFoundError），
+                         而 Process.open_files() 依赖它读每个 fd 的打开模式
+                         （实测 num_fds()=13 而同刻 open_files()=0）。
+                         这是**上游逻辑缺陷**在"数据源恒空"平台上被暴露，非平台自身缺陷。
+
+affected_scope:         任何上游测试/工具同时具备：①「轮询直到某条件成立」结构
+                         （call_until / waits_for / while True + for + break）；
+                         ② 退出条件/超时保护写在循环体内部；一旦被轮询的数据源在该
+                         平台恒为空/恒不满足，即挂死
+
+rec_priority:           1
+rec_approach:           deselect-and-attribute
+rec_description:        ①用 CPU 时间法（elapsed 增长而 cpu_ticks 不涨）区分"挂死"
+                         与"真在计算"，**不要靠 elapsed 判断进度**；②二分定位到具体
+                         用例后，用 --deselect 精确排除（**不要列入允许失败清单**——
+                         挂死用例不产生失败记录，列了没用且掩盖 run 超时）；③在
+                         manifest/notes/PR 写明上游 file:line 与数据源恒空原因；
+                         ④功能重要则另写自身进程的等价消费者测试补足覆盖。
+rec_command: >
+  # 判定挂死（不要看 elapsed，看 CPU 时间）
+  for i in 1 2 3; do awk '{print "cpu_ticks=" $14+$15}'
+    /proc/$(pgrep -f "[p]ytest" | head -1)/stat; sleep 15; done
+  # 精确排除
+  python3 -m pytest tests --deselect "tests/test_linux.py::TestProcess::test_open_files_mode"
+rec_auto_fix:           false
+rec_impl:               manual-command-line-flags
+
+forbid_1_pattern:       用「已完成 N 项 / 已耗时 T」线性外推整套测试总耗时并据此改架构
+forbid_1_reason:        挂死用例会让完成速率归零，外推结果严重失真（本次实测：外推
+                         7 小时，实际全套 59 秒）
+forbid_1_consequence:   做出错误的架构决策（如误改并行）、浪费大量预算在错误方向
+
+forbid_2_pattern:       为挂死用例打上游补丁改逻辑，或将挂死用例写入 ALLOWED_TEST_FAILURES
+forbid_2_reason:        --deselect 可达同样效果且零补丁面；挂死用例不产生失败记录，
+                        列入清单掩盖"整套 run 超时"的真实原因
+forbid_2_consequence:   补丁维护面增加/偏离上游；根因被掩盖，后续难以定位
+
+forbid_3_pattern:       因为"看着慢"就改用并行规避
+forbid_3_reason:        挂死在并行下仅表现为某 worker 卡住、更难定位，且 xdist 会连带
+                        吞掉失败清单（见 DRAFT-xdist-internalerror-swallows-summary）
+forbid_3_consequence:   既慢又得不到可用结果，浪费轮次
+
+principles:             CPU 时间区分挂死与计算（不看 elapsed）; 受限平台禁止速率外推;
+                        排除挂死用例用 deselect 而非 allowlist; 功能覆盖用消费者测试补足
+
+verification_cmd:       # 未排除：串行 40 分钟仅完成 65/704 项、cpu_ticks 增量≈0
+                         # 排除后：collected 700 items → 158 failed, 280 passed,
+                         #   279 skipped, 1 deselected, 1 error in 59.55s
+                         ls /proc/self/fdinfo            # FileNotFoundError
+                         python3 -c "import psutil; p=psutil.Process();
+                           print(p.num_fds(), len(p.open_files()))"   # 13 0
+
+related_docs:           doc/E031.md, doc/E429.md, DRAFT-ohos-proc-hidepid-invisible,
+                         DRAFT-xdist-internalerror-swallows-summary
+
+source_event:           archives/p/psutil/7.2.2 PR#11263
+first_seen_project:     psutil/7.2.2
+last_updated:           2026-09-20

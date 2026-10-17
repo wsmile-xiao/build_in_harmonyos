@@ -1,0 +1,31 @@
+#====================================================================
+# Draft: pd-chaos 0.2 on OHOS aarch64 -- the Pd "Makefile template 1.0.11"
+#        selects its platform branch with a full-string `uname -s` match and
+#        has no OHOS branch, so CI silently loses -fPIC/-shared; and testing a
+#        Pd plugin needs a runtime shim whose pd_new() must NOT call c_new
+#====================================================================
+
+id:                     DRAFT-PD-CHAOS-020-UNAME-LINUX-PD-SHIM
+trigger_tool:           conan|clang|make|pd
+phase:                  compilation|testing
+error_signature:        Relocations in generic ELF \(EM: 183\)|undefined symbol: main|file in wrong format|linking objects in \w+\.|cannot return function type|__fd_chk: symbol not found|couldn't create
+
+severity:               1
+category:               build-system|testing|ohos-platform
+match_keywords:         pd-chaos, Pure Data, Pd external, pd_linux, Makefile template, UNAME, uname -s, HarmonyOS, puredata, m_pd.h, class_new, class_addbang, pd_new, outlet_float, t_float, dlopen, RTLD_NOW, rdynamic, libchaos
+
+title:                  Pd 老式 Makefile template 按 UNAME 全串匹配判平台且无 OHOS 分支（本地 Linux 全绿、CI 链接报 undefined symbol: main，必须命令行 UNAME=Linux）；测 Pd 插件的 shim 里 pd_new() 只是分配原语、回调 c_new 会无限递归爆栈
+
+root_cause:             (1) 平台判定：pd-chaos 随包的 Makefile template 1.0.11 里 `UNAME := $(shell uname -s)` 后用 `ifeq ($(UNAME),Linux)` / `Darwin` / `MSYS` / `MINGW` / `GNU` / `ANDROID` ... 全串精确匹配，没有 OHOS/Cygwin 之外的国产 OS 分支。OHOS CI worker 的 `uname -s` 是 HarmonyOS，于是没有任何分支命中：EXTENSION 为空、PD_PATH 为空、-fPIC / -shared / -rdynamic / -Wl,-soname 一个都没设，产物名退化成 `attract1.`（空扩展名），链接命令没有 -shared，ld.lld 报 `undefined symbol: main` 加一串未定义 Pd 符号。同族第二次踩坑：`make libdir_install` 会在 package() 阶段重链过期插件，CC 只在 build() 传就会回落宿主 `cc`，报 `/usr/bin/ld: xxx.o: Relocations in generic ELF (EM: 183)`（宿主 ld 不认 aarch64）——make 命令行覆盖必须 build()/package() 共用。(2) 测试侧：Pd 插件的 Pd 符号来自 Pd 主程序 -rdynamic 映像，没有可链接的库，消费者测试只能自带 shim + dlopen(RTLD_NOW)。`pd_new(cls)` 在 Pd 里是「按 c_classsize 分配并写 ob_pd」的**分配原语**，插件构造函数第一行就是 `pd_new(<class>)`；shim 若在 pd_new 里回调 `cls->c_new`，立刻变成 pd_new -> ctor -> pd_new 无限递归，表现为毫无上下文的 SIGSEGV（崩在第 28 个插件附近，stdout 缓冲让现场看起来像"某个插件坏了"）。带创建参数的实例化要走 Pd 的 newobject() 语义 `(*c_new)(gensym(name), argc, argv)`。另外三个同源小坑：m_pd.h 把 `class_addbang` 声明成自调用宏，提供同名符号前必须 `#undef`（否则函数**定义**也被展开，报 "function cannot return function type"）；`t_float` 在 puredata 构建里是 32 位 float，吸引子在 double 上迭代但 outlet_float 会收窄，期望值必须同样过一道 `(t_float)`；`struct _class` / `struct _outlet` 在 m_pd.h 里只有前置声明（完整定义在私有 m_globals.h，不随包发布），插件从不解引用它们，测试侧补一个够用的定义即可，而 t_object(struct _text) 有完整定义、te_outlet 偏移是对的。
+affected_scope:         所有用 Pd 官方 Makefile template / pd-lib-builder 的外部对象集合（pd-chaos、pd-maxlib、pd-mjlib、pd-libdir 等同族包），以及任何靠 `uname -s` 全串匹配选平台分支的老式手写 Makefile（本地 Linux 永远看不出来，只有真机 worker 暴露）；以及所有需要「自带宿主运行时 shim 再 dlopen 插件」的插件类包测试（Pd 插件、编辑器插件、解释器扩展）。
+verification_cmd:       make -j1 CC="<OHOS clang>" PD_INCLUDE="<puredata pkg>/include/pd" UNAME=Linux prefix= STRIP=true && ls *.pd_linux | wc -l   # 期望 28；去掉 UNAME=Linux 模拟 HarmonyOS 即复现链接失败
+rec_priority:           1
+rec_approach:           read-makefile-uname-branch-and-force-it-on-command-line
+rec_description:        (1) 拿到源码先 `grep -n 'UNAME\|uname -s\|^ *ifeq ($(UNAME)' Makefile`（或 pd-lib-builder 的 `system` 变量），确认平台判定是全串匹配；只要没有目标 OS 分支，就在 make 命令行显式覆盖（`UNAME=Linux` / `system=Linux`），命令行变量优先级高于 Makefile 的 `:=`，**不需要打补丁**。(2) 把这组覆盖收进一个 helper，build() 与 package() 共用——install 目标会重链，二次回落宿主 cc 是本类包的固定坑（症状 `Relocations in generic ELF (EM: 183)`）。(3) 连带检查上游的路径变量是「字符串直拼」还是「路径拼接」：`libdir=$(prefix)/lib` 这类直拼要求 `prefix=` 留空而不是 `prefix=/`，否则产物落到 `usr/local/` 下。(4) 测 Pd 插件：先 `readelf --dyn-syms <x>.pd_linux | awk '$7=="UND"'` 对全部插件取并集，shim 只实现真正 import 的那几个符号（本例 14 个，含 s_float/s_list 两个**数据符号**），消费者用 `-rdynamic` 编译；`pd_new()` 只做分配，对象创建走 `(*c_new)(sym, argc, argv)`；`gensym` 必须驻留；`#undef class_addbang`；期望值过 `(t_float)` 收窄。(5) Pd 的 API 头在制品仓里通常是 application 包的 package folder（puredata 的 cpp_info.includedirs 为空），按依赖 folder 探测 m_pd.h，别去改被依赖包的配方（那要单独 PR）。
+rec_command:            make -j1 CC="<OHOS clang>" PD_INCLUDE="<puredata pkg>/include/pd" UNAME=Linux prefix= STRIP=true
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# PR 交付后回填（与仓内绝大多数草稿同阶段做法一致）
+source_pr:
+source_commit:

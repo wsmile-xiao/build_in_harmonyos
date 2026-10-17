@@ -1,0 +1,121 @@
+# ═══ Draft knowledge entry — 非 NLS 分支 i18n 回退宏集不全：共享库残留未定义符号，消费者链接阶段（lld 默认 --no-allow-shlib-undefined）失败 ═══
+# Timestamp: 2026-09-21
+# Software: libexif-gtk 0.5.0 (任何自带 `#ifdef ENABLE_NLS ... #else ...` i18n 宏块的 autotools 包)
+# Gate: 上游示例链接 make / conan create test_package 链接
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-nls-off-incomplete-i18n-stub-undefined-shlib-symbol
+trigger_tool:           make|ld|clang|lld|conan
+phase:                  linking|testing
+error_signature:        undefined reference due to --no-allow-shlib-undefined.*(bind_textdomain_codeset|dgettext|bindtextdomain)|
+                         referenced by .*libexif-gtk3\.so|
+                         Error relocating .*: (bind_textdomain_codeset|dgettext).*symbol not found|
+                         U bind_textdomain_codeset
+severity:               2
+category:               ohos, libc, musl, linking, autotools
+match_keywords:         bind_textdomain_codeset, bindtextdomain, ENABLE_NLS, disable-nls, libintl,
+                         proxy-libintl, g_libintl, GETTEXT_PACKAGE, undefined reference, --no-allow-shlib-undefined,
+                         lld, shared library, 未定义符号, i18n 桩, 宏回退不全, NLS 关闭
+
+title:                  非 NLS 分支的 i18n 回退宏集不全（缺 bind_textdomain_codeset）时，共享库留下未定义符号；
+                        库自身 -shared 链接成功，失败只在消费者（上游示例/test_package）链接阶段暴露
+
+root_cause: >
+  上游源文件普遍带这样一段“i18n 宏回退”：
+      #ifdef ENABLE_NLS
+      #  include <libintl.h>
+      #  define _(String) dgettext (GETTEXT_PACKAGE, String)
+      #else
+      #  define textdomain(String) (String)
+      #  define gettext(String) (String)
+      #  define dgettext(Domain,Message) (Message)
+      #  define dcgettext(Domain,Message,Type) (Message)
+      #  define bindtextdomain(Domain,Directory) (Domain)
+      /* ← 漏掉 bind_textdomain_codeset */
+      #endif
+  而调用点（每个控件的构造/lookup 入口）**写在 guard 之外**：
+      bindtextdomain (GETTEXT_PACKAGE, LOCALEDIR);
+      bind_textdomain_codeset (GETTEXT_PACKAGE, "UTF-8");
+  在 glibc 平台，NLS 关闭时 bind_textdomain_codeset 仍由 libc 提供，问题不可见；
+  在**无 libc libintl 的平台（OHOS/musl）**且 NLS 关闭时：
+    1. bindtextdomain 被文件自带宏吃掉（no-op），不产生引用；
+    2. bind_textdomain_codeset 没有对应宏，按真实函数调用编译 → 进入 .so 的 UND 符号表；
+    3. 库自身用 `-shared` 链接（允许未定义符号）**不报错**，于是缺陷潜伏；
+    4. 消费者（上游示例 tests/test-libexif-gtk、或 test_package）链接时 lld 默认
+       `--no-allow-shlib-undefined` → `undefined reference due to --no-allow-shlib-undefined:
+       bind_textdomain_codeset >>> referenced by libexif-gtk3.so` 直接失败。
+  同一根因还有第二条触发路径：若**不**关 NLS，glib 的 proxy-libintl 头会把
+  bindtextdomain/gettext/... 重定向到 `g_libintl_*`（实现在 glib 包自带 libintl，
+  上游 Makefile.am 的 LIBADD 并未加 $(INTLLIBS)）→ .so 同样留下 UND 符号。
+
+affected_scope: >
+  任何 autotools 包，满足：源码 i18n 宏块的非 NLS 分支与调用点全集不一致（尤其漏
+  bind_textdomain_codeset / textdomain 之外的函数）；调用点未被 #ifdef ENABLE_NLS 包住；
+  在无 libc libintl 的平台上以 NLS 关闭（默认探测或 --disable-nls）构建；
+  消费者为 C 可执行文件且使用 lld（默认 --no-allow-shlib-undefined）。
+  libexif-gtk 0.5.0 实证；libexif 家族、其它为 GTK 控件库提供 i18n 的 autotools 项目同构。
+
+verification_cmd: >
+  1) 检查 .so 是否残留未定义符号：
+     llvm-nm -D --undefined-only libexif-gtk/.libs/libexif-gtk3.so.5.1.0 | grep -i 'textdomain\|libintl'
+     （修复前输出 `U bind_textdomain_codeset`；修复后无输出）
+  2) 消费者链接必须真实执行（示例程序/test_package），仅看库自身 make 成功会漏判：
+     make -j1 → 修复前 `ld.lld: error: undefined reference due to --no-allow-shlib-undefined`
+
+rec_priority:           1
+rec_approach:           complete-non-nls-i18n-stub-macro
+rec_description: >
+  在**每个**带该 i18n 宏块的源文件的非 NLS 分支补上缺失的桩宏，并显式
+  `--disable-nls`（避免走 glib proxy-libintl 的 g_libintl_* 分支——上游
+  LIBADD 未含 $(INTLLIBS)）。libexif-gtk 实证：14 个文件（其中 12 个实际调用，
+  2 个为同款宏块保持一致性）各补一行后，`make` 与消费者链接均通过。
+  桩宏写法与既有 5 个保持一致：`#  define bind_textdomain_codeset(Domain,Codeset) (Domain)`
+  （结果是表达式而非语句，clang 会报 `expression result unused` 警告——与既有
+  bindtextdomain 桩同样，属上游风格，不影响构建）。
+rec_command: >
+  python3 - <<'PY'
+  import glob
+  anchor = "#  define bindtextdomain(Domain,Directory) (Domain)\n"
+  add    = "#  define bind_textdomain_codeset(Domain,Codeset) (Domain)\n"
+  for f in glob.glob('*/*.c') + glob.glob('*.c'):
+      s = open(f).read()
+      if anchor in s and add not in s:
+          open(f,'w').write(s.replace(anchor, anchor + add, 1))
+  PY
+  # 配方侧：AutotoolsToolchain.configure_args += ["--disable-nls"]
+rec_auto_fix:           false
+rec_impl:               patch 文件（patch_type=portability）+ 配方 configure_args 显式 --disable-nls
+fallback_priority:      2
+fallback_approach:      link-libintl-and-add-intllibs
+fallback_description: >
+  保留 NLS 开启，把 $(INTLLIBS) 补进 lib_LTLIBRARIES 的 LIBADD，让 glib 自带
+  proxy-libintl（libintl.so，导出 g_libintl_*）解析符号。代价：需改上游
+  Makefile.am 的链接行、并使包对 libintl 产生运行期 DT_NEEDED；
+  若目标只是“让库可用”，优先第一条路。
+fallback_command:       # Makefile.am: libexif_gtk3_la_LIBADD += $(INTLLIBS)
+fallback_auto_fix:      false
+fallback_impl:          需上游构建文件改动，风险高于补桩
+
+forbid_1_pattern:       __OHOS__
+forbid_1_reason:        该缺陷是“宏集不全”，与平台无关；用 #ifdef __OHOS__ 包住调用点属 R8
+                        明确禁止的补丁平台宏（会掩盖真实根因、且不解决 NLS 关闭的语义）
+forbid_1_consequence:   补丁被 CI/评审判不合规；换平台后同样问题复现
+
+principles:             共享库的 UND 符号是消费者失败的前置条件；只验证库自身链接成功不足以判定可消费
+caused_by:              上游 i18n 宏块在 NLS 关闭分支只覆盖“常用 5 个”，漏 bind_textdomain_codeset；
+                        调用点写在 guard 之外；glibc 平台下 libc 兜底使该缺陷长期不可见
+causes:                 消费者（示例程序/test_package）链接失败；若消费者是应用则直接阻断下游集成
+similar_to:             DRAFT-13410-trueprint-libintl-stub-header（sysroot libintl.h 无声明 → 隐式声明/undefined）；
+                        DRAFT-desktop-file-utils-0.28-libintl-header-prototype-inject（注入最小 libintl.h 原型）；
+                        DRAFT-glib-2.84.0.1-gettext-libintl-ld-library-path-shadow（proxy-libintl 运行期遮蔽）；
+                        DRAFT-latino-1.4.4-musl-empty-libintl-bison-dgettext（musl libintl.h 空壳，编译期）
+doc_file:               knowledge/drafts/DRAFT-nls-off-incomplete-i18n-stub-undefined-shlib-symbol.md
+last_updated:           2026-09-21
+source_event:           libexif-gtk 0.5.0（GTK3 变体）OHOS PC 适配，tests/test-libexif-gtk 链接阶段首个错误
+authors:                AtomCode (OpenDesk)
+source_pr:              (本 PR)
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-21

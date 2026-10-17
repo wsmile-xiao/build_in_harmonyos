@@ -1,0 +1,79 @@
+# ═══ Draft knowledge entry — OHOS cargo libcurl 无 HTTP/2：sparse 索引必须 multiplexing=false 降级 HTTP/1.1 ═══
+# Timestamp: 2026-10-08
+# Software: alacritty/0.17.0（适配实测）；适用一切用 cargo + rsproxy.cn sparse
+#   镜像拉依赖的 OHOS Rust 配方（argc/libsignal-core 家族的镜像方案增量）
+# Gate: 本地 cargo fetch 实测（sparse 默认失败 → git 索引失败 → sparse+multiplexing=false 成功）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-ohos-cargo-no-http2-sparse-multiplexing
+trigger_tool:           cargo|conan
+phase:                  dependency-fetch
+error_signature:        failed to enable HTTP/2, is curl not built right\?|
+                        \[1\] Unsupported protocol|
+                        failed to get `.*` as a dependency of package|
+                        failed to query replaced source registry `crates-io`|
+                        download of config\.json failed|
+                        \[60\] SSL peer certificate or SSH remote key was not OK
+
+severity:               2
+category:               rust, cargo, network, http2, sparse-index, rsproxy, mirror
+match_keywords:         cargo, HTTP/2, HTTP2, multiplexing, sparse, unsupported protocol,
+                        curl not built right, config.json, crates-io, rsproxy,
+                        git index, SSL peer certificate, registry, fetch failed
+
+title:                  OHOS 侧 cargo 内置 libcurl 常缺 HTTP/2——sparse 注册表索引在默认多路复用下必失败，.cargo/config.toml 需 multiplexing=false + cainfo 双修
+
+root_cause: >
+  cargo 自带的网络栈是内置 libcurl。OHOS 设备/CI worker 上分发的 cargo
+  （Harmonybrew bottle 或 rust-toolchain 包）其 libcurl 构建常未启用
+  HTTP/2（设备 curl 同样：curl -v 显示 "using HTTP/1.x"）。而 cargo 的
+  sparse 注册表协议默认启用 HTTP/2 多路复用（单连接并发多路请求）：
+  cargo 在更新 sparse 索引时报 "failed to enable HTTP/2, is curl not
+  built right? error: [1] Unsupported protocol"，随后 "download of
+  config.json failed"，依赖解析完全无法进行。
+  陷阱二段：换成 git 索引协议（rsproxy.cn/git/rsproxy-crates.io-index）
+  躲开 HTTP/2，但 cargo 的 git 传输（libgit2）对 rsproxy 的证书链报
+  "[60] SSL peer certificate or SSH remote key was not OK"（设备无默认
+  CA bundle 且 git 传输的证书校验路径与 curl 不同），同样失败。
+
+affected_scope:         一切在 OHOS 设备/CI 上以 rsproxy.cn sparse 镜像替换
+                        crates-io 的 Rust 配方（argc/1.24.0、agent-browser、
+                        libsignal-core 家族镜像方案的 HTTP/2 增量）；与包本身
+                        无关，纯工具链网络栈能力问题。
+
+solution: |
+  .cargo/config.toml 的 [http] 段两处增补（保留家族既有的 rsproxy sparse
+  替换 + retry/timeout/low-speed-limit 容错）：
+    [http]
+    timeout = 600
+    low-speed-limit = 1
+    multiplexing = false
+    cainfo = "/storage/Users/currentUser/usr/local/ssl/cert.pem"
+  (1) multiplexing = false：强制 HTTP/1.1，绕开 libcurl 无 HTTP/2 的硬伤，
+      rsproxy.cn sparse 镜像实测正常（alacritty ~300 crate 全量 fetch 成功）；
+  (2) cainfo：指向系统 CA 存储（usr/local/ssl/cert.pem，astra/boolector
+      先例验证），设备无默认 CA bundle 时 cargo 的 TLS 校验需要显式喂
+      证书链；仅在该文件存在时写入（CI 环境可能路径不同）。
+  注意：不要改用 git 索引协议——git 传输的证书校验是另一条失败路径（见
+  root_cause 陷阱二段），sparse + multiplexing=false 才是正解。
+
+fallback: >
+  若 multiplexing=false 后仍遇个别 crate 慢速卡顿（rsproxy 单文件抖动），
+  [net] retry = 10 + [http] timeout = 600 + low-speed-limit = 1 的家族容错
+  已覆盖（argc 第 12 号坑先例）。彻底无网环境走 cargo vendored 离线路线
+  （cargo vendor + source 替换），不在本条范围。
+
+verify_builds:          本地三轮实证（2026-10-07 设备 alacritty 0.17.0）：
+                        fetch.log（sparse 默认：HTTP/2 Unsupported protocol
+                        FETCH_RC=101）；build_feasibility（git 索引：[60]
+                        SSL 证书失败）；fetch 成功（sparse+multiplexing=
+                        false：FETCH_RC=0 全量下载）。conan create 与 CI
+                        #待建 PR 复核。
+
+rec_priority:           1
+rec_approach:           cargo-config-multiplexing-false-http1
+rec_description:        .cargo/config.toml [http] multiplexing=false 强制
+                        HTTP/1.1 + cainfo 指向系统 CA 存储
+rec_command:            printf '[http]\nmultiplexing = false\ncainfo = "/storage/Users/currentUser/usr/local/ssl/cert.pem"\n' >> .cargo/config.toml
+rec_auto_fix:           true
+rec_impl:               conan-recipe-cargo-http1-sparse-index

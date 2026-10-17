@@ -1,0 +1,84 @@
+#====================================================================
+# DRAFT-10686-skypat-perf-events-runtime-capability-probe -
+# perf_event_open 编译可用但运行期被拒（EACCES）：上游仅在编译期做头文件
+# 门控，fd 无效仍 read() 未初始化缓冲并断言（skypat 3.2.0 OHOS arm64 实测）。
+#
+# 场景: skypat 3.2.0（C++ 性能+单元测试框架）在 OHOS PC（aarch64,
+#       clang 15.0.4 / OHOS SDK 26.0.0.18）运行 PERFORM() 性能路径：
+#       <linux/perf_event.h> 与 __NR_perf_event_open(=241) 均可用
+#       （asm/unistd.h 位于 sysroot/usr/include/aarch64-linux-ohos/），
+#       但 syscall 在运行期返回 -1/EACCES（HW 与 SW 事件均被拒，
+#       /proc/sys/kernel/perf_event_paranoid 已是 -1 仍不放行）；
+#       Timer/Perf 对 fd=-1 继续 read() 未初始化栈缓冲 →
+#       [ TIME (ns)] 打印 156863262856 级伪值、断言可能中止。
+# 适用: 所有以 perf_event_open/perf_events 计数或计时并依赖运行期可用性的
+#       C/C++ 库（性能测试框架、profiler、采样/缓存分析工具），以及
+#       "编译期能力检测 ≠ 运行期权限" 的受限进程/容器/安全域场景。
+#
+# 注: 本文件所有字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-10686-skypat-perf-events-runtime-capability-probe
+source_lib:             skypat 3.2.0
+trigger_tool:           runtime
+phase:                  runtime
+error_signature:        perf_event_open is unavailable|fail to get performance counters|perf_event_open.*(Permission denied|EACCES|EPERM)
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               platform, syscall, kernel, detection, portability
+match_keywords:         perf_event_open, perf_events, perf_event_paranoid, EACCES, EPERM, __NR_perf_event_open, asm/unistd.h, linux/perf_event.h, HAVE_LINUX_PERF_EVENT_H, uninitialized read, fail to get performance counters, runtime capability probe, graceful degradation, PERFORM, TASK_CLOCK, HM kernel, restricted domain, 性能计数降级, 伪时长, measurement integrity, fake timing, errno, backend selection, libcpucycles, libpfm, google-benchmark
+title:                  perf_event_open 编译可用但运行期被拒（EACCES）：编译期头文件门控不足，须运行期探测并优雅降级
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             编译期 AC_CHECK_HEADERS 只反映 <linux/perf_event.h> 是否存在（OHOS sysroot 存在，故 HAVE_LINUX_PERF_EVENT_H=1 且 syscall(__NR_perf_event_open, ...) 可编译通过），但 OHOS 内核/安全域在运行期以 EACCES 拒绝 perf_event_open（HW 与 SW 事件实测均返回 -1 errno=13，perf_event_paranoid=-1 也不放行）；上游在 fd=-1 时仍 read(m_Fd, &counter, sizeof(unsigned long long)) 读取未初始化栈缓冲，并以 assert(-1 != m_Start && "fail to get performance counters") 兜底：NDEBUG 未定义时可能随机中止，Release 下静默产出伪计数/伪时长（实测 fib(10) 报 156.9 秒且各测量块数值完全一致）。
+affected_scope:         所有依赖 perf_event_open/perf_events 运行期可用性的 C/C++ 库与工具（性能测试框架、profiler、缓存/分支采样、基准计时器），以及"编译期能力检测 ≠ 运行期权限"的受限进程/容器/安全域场景。语料对照：libcpucycles 为已自愈实现（backend selection + SKIP）、libpfm 仅事件编码（下游消费者才会命中）、google-benchmark 启用硬件计数器时命中；广义含 ptrace/eBPF/io_uring 等受限域特权能力。
+verification_cmd:       设备侧最小复现：clang 编译 syscall(241, &attr, 0, -1, -1, 0) 探针，期望 fd=-1 errno=13（HW/SW 均为 EACCES）；再运行框架 PERFORM() 示例：修复前 [ TIME (ns)] 为常数级伪值、[RESULT NUM] 0，修复后为真实递增时长、计数器诚实为 0、无断言中止。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           runtime-capability-probe-with-graceful-degradation
+rec_description:        运行期以 fd 有效位为准：fd<0 时跳过一切 read/ioctl，计数返回 0；计时按"fd 有效→read perf 计数器；否则 clock_gettime/gettimeofday"的运行期分支回退（原实现只有编译期 #if 门控）；首次失败向 stderr 报告一次原因。补丁不引入平台宏、保持通用。
+rec_command:            patch -p1 -i patches/0001-lib-Support-Unix-Perf.inc.patch && patch -p1 -i patches/0002-lib-Support-Unix-Timer.inc.patch
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      compile-time-disable-perf-gate
+fallback_description:   无法改源码做运行期探测时，在配置期强制关闭头文件门控（ac_cv_header_linux_perf_event_h=no），编译走纯时钟分支、计数器恒 0；代价：在真正允许 perf 的平台上同样失去计数能力。
+fallback_command:       ac_cv_header_linux_perf_event_h=no ./configure --prefix=...
+fallback_auto_fix:      true
+fallback_impl:
+
+forbid_1_pattern:       read\(m_Fd, &[A-Za-z_]+, sizeof\(unsigned long long\)\);\s*return
+forbid_1_reason:        不检查 read() 返回码直接使用缓冲：fd 无效时读取未初始化栈值（UB），产出伪计数/伪时长且优化下不可预测
+forbid_1_consequence:   测量结果不可信、断言随机中止、CI 数据抖动且无法定位
+forbid_2_pattern:       sudo|chmod.*perf_event_paranoid|echo [0-9-]+.*perf_event_paranoid
+forbid_2_reason:        通过提权或修改内核全局参数放行 syscall 不属于三方库适配边界，在 CI 与用户环境不可复现，且破坏系统安全模型
+forbid_2_consequence:   不可复现的环境篡改，评审拒绝
+
+principles:             P013, P015, P008
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E303, E270, E008]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-10686-skypat-perf-events-runtime-capability-probe.md
+last_updated:           2026-09-16
+source_event:           skypat 3.2.0 OHOS arm64 适配：PERFORM() 真机运行实测 perf_event_open EACCES (errno=13)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                kasumizawa-miyuu <241250031@smail.nju.edu.cn>
+source_pr:              10346
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-16

@@ -69,7 +69,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-init <软件名> <版本> --force
 
 | 检查项 | 铁律 | 说明 |
 |--------|------|------|
-| `requirements()` | R27 | 依赖格式 `name/ver`；无依赖则 `pass` |
+| `requirements()` | — | 依赖格式 `name/version`；无依赖则 `pass` |
 | `generate()` 系统同名库静态 | R26 | 仅系统同名库设 `BUILD_SHARED_LIBS=OFF`，其他默认动态 |
 | `package_info()` | — | `cpp_info.libs` 列表正确 |
 | `conandata.yml` sha256 | — | 必须是真实 SHA256，不能是占位符 |
@@ -85,7 +85,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-init <软件名> <版本> --force
 ### Phase 3: 本地验证
 
 ```bash
-# 运行完整验证（7 道门禁 + 知识图谱）
+# 运行完整验证（8 道门禁 + 知识图谱）
 python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify <软件名> <版本>
 ```
 
@@ -117,7 +117,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> built
 - `built` — conan-verify 通过，未上传（AI 本地验证完成）
 - `failed` — conan-verify 未通过（需修复后重试）
 
-> ⚠️ AI 不要标记 `published`——那需要 CI upload 完成后由 CI 设置（R29）
+> finish 支持四状态值 published|built|failed|archived；AI 探索阶段通常标记 built，published 状态需 conan-verify 通过且 CI upload 完成后确认（R29）
 
 ### Phase 5: 提交 PR
 
@@ -177,7 +177,7 @@ rm -f  archives/<字母>/<软件名>/<版本>/.staging-verified
 python3 $SKILL_ROOT/scripts/ohc-run.py conan-init <软件名> <版本> --force
 
 # 4. 检查生成的 conanfile.py
-# - 确认 requirements() 格式为  (R27)
+# - 确认 requirements() 格式为 `name/version`
 # - 确认系统同名库有静态链接配置 (R26)，非系统同名库默认动态
 # - 确认无硬编码系统路径
 # - 确认 conandata.yml sha256 不是占位符
@@ -252,7 +252,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py init-build <软件名> <版本> --url=<UR
 - [ ] `test_package/MANIFEST.yml` 存在且 `assertion_count > 0`（CI L0e 门禁强制要求）
 - [ ] `patches/` 中的补丁都在 `conandata.yml` 中声明
 - [ ] 系统同名库的 `generate()` 有静态链接配置（R26），非系统同名库默认动态
-- [ ] 依赖引用格式为 ``（R27）
+- [ ] 依赖引用格式为 `name/version`
 - [ ] 无硬编码系统路径（`-L/storage/.../usr/local/lib` 等隐式依赖）
 - [ ] 所有第三方依赖都在 `requirements()` 显式声明
 - [ ] `conan-verify` 全部门禁 PASS（或已知非阻塞警告）
@@ -338,3 +338,4 @@ A (依赖方)   ──build──→ 下载 B 二进制 → 链接 → upload
 | ffi | `/lib/libffi.so*` | `BUILD_SHARED_LIBS=OFF` |
 
 > 完整判断方法：`ls /lib*/**/lib<name>.so* 2>/dev/null`，有输出则必须静态。
+�：`ls /lib*/**/lib<name>.so* 2>/dev/null`，有输出则必须静态。

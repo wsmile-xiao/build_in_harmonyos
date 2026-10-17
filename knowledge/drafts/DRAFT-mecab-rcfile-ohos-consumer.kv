@@ -1,0 +1,122 @@
+#====================================================================
+# DRAFT-mecab-rcfile-ohos-consumer —— MeCab 系词典在 OHOS 的运行期消费：
+#   默认 rcfile 硬编码 //etc/mecabrc（只读根不存在）且失败错误被吞，
+#   消费必须 --rcfile <dicdir>/dicrc，dicrc 必须与二进制索引同目录
+# 对应文档: knowledge/drafts/DRAFT-mecab-rcfile-ohos-consumer.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-mecab-rcfile-ohos-consumer
+trigger_tool:           conan|runtime|test|cmake
+phase:                  runtime|testing
+error_signature:        mecab_new2.*model failed|
+                        //etc/mecabrc.*no such file or directory|
+                        mecab_model_new2.*(NULL|失败|failed)
+
+severity:               2
+category:               conan, testing, runtime-data, mecab, dictionary, ohos
+match_keywords:         mecab, mecabrc, rcfile, dicrc, mecab-jumandic, mecab-ipadic,
+                        mecab-ko-dic, 词典, 分词, morphological, mecab_new2,
+                        mecab_model_new2, --rcfile, 只读根, read-only rootfs
+title:                  MeCab 系词典制品在 OHOS 上被消费时 mecab_new2/mecab_model_new2
+                        返回 NULL——默认 rcfile 是构建期硬编码的 //etc/mecabrc，
+                        OHOS 只读根不存在该文件，且 API 失败时错误信息为空易被误判
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             mecab 0.996 的参数解析（src/param.cpp:69 一带）在 rcfile 未
+                        显式指定时回落到构建期宏 MECAB_DEFAULT_RC（本仓 mecab/0.996
+                        制品中展开为 ``//etc/mecabrc``）。OHOS 根文件系统为只读且
+                        无 /etc/mecabrc，open 失败 → mecab_new2/mecab_model_new2
+                        返回 NULL。
+                        两个放大误判的因素：
+                        ① 失败时 mecab_strerror(0) 常返回空串（模型未建好前错误
+                        上下文未挂上），探针表现为"无错误的失败"，极易误判为
+                        词典数据损坏或链接问题；
+                        ② 即便 --rcfile 指定了包内 dicrc，mecab 的
+                        load_dictionary_resource（src/utils.cpp:384-388）还会在
+                        -d 指定的 dicdir 下无条件加载 <dicdir>/dicrc——dicrc 不与
+                        二进制索引（char.bin/matrix.bin/model.bin/sys.dic/unk.dic）
+                        同目录安装时同样失败。
+                        另注意：mecab-dict-index 只产出 5 个二进制索引、**不复制
+                        dicrc**；上游 Makefile.am 靠 dic_DATA 安装把 dicrc 放进词典
+                        目录，配方若只拷贝索引就会漏掉这一环。
+affected_scope:         一切消费 MeCab 系词典制品（mecab-ipadic/mecab-jumandic/
+                        mecab-ko-dic 及任意自编词典）的 OHOS 消费者测试与运行期
+                        代码；也约束词典类配方的 package() 布局（dicrc 必须与
+                        .bin/.dic 同目录）。
+verification_cmd:       ① 复现默认失败（错误串为空是特征）：
+                          # 传 -d 不传 --rcfile → mecab_new2 返回 NULL
+                        # ② 确认真实错误来源（strace/源码 param.cpp:69）：
+                          strace -e openat ./probe 2>&1 | grep mecabrc
+                          # → openat("//etc/mecabrc") = -1 ENOENT
+                        # ③ 确认修正后成功：
+                          ./probe "-d <dicdir> --rcfile <dicdir>/dicrc" "今日は…"
+                          # → 正常分词输出
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           explicit-rcfile-plus-dicrc-coinstall
+rec_description:        两端配合：
+                        **消费端**（测试/应用代码）：创建 tagger 时显式传
+                        ``-d <dicdir> --rcfile <dicdir>/dicrc``，不依赖默认 rcfile；
+                        失败诊断不要信 mecab_strerror 的空串，用 strace 或回读
+                        param.cpp 的 "model failed" 路径定位。
+                        **配方端**（词典类 package()）：dicrc 必须与二进制索引
+                        安装到同一 dicdir（mecab-dict-index 不产出 dicrc，需配方
+                        在 build() 索引生成后显式复制——上游 Makefile.am 用
+                        dic_DATA 达到同等效果）。
+                        词典制品的 package_info 应把 ``--rcfile`` 用法写进提示，
+                        避免 OHOS 消费者踩只读根的坑。
+rec_command:            # 消费端：
+                        mecab_model_t* m = mecab_model_new2(
+                            ("-d " + dicdir + " --rcfile " + dicdir + "/dicrc").c_str());
+                        # 配方端（build() 索引生成后）：
+                        copy(self, "dicrc", src=srcdir, dst=index_outdir)
+rec_auto_fix:           false
+rec_impl:               explicit-rcfile-plus-dicrc-coinstall
+
+fallback_priority:      2
+fallback_approach:      ship-etc-mecabrc-in-package
+fallback_description:   在词典制品里附一个最小 mecabrc 并让消费者用 --rcfile 指向它
+                        （等效于主方案，只是 rc 内容从包内 dicrc 换成专用 mecabrc）。
+                        若消费者无法改命令行，可在环境层设 MECABRC 环境变量指向
+                        可写位置的 rc 文件——但 OHOS 上路径仍需显式存在，不如
+                        --rcfile 直接。
+fallback_command:       # MECABRC=<pkg>/dic/mecabrc ./app
+fallback_auto_fix:      false
+fallback_impl:          ship-etc-mecabrc-in-package
+
+forbid_1_pattern:       因.*(mecab_new2|mecab_model_new2).*(NULL|失败).*(判定|认为).*(词典|数据|索引).*(损坏|错误)|
+                        凭.*mecab_strerror.*空.*(推断|断定).*(无错误|库坏)
+forbid_1_reason:        NULL + 空错误串的默认形态几乎总是 rcfile 缺失（//etc/mecabrc
+                        在 OHOS 只读根不存在），不是词典数据问题；空 strerror 是
+                        mecab 0.996 的错误上下文未挂上，不能当"无错误"证据。
+forbid_1_consequence:   误判方向后去改词典打包/数据字节，真实问题（rcfile 路径）没修。
+
+forbid_2_pattern:       词典.*配方.*package.*只.*复制.*(索引|\.bin).*(不|未).*(复制|安装).*dicrc
+forbid_2_reason:        mecab load_dictionary_resource 无条件加载 <dicdir>/dicrc，
+                        漏装 dicrc 的词典制品在消费者侧必然运行期失败（见 root_cause）。
+forbid_2_consequence:   制品发布后所有消费者 mecab_new2 失败，且错误被吞难以定位。
+
+principles:             honest-reporting, measure-not-assume
+
+causes:                 []
+caused_by:              []
+similar_to:             [E251]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-mecab-rcfile-ohos-consumer.md
+last_updated:           2026-09-20
+source_event:           mecab-jumandic 7.0-20130310 适配（消费者探针 mecab_new2
+                        返回 NULL 且错误串为空；strace/源码定位到 //etc/mecabrc
+                        ENOENT；--rcfile 指包内 dicrc 后 3 样例 golden 分词全对）
+
+authors:                AtomCode (glm-5.3) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9

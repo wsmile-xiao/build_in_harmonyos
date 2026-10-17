@@ -1,0 +1,79 @@
+--- a/src/arena.c
++++ b/src/arena.c
+@@ -52,20 +52,44 @@
+ static void *mmap_base = (void *) 0x40000000;
+ static void *mmap_max  = (void *) 0x80000000;
+ static intptr_t mmap_off = (intptr_t) 1 << 16;
+ static intptr_t mmap_off_mask = 0x3fff;
+ #elif BXF_BITS == 64
+ /* On Linux it seems that you cannot map > 48-bit addresses */
+ static void *mmap_base = (void *) 0x200000000000;
+ static void *mmap_max  = (void *) 0x7f0000000000;
+ static intptr_t mmap_off = (intptr_t) 1 << 24;
+ static intptr_t mmap_off_mask = 0x3fffff;
++
++# ifndef _WIN32
++/* Some systems (e.g. OpenHarmony) cap user-space VA well below the default
++   window: MAP_FIXED there fails with EINVAL, which made every arena
++   creation fail. Probe the default base once at runtime and fall back to
++   a low window when it is rejected; on systems where the default window
++   works nothing changes. The fallback spans [4 GiB, ~259 GiB) with a
++   16 MiB stride and 16384 slots, so every random draw stays in range. */
++static void bxfi_probe_mmap_window(void)
++{
++    long page = sysconf(_SC_PAGESIZE);
++
++    void *p = mmap(mmap_base, (size_t) page, PROT_READ | PROT_WRITE,
++            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
++    if (p == MAP_FAILED) {
++        mmap_base = (void *) 0x100000000;
++        mmap_max  = (void *) 0x4100000000;
++        mmap_off = (intptr_t) 1 << 24;
++        mmap_off_mask = 0x3fff;
++        return;
++    }
++    munmap(p, (size_t) page);
++}
++# endif
+ #else
+ # error Platform not supported
+ #endif
+ 
+ static unsigned int mmap_seed;
+ 
+ static inline void *ptr_add(void *ptr, size_t off)
+ {
+     return (char *) ptr + off;
+ }
+@@ -108,20 +132,31 @@
+         return 0;
+     bug("msync(2) returned an unexpected error");
+ #endif
+ }
+ 
+ int bxf_arena_init(size_t initial, int flags, bxf_arena *arena)
+ {
+     initial = align2_up(initial, PAGE_SIZE);
+     if (!initial)
+         initial = 32 * PAGE_SIZE;
++
++#if !defined(_WIN32) && BXF_BITS == 64
++    {
++        static int window_probed;
++
++        if (!window_probed) {
++            bxfi_probe_mmap_window();
++            window_probed = 1;
++        }
++    }
++#endif
+ 
+ #ifdef _WIN32
+     SECURITY_ATTRIBUTES inherit = {
+         .nLength        = sizeof (SECURITY_ATTRIBUTES),
+         .bInheritHandle = TRUE,
+     };
+ 
+     /* Consider available commit limit for possible max heap size */
+     MEMORYSTATUSEX mem = { .dwLength = sizeof (mem) };
+     if (!GlobalMemoryStatusEx(&mem))

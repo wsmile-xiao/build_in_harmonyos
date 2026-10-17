@@ -1,0 +1,200 @@
+--- a/connect.c
++++ b/connect.c
+@@ -249,6 +249,20 @@
+ #define WITH_RESOLVER 1
+ #include <arpa/nameser.h>
+ #include <resolv.h>
++/* HarmonyOS/OHOS (and other musl based systems) keep no _res resolver state:
++   res_init() exists but is a no-op and gethostbyname() always reads
++   /etc/resolv.conf. Overriding the nameserver by writing into _res, as done
++   on glibc, does not compile there. Query the nameserver given by '-R <ip>'
++   over UDP instead (see switch_ns()/ns_resolve() below). */
++#if defined(__linux__) && !defined(__GLIBC__)
++#define WITHOUT_RES_STATE 1
++#endif
++#ifdef WITHOUT_RES_STATE
++#ifndef DNS_PORT
++#define DNS_PORT     53                         /* nameserver port (RFC 1035) */
++#endif
++#define DNS_TIMEOUT  5                          /* seconds to wait for a reply */
++#endif
+ #else  /* not ( not _WIN32 && not __CYGWIN32__) */
+ #undef WITH_RESOLVER
+ #endif /* not ( not _WIN32 && not __CYGWIN32__) */
+@@ -1761,6 +1775,144 @@
+ #endif
+ 
+ #if !defined(_WIN32) && !defined(__CYGWIN32__) && !defined(__INTERIX)
++#ifdef WITHOUT_RES_STATE
++
++/* Nameserver requested with '-R <ip>'. It is not pushed into the libc
++   resolver (there is no _res on musl); local_resolve() sends the query here
++   directly, see ns_resolve(). */
++static struct sockaddr_in custom_ns;
++
++void
++switch_ns (struct sockaddr_in *ns)
++{
++    memcpy (&custom_ns, ns, sizeof(custom_ns));
++    custom_ns.sin_family = AF_INET;
++    custom_ns.sin_port = htons(DNS_PORT);
++    debug("Using nameserver at %s\n", inet_ntoa(ns->sin_addr));
++}
++
++/* Encode "www.example.com" into DNS QNAME labels.
++   Returns the encoded length, or -1 if the name does not fit. */
++static int
++dns_encode_name (const char *host, unsigned char *out, int outlen)
++{
++    int pos = 0;
++    const char *label = host;
++
++    while ( *label != '\0' ) {
++        const char *dot = strchr(label, '.');
++        int len = (dot != NULL) ? (int)(dot - label) : (int)strlen(label);
++        if ( (len <= 0) || (63 < len) || (outlen <= pos + len + 1) )
++            return -1;
++        out[pos++] = (unsigned char)len;
++        memcpy(out + pos, label, len);
++        pos += len;
++        label += len;
++        if ( *label == '.' )
++            label++;
++    }
++    if ( outlen <= pos )
++        return -1;
++    out[pos++] = 0;                             /* root label */
++    return pos;
++}
++
++/* Skip a (possibly compressed) name in a DNS message.
++   Returns the offset just after the name, or -1 on malformed input. */
++static int
++dns_skip_name (const unsigned char *msg, int len, int pos)
++{
++    while ( (0 <= pos) && (pos < len) ) {
++        unsigned char c = msg[pos];
++        if ( c == 0 )
++            return pos + 1;
++        if ( (c & 0xC0) == 0xC0 )               /* compression pointer */
++            return (pos + 2 <= len) ? pos + 2 : -1;
++        if ( 63 < c )                           /* reserved label type */
++            return -1;
++        pos += 1 + c;
++    }
++    return -1;
++}
++
++/* Resolve 'host' by asking the nameserver given with '-R <ip>' for its A
++   record, and store the first answer into 'addr'. Returns 0 on success. */
++static int
++ns_resolve (const char *host, struct in_addr *addr)
++{
++    unsigned char query[512], resp[512];
++    int qlen, n, pos, ancount, i;
++    unsigned int id;
++    struct timeval tv;
++    SOCKET s;
++
++    id = (unsigned int)getpid() & 0xFFFF;
++    memset(query, 0, sizeof(query));
++    query[0] = (unsigned char)(id >> 8);        /* ID */
++    query[1] = (unsigned char)(id & 0xFF);
++    query[2] = 0x01;                            /* RD: recursion desired */
++    query[5] = 0x01;                            /* QDCOUNT = 1 */
++    n = dns_encode_name(host, query + 12, (int)sizeof(query) - 12 - 4);
++    if ( n < 0 ) {
++        debug("cannot encode hostname into a DNS query: %s\n", host);
++        return -1;
++    }
++    qlen = 12 + n;
++    query[qlen++] = 0;                          /* QTYPE  = A (1) */
++    query[qlen++] = 1;
++    query[qlen++] = 0;                          /* QCLASS = IN (1) */
++    query[qlen++] = 1;
++
++    s = socket(AF_INET, SOCK_DGRAM, 0);
++    if ( s == SOCKET_ERROR )
++        return -1;
++    tv.tv_sec = DNS_TIMEOUT;
++    tv.tv_usec = 0;
++    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (void *)&tv, sizeof(tv));
++    if ( sendto(s, query, qlen, 0,
++                (struct sockaddr *)&custom_ns, sizeof(custom_ns)) != qlen ) {
++        closesocket(s);
++        return -1;
++    }
++    n = recvfrom(s, resp, sizeof(resp), 0, NULL, NULL);
++    closesocket(s);
++
++    if ( (n < 12) || (resp[0] != query[0]) || (resp[1] != query[1]) ) {
++        debug("no valid response from nameserver.\n");
++        return -1;                              /* truncated or foreign reply */
++    }
++    if ( (resp[3] & 0x0F) != 0 ) {
++        debug("nameserver returned rcode %d.\n", resp[3] & 0x0F);
++        return -1;
++    }
++    ancount = (resp[6] << 8) | resp[7];
++    pos = dns_skip_name(resp, n, 12);           /* skip the question name */
++    if ( (pos < 0) || (n < pos + 4) )
++        return -1;
++    pos += 4;                                   /* skip QTYPE + QCLASS */
++
++    for ( i = 0; i < ancount; i++ ) {
++        int type, rdlength;
++        pos = dns_skip_name(resp, n, pos);
++        if ( (pos < 0) || (n < pos + 10) )
++            return -1;
++        type     = (resp[pos] << 8) | resp[pos+1];
++        rdlength = (resp[pos+8] << 8) | resp[pos+9];
++        pos += 10;
++        if ( n < pos + rdlength )
++            return -1;
++        if ( (type == 1) && (rdlength == 4) ) { /* A record */
++            memcpy(addr, resp + pos, 4);
++            return 0;
++        }
++        pos += rdlength;                        /* CNAME etc., keep looking */
++    }
++    debug("no A record in the response.\n");
++    return -1;
++}
++
++#else  /* not WITHOUT_RES_STATE */
++
+ void
+ switch_ns (struct sockaddr_in *ns)
+ {
+@@ -1769,6 +1921,8 @@
+     _res.nscount = 1;
+     debug("Using nameserver at %s\n", inet_ntoa(ns->sin_addr));
+ }
++
++#endif /* not WITHOUT_RES_STATE */
+ #endif /* !_WIN32 && !__CYGWIN32__ && !__INTERIX */
+ 
+ /* TODO: IPv6
+@@ -1785,6 +1939,22 @@
+         addr->sin_addr.s_addr = inet_addr(host);
+     } else {
+         debug("resolving host by name: %s\n", host);
++#ifdef WITHOUT_RES_STATE
++        /* '-R <ip>' was given: ask that nameserver instead of the libc
++           resolver, which would ignore it on musl. */
++        if ( custom_ns.sin_addr.s_addr != 0 ) {
++            if ( ns_resolve(host, &addr->sin_addr) == 0 ) {
++                addr->sin_family = AF_INET;
++                /* NOTE: inet_ntoa() returns a static buffer, so the resolved
++                   address and the nameserver cannot be printed in one call. */
++                debug("resolved: %s (%s) by the specified nameserver\n",
++                      host, inet_ntoa(addr->sin_addr));
++                return 0;                       /* good */
++            }
++            debug("failed to resolve by the specified nameserver.\n");
++            return -1;                          /* failed */
++        }
++#endif /* WITHOUT_RES_STATE */
+         ent = gethostbyname (host);
+         if ( ent ) {
+             memcpy (&addr->sin_addr, ent->h_addr, ent->h_length);

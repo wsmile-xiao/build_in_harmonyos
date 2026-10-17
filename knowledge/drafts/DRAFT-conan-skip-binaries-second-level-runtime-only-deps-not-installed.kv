@@ -1,0 +1,52 @@
+#====================================================================
+# DRAFT-conan-skip-binaries-second-level-runtime-only-deps-not-installed.kv
+# conan 2.29 skip-binaries：纯消费者场景二级 runtime-only 依赖不安装，
+# test_package 执行打包二进制时 loader 必失败
+# 完整叙事、自包含探针与证据见同目录 .md
+#====================================================================
+
+id:                     DRAFT（编号由知识库主编确认）
+trigger_tool:           conan|ld|runtime
+phase:                  installation|testing|runtime
+error_signature:        Skipped binaries|Error loading shared library libopenal\.so\.1|Error loading shared library libsndfile|package_folder=None|Error loading shared library .*needed by .*\.so
+severity:               3
+category:               conan, dependency-closure, runtime, packaging
+match_keywords:         conan, skip-binaries, Skipped binaries, 二级依赖, runtime-only, 纯消费者, shared library consumer, libopenal.so.1, libsndfile.so.1, openal-soft, libsndfile, libKDEGames6, DT_NEEDED, Error loading shared library, package_folder None, conan test, test_package, LD_LIBRARY_PATH, 运行时闭包, unskip, 直连 require
+title:                  conan 2.29 skip-binaries 把纯消费者的二级 runtime-only 依赖（openal-soft/libsndfile）标记 Skipped binaries 不下载不安装，test_package 执行打包出的 GUI 二进制时 loader 沿中间共享库 DT_NEEDED 必失败——消费方配方直连 require + test_package 复声明以显式化运行时闭包
+root_cause:             conan 2.29 图语义（实测）：应用（纯消费者，kjumpingcube）的 CMake 链接行只有中间共享库（libkdegames 的 libKDEGames6.so），二级 runtime-only 依赖（openal-soft 提供 libopenal.so.1、libsndfile 提供 libsndfile.so.1）只出现在该共享库自身的 DT_NEEDED 里——conan 的图分析看不到共享库二进制内部的 NEEDED，判定二级包"对最终消费者不可见"，把其二进制标记 Skipped binaries：不下载、不构建、不安装。skip 发生在安装决策层，重跑 --build=missing 无效；即便本地缓存存在其他 package_id 的同名二进制，test graph 中该节点 package_folder 仍为 None。后果：test_package 执行打包二进制时 musl loader 沿 DT_NEEDED（libopenal.so.1）找不到提供者，报 Error loading shared library，rc=127。与姊妹失效面 DRAFT-conan-skipped-binaries-package-folder-null-guard 同源不同面：那条是 Skip 节点 package_folder=None 导致配方循环未判空 TypeError 崩（防崩溃面，修法=判空守卫），本条是 Skip 节点不安装导致运行时闭包缺失（防漏画面，修法=直连 require unskip）——同一 Skip 语义的两个独立失效面，互补不互替，本配方两者同时落地（18 处依赖循环判空守卫 + openal/libsndfile 直连 require）
+affected_scope:         一切"纯消费者 + 中间共享库 + 二级 runtime-only 依赖"的 conan 2.29 图：GUI 应用消费音频/多媒体后端类共享库（openal、sndfile 等只被中间库 DT_NEEDED 的运行时件）是最典型形态；任何以 test_package 执行打包二进制的配方都会在运行时阶段暴露。纯静态链接图或二级依赖同时被直接链接的图不触发。识别要点：Error loading shared library libX.so.N (needed by <中间库>.so) 且 libX recipe 在图里可见、却出现在安装计划 Skipped binaries 段 = 本条机理，不要往下载源/缓存损坏方向排查
+verification_cmd:       定向复现探针（自包含，conan 2.x 任意新 shell 可跑）：临时目录写三级最小配方 app->mid->base（全部 package_type="shared-library"；base 产出 libbase.so；mid 产出 libmid.so 且 DT_NEEDED libbase.so；app 仅链接 mid）；conan create app -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing，断言 (a) 输出含 "Skipped binaries" 且列出 base/1.0，(b) app 的 test_package 报 Error loading shared library libbase.so 且 rc=127；app 配方追加 self.requires("base/1.0") 后重跑，(a)(b) 消失且出现 "base/1.0: Already installed"。在制品仓内的判定命令：conan list "openal-soft/1.25.2" -r=ohpcd（排除"源缺失"假象）
+rec_priority:           1
+rec_approach:           direct-require-runtime-closure-in-consumer-recipe-plus-test-package
+rec_description:        把二级 runtime-only 依赖提升为消费方配方的直接 require，双处声明：(1) 主配方 requirements() 显式 self.requires("openal-soft/1.25.2")/("libsndfile/1.2.2")（版本与中间库 recipe 所钉一致，均已发布 ohpcd）——直接依赖永远不进 Skipped binaries，conan create/install 为其下载/构建二进制，运行时闭包从此显式可复现；(2) test_package 的 requirements() 复声明——test graph 会把被测包的二级依赖标 skip（节点 package_folder=None），复声明是配方层唯一 unskip 手段（libkdegames/26.04.0.1 test_package 同一先例，其 openal 播放断言依赖于此），且 test_package 需把这些包的 lib/ 收进 LD_LIBRARY_PATH 闭包。配套实现细节：conan test() 的 self.run 在 build scope 会替换进程环境，运行时变量必须命令行内联传递；依赖库需镜像到 cwd 相对解析基准（../../bin 形态的相对 NEEDED 见 E537 系）
+rec_command:            主配方：self.requires("openal-soft/1.25.2") + self.requires("libsndfile/1.2.2")（与中间库所钉版本一致）；test_package：requirements() 复声明 + test() 内联 LD_LIBRARY_PATH/QT_PLUGIN_PATH/QT_QPA_PLATFORM=offscreen/HOME/XDG 执行打包二进制。验证：conan create 输出 "openal-soft/1.25.2: Already installed"，test_package 冒烟（--version）rc=0
+rec_auto_fix:           false
+rec_impl:               manual-conan-recipe
+fallback_priority:      2
+fallback_approach:      force-build-skipped-runtime-nodes
+fallback_description:   配方不可改时的退路：构建命令强制 Skip 节点参与本次构建（追加 --build='openal-soft/*' --build='libsndfile/*'）。Build 节点会展开其依赖、不再被 Skipped（姊妹草稿探针 P5 同机理实测：--build=skipmid/* 后 Skipped binaries 消失）。诚实权衡：治标不治本——命令行依赖，平台 CI 不带该参数即复发；仅作应急退路，配方可改时必须直连 require
+fallback_command:       conan create <consumer-dir> --build=missing --build='openal-soft/*' --build='libsndfile/*'  # Skipped binaries 消失，二进制落缓存
+fallback_auto_fix:      false
+fallback_impl:          manual-conan-graph
+forbid_1_pattern:       依赖测试图自动安装二级 runtime-only 依赖|不显式声明运行时闭包
+forbid_1_reason:        conan skip-binaries 语义下二级 runtime-only 依赖被 Skipped binaries，不下载不安装；显式性是运行时闭包的唯一保障
+forbid_1_consequence:   test_package 执行打包二进制时 loader 沿中间库 DT_NEEDED 找不到提供者，rc=127（attempt5 实测）
+forbid_2_pattern:       向下载源/缓存损坏方向排查.*Skipped binaries
+forbid_2_reason:        Skipped binaries 是安装决策层语义（判定"不需要"），不是获取失败；--build=missing 重跑与换镜像均无效
+forbid_2_consequence:   排障方向错误，浪费轮次（attempt5 前置排查的实测教训）
+principles:             []
+causes:                 []
+caused_by:              []
+similar_to:             [E019, E088, E298]
+conflicts_with:         []
+prerequisite_of:        []
+doc_file:               DRAFT-conan-skip-binaries-second-level-runtime-only-deps-not-installed.md
+last_updated:           2026-09-25
+source_event:           kjumpingcube 26.04.0 OHOS PC 适配（run kjumpingcube-26.04.0：attempt5 以 loader 失败 + Skipped binaries 段双证据定位，attempt6 直连 require 后 PASS；姊妹失效面见 DRAFT-conan-skipped-binaries-package-folder-null-guard）
+authors:                GoliWie
+source_pr:              未合并（分支 feat/kjumpingcube-26.04.0，run kjumpingcube-26.04.0）
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-25

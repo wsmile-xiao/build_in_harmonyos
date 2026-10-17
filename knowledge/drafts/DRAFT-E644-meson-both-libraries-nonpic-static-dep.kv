@@ -1,0 +1,84 @@
+# ═══ Draft knowledge entry — meson both_libraries() 无视 default_library 连带构建 .so,依赖静态库非 PIC 时链接必败 ═══
+# Timestamp: 2026-09-21
+# Software: libaudec 0.3.4(任何用 both_libraries 即建共享变体且依赖 conan 非-PIC 静态库的 meson 包)
+# Gate: conan create build() / meson compile
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-E644
+title: >-
+  meson both_libraries() 连带构建共享库，ohpcd 非 PIC 静态依赖链入 .so 报
+  R_AARCH64_ABS64 绝对重定位/recompile with -fPIC
+trigger_tool: meson / ld.lld
+phase: build
+error_signature: can not be used when making a shared object|can't create dynamic relocation R_AARCH64_ABS64|recompile with -fPIC|can't create dynamic relocation R_AARCH64_ADR_PREL_PG_HI21
+severity: 2
+category: platform|build-system|meson
+match_keywords: both_libraries,R_AARCH64_ABS64,shared object,recompile with -fPIC,static_library,default_library,non-PIC,StaticLibraryHolder,get_static_lib
+keywords: >-
+  meson, both_libraries, static_library, default_library, R_AARCH64_ABS64, 非 PIC,
+  fPIC, libsamplerate, lld, StaticLibraryHolder, Unknown method get_static_lib,
+  relocation, shared object
+approach: >-
+  meson 配方把 default_library 设为 static 仍可能失败——both_libraries() 无视该选项
+  连带构建共享变体。先用 llvm-readelf -r 抽查依赖静态库对象，查 R_AARCH64_ABS64 与
+  ADR_PREL_PG_HI21 绝对重定位确认非 PIC；再把 both_libraries( 改 static_library( 并
+  同步改写所有 .get_static_lib() 调用点（static_library 对象没有该方法，主
+  meson.build 与 tests/meson.build 里通常各有一处，漏改报 Unknown method
+  "get_static_lib" in object StaticLibraryHolder）
+root_cause: >-
+  meson 的 both_libraries() 语义是同时构建 static+shared 两个变体，与 default_library
+  无关；conan 侧依赖（如 libsamplerate/0.2.2）只发布 shared=False 的静态库且配方未设
+  fPIC/CMAKE_POSITION_INDEPENDENT_CODE，产物对象含绝对重定位（实测 src_sinc.c.obj
+  31 处 R_AARCH64_ABS64），lld 拒绝把非 PIC 对象链入共享库。在消费侧注入 -fPIC
+  只影响本项目对象，救不了预编译依赖——唯一出路是不构建 .so
+affected_scope: >-
+  OHOS 上全部 meson 包中上游用 both_libraries() 或显式 shared 变体、而依赖是 conan
+  非-PIC 静态库的组合；判定与 fPIC 选项名无关，readelf 实测重定位类型才是权威
+verification_cmd: cd "$TASK_DIR" && A=$(find "$HOME/.conan2/p" -name libsamplerate.a -not -path "*avr*" 2>/dev/null | head -1) && ar x "$A" src_sinc.c.obj && /data/service/hnp/bin/llvm-readelf -r src_sinc.c.obj | grep -q R_AARCH64_ABS64 && echo NON-PIC-CONFIRMED
+verification_expected: 输出 NON-PIC-CONFIRMED 即命中（依赖静态库非 PIC；需先 conan download libsamplerate/0.2.2 或任一含该库的包以物化缓存）
+rec_priority: 1
+rec_approach: static-library-patch
+rec_description: >-
+  patch 把 both_libraries( 改为 static_library(，同步把 meson.build 与
+  tests/meson.build 里的 audec.get_static_lib () 调用改为直接引用该 static_library
+  对象
+rec_command: patch -p1 < patches/0001-<name>-static-library.patch
+rec_auto_fix: false
+rec_impl: >-
+  conandata.yml 登记 patch_file + patch_type=portability，conanfile 用
+  apply_conandata_patches 应用；options 收敛为 shared=[False]（R26 静态交付）
+fallback_priority: 2
+fallback_approach: rebuild-deps-with-pic
+fallback_description: >-
+  从源头重建带 fPIC 的依赖（改上游依赖配方加 fPIC 选项）再支持共享变体；代价是动
+  他人已发布包，通常不值得
+fallback_command: (无通用命令——需修改依赖包配方并在 ohpcd 重发)
+fallback_auto_fix: false
+fallback_impl: 仅当消费侧确实需要 .so 时考虑
+principles: >-
+  meson 变体构建看构造函数（both_libraries=双建）而不只看 default_library；conan 静态
+  依赖的 PIC 属性取决于依赖配方，readelf 重定位类型是唯一权威证据；static_library
+  对象没有 get_static_lib() 方法，改构造函数必须连带改写全部调用点
+caused_by: >-
+  上游 meson.build 用 both_libraries('audec', ...) 且 tests/meson.build 以
+  audec.get_static_lib() 链接；ohpcd libsamplerate/0.2.2 静态库未开 PIC
+  （实例为 libaudec 0.3.4 首轮采信轮）
+causes: >-
+  G2 conan create 在 meson compile 阶段报绝对重定位/R_AARCH64_ABS64 类链接错误；
+  或改完主 meson.build 漏改 tests/meson.build 报 Unknown method "get_static_lib"
+similar_to: E007(config.guess 缺 HarmonyOS 分支——同为平台判定缺口,但发生在 autotools 侧)
+conflicts_with:
+prerequisite_of: DRAFT-E645(pkg-config 别名桥接——同包的依赖解析侧配套修法)
+doc_file: knowledge/drafts/DRAFT-E644-meson-both-libraries-nonpic-static-dep.md
+last_updated: 2026-09-21
+source_event: >-
+  libaudec 0.3.4 OHOS 采信轮 G2 失败——先报 Unknown method "get_static_lib"
+  （漏改 tests/meson.build），再回溯根因为 both_libraries() 连带 .so 与非 PIC 依赖
+  冲突；以 llvm-readelf -r 实测 src_sinc.c.obj 31 处 R_AARCH64_ABS64 定案
+authors: Awstme
+source_pr: (本 PR)
+source_commit: 1ec1f3408f2167c230ba3dfdd6f0757d348a494a
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.95
+metrics_last_used: 2026-09-21

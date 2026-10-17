@@ -1,0 +1,71 @@
+# ═══ Draft knowledge entry — meson dependency() 系统查优先、wrap 回退（catch2 实测） ═══
+# Timestamp: 2026-09-25
+# Software: libnpy 1.0.1（任何 tests/ 用 meson wrap 提供依赖的包）
+# Gate: 原生 meson setup（tests/ 独立工程）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+
+id: DRAFT-E730
+title: "meson dependency() 先 pkg-config/cmake 系统查、未命中才回退 subproject wrap 下载——catch2 wrap 在设备与 CI 均可达，--wrap-mode=nodownload 才会把回退变硬错误"
+trigger_tool: "meson|ninja|conan"
+phase: "configure|build|testing"
+error_signature: "Run-time dependency catch2 found: NO|Looking for a fallback subproject for the dependency|Downloading catch2 source from https://github.com/catchorg/Catch2|Downloading catch2 patch from https://wrapdb.mesonbuild.com"
+severity: 3
+category: "meson|wrap|catch2|test-framework|network"
+match_keywords: "meson, catch2, wrap, wrapdb, subproject, dependency(), nodownload, pkg-config, cmake, fallback"
+prescan_pattern: "dependency\\(\\s*['\"]catch2['\"]"
+keywords: "meson, wrap-file, catch2, subprojects, --wrap-mode, nodownload, PkgConfigDeps, wrapdb"
+approach: >
+  tests/meson.build 里 dependency('catch2') 的解析顺序是：先 pkg-config、再 cmake
+  （系统查），两者都未命中才回退 subprojects/catch2.wrap 并下载（GitHub tarball +
+  wrapdb patch，source_hash 由 wrap 锁定）。设备与 CI worker 实测两条下载链均可达，
+  因此上游原样 meson setup 即可通过；只有显式 --wrap-mode=nodownload 才会把回退
+  变成硬错误——若走 conan 化依赖（PkgConfigDeps 暴露 .pc 让系统查先命中），
+  必须先确认 .pc 会被 pkg-config 找到，否则 nodownload 下直接 setup 失败。
+root_cause: >
+  meson 的 dependency() 对带 [provide] 的 wrap 采用"系统查优先、wrap 兜底"的顺序
+  （libnpy 实测日志：'Run-time dependency catch2 found: NO (tried pkg-config and
+  cmake)' → 'Looking for a fallback subproject' → 两条下载 → 'Dependency catch2
+  ... from subproject subprojects/Catch2-2.13.8 found: YES 2.13.8'）。conan 的
+  catch2/2.13.10-r0 只设 cmake_file_name=Catch2、无 pkg_config_name，且大小写与
+  find_package(catch2) 不匹配，故系统查必然未命中、稳定走 wrap 回退。
+affected_scope: >
+  任何上游 tests/（或主工程）用 meson wrap-file 提供依赖的 C/C++ 包；对 conan 侧
+  已有同名包但未暴露 pkg-config 的场景（catch2/gtest 类）尤其相关。
+verification_cmd: >
+  grep -E "found: NO \(tried pkg-config and cmake\)|Downloading catch2 source" "$TASK_DIR/native-setup.log"
+  # 两行都在 = 走了系统查未命中 → wrap 回退（libnpy 2026-09-25 实测）
+rec_priority: 1
+rec_approach: "allow-wrap-fallback"
+rec_description: >
+  默认（不加 --wrap-mode）保持上游原样 meson setup：wrap 回退下载由 wrap 文件的
+  source_hash/patch_hash 锁定，可复现；只有在无网络环境才需要把依赖 conan 化并
+  先让系统查命中（PkgConfigDeps + PKG_CONFIG_PATH，或 CMakeDeps + CMAKE_PREFIX_PATH
+  且注意 find_package 大小写与 cmake_file_name 一致），然后再加 nodownload。
+rec_command: "cd tests && meson setup builddir && meson test -C builddir"
+rec_auto_fix: false
+rec_impl: "meson-wrap-fallback-native"
+fallback_priority: 2
+fallback_approach: "conan-dep-via-pkgconfig"
+fallback_description: >
+  无网络或 wrapdb 不可达时：conan requires/tool_requires 提供依赖，generate() 里挂
+  PkgConfigDeps 并 export PKG_CONFIG_PATH，确保 dependency() 系统查命中后再用
+  --wrap-mode=nodownload；pkg_config_name 与 dependency() 的名字必须一致。
+fallback_command: "meson setup builddir --wrap-mode=nodownload"
+fallback_auto_fix: false
+fallback_impl: "pkgconfig-bridge"
+principles: "meson dependency() 的解析顺序（pkg-config → cmake → wrap）是确定性的；看到 found: NO 不是失败，后续是否回退取决于 wrap 文件与 wrap-mode"
+caused_by: "系统查无命中（conan 包未暴露同名 .pc / cmake 文件名大小写不符）+ wrap-mode 默认允许下载"
+causes: "meson setup 日志出现 'Looking for a fallback subproject' 与两条 Downloading 行——属正常回退，非配置错误"
+similar_to: "E732（同任务计数侧）、E733（同 tests/ 依赖面）"
+conflicts_with:
+prerequisite_of:
+doc_file: "knowledge/drafts/DRAFT-E730-meson-catch2-wrap-fallback.md"
+last_updated: "2026-09-25"
+source_event: "libnpy 1.0.1 原生上游测试（meson setup builddir 实测，native-setup.log 逐字留档）"
+authors: "libnpy-1.0.1-executor"
+source_pr:
+source_commit:
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.9
+metrics_last_used: "2026-09-25"

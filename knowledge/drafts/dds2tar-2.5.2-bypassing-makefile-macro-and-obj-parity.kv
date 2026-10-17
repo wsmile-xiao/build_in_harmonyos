@@ -1,0 +1,30 @@
+#====================================================================
+# Draft: 绕过上游 Makefile 直接驱动编译器时，必须**完整复刻 Makefile 注入的宏与
+#        目标文件集合** —— 漏一个字符串宏 → 语法错误；照抄一个特殊宏值 →
+#        引入宿主机内核源码绝对路径 include；漏一个跨续行的 OBJ 成员 → 链接期
+#        undefined symbol。三种失败形态、三个不同的排错方向，根因都是同一件事
+#   Stem: dds2tar-2.5.2-bypassing-makefile-macro-and-obj-parity — pairs with same-stem .md
+#====================================================================
+
+id:                     DRAFT-DDS2TAR-BYPASSING-MAKEFILE-MACRO-AND-OBJ-PARITY
+trigger_tool:           conan
+phase:                  build
+error_signature:        expected ';' after top level declarator|fatal error: '/usr/src/linux/.*' file not found|undefined symbol: [a-z_]+|ld\.lld: error: undefined symbol
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               conan, raw-makefile, cross-compile, recipe-parity
+match_keywords:         直编, 绕过 Makefile, CCFLAGS, -D 宏, 字符串字面量宏, VERSION, 语法错误, 内核源码, /usr/src/linux, st_options.h, OBJ, 续行, undefined symbol, 链接错误, makefile parity
+
+title:                  绕过上游 Makefile 直编时必须完整复刻其宏与 OBJ 集合：漏字符串宏→语法错误、照抄特殊宏值→引宿主机内核头、漏续行 OBJ→链接期 undefined symbol
+
+root_cause:             直编（自己写 `self.run(clang …)` 而不调 make）在交叉编译场景常被用来绕开 autotools/隐式规则摩擦，但**上游 Makefile 本身是一份"构建契约"**：它通过命令行 `-D` 与变量把源码分支所需的信息注进去。只读源码、不读 Makefile 的变量展开，就会出现三类各自独立的失败：(1) **字符串字面量宏缺失** —— 如 `CCFLAGS=-DVERSION=\"$V\"`，源码里靠 `"Version " VERSION " …"` 做字面量拼接，宏未定义时标识符留在表达式里，报 `error: expected ';' after top level declarator`，**报错点与真正原因相距很远**；(2) **照抄特殊宏值反而引入宿主机依赖** —— 如上游默认 `-DST_BUFFER_BLOCKS=0`，而头文件对 0 的特判是 `#include "/usr/src/linux/drivers/scsi/st_options.h"`（宿主机内核源码绝对路径），在 CI/交叉环境必然 `fatal error: file not found`；源码下文常有 `#ifndef … #define 32` 兜底，**不定义反而是正确取值**；(3) **OBJ 变量跨续行** —— Makefile 里 `OBJ= a.o b.o c.o \` + 下一行 `d.o e.o`，只读到第一行就动手，则缺少的成员往往正是"次要功能"模块（零填充直读、头校验），编译期毫无异常，**只在链接期报 undefined symbol**。
+affected_scope:         所有「上游自带 Makefile 但配方选择直接驱动编译器」的包——本仓库 raw makefile 类配方的通用风险面。三类失败排错方向完全不同（改宏 / 查宿主机依赖 / 补目标文件），若不先做"Makefile 契约核对"，很容易在三条错路上各烧一轮 CI。
+verification_cmd:       grep -nE '^\s*(OBJ|CCFLAGS|CFLAGS|CPPFLAGS|CCOPT)\s*=' Makefile   # 逐行看，注意续行；再 grep -rn '\$(' Makefile 找宏注入
+
+# ═══ Layer 2: 决策层 ═══
+rec_priority:           1
+rec_approach:           makefile-contract-parity-checklist
+rec_description:        动手前做三件事，形成"Makefile 契约清单"：(1) **完整展开变量**——`OBJ`/`CCFLAGS`/`CCOPT` 等常跨续行，用 `awk '/^OBJ=/{f=1} f{print; if($0 !~ /\\\\$/) exit}' Makefile` 之类完整读出，并核对"每个待链接的可执行文件分别链哪些 .o"；(2) **枚举全部命令行宏**——`grep -nE '^\s*[A-Z_]+\s*=-\?*D' Makefile`，逐个判断：源码是否依赖它？依赖则**必须注入**；不注入也应显式确认源码有兜底；(3) **对"触发宿主机绝对路径"的宏做反向判断**——若某宏的某个取值让源码 include 宿主机路径（内核源码、/usr/local 头等），则**不要注入该值**，改用源码的 `#ifndef` 兜底或上游注释认可的值。字符串字面量宏（`-DVERSION=\"1.2\"`）**不要靠 shell 引号转义**——cmd.exe 与 POSIX sh 行为不同；改为**生成一个内联头文件并用 `-include <绝对路径>` 注入**，彻底避开引号问题（本包即用此法）。参考实现：archives/d/dds2tar/2.5.2/conanfile.py。
+rec_command:            awk '/^OBJ=/{f=1} f{print; if($0 !~ /\\$/) exit}' Makefile ；grep -nE '^\s*[A-Z_]+\s*=-?D' Makefile
+rec_auto_fix:           false

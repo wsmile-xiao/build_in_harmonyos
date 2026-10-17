@@ -1,0 +1,108 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E6401.kv，填写各字段
+# 对应的人类文档: doc/E6401.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E6401
+trigger_tool:           meson|ninja|configure
+phase:                  configuration
+error_signature:        unknown host (machine|system)|Host system[ :]+harmonyos|HarmonyOS is not supported|Program (llvm-ar|llvm-ranlib|llvm-nm|llvm-strip|ninja) not found|could not read from remote repository|fetching subproject.*fail
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               1
+category:               build-system, meson, platform, detection
+prescan_pattern:        host_machine\.system\(\)
+prescan_globs:          meson.build
+match_keywords:         meson, host_os, HarmonyOS, host_machine, llvm-ar, llvm-ranlib, wrap-git, subproject, PATH, ninja, QEMU, can_socketcan, dtc
+title:                  Meson 在 OHOS 上 host_os 'HarmonyOS' 不识别（静默回退非 Linux stub）+ SDK 工具链不在默认 PATH + subproject wrap-git 不可达
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OHOS 的 meson 宿主三元组 system 为 HarmonyOS，上游 meson.build 只按 linux/windows/darwin 等已知系统分支：
+                        未识别的 host_os 不报错，而是静默走非 Linux stub 代码路径（QEMU 表现为 CONFIG_LINUX 未启用，
+                        syscall wrapper/UFFD/SG_IO/PR manager 全部缺失，产物功能严重残缺）。
+                        meson 同时以裸名探测 llvm-ar/llvm-ranlib/llvm-nm/llvm-strip/ninja，
+                        OHOS SDK 编译器位于 /data/service/hnp/bin 且不在默认 PATH，探测失败。
+                        [wrap-git] 类型 subproject（如 dtc）会尝试从 gitlab.com git fetch，OHOS 构建环境不可达。
+                        级联后果：host_os 归一化为 linux 后 QEMU 会尝试编译 can_socketcan.c（socket(PF_CAN)），
+                        OHOS 无 CAN 设备支持，必须配套跳过。
+affected_scope:         所有 Meson 构建、交叉适配 OHOS 的软件（尤其 meson.build 按 host_machine.system() 分支、含 wrap-git subproject、使用 LLVM 工具链裸名探测者）
+verification_cmd:       |
+  # 1) 归一化后 meson setup 应输出 Host system: linux
+  grep "Host system" meson-logs/meson-log.txt
+  # 2) ninja 命令应使用 SDK 绝对路径工具链（PATH/AR/RANLIB 已注入）
+  ninja -t commands | head -5
+  # 3) subproject 应使用本地 bundled 源码，不触发 git fetch
+  ls subprojects/dtc | head -3
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           source-patch + build-env 四件套（第 1 件级联触发第 2 件，缺一即编译失败或产物残缺）:
+                        1) patch meson.build：host_os==HarmonyOS 时归一化为 linux，保留 host_os_orig 供下游判断；
+                        2) patch net/can/meson.build：host_os_orig 非 linux 时跳过 can_socketcan.c；
+                        3) dtc.wrap [wrap-git]→[wrap-file] 官方固定版本 tarball（含 source_hash），build() 内对带 bundled 源码的 subproject 删除 .wrap；
+                        4) conanfile generate() 写独立 env 脚本：PATH prepend /data/service/hnp/bin + define AR/RANLIB/NM/STRIP，configure 显式 --cc/--cxx 绝对路径。
+rec_description:        host_os 归一化 + socketcan 配套裁剪 + subproject 源固定 + SDK 工具链 env 注入，四件套缺一不可
+rec_command:            |
+  patch -p1 < patches/0001-meson-build-harmonyos-linux.patch
+  patch -p1 < patches/0002-can-skip-socketcan-on-harmonyos.patch
+  patch -p1 < patches/0003-dtc-use-official-github-mirror.patch
+  # conanfile generate(): env.prepend_path("PATH", sdk_bin); env.define("AR"|"RANLIB"|"NM"|"STRIP", ...)
+rec_auto_fix:           false
+rec_impl:               archives/q/qemu/11.1.1/patches/0001-0003 + conanfile.py generate()
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:      若 SDK 升级后 meson 官方支持 ohos 三元组，优先走官方三元组并废弃归一化 patch；
+                        工具链缺失可改由 conan tool_requires 提供（参考 pdfsandwich/OCaml 正例），不再依赖绝对路径 env 注入
+fallback_description:   归一化 patch 仅适用于上游 meson 不识别 HarmonyOS 的场景，SDK 升级后应回滚
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+forbid_1_pattern:       --cross-file.*host_system[= ]linux
+forbid_1_reason:        用 meson cross-file 硬改 host=linux——QEMU configure 层与 meson 层各自检查 host，两处必须一致
+forbid_1_consequence:   构建表面通过但 configure 层仍走非 Linux 分支，产物功能缺失且难以定位
+forbid_2_pattern:       export PATH=.*hnp
+forbid_2_reason:        把 SDK 路径 export 到全局会话 PATH——污染其他包工具链选择；conan build() 也拿不到裸 shell 变量（R33）
+forbid_2_consequence:   其他包构建被干扰；release worker 非交互会话下变量为空导致静默失败
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        [E6402]
+
+# ═══ 元数据 ═══
+keywords: meson, HarmonyOS, host_os, host_machine, llvm-ar, wrap-git, dtc, can_socketcan, QEMU, SDK toolchain, /data/service/hnp/bin
+doc_file:               doc/E6401.md
+last_updated: 2026-09-22
+source_event:           qemu 11.1.1 OHOS armv8 适配（build_in_harmonyos archives/q/qemu/11.1.1，2026-09-22）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                AtomCode (qwen3.8) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: QEMU

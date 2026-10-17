@@ -1,0 +1,126 @@
+# ═══ Draft knowledge entry — OHOS：对已签名 .so 的原地改写使签名失效，dlopen 报 Permission denied ═══
+# 问题类命名（库案例仅括号内出现）。重构自 DRAFT-ohos-hmdfs-elf-rewrite-exec-deny
+# （2026-09-13 path-update 补证轮：判别实验证伪 "HMDFS W^X 标签在场即拒绝" 机理，
+#  坐实 E517/E077 签名面；实验日志 tmp/oh-device-porting-v2/kio-6.14.0/logs/
+#  wxexp-discriminating.log 与 wxexp-minimal-probe.log）。
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-ohos-signed-so-inplace-rewrite-dlopen-denied
+trigger_tool:           patchelf|llvm-objcopy|strip|conan|dlopen
+phase:                  package|runtime|testing
+error_signature:        Error loading shared library .*Permission denied|dlopen.*\.so.*Permission denied|patchelf.*replace-needed.*package_folder
+
+severity:               2
+category:               security, dynamic-loading, packaging, ohos, conan
+match_keywords:         codesign, binary-sign-tool, selfSign, patchelf, in-place rewrite, Permission denied, dlopen, DT_NEEDED, soname, security.isolate, hmdfs.perm, silent no-op, readelf, 原地改写, 静默跳过
+
+title:                  对自带 .codesign 签名的 .so 做 package() 内原地改写会使签名失效、设备 dlopen 报 Permission denied——DT_NEEDED/SONAME 修复必须前移链接期；无法前移时必须按 E077 四步重签，且不得以 CI 通过或 xattr 标签判断改写是否安全
+
+root_cause: >
+  完整因果链（各环均有设备判别实验证据，2026-09-13）：① OHOS 上
+  clang/lld 产物自带 .codesign 段；已发布 conan 包的 .so 在构建机上签名后
+  随二进制分发（E517 面）。② 配方在 package() 内用 patchelf
+  --replace-needed/--set-soname/--set-rpath 等工具原地改写字节后，原签名
+  与新内容失配。③ musl 加载器拒绝映射签名失配的共享库，报 Permission
+  denied（readelf/file/属主/权限位全部正常，极易误判为路径或权限问题）。
+  ④ 判别实验证明拒绝因素是签名而非 HMDFS xattr 标签：改写产物、未改写
+  产物与 E077 重签产物的 security.isolate/user.hmdfs.perm/selinux 三项
+  xattr 完全相同（getfattr -d 逐字节对照），仅重签产物的 dlopen 由
+  Permission denied 变 OK；把改写产物按字节复制到新 inode 仍被拒（无效
+  签名随字节复制）；仅 remove-section 不重签的负对照同样被拒。⑤ 附加
+  工程风险：seed recipe 的此类后处理步骤普遍写成
+  subprocess + except OSError: continue——CI worker PATH 无 readelf 时
+  静默 no-op（产物保持绝对路径 DT_NEEDED、恰好在构建机上可解析 → 测试
+  假通过）；换到有 readelf 的 worker 上同一配方立即产出整体不可加载的
+  包。同一配方在两类 worker 上结论相反，CI 绿不等于包可用。
+
+affected_scope:         任何在 package()/安装/打包阶段对已签名 ELF 做内容改写的
+                        配方或脚本（patchelf --replace-needed/--set-soname/
+                        --set-rpath、strip、llvm-objcopy、in-place 二进制改写），
+                        以及以"CI 测试通过"判定改写步骤安全性的发布流程；
+                        典型诱因是依赖库缺 DT_SONAME 导致路径形态 DT_NEEDED
+                        （见 DRAFT-cmake-harmonyos-platform-soname-flag）。
+
+verification_cmd:       |
+  # 自包含最小判别探针（设备上开新 shell 可直接复跑；2026-09-13 实测）：
+  cd /storage/Users/currentUser/tmp/oh-device-porting-v2/kio-6.14.0/wxexp
+  printf 'int probe_fn(void){return 7;}\n' > probe_min.c
+  clang -shared -fPIC probe_min.c -o tfinal.so && chmod 755 tfinal.so
+  # 1) 首次 dlopen 之前先原地改写（patchelf rc=0，改写成功）
+  patchelf --set-rpath '$ORIGIN' tfinal.so; echo "patchelf rc=$?"
+  getfattr -d tfinal.so                      # 三项标签在场（isolate/hmdfs.perm/selinux）
+  python3 -c "import ctypes,sys
+try: ctypes.CDLL(sys.argv[1]); print('dlopen: OK')
+except OSError as e: print('dlopen FAIL:', e)" tfinal.so
+  #   → dlopen FAIL: Permission denied（签名失配）
+  # 2) E077 四步重签同一 inode（不触碰 xattr）：
+  llvm-objcopy --remove-section .codesign tfinal.so
+  binary-sign-tool sign -inFile tfinal.so -outFile tfinal.so -selfSign 1
+  chmod a+x tfinal.so
+  getfattr -d tfinal.so                      # 三项标签原样在场（与步骤 1 相同）
+  python3 -c "import ctypes,sys
+try: ctypes.CDLL(sys.argv[1]); print('dlopen: OK')
+except OSError as e: print('dlopen FAIL:', e)" tfinal.so
+  #   → dlopen: OK（标签未变，仅签名恢复——证明判别因素是签名）
+  # 3) 负对照：仅 remove-section 不重签 → 仍 Permission denied
+  # 补充观察：已被 dlopen 过的 inode 对 patchelf 的 O_RDWR 打开报
+  # "open: Operation not permitted"（改写须在首次加载前，或对新副本做）。
+
+rec_priority:           1
+rec_approach:           link-time-fix-forward
+rec_description: >
+  SONAME/DT_NEEDED 修复一律前移到链接期，禁止构建后改写 ELF：
+  (1) 目标库缺 SONAME → CMake set_target_properties(... LINK_OPTIONS
+  "-Wl,-soname,<实际产物文件名>") 或注入平台 SONAME flag（见
+  DRAFT-cmake-harmonyos-platform-soname-flag）；(2) 依赖记录绝对/相对路径 →
+  链接期 -Wl,-rpath-link / 显式 .so 输入（env 注入须在 toolchain 环境快照
+  之前）；(3) review 任何 seed recipe 的"subprocess + except OSError:
+  continue"型后处理步骤时按隐患拆除：改写是否真的发生以日志输出行数为准，
+  绝不以 CI 通过为准——静默 no-op 会在"恰好可解析"的构建机上产生假通过。
+
+rec_auto_fix:           false
+rec_impl:               manual
+fallback_priority:      2
+fallback_approach:      e077-four-step-resign
+fallback_description:   确实无法前移、必须做构建后改写时，严格按 E077 四步流程
+                        执行并逐产物校验 .codesign 计数恰为 1：remove-section
+                        .codesign → 改写 → binary-sign-tool -selfSign 1 →
+                        chmod a+x。诚实权衡：每产物多两步签名/改段开销；量产需
+                        批量脚本；且改写必须在首次 dlopen 之前（已加载过的 inode
+                        拒绝写打开）。掩盖的是产物形态而非根因，仅作退路。
+fallback_command:       llvm-objcopy --remove-section .codesign F && patchelf --replace-needed OLD NEW F && binary-sign-tool sign -inFile F -outFile F -selfSign 1 && chmod a+x F && llvm-readelf -SW F | grep -c codesign
+fallback_auto_fix:      false
+fallback_impl:          post-install-script
+
+forbid_1_pattern:       package\(\).*(patchelf|llvm-objcopy|strip).*|发布前对已签名 ELF 原地改写且不重签
+forbid_1_reason:        原地改写使 .codesign 签名失配，加载器拒绝映射报 Permission denied；失败仅在运行期暴露，且 CI worker 无 readelf 时该步骤静默跳过产生假通过。
+forbid_1_consequence:   包在构建机"测试通过"、在下游/其他 worker 上不可运行——假阳性交付，返工面扩大到全部下游消费者。
+
+forbid_2_pattern:       以 getfattr/security.isolate/权限位作为 dlopen 失败的判别依据，或失败后反复 chmod/chcon
+forbid_2_reason:        判别实验证明加载/拒绝两种结局的文件 xattr 标签完全相同——标签不是判别因素；chmod 无法改变签名状态（E212/E077 的 forbid 同向）。
+forbid_2_consequence:   排障方向错误，浪费在权限/标签操作上；正确动作是 llvm-readelf -SW 查 .codesign 并按 E077 重签。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P-SIGN-001, P-PACK-001, P-HMDFS-001, P-BUILD-001
+
+# ═══ 关系图（与相近条目逐项划界，见同名 .md 的去重记录节） ═══
+similar_to:             E077, E517, E212, E453, DRAFT-E077B-ohos-sdk-autocodesign-invalid, DRAFT-cmake-harmonyos-platform-soname-flag
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-ohos-signed-so-inplace-rewrite-dlopen-denied.md
+last_updated:           2026-09-13
+source_event:           kio 6.14.0 适配（run kio-6.14.0）：r1（无改写）可载 vs
+                        r2（package() 内 patchelf --replace-needed 原地改写）
+                        EACCES 对照；2026-09-13 path-update 补证轮判别实验
+                        （同 xattr 三步对照 + E077 重签恢复 + remove-section
+                        负对照 + 首载前/后改写写入门观察）证伪标签机理、
+                        坐实签名机理。
+authors: GoliWie <GoliWie@noreply.gitcode.com>

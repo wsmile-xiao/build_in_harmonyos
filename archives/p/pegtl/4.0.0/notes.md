@@ -64,5 +64,10 @@ pkg-config --modversion pegtl
 3. 使用时只需包含头文件 `<tao/pegtl.hpp>` 即可
 ---
 
-**编译结束**: 2026-06-08 14:38
+**编译结束**: 2026-09-21 02:12
 **最终状态**: built
+
+## pegtl 4.0 特有 API 事实（4.x 与旧版差异，记档不建知识草稿）
+1. 输入类更名: memory_input/string_input 在 4.x 移除，直接使用 view_input<>(str) / copy_input<>（view_input 构造接受 std::string/string_view/C 串）。
+2. ranges 规则: 字符区间须按 (Lo,Hi) 对并整体 ASCII 升序排列（如 ranges<'0','9','A','Z','_','_','a','z'>），否则 static_assert( Lo <= Hi ) 编译失败。
+3. 上游测试: 257 个独立用户用例（src/test/*.cpp → pegtl-test-* 可执行），ctest 257/257 通过。

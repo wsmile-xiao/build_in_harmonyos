@@ -1,0 +1,128 @@
+--- a/usr/bs.c
++++ b/usr/bs.c
+@@ -219,33 +219,42 @@
+ 
+ static void *bs_thread_worker_fn(void *arg)
+ {
+ 	struct bs_thread_info *info = arg;
+ 	struct scsi_cmd *cmd;
+ 	sigset_t set;
+ 
+ 	sigfillset(&set);
+ 	sigprocmask(SIG_BLOCK, &set, NULL);
+ 
+-	while (1) {
++	while (!info->stop) {
+ 		pthread_mutex_lock(&info->pending_lock);
+ 		pthread_cleanup_push(mutex_cleanup, &info->pending_lock);
+ 
+-		while (list_empty(&info->pending_list))
++		while (list_empty(&info->pending_list) && !info->stop)
+ 			pthread_cond_wait(&info->pending_cond,
+ 					  &info->pending_lock);
+ 
+-		cmd = list_first_entry(&info->pending_list,
+-				       struct scsi_cmd, bs_list);
+-
+-		list_del(&cmd->bs_list);
++		/* Get command if available, otherwise just unlock */
++		if (!info->stop && !list_empty(&info->pending_list)) {
++			cmd = list_first_entry(&info->pending_list,
++					       struct scsi_cmd, bs_list);
++			list_del(&cmd->bs_list);
++		} else {
++			cmd = NULL;
++		}
++
+ 		pthread_cleanup_pop(1); /* Unlock pending_lock mutex */
++
++		/* Skip processing if stopping or no command */
++		if (info->stop || !cmd)
++			continue;
+ 
+ 		info->request_fn(cmd);
+ 
+ 		pthread_mutex_lock(&finished_lock);
+ 		list_add_tail(&cmd->bs_list, &finished_list);
+ 		pthread_mutex_unlock(&finished_lock);
+ 
+ 		if (sig_fd < 0)
+ 			pthread_cond_signal(&finished_cond);
+ 		else
+@@ -401,20 +410,21 @@
+ 			  int nr_threads)
+ {
+ 	int i, ret;
+ 
+ 	info->worker_thread = zalloc(sizeof(pthread_t) * nr_threads);
+ 	if (!info->worker_thread)
+ 		return TGTADM_NOMEM;
+ 
+ 	eprintf("%d\n", nr_threads);
+ 	info->request_fn = rfn;
++	info->stop = 0;  /* Initialize stop flag */
+ 
+ 	INIT_LIST_HEAD(&info->pending_list);
+ 
+ 	pthread_cond_init(&info->pending_cond, NULL);
+ 	pthread_mutex_init(&info->pending_lock, NULL);
+ 
+ 	for (i = 0; i < nr_threads; i++) {
+ 		ret = pthread_create(&info->worker_thread[i], NULL,
+ 				     bs_thread_worker_fn, info);
+ 
+@@ -423,41 +433,52 @@
+ 				i, strerror(ret));
+ 			if (ret)
+ 				goto destroy_threads;
+ 		}
+ 	}
+ 	info->nr_worker_threads = nr_threads;
+ 
+ 	return TGTADM_SUCCESS;
+ destroy_threads:
+ 
++	/* Set stop flag and signal all threads to wake up */
++	pthread_mutex_lock(&info->pending_lock);
++	info->stop = 1;
++	pthread_cond_broadcast(&info->pending_cond);
++	pthread_mutex_unlock(&info->pending_lock);
++
+ 	for (; i > 0; i--) {
+ 		if (info->worker_thread[i - 1]) {
+-			pthread_cancel(info->worker_thread[i - 1]);
+ 			pthread_join(info->worker_thread[i - 1], NULL);
+ 			eprintf("stopped the worker thread %d\n", i - 1);
+ 		}
+ 	}
+ 
+ 	pthread_cond_destroy(&info->pending_cond);
+ 	pthread_mutex_destroy(&info->pending_lock);
+ 	free(info->worker_thread);
+ 
+ 	return TGTADM_NOMEM;
+ }
+ 
+ void bs_thread_close(struct bs_thread_info *info)
+ {
+ 	int i;
+ 
++	/* Set stop flag and signal all threads to wake up */
++	pthread_mutex_lock(&info->pending_lock);
++	info->stop = 1;
++	pthread_cond_broadcast(&info->pending_cond);
++	pthread_mutex_unlock(&info->pending_lock);
++
++	/* Wait for all threads to finish */
+ 	for (i = 0; i < info->nr_worker_threads && info->worker_thread[i]; i++) {
+-		pthread_cancel(info->worker_thread[i]);
+ 		pthread_join(info->worker_thread[i], NULL);
+ 	}
+ 
+ 	pthread_cond_destroy(&info->pending_cond);
+ 	pthread_mutex_destroy(&info->pending_lock);
+ 	free(info->worker_thread);
+ }
+ 
+ int bs_thread_cmd_submit(struct scsi_cmd *cmd)
+ {

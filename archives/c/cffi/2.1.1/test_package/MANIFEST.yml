@@ -1,0 +1,88 @@
+# test_package/MANIFEST.yml — cffi 2.1.1（Python 版）
+# 上游官方测试声明文件
+# CI 脚本 (build_and_test.sh L0e) 强制要求此文件存在
+# 详见: docs/TEST_QUALITY_SPEC.md
+
+package: cffi/2.1.1
+homepage: "https://github.com/python-cffi/cffi"
+
+# 上游测试命令 — pytest（testing/ 目录，38 个 test_*.py 模块）
+upstream_check_command: "python3 -m pytest testing -q"
+
+# conanfile.py build() 方法中是否已集成上游测试
+upstream_test_in_build: true
+upstream_test_command: "python3 -m pytest testing -q --no-header -p no:cacheprovider --basetemp=<build>/pytest-basetemp [--deselect=testing/cffi1/test_verify1.py::test_verify_dlopen_flags]"
+
+# 上游实际运行的测试程序（2026-09-20 实测记录）：
+# - testing/ 目录 **38 个 test_*.py 模块**：
+#     testing/cffi0      16 个（ABI/ctypes 后端、解析、模型、vgen、zdistutils、zintegration）
+#     testing/cffi1      17 个（recompiler、verify、dlopen、ffi_obj、parse/realize_c_type、
+#                               pkgconfig、cffi_gen_src、re_python…）
+#     testing/embedding   5 个（basic、performance、recursive、thread、tlocal）
+# - 实测结果：**1729 passed, 119 skipped, 1 deselected, 4 xfailed**（conan create 内 896s）
+#   零失败；119 skipped 为上游自身 skipif，4 xfailed 为上游自身标记的预期失败
+#
+# 测试执行方式（本包关键点，未照抄"PYTHONPATH 注入"）：
+#   ① **必须用宿主解释器**：python 依赖自带的 bin/python3.12 其 _ctypes 解析不到
+#      libffi（ffi_prep_closure_loc: symbol not found），而 testing/conftest.py:4
+#      顶层就 `from ctypes import util` → 整个 session 在收集期即崩（实测 exit=4）。
+#      宿主 python 的 ctypes 正常，且同为 CPython 3.12/aarch64-linux-ohos，ABI 兼容。
+#   ② 测试运行期要**现场编译**上百个 C 扩展（cffi verify/recompile），musl 下必须
+#      显式 -lpython3.12，故测试环境补 LDFLAGS（实测 134 项 ImportError → 0）。
+#   ③ OHOS 无裸名 `cc` 且 posix_spawn 不搜 PATH（E405）→ 注入 sitecustomize 补丁
+#      subprocess.Popen（pillow 10.4.0 先例），实测 209 项 ERROR → 0。
+#   ④ OHOS 无 ldconfig → ctypes.util.find_library('m'/'dl') 恒 None（E068）→
+#      sitecustomize 内按 soname 回退探测，实测 26 项失败 → 通过。
+#   ⑤ embedding 用例运行内嵌 CPython 的可执行文件，需宿主 libpython 在
+#      LD_LIBRARY_PATH 上（实测 exit 127 → 5 passed）。
+#   ⑥ setuptools 引导目录**不能**放进测试 PYTHONPATH（PYTHONPATH 不执行 .pth，
+#      子环境 distutils shim 缺失）→ 实测 zintegration 7 项 ERROR → 8 passed。
+upstream_tests:
+  - file: testing/
+    source: cffi-2.1.1/testing/
+    description: "上游 pytest 套件（38 个 test_*.py 模块：cffi0 16 + cffi1 17 + embedding 5；实测 1729 passed / 119 skipped / 1 deselected / 4 xfailed）"
+    command: "python3 -m pytest testing -q"
+
+# 平台限制（R51 如实申报，非库缺陷）
+platform_limitations:
+  - test: "testing/cffi1/test_verify1.py::test_verify_dlopen_flags"
+    reason: >-
+      该用例断言 sys.setdlopenflags(RTLD_GLOBAL) 载入的库，其导出符号能被之后
+      载入的另一个库解析（Linux 上成立）。实测 OHOS 加载器**不做全局作用域符号
+      传播**：用纯 ctypes（不经 cffi）复现——liba.so 导出 probe_sym_a 并以
+      RTLD_GLOBAL 载入后，引用该符号的 libb.so 仍报
+      `Error relocating libb.so: probe_sym_a: symbol not found`。
+    classification: "平台能力限制（与 musl 的 dlopen 作用域语义相关），非库缺陷"
+    handling: >-
+      配方内 _rtld_global_propagates() **先探针实测**（独立编两个 .so + 子进程
+      验证），仅在确认平台不传播时才 --deselect——平台若放开该能力，用例自动
+      恢复执行，不写死跳过。
+    note: >-
+      探针不可用（编译失败）时**不排除**该用例，让其自行失败以暴露问题。
+
+# test_package 中自带的测试（消费者视角验证）
+test_package_tests:
+  - file: test_cffi.py
+    description: >-
+      消费者测试（23 断言，R34 真实 API）：import cffi + _cffi_backend（C 扩展
+      确实可 dlopen）+ 版本一致性 + ABI 模式（ffi.new/dlopen(None)/strlen/
+      strchr）+ 指针与数组 + 结构体字段 + from_buffer + sizeof/offsetof +
+      ffi.callback + **C 侧反向调用 Python 回调（libc qsort）** +
+      new_handle/from_handle + typeof + **负例**（cdef 拒绝非法 C）。
+      刻意**不断言** verify()/API 模式：它在 Python >=3.12 上要求运行期可用
+      setuptools（实测报 "requires setuptools on Python >= 3.12"），而 setuptools
+      并非本包交付契约、也未发布到 ohpcd（运行期依赖仅 pycparser）——写成断言会把
+      "消费者环境没装 setuptools"误报成"包坏了"。
+    command: "python3 test_cffi.py <site-packages-dir>"
+
+# 测试断言总数（实测：23）
+assertion_count: 23
+
+# 上游测试实测结果（R51 如实申报）
+upstream_test_note: >-
+  上游 pytest 套件在 build() 内真实运行，实测 **1729 passed, 119 skipped,
+  1 deselected, 4 xfailed**（conan create 内 896s）。**零失败**：套件退出码非 0
+  （含超时 5400s）时 conan create 直接失败，杜绝「测试没跑通但构建成功」。
+  通过率 = 1729/(1729+0) = **100%**（分母不含上游自身 skip/xfail 与平台限制
+  deselect）。测试依赖由构建期从平台 pip 镜像取到独立目录；取依赖失败显式抛错，
+  不以跳过冒充通过。test_package 消费者测试：**23/23 passed**。

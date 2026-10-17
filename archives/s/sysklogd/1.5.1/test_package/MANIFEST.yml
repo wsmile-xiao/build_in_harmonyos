@@ -1,0 +1,85 @@
+# test_package/MANIFEST.yml -- sysklogd 1.5.1
+#
+# 字段口径取自仓内既有先例（archives/a/acpid/2.0.34/test_package/MANIFEST.yml、
+# archives/a/abduco/0.6/test_package/MANIFEST.yml）：
+#   package / homepage / upstream_check_command / upstream_test_in_build /
+#   upstream_test_command / upstream_tests[{file,source,description,command}] /
+#   test_package_tests[{file,description,command}] / assertion_count
+# 未自创字段；"未执行 + 真实原因"按 docs/TEST_QUALITY_SPEC.md §3.3 的要求写在
+# 对应条目的 description 文本里（仓内暂无 exempt/status 字段先例，不发明）。
+
+package: "sysklogd/1.5.1"
+homepage: "https://www.infodrom.org/projects/sysklogd/"
+
+# 上游只有一个 test 目标，没有 check 目标：
+#   $ grep -n "^check" Makefile      -> 无输出
+#   Makefile:78  test: syslog_tst ksym oops.ko tsyslogd
+# 该目标是**构建**目标（把 4 个测试产物编出来），没有任何"运行 + 断言"的入口，
+# 因此 conanfile.build() 不运行它（详见下面逐条说明）。
+upstream_check_command: "make test"
+upstream_test_in_build: false
+upstream_test_command: ""
+
+upstream_tests:
+  - file: "Makefile"
+    source: "sysklogd-1.5.1/Makefile:78 (test: syslog_tst ksym oops.ko tsyslogd)"
+    description: "上游唯一的测试入口。未执行，真实原因分三条：它需要构建 oops.ko 内核模块（本平台无内核构建树，见下条）；它产出的 4 个程序都不是断言程序（无退出码判定、无期望值表）；其中 syslog_tst 硬编码写 /dev/log，非特权用户无法绑定该路径。本包用等价的、可断言的形式覆盖同一契约（见 test_package_tests）。"
+    command: "make test"
+
+  - file: "oops.c"
+    source: "sysklogd-1.5.1/Makefile:141-142 (oops.ko: make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules)"
+    description: "内核模块测试件。本平台不可执行，真实原因：设备实测 ls /lib/modules 返回 RC=1、/usr/src 不存在，即没有可编译外部模块的内核构建树；且 HarmonyOS PC 不接受加载未签名外部 .ko。其依赖的 linux/init.h 与 linux/proc_fs.h 在 sysroot 中确实缺失（本次 48 个头文件全量扫描仅缺这 2 个 + sys/msgbuf.h，三者都只被 oops.c/syslogd.c 的非 SYSV 分支引用），属同一结论的旁证，而不是本包 syslogd/klogd 的构建障碍。"
+    command: "make oops.ko"
+
+  - file: "syslog_tst.c"
+    source: "sysklogd-1.5.1/syslog_tst.c (Makefile:89-90, 113-114)"
+    description: "上游自带的日志客户端（openlog/syslog 打到 /dev/log，再从 stdin 灌数据）。未执行，真实原因：目标 socket 路径不可重定位，需要 root 才能占住 /dev/log，且程序自身只产生流量、不做任何断言。本包的 test_consumer.c 覆盖同一契约并改为可断言形式（socket 路径由 argv 注入 + 退出码判定）。"
+    command: "make syslog_tst && ./syslog_tst"
+
+  - file: "ksym.c"
+    source: "sysklogd-1.5.1/Makefile:116-120 (ksym: ksym_test.o ksym_mod.o, -DTEST)"
+    description: "上游内核符号表解析测试件（读 /proc/modules 与模块符号）。未执行，真实原因：本平台运行期是否有 /proc/modules 尚未实测（属构建闸口待验项，见 notes.md 的待验清单），不在有证据前声称它可跑或不可跑；该目标也不含断言。"
+    command: "make ksym && ./ksym"
+
+  - file: "syslogd.c / klogd.c (-DTESTING)"
+    source: "sysklogd-1.5.1/Makefile:92-96 (tsyslogd, tklogd)"
+    description: "上游的 TESTING 变体构建目标（关掉 pidfile/fork 等常驻逻辑，便于人工观察）。未执行，真实原因：它们只是**另一种构建**，没有 runner、没有断言、没有期望值表，跑起来也不会给出 pass/fail 判据；且 tklogd 仍需 klogctl 权限。本包改为在正式产物上做可断言的 CLI + 端到端检查（见 test_package_tests）。"
+    command: "make tsyslogd"
+
+# test_package 的断言清单（test_runner.sh 逐条 pass/fail/skip 计数，
+# 退出码即判决；assertion_count 与该脚本的 checks 总数一一对应）。
+test_package_tests:
+  - file: "test_consumer.c"
+    description: "真实消费者程序：由测试驱动现场编译，对 syslogd 提供的 AF_UNIX SOCK_DGRAM 日志套接字执行 socket(2)/connect(2)/send(2)，优先级用 <sys/syslog.h> 的 LOG_USER|LOG_INFO 组装而非魔数；每一步转成退出码。"
+    command: "cc -Wall -o test_consumer test_consumer.c"
+
+  - file: "test_runner.sh"
+    description: "13 条断言：syslogd/klogd 已安装且可执行（2）；syslogd -v 输出 'syslogd 1.5.1' 且 exit 0（1）；klogd -v 输出 'klogd 1.5.1' 且 exit 1（1，上游 case 'v' 里就是 exit(1)）；syslogd 对未知选项打印 usage 并 exit 1（1）；usage 文本包含 -p/-m/-s/-f 选项面（1）；消费者程序编译成功（1）；syslogd 用 -p 绑定日志套接字（1）；单行投递（1）；两行合并投递（1）；单行记录被路由进配置文件指定的日志文件（1）；多行记录的第二行也被落盘（1）；klogd 经 klogctl(2) 读内核日志（1，见下）。端到端项的 scratch 目录由
+  #   test_package/conanfile.py 放在 tmpfs：本设备实测在 HMDFS 路径上 bind(2) 一
+  #   个 AF_UNIX 套接字返回 Operation not permitted，在 /data/storage/el2/base 上
+  #   bind 与 chmod 均正常（/dev/shm 上是 Permission denied）。"
+    command: "bash test_runner.sh <sbin> <cc> <work>"
+
+  - file: "test_runner.sh"
+    description: "第 13 条是运行期受限项，本次真机实测为 SKIP，并列原因两条：① klogd 在读内核日志之前先落自己的 pid 文件，该路径是编译进去的（klogd.c 的 PidFile 由 _PATH_VARRUN 拼接 klogd.pid，即上游 Makefile 传 -DFSSTND 时落到 /var/run/klogd.pid），而 klogd 的 getopt 串 c:df:iIk:nopsvx2 不提供任何覆盖入口；本设备实测 /var/run 目录不存在，于是 write_pid() 失败即走 Terminate()，非特权下根本到不了读取那一步。② klogctl(2) 本身要求 CAP_SYSLOG。两条都只支持 SKIP，不支持记通过。补丁 0001 真正关心的符号解析问题改由链接期事实覆盖：lld 对可执行文件里的未定义符号是硬报错（本次用调用一个不存在函数的对照程序复现出 ld.lld: error: undefined symbol），而 klogd 链接成功，说明 klogctl 确已解析；测试驱动里若出现动态链接/符号类报错仍判 FAIL。syslogd 侧同类 pid 文件写入被上游 if (!Debug) 守卫挡住，这也是端到端断言带 -d 运行的原因，属上游既有行为、非本包改动。"
+    command: "klogd -n -s -o -f <work>/klogd.out"
+
+# 与 test_runner.sh 的 checks 计数一致：13 条。本次真机实测 SUMMARY
+# checks=13 failures=0 skips=1、VERDICT=PASS、脚本退出码 0；SKIP 的那条是
+# klogd 内核日志读取，原因见上一条。
+assertion_count: 13
+
+
+# ── 资源预算（手册/05 资源纪律 ⓓ 先评估 + ⓥ 只认硬封顶）──────────────────
+# 探针（memcap-run.py --probe，跑 conanfile.build() 逐字一致的 make，干净 tmpfs 副本树，
+#       日志 /storage/Users/currentUser/tmp/uc2/sysklogd/ 与 notes.md §10.1）：
+#       MEMCAP[probe] peak=94MB budget=2000MB rc=0 用时1.9s
+# 正式闸口（build-slot.sh --wait 300 --mem 3000 -- memcap-run.py --mb 1500
+#       --avail-factor 1.2 --slow -- python3 scripts/ohc-run.py conan-verify sysklogd 1.5.1）：
+#       MEMCAP[run] peak=126MB budget=1500MB rc=0 用时25.1s（含 conan create + 本 test_package 端到端）
+# finish（同一外壳）：MEMCAP[run] peak=124MB budget=1500MB rc=1 用时41.2s
+# 口径：max_rss_mb 是**授予的硬预算**（超了由 memcap 杀进程组，rc=90），实测峰值另记在下两行，
+#       不拿预算冒充实测；本机无内核级内存封顶手段，故预算必须由 --mb 给出而非靠降速。
+max_rss_mb: 1500
+measured_peak_rss_mb: 126
+probe_peak_rss_mb: 94

@@ -1,0 +1,30 @@
+draft: DRAFT-xdp-tools-1.6.3-ohos-libc-uapi-header-struct-conflict
+status: pending-editor-review
+id: DRAFT-xdp-tools-1.6.3-ohos-libc-uapi-header-struct-conflict
+title: OHOS/bionic 下 libc 头与内核 UAPI 头的结构体冲突：同名双定义 + UAPI 改名
+trigger_tool: make|clang|cc
+phase: compilation
+error_signature: redefinition of 'ethhdr'|redefinition of 'sysinfo'|arithmetic on a pointer to an incomplete type 'struct udphdr'|previous definition is here.*linux/if_ether\.h|previous definition is here.*linux/sysinfo\.h|forward declaration of 'struct udphdr'
+severity: 2
+category: portability, headers, kernel-uapi, musl-bionic, cross-compile
+match_keywords: struct ethhdr, netinet/if_ether.h, linux/if_ether.h, struct sysinfo, sys/sysinfo.h, linux/sysinfo.h, struct udphdr, __kernel_udphdr, netinet/udp.h, __UAPI_DEF_ETHHDR, libc-compat, OHOS, bionic, musl, XDP, bpf, clang -target bpf
+root_cause: OHOS/bionic 把内核 UAPI 与 libc 头拆开且未实现 glibc 的 libc-compat 互操作：libc 头 netinet/if_ether.h、sys/sysinfo.h 无条件定义 struct ethhdr / struct sysinfo，而内核头 linux/if_ether.h、linux/sysinfo.h 也定义同名结构体（前者仅在 __UAPI_DEF_ETHHDR 为 0 时让位），同一 TU 里同时包含即 redefinition；更甚者 UAPI 把 UDP 头改名为 struct __kernel_udphdr，struct udphdr 只在 libc-only 的 <netinet/udp.h>，而 clang -target bpf 不能引 libc 头，于是内核侧解析助手拿到的是不完备类型。
+affected_scope: 所有在 OHOS/musl 上同时（直接或经第三方头传递）包含 libc 网络头与内核 UAPI 头的 C 项目；尤其 clang -target bpf 的 eBPF 程序（不能引 netinet/*）、以及通过 libpcap/libbpf 等把 UAPI 头拉进 TU 的用户态程序
+verification_cmd: grep -n 'ethhdr' $SYSROOT/usr/include/netinet/if_ether.h; grep -n '__UAPI_DEF_ETHHDR' $SYSROOT/usr/include/linux/if_ether.h; grep -n 'struct __kernel_udphdr' $SYSROOT/usr/include/linux/udp.h; grep -n 'struct udphdr' $SYSROOT/usr/include/netinet/udp.h
+rec_priority: 1
+rec_approach: guard-or-restore-uapi-struct
+rec_description: 按形态分别处理：①同名双定义——在会同时看到两套头的 TU 顶部，于任何 include 之前置 __UAPI_DEF_ETHHDR=0（等价 glibc libc-compat），或对 sysinfo 预先定义内核头 guard _LINUX_SYSINFO_H 跳过 UAPI 版本，让 libc 定义成为唯一定义；②UAPI 改名——在仅给 bpf/内核侧使用的公共头里，用构建期特性宏（如 HAVE_OHOS_BPF，由配方在 config.mk 注入 HAVE_FEATURES）回补 struct udphdr 的 UAPI 定义；不要给 bpf 目标引 <netinet/udp.h>。
+rec_command: printf '#ifndef __UAPI_DEF_ETHHDR\n#define __UAPI_DEF_ETHHDR 0\n#endif\n' >> /tmp/guard.h; cc -include /tmp/guard.h -c source.c; printf '#define _LINUX_SYSINFO_H\n' >> /tmp/guard2.h; cc -include /tmp/guard2.h -c source.c
+rec_auto_fix: false
+rec_impl: source-patch
+fallback_priority: 2
+fallback_approach: vendor-uapi-header
+fallback_description: 若不便改各 TU，可为该项目补一份 vendored <linux/udp.h> 覆盖 UAPI 版本，并确保 -I<vendored> 在 sysroot 之前；或对同名结构冲突统一用编译参数 -D__UAPI_DEF_ETHHDR=0 / -D_LINUX_SYSINFO_H。注意编译参数是全局的，需确认没有 TU 只含 UAPI 头却依赖其定义。
+fallback_command: make CFLAGS="-D__UAPI_DEF_ETHHDR=0 -D_LINUX_SYSINFO_H $CFLAGS"
+fallback_auto_fix: false
+fallback_impl: build-env
+similar_to: E091, E119
+principles:
+doc_file: DRAFT-xdp-tools-1.6.3-ohos-libc-uapi-header-struct-conflict.md
+source_event: xdp-tools 1.6.3 OHOS 适配（任务 #12086）：构建整棵工具树时 libc <netinet/if_ether.h>/<sys/sysinfo.h> 与 UAPI <linux/if_ether.h>/<linux/sysinfo.h> 冲突；且 UAPI 把 struct udphdr 改名为 struct __kernel_udphdr，clang -target bpf 编 parsing_helpers.h 时报不完备类型
+authors: staralsnow

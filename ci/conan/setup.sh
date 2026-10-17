@@ -22,26 +22,91 @@ echo "[step] Conan environment setup..."
 # ── 1. Detect/install Conan ──
 # pip3 可能装到 ~/.local/bin, 确保在 PATH 上
 export PATH="$HOME/.local/bin:$PATH"
+source "$SCRIPT_DIR/sqlite_runtime.sh"
+ensure_python_sqlite_runtime || exit 1
+
+# Ensure Python's sqlite3 module works (conan requires it for cache DB)
+# Some CI workers' HNP Python has _sqlite3.so dynamically linking
+# libsqlite3.so.0 which may not be installed.
+if ! python3 -c "import sqlite3" &>/dev/null; then
+    echo "[step] Python sqlite3 broken, installing libsqlite3..."
+    DST="${DEFAULT_PREFIX:-$HOME/usr/local}"
+    python3 - "$DST" <<'PYEOF' || { echo "[error] Failed to install sqlite3"; exit 1; }
+import urllib.request, os, tarfile, tempfile, sys
+dst = sys.argv[1]
+url = "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/sqlite3-3.49.1-ohos-aarch64.tar.gz"
+tmp = tempfile.mkdtemp()
+tarball = os.path.join(tmp, "sqlite3.tar.gz")
+urllib.request.urlretrieve(url, tarball)
+with tarfile.open(tarball, "r:gz") as tar:
+    tar.extractall(dst)
+print(f"sqlite3 installed to {dst}")
+PYEOF
+fi
 
 # Check both that conan exists AND is functional (conan --version succeeds)
 # If conan binary exists but is broken, force-reinstall to fix
 if ! command -v conan &>/dev/null || ! conan --version &>/dev/null; then
     echo "[step] Conan not found or broken, (re)installing..."
-    # 安装 OHOS 适配版 conan（私有 PyPI 提供，基线 2.29.1，已适配 OHOS 平台）
-    # 不要钉死官方旧版本号，应从配置的 PyPI 源安装最新适配版
-    # Use python3 -m pip to bypass potentially broken pip3 shebang
-    # (HNP pip3/conan binaries may have shebangs pointing to non-existent
-    #  build-machine paths with ^M line endings)
-    python3 -m pip install --user --force-reinstall conan || {
-        echo "[error] Failed to install conan"
+    # 安装 OHOS 适配版 conan（社区 PyPI 提供，基线 2.29.1，已适配 OHOS 平台）。
+    # 社区 PyPI 只托管适配版 conan wheel，不保证包含 requests/idna 等通用依赖；
+    # 因此分两步：先从社区源下载 conan wheel，再安装本地 wheel 并从公开 PyPI 解析依赖。
+    # 这样既避免误装官方 conan，又避免社区源缺依赖导致 CI setup 失败。
+    PIP_COMMUNITY_INDEX="${PIP_COMMUNITY_INDEX:-https://pypi.cnb.cool/OpenHarmonyPCDeveloper/pypi/-/packages/simple}"
+    PIP_PUBLIC_INDEX="${PIP_PUBLIC_INDEX:-https://pypi.org/simple}"
+    PIP_TMP_DIR="${TMPDIR:-$HOME/tmp}/conan-wheel-$$"
+    mkdir -p "$PIP_TMP_DIR"
+
+    python3 -m pip download --no-deps --dest "$PIP_TMP_DIR" \
+        --index-url "$PIP_COMMUNITY_INDEX" --trusted-host pypi.cnb.cool conan || {
+        echo "[error] Failed to download OHOS-adapted conan wheel"
         exit 1
     }
+
+    CONAN_WHEEL="$(find "$PIP_TMP_DIR" -name 'conan-*.whl' -type f | head -n 1)"
+    if [ -z "$CONAN_WHEEL" ]; then
+        echo "[error] OHOS-adapted conan wheel not found in $PIP_TMP_DIR"
+        exit 1
+    fi
+
+    # Use python3 -m pip to bypass potentially broken pip3 shebang.
+    python3 -m pip install --user --force-reinstall \
+        --index-url "$PIP_PUBLIC_INDEX" "$CONAN_WHEEL" || {
+        echo "[warn] conan install failed, trying to fix dependencies (requests)..."
+        python3 -m pip install --user --upgrade "requests>=2.25,<3.0" && \
+        python3 -m pip install --user --force-reinstall \
+            --index-url "$PIP_PUBLIC_INDEX" "$CONAN_WHEEL" || {
+            echo "[error] Failed to install conan"
+            exit 1
+        }
+    }
+    rm -rf "$PIP_TMP_DIR" 2>/dev/null || true
     # Ensure user-installed binaries are found before any broken HNP version
     export PATH="$HOME/.local/bin:$PATH"
 fi
 
 CONAN_VERSION=$(conan --version 2>/dev/null || echo "unknown")
 echo "[step] Conan version: $CONAN_VERSION"
+
+# If conan still can't run after install/reinstall, diagnose the root cause
+if [ "$CONAN_VERSION" = "unknown" ]; then
+    echo "[error] conan 仍然无法运行, 诊断系统环境..."
+    python3 -c "import sqlite3" 2>&1 || \
+        echo "[error] Python sqlite3 became unavailable after environment setup"
+    python3 -c "import ssl" 2>&1 || echo "[error] Python ssl 模块损坏 — libssl.so 缺失"
+    # Check for other missing shared libraries
+    PYTHON3_BIN=$(which python3 2>/dev/null)
+    if [ -n "$PYTHON3_BIN" ]; then
+        ldd "$PYTHON3_BIN" 2>/dev/null | grep "not found" | while read -r line; do
+            echo "[error] 缺失动态库: $line"
+        done
+    fi
+    # Final check — if still broken, exit with clear message
+    if [ "$CONAN_VERSION" = "unknown" ]; then
+        echo "[error] Conan 无法启动, Worker 环境需要修复 (非 CI 脚本问题)"
+        exit 1
+    fi
+fi
 
 # ── 1b. Refresh stale settings.yml ──
 # conan caches settings.yml on first run; if conan was upgraded (e.g. OHOS
@@ -72,6 +137,8 @@ if conan remote list 2>/dev/null | grep -q "^${CONAN_REMOTE_NAME}:"; then
     echo "[step] remote 已就绪: ${CONAN_REMOTE_NAME}"
 else
     echo "[step] remote '${CONAN_REMOTE_NAME}' 不存在, 自动添加 (匿名读取)"
+    # --force 确保重复运行不会失败（幂等）
+    conan remote add --force "${CONAN_REMOTE_NAME}" "${CONAN_REMOTE_URL}" 2>/dev/null || \
     conan remote add "${CONAN_REMOTE_NAME}" "${CONAN_REMOTE_URL}" || {
         echo "[error] 无法添加 remote '${CONAN_REMOTE_NAME}'"
         exit 1

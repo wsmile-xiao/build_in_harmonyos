@@ -1,0 +1,81 @@
+# 版本级 manifest — dasm 2.20.15-202011092.20.14.1
+
+version: "2.20.15-202011092.20.14.1"
+software: "dasm"
+
+status: built
+build_date: "2026-09-10"
+build_system: custom
+
+source:
+  # 平台版本串是 Debian 版本 2.20.15~20201109+really2.20.14.1 的规范化形式
+  #（~ → -、+really → 空）。源包文件名必须用 Debian 原始拼写。
+  url: "https://deb.debian.org/debian/pool/main/d/dasm/dasm_2.20.15~20201109+really2.20.14.1.orig.tar.gz"
+  sha256: "ec71ffd10eeaa70bf7587ee0d79a92cd3f0a017c0d6d793e37d10359ceea663a"
+  tar_format: tar.gz
+  upstream_release: "2.20.14.1"   # src/version.h 的 DASM_RELEASE
+
+build:
+  system: custom
+  configure_options:
+  - "不跑上游 Makefile，直接驱动 OHOS clang（配方 build() 显式列出 11 个核心 .c）"
+  - "clang -O2 -std=c99 -I. -include dasm_ohos_compat.h -c <11 个核心 .c + dasm_ohos_compat.c>"
+  - "clang ... <全部 .o> -o dasm"
+  - "clang ... -c ftohex.c -o ftohex.o && clang ... ftohex.o -o ftohex"
+  dependencies: []
+  cc: clang
+  cxx: N/A
+
+patches_applied: []
+# 未改上游源码：musl 缺失的 strlcat/strlcpy 以「-include 前置兼容头 + 单独编译的
+# 兼容实现」补桥，属于配方侧 shim，不是源码补丁。
+
+artifacts:
+  bin:
+  - name: dasm
+    size: 203552
+    format: ELF64
+    arch: aarch64
+    type: PIE
+    needed: ["libc.so"]
+    interpreter: "/lib/ld-musl-aarch64.so.1"
+  - name: ftohex
+    size: 16720
+    format: ELF64
+    arch: aarch64
+    type: PIE
+  share:
+  - "dasm/machines/{atari2600,atari7800,68hc11,68hc908,channel-f}/*  （用户经 -I 引入的机器头/宏）"
+  - "doc/dasm/{ChangeLog,NEWS,README,LICENSE,dasm.txt,ftohex.txt}"
+  - "man/man1/dasm.1"
+
+tests:
+  upstream_suite:
+    harness: "test/run_tests.sh（上游自带，bash + find/sed/awk/diff）"
+    command: "cd test && bash run_tests.sh -S 7"
+    result: "executed 93 tests, 85 OK, 8 failed"
+    note: >-
+      8 个未通过项全部集中在测试框架自检目录 selftest/（0_no_assembly、1_no_binary、
+      2_hexref_missing、3_binary_different、5_must_fail、6_false_positive_fail、
+      7_false_positive_fail 共 7 项）与 atari7800/spritesample（1 项）。
+      selftest/ 是"故意制造失败以验证 harness 能识别失败"的元测试，其 FAILED 属
+      上游既有状态；上游 Makefile 自身亦注明 "testing is not fully automated yet"。
+  upstream_cases_in_test_package: 12
+  test_package_assertions: 38
+  test_package_result: "38 passed, 0 failed（在真实 OHOS aarch64 制品上实跑）"
+
+ohos_adaptation:
+  key_points:
+  - "★ OHOS musl 不提供 strlcat/strlcpy（glibc 直到 2.38 才纳入），而 errors.c 无条件调用 strlcat；用 -include 前置兼容头 + 单独编译实现补桥。"
+  - "不跑上游 Makefile：其 build 目标会 mkdir bin/ 并 cp 产物，污染 conan 源码树；且 ftohex 的链接依赖 make 隐式规则。"
+  - "conan copy() 的 pattern 是相对 src 的 fnmatch：以 source_folder 为 src 时 bin/dasm 匹配不到 'dasm'，会静默零拷贝 —— 必须以 <source>/src 为 src。"
+  - "test_package 用 -std=c99 时必须先定义 _POSIX_C_SOURCE，否则 popen/pclose 声明被隐藏，指针截断导致运行时段错误。"
+  - "consumer 测试落地文件一律写 cwd（conan 构建目录），不写 /tmp（OHOS 上 /tmp 只读）。"
+
+knowledge_gained:
+- "OHOS(musl) 缺 <code>strlcat</code>/<code>strlcpy</code>：这两个函数源自 OpenBSD，glibc 到 2.38（2023-08）才纳入，musl 至今没有。凡是 BSD 血统或近年新写的 C 代码（dasm 的 errors.c 三处调用）在 glibc 上能过、在 OHOS musl 上必挂。表现随方言而变：严格 ISO C 下是隐式声明（clang 15+ 直接报错），否则是链接期 undefined reference。"
+- "补桥用 <code>-include</code> 前置一个用宏改名的兼容头（<code>#define strlcat dasm_compat_strlcat</code>），而不是改上游源码或条件声明：在已提供 strlcat 的 libc 上，<code>string.h</code> 里的原型会被一并改名成同签名自带实现，无重复定义风险；在 musl 上则同时给出声明与实现。"
+- "<code>conan.tools.files.copy()</code> 的 pattern 是与「相对 src 的路径」做 fnmatch，不是与 basename 匹配。以 source_folder 为 src 拷 bin/dasm 时，相对路径是 <code>bin/dasm</code>，<code>fnmatch('bin/dasm','dasm')</code> 为假 —— 一个字节都不拷且**不报错**，package 目录里静默没有二进制，只有 test_package 才能发现。"
+- "test_package 用 <code>-std=c99</code>（严格 ISO，未定义 _POSIX_C_SOURCE）时，glibc 与 musl 都会隐藏 <code>popen</code>/<code>pclose</code> 的声明；隐式 int 返回被赋给 <code>FILE *</code> 造成指针截断，编译仅告警、运行必段错误（实测 glibc 2.35 上 exit 139）。CMake 默认 gnu 方言不暴露该问题，显式 -std=c99 才复现。"
+- "dasm 的 <code>-f1</code> 原始格式输出 = 2 字节小端 origin 头 + 机器码；上游 .bin.ref 即此布局，是回归比对的权威判据（.hex.ref 只在失败时用于 diff 展示）。"
+- "上游 <code>test/run_tests.sh</code> 分 strict=off / strict=on 两段，同一用例可同时登记 <code>.bin.ref</code>（非 strict 期望成功）与 <code>.fail</code>（strict 期望报错，并带期望错误码）。双登记用例的 <code>.bin</code> 会被 strict 段清空，逐字节复核时必须在非 strict 段之后单独重跑。"

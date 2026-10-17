@@ -1,0 +1,82 @@
+# ══ Draft knowledge entry — Conan 打包 autotools 库：安装布局与 pkg-config 前缀失真 ══
+# Timestamp: 2026-09-18
+# Software: libart-lgpl 2.3.21（GNOME libart_lgpl；autotools + libtool 2.2.6）
+# Gate: conan create（ohos-aarch64 profile，clang 15）rc=0；上游 demo 程序 6/6、
+#       消费者断言 20/20（OHOS aarch64 真机实跑）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. 复核下方证据
+#   2. 重命名为 E0XX.kv 并移入 knowledge/graph/
+#   3. 在 knowledge/graph/index.tsv 增加一行
+id: draft-libart-lgpl-2.3.21-conan-autotools-install-layout-pkgconfig
+title: Conan 下 autotools 库的 .pc 中 prefix=/ 与 cpp_info.includedirs 错配，消费者 find_package/pkg-config 取到系统路径或不存在的头目录
+trigger_tool: conan|cmake|pkg-config
+phase: installation
+error_signature: Imported target .* includes non-existent path|INTERFACE_INCLUDE_DIRECTORIES|^prefix=/|pkg-config .* not found
+severity: 2
+category: conan|autotools|pkg-config|build-system|installation
+match_keywords: pkg-config, .pc, prefix=/, DESTDIR, cpp_info.includedirs, CMakeDeps,
+  non-existent path, INTERFACE_INCLUDE_DIRECTORIES, include/libart-2.0, autotools layout,
+  conan create, find_package, replace_in_file
+keywords: prefix=/, DESTDIR, pkg-config, .pc, cpp_info.includedirs, CMakeDeps,
+  INTERFACE_INCLUDE_DIRECTORIES, include/libart-2.0, conan create, find_package,
+  replace_in_file, autotools 安装布局
+root_cause: >
+  (1) Conan 的 Autotools 流程以 `--prefix=/` 配置、`make install DESTDIR=<pkg>` 安装，
+  上游 `*.pc.in` 里的 `@prefix@` 展开成 `/`。包内 `lib/pkgconfig/libart-2.0.pc` 于是写成
+  `prefix=/`、`Cflags: -I/include/libart-2.0`、`Libs: -L/lib`，任何走 pkg-config 的消费者
+  （含在 OHOS 设备上直接用 pkg-config 构建的项目）拿到的是系统路径而不是包路径。
+  (2) 上游 autotools 的安装布局常把公共头放在 `include/<api-name>/<libname>/`
+  （libart 实测为 `include/libart-2.0/libart_lgpl/`）。配方若按想当然写
+  `includedirs=["include","include/libart_lgpl"]`，CMakeDeps 生成的
+  `INTERFACE_INCLUDE_DIRECTORIES` 会包含不存在的目录，CMake 在 configure 阶段直接报
+  `Imported target "libart-lgpl::libart-lgpl" includes non-existent path` 并终止。
+  两类失真同源：**都没有以“安装后的实际布局”为准反推 cpp_info/.pc**。
+approach: >
+  以“安装后实测”为准反推 cpp_info。先让包落地（conan create 或只看 install 日志的
+  DESTDIR 路径），用 `find <pkg> -maxdepth 3 -type d` 与 `ls <pkg>/include` 确认头/库/.pc
+  的真实位置；据此设置 `cpp_info.includedirs`（含 `include/<api-name>`），并在 package()
+  里把 .pc 的 prefix/exec_prefix/libdir/includedir 幂等重写为 package_folder。
+  修复后必须让 test_package 用 CMakeDeps 走一次真实 find_package 才能暴露 includedirs
+  错配（只跑直接编译的消费者测试不会触发）。
+rec_command: |
+  # package()
+  pkg_config = os.path.join(self.package_folder, "lib", "pkgconfig", "libart-2.0.pc")
+  if os.path.isfile(pkg_config):
+      replace_in_file(self, pkg_config, "prefix=/", "prefix=" + self.package_folder)
+      replace_in_file(self, pkg_config, "exec_prefix=${prefix}",
+                      "exec_prefix=" + self.package_folder)
+      replace_in_file(self, pkg_config, "libdir=${prefix}/lib",
+                      "libdir=" + os.path.join(self.package_folder, "lib"))
+      replace_in_file(self, pkg_config, "includedir=${prefix}/include",
+                      "includedir=" + os.path.join(self.package_folder, "include"))
+  # package_info()
+  self.cpp_info.libs = ["art_lgpl_2"]
+  self.cpp_info.includedirs = ["include", "include/libart-2.0"]
+  self.cpp_info.set_property("pkg_config_name", "libart-2.0")
+  # test_package/CMakeLists.txt 必须真实 find_package + target_link_libraries
+  #   find_package(libart-lgpl CONFIG REQUIRED)
+  #   target_link_libraries(libart_lgpl_consumer PRIVATE libart-lgpl::libart-lgpl)
+verification_cmd: >
+  PKG_CONFIG_PATH=<pkg>/lib/pkgconfig pkg-config --cflags --libs libart-2.0
+  # 期望：-I<pkg>/include/libart-2.0 … -L<pkg>/lib -lart_lgpl_2（不是 / 或 /usr）
+  # 且 conan create 的 test_package（CMakeDeps find_package）配置阶段通过
+  # 对照实验（区分上游写错 vs Conan 失真）：同一源码原生
+  #   ./configure --prefix=<dir> && make install
+  #   PKG_CONFIG_PATH=<dir>/lib/pkgconfig pkg-config --cflags --libs <name>
+  # 原生输出正确 → 失真来自 Conan 的 --prefix=/ + DESTDIR（libart 实测确实如此）
+affected_scope: >
+  所有上游自带 .pc.in 的 Conan autotools/CMake 配方，尤其在 OHOS 上会被其他项目以
+  pkg-config 消费时；所有头文件安装在 `include/<name>` 子目录、而 includedirs 仅按
+  默认 `include` 猜测的库；以及只测“直接编译消费者”而不跑 CMakeDeps find_package 的
+  test_package（会漏掉这类错配）。
+related: >
+  与 DRAFT-5851（Conan CMakeDeps 路径/程序路径缺失）同为“Conan 生成物与实际布局不符”
+  一族，但根因不同：5851 是 generate() 生成的路径文件缺 CMAKE_PREFIX_PATH/自定义 .pc
+  变量，本条是包内 .pc 前缀与 cpp_info.includedirs 相对安装布局失真。
+authors:
+  - "frj__ <241250055@smail.nju.edu.cn>"
+source_pr: pending
+source_commit: pending
+draft_date: 2026-09-18

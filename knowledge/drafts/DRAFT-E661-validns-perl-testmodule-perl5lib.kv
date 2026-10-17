@@ -1,0 +1,125 @@
+# ═══ Draft knowledge entry — validns 0.11.0 上游 TAP 套件的 Perl 模块缺口 ═══
+# Timestamp: 2026-09-22
+# Software: validns 8.00.11.0（上游 v0.11.0, DNS-OARC）
+# Gate: 首次适配（积分赛）；探索构建 conan create（make check 段）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E661.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E661.md
+
+id:                     DRAFT-E661
+trigger_tool:           perl|make check|Test::Harness|autotools|conan
+phase:                  build
+error_signature:        >-
+                         Can't locate Test/Command/Simple\.pm in @INC \(you may need to install the Test::Command::Simple module\)| BEGIN failed--compilation aborted at .*t/test\.pl| Test Summary Report.*t/test\.pl\s*\(Wstat.*Tests: 1 Failed: 1\)| Dubious, test returned 255| use_ok\("Test::Command::Simple"\)
+
+severity:               2
+category:               perl|upstream-tests|make-check|test-module|tap|conandata
+match_keywords:         Test::Command::Simple, Test::More, Test::Harness, use_ok, runtests,
+                        TAP, done_testing, PERL5LIB, libtest-command-simple-perl, nocheck,
+                        graceful degrade, t/test.pl, CPAN
+
+title: 上游 make check 依赖非 core Perl 测试模块（如 Test::Command::Simple）：CPAN 官方发行物作 conandata 第二 source + 构建期 PERL5LIB 注入；警惕 test.pl「缺模块优雅退化」实为 1/1 失败断言的必败形态
+
+root_cause: >
+  1) 一类 C 项目的上游测试套件用 perl 写（Test::Harness 驱动 t/*.pl），且 use 了非 core
+     测试模块（validns 0.11.0 的 src/t/test.pl 首行 BEGIN { use_ok("Test::Command::Simple") }；
+     Debian 对应构建依赖 libtest-command-simple-perl <!nocheck>）。HarmonyOS PC 的两个
+     perl（设备 ~/.harmonybrew/bin/perl 5.44、CI worker /data/service/hnp/bin/perl 5.42）
+     都只有 core 模块：Test::More/Test::Harness 可加载，Test::Command::Simple 必缺
+     （perl -MTest::Command::Simple -e1 实测 BEGIN failed）。
+  2) 不能用 conan 的 perl 包补位：conan perl/5.42.2 是 OHOS 交叉构建，同架构 build 机上
+     dlopen 其 Cwd.so 失败（Perl_my_cxt_init 崩溃，见 device-facts §一.23），tool_requires
+     它反而把 PATH 里的系统 perl 顶掉。
+  3) 「缺模块时优雅退化」是必败形态而非可用降级：test.pl 的
+     BEGIN { use_ok(...) } 的 use_ok 失败不 die（只记一条失败断言），随后
+     unless (*run{CODE}) { done_testing; exit(0) } 把计划数定格为 1 → TAP 输出
+     "1..1 / not ok 1"，Test::Harness 判 Dubious, 1/1 Failed → make check rc!=0
+     → conan create 失败。即：看似「0 测试跳过」，实为「1 个失败断言」，不处理必红。
+  4) CI worker 无网络装 perl 模块，设备也无 CPAN 客户端可假设；模块必须随
+     conan 取源链路进入构建环境。
+
+affected_scope:         上游测试由 perl TAP 套件驱动、use 了非 core 测试模块的 C 项目
+                        （validns、以及任何 use Test::Command::Simple / Test::Cmd /
+                        Test::Differences 等的 autotools 项目）；HarmonyOS PC 设备与
+                        CI worker 的系统 perl 都不装非 core 测试模块。
+
+verification_cmd:       >-
+                        ① perl -MTest::Harness -MTest::More -e 1 → 确认 core 测试框架在；
+                        ② perl -MTest::Command::Simple -e 1 → 复现 "BEGIN failed" 缺口；
+                        ③ 在任务目录下执行 conan create <配方目录>
+                        -pr:h=<repo>/ci/conan/profiles/ohos-aarch64
+                        -pr:b=<repo>/ci/conan/profiles/ohos-aarch64 --build=missing，
+                        日志应含 "Result: PASS"（Test::Harness）与三个 C 自测程序的
+                        "All N tests successful."。
+
+rec_priority:           1
+rec_approach:           perl-test-module-via-conandata-second-source-perl5lib
+rec_description: >
+  1) 把模块的 CPAN 官方发行物（https://www.cpan.org/authors/id/.../*.tar.gz）登记为
+     conandata.yml 的第二 source（带 sha256），R39 官方源口径不变；仅用于测试面、
+     不进 package（等价 Debian 的 <!nocheck> 构建依赖语义）。
+  2) source() 里 get(..., strip_root=True, destination="test-perl") 解到源码树外的
+     子目录，避免混进上游源码 diff。注意 strip_root 会把发行物目录名一并剥掉：
+     模块树直接落在 test-perl/lib/Test/Command/Simple.pm（不要再拼发行物名一层）。
+  3) build() 里构造 Environment() 定义 PERL5LIB 指向解包出的 test-perl/lib，
+     with env.vars(self).apply(): autotools.make(target="check", ...)——不改动上游
+     测试脚本本身（R7/R8：不打平台补丁进 t/*.pl）。
+  4) 若模块加载失败仍可能发生（版本漂移），保留 shutil.which("perl") 的显式分支：
+     无 perl 时打 warning 标记 TAP 套件 NOT_RUN 并只跑 C 自测程序——跳过要有日志
+     痕迹，绝不伪造 PASS。
+  5) 不要 tool_requires conan perl（交叉构建 Cwd.so 同机不可 dlopen，会顶掉系统
+     perl）；make check 用系统 perl，core Test::Harness 两端都可用。
+  6) 计数口径：TAP 断言数取 t/test.pl 的计划/结果行，C 自测程序取各自的
+     "All N tests successful."；两者相加为上游测试 N′，与源码静态清点分开列报。
+
+rec_command:            PERL5LIB=<source_folder>/test-perl/lib make check
+rec_auto_fix:           false
+rec_impl:               conan-recipe-test-perl-module-perl5lib
+
+fallback_priority:      2
+fallback_approach:      skip-tap-suite-with-evidence
+fallback_description:   若无法引入模块（如 source 镜像不可达），显式跳过 TAP 套件：
+                        只构建并运行上游的 C 自测程序（validns 同类项目多有
+                        noinst_PROGRAMS 形态的自测），PR 里把 TAP 部分按 NOT_RUN
+                        申报并给出「模块不可得」的原始证据；禁止按 0 计数掩盖。
+fallback_command:       for t in test64 test32hex testcompose; do ./src/$t; done
+fallback_auto_fix:      false
+fallback_impl:          upstream-c-selftest-only
+
+forbid_1_pattern:       tool_requires\(\s*["']perl/
+forbid_1_reason:        conan perl 是 OHOS 交叉构建，同机 dlopen Cwd.so 失败（Perl_my_cxt_init），
+                        且会把 PATH 里的系统 perl 顶掉，make check 反而必败
+forbid_1_consequence:   autoreconf/ perl 脚本全线崩溃，形态像「上游脚本损坏」
+
+forbid_2_pattern:       (sed|patch).*t/test\.pl.*(use_ok|Test::Command)
+forbid_2_reason:        为绕过缺模块而删改上游测试脚本 = 删测试凑数（假绿）
+forbid_2_consequence:   上游测试分母失真，W4/外部审查按少报/造假一票否决
+
+forbid_3_pattern:       "Tests: 1 Failed: 1.*PASS|use_ok 失败.*跳过继续"
+forbid_3_reason:        「优雅退化成 1 个失败断言」不是 0 测试跳过，不得改写为 PASS/跳过
+forbid_3_consequence:   make check rc!=0 被 conan create 如实判负；若人为放行即假绿
+
+principles:             P001, P003, P011
+similar_to:             E007, E120
+conflicts_with:
+prerequisite_of:
+
+prescan_pattern:        '\bCan''t locate Test/\w+(::\w+)*\.pm in @INC|use Test::Command::Simple|libtest-command-simple-perl'
+prescan_globs:          "*.pl, Makefile.am, conanfile.py, conandata.yml, notes.md"
+
+doc_file:               knowledge/drafts/DRAFT-E661-validns-perl-testmodule-perl5lib.md
+last_updated:           2026-09-22
+source_event:           feat/validns-8.00.11.0 首次适配；探索构建日志
+                        conan-create-explore*.log（make check 段缺 Test::Command::Simple）
+authors:                validns-8.00.11.0 执行体
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-22

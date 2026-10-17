@@ -2,9 +2,9 @@
 
 ## 编译环境
 - 构建系统: Go (CGO_ENABLED=0 静态编译)
-- 编译日期: 2026-06-01
-- 编译器: Go 1.24.2 (~/usr/local/go/bin/go)
-- 状态: published
+- 编译日期: 2026-08-06
+- 编译器: Go 1.24.0 (auto-bootstrapped via conan recipe)
+- 状态: built
 
 ## 编译步骤
 
@@ -41,13 +41,13 @@ goenv 是一个 Go 语言项目，不需要传统的 configure/make 流程。
 
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
-| 1 | Go版本不匹配(compile: go1.23.6 vs go: go1.24.2) | ~/usr/local/bin/go的GOROOT指向旧版工具链 | 使用~/usr/local/go/bin/go(GOROOT=~/usr/local/go)，版本匹配 |
+| 1 | Go版本不匹配(compile: go1.23.6 vs go: go1.24.0) | ~/usr/local/bin/go的GOROOT指向旧版工具链 | conan recipe auto-bootstraps Go 1.24.0 SDK from golang.google.cn |
 | 2 | `go build` link步骤权限拒绝 | TMPDIR=/tmp只读(E002) | 设置TMPDIR=/data/storage/el2/base/cache |
 | 3 | `go test ./...` 全部permission denied | 鸿蒙ELF签名要求，test二进制未签名无法执行 | 平台限制，跳过测试，手动验证主二进制 |
 
 ## 依赖版本
 
-- Go 1.24.2 (~/usr/local/go/bin/go)
+- Go 1.24.0 (auto-bootstrapped from golang.google.cn in conan recipe)
 
 ## 验证结果
 
@@ -72,5 +72,5 @@ ELF executable, 64-bit LSB arm64, static, BuildID=16d8119feb2c6b3102bf45a982c5c2
 - Go test 无法在鸿蒙平台执行（ELF签名限制），功能验证通过手动运行 --version
 ---
 
-**编译结束**: 2026-06-01 20:40
-**最终状态**: published
+**编译结束**: 2026-08-06 14:52
+**最终状态**: built

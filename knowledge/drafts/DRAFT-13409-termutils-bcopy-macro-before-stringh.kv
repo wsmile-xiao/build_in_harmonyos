@@ -1,0 +1,41 @@
+#====================================================================
+# Draft: legacy bcopy->memcpy compat macro defined before
+#        #include <string.h> breaks OHOS musl build (termutils 2.0)
+#====================================================================
+
+id:                     DRAFT-13409-TERMUTILS-BCOPY-MACRO-BEFORE-STRINGH
+trigger_tool:           clang|tparam.c|termcap|strings.h|string.h|musl|autoconf
+phase:                  compile
+error_signature:        conflicting types for 'memcpy'|expanded from macro 'bcopy'|previous declaration is here
+
+severity:               2
+category:               legacy-source-compat
+match_keywords:         bcopy, memcpy, tparam, termcap, strings.h, string.h, conflicting types, K&R, legacy C, termutils, gnu89, musl, STDC_HEADERS, HAVE_STRING_H
+
+title:                  Legacy bcopy(s,d,n) to memcpy(d,s,n) compatibility macro defined before #include <string.h> leaks into the system bcopy declaration and breaks the OHOS build
+
+root_cause:             Old GNU C sources (termutils 2.0 tparam.c and many contemporaries) define `#define bcopy(s, d, n) memcpy ((d), (s), (n))` under HAVE_STRING_H/STDC_HEADERS and only afterwards include <string.h>. On the OHOS musl sysroot <string.h> pulls in <strings.h>, which declares `void bcopy (const void *, void *, size_t)`. The macro is still in scope at that point, so the system declaration expands to `void memcpy((const void *), (void *), size_t)` and clang fails with "conflicting types for 'memcpy'" (note pointing at both the macro expansion and the previous declaration in string.h). Build hosts with glibc may not surface the conflict because their headers order or omit bcopy differently.
+
+affected_scope:         Any legacy C package that shadows BSD string functions (bcopy/bcmp/bzero) with memcpy macros before including system headers, built against the OHOS musl sysroot. Verified instance - termutils-2.0 tparam.c line 25.
+
+verification_cmd:       conan create archives/t/termutils/2.0 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+
+rec_priority:           1
+rec_approach:           reorder-system-include-before-compat-macro
+rec_description:        Move the system include above the compatibility macro inside the same conditional block - `#if defined(HAVE_STRING_H) || defined(STDC_HEADERS)` then `#include <string.h>` then `#define bcopy(s, d, n) memcpy ((d), (s), (n))` then `#endif`. Double inclusion is harmless (include guards), the system bcopy declaration is parsed before the macro exists, and the package's own bcopy call sites keep expanding to memcpy on every platform. Do not use #undef after the header, do not guard with platform macros (R8), do not patch the sysroot.
+rec_command:            apply the include reorder and rebuild with conan create archives/t/termutils/2.0 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+rec_auto_fix:           false
+rec_impl:               patches/0002-tparam.c.patch in archives/t/termutils/2.0/
+
+fallback_priority:      2
+fallback_approach:      drop-macro-when-real-bcopy-exists
+fallback_description:   On libcs that still provide real bcopy (musl does) the macro can be dropped behind a HAVE_BCOPY style configure check, but that requires touching configure.in and regenerating configure, so for tarball-only builds the include reorder is preferred.
+fallback_command:       grep -n "bcopy" tparam.c and confirm the call sites expand correctly after any fix
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       guard the macro with #ifdef __OHOS__|rename the bcopy call sites|edit sysroot headers|use -Dbcopy= something compiler hacks
+forbid_1_reason:        R8 forbids platform macros in patches; renaming call sites and header edits diverge from upstream and do not generalize; compiler hacks hide the real declaration conflict instead of fixing the include order.
+forbid_1_consequence:   PF5 preflight rejection, non-portable patches that break glibc builds, or unmaintainable diverging sources.
+
+principles:             minimal-patch, platform-agnostic-fix, legacy-c-compat, real-evidence-over-assumption

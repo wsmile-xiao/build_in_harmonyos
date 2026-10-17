@@ -1,0 +1,77 @@
+#====================================================================
+# Draft: aes-stream 20260924 - x86 AES-NI intrinsics-only C 库在
+#        OHOS arm64 的 ARMv8 crypto extension 移植路径；实测本平台
+#        AESE 指令语义为"先 AddRoundKey 再 SubBytes 再 ShiftRows"
+#        （与 x86 AESENC 相反），标准 AES 轮须写作
+#        veor(AESMC(AESE(st, 0)), rk_i)
+#====================================================================
+
+id:                     DRAFT-AES-STREAM-20260924-AESNI-TO-ARMV8-CRYPTO-PORT
+trigger_tool:           clang|conan|make
+phase:                  compilation|linking|testing
+error_signature:        immintrin.h.*only meant to be used on x86|_mm_aesenc_si128|_mm_aeskeygenassist|vaeseq_u8|vaesmcq_u8|aesenc|aesenclast
+
+severity:               2
+category:               portability|crypto|arm64|intrinsics|ohos-platform
+match_keywords:         AES-NI, AES, intrinsics, __m128i, immintrin, arm64, aarch64, arm_neon, vaeseq_u8, vaesmcq_u8, AESENC, AESENCLAST, crypto extension, AES-PRF, random number generator, jedisct1, aes-stream
+
+title:                  x86 AES-NI intrinsics-only 库的 OHOS arm64 移植：ARMv8 crypto extension 语义实证与 bit-exact 对拍验证链
+
+root_cause:             上游 aes-stream.c 全部核心逻辑基于 x86 AES-NI intrinsics
+                         （immintrin.h / __m128i / _mm_aesenc_si128 /
+                         _mm_aeskeygenassist_si128），无任何可移植参考路径；
+                         OHOS PC 目标为 aarch64，immintrin.h 直接报
+                         "This header is only meant to be used on x86 and x64"。
+                         设备 CPU 具备 ARMv8 crypto extension（/proc/cpuinfo
+                         aes pmull 特性）。移植的关键坑：本平台 AESE 指令
+                         语义为"先 AddRoundKey 再 SubBytes 再 ShiftRows"
+                         （实测：vaeseq_u8(d, rk) = SR(SB(d XOR rk))，与 x86
+                         AESENC 的 ShiftRows->SubBytes->MixColumns->
+                         AddRoundKey 顺序相反），因此直接套
+                         vaesmcq(vaeseq(st, rk)) 无法复现标准 AES 轮；
+                         正确写法是内部轮
+                         st' = veor(AESMC(AESE(st, 0)), rk_i)、末轮
+                         st' = veor(AESE(st, 0), rk_Nr)（穷举 + FIPS-197
+                         KAT 唯一命中组合）。
+
+affected_scope:         所有"仅 x86 SIMD/intrinsics 且无构建系统（或构建系统
+                         不可用）"的 C/C++ 库在 OHOS arm64 的移植；同类
+                         AES/其他 crypto SIMD 库（如基于 AES-NI 的 PRF/PRNG、
+                         加密实现）直接套用本 AESE 语义映射与对拍验证链。
+
+verification_cmd:       穷举候选序列对 FIPS-197 KAT（AES-128 ct=69c4e0d8...
+                         b4c55a，AES-256 ct=8ea2b7ca...496089）找唯一命中；
+                         再以可移植标量参考实现（oracle）对 ARM 移植版做
+                         多种子多长度 bit-exact 对拍（diff 为空即通过）。
+
+rec_priority:           1
+rec_approach:           armv8-crypto-intrinsics-port-with-aese-semantics-probe
+rec_description:        (1) 用 NIST/FIPS-197 KAT 固定 AES 正确语义：穷举
+                         {AESE/AESMC/veor}×{plain/MC/IMC/ZERO 密钥} 组合，
+                         唯一命中"内部轮 veor(AESMC(AESE(st,0)),rk_i) +
+                         末轮 veor(AESE(st,0),rk_Nr)"（本平台 AESE 为
+                         key-first 语义）；(2) 写可移植标量参考实现逐位镜像
+                         上游构造（含第 4 轮中间态 s 与最终密文 XOR 的
+                         AES-PRF、快速密钥擦除、counter 增量），先过
+                         FIPS-197 KAT 再与 ARM 版对拍；(3) 配方携带移植源
+                         文件（exports_sources src/*），build() 直接
+                         clang -march=armv8-a+crypto 编译；(4) 上游零测试
+                         时以 test_package KAT/确定性/非全零/key-erasure
+                         断言补齐鸿蒙专项测试，不冒充上游用例。
+rec_command:            clang -march=armv8-a+crypto -c aes-stream-arm.c;
+                        穷举探针 arm_brute.c；对拍 diff oracle10.out arm_10.out
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      scalar-port-fallback
+fallback_description:   若目标设备无 crypto extension（无 aes 特性），改携可移植
+                         标量 AES 实现（S-box 表 + FIPS-197 密钥扩展），不依赖
+                         指令扩展；验证链不变。
+fallback_command:       使用同一标量参考核心编译为库实现
+fallback_auto_fix:      false
+fallback_impl:          source-replacement
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              (pending)
+source_commit:          (pending)

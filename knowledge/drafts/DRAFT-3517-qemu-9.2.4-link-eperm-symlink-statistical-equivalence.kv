@@ -1,0 +1,82 @@
+id: DRAFT-3517-qemu-9.2.4-link-eperm-symlink-statistical-equivalence
+title: "OHOS HMDFS 拒绝 link(2)/linkat(2)（EPERM）——以符号链接做「统计等价」代偿的适用前提与不可代偿面（qemu 9.2.4 实证）"
+category: hmdfs
+severity: 2
+error_signature: "link.*Operation not permitted|linkat.*Operation not permitted|EPERM.*link|9p.*Rlerror.*7|Expected reply 71, got 7|hardlink.*assertion failed"
+keywords:
+  - link
+  - linkat
+  - hard link
+  - EPERM
+  - symlink
+  - statistical equivalence
+  - st_ino
+  - st_dev
+  - st_nlink
+  - HMDFS
+  - 9p
+  - virtio-9p
+  - qemu
+affected_build_systems:
+  - meson
+affected_compilers:
+  - clang
+affected_platforms:
+  - OHOS
+  - aarch64-linux-ohos
+first_seen:
+  package: qemu
+  version: "9.2.4"
+  date: "2026-09-27"
+last_updated: "2026-09-27"
+hit_count: 0
+verified: false
+verify_builds: []
+prescan_pattern: "link\\(|linkat\\(|st_nlink"
+root_cause: |-
+  OHOS HMDFS 上 `link(2)` 与 `linkat(2)`（flags=0）均返回 EPERM，
+  而 `/dev/shm` 上可用（但该挂载点 `mkdir` 被拒，故不能简单当根目录用）：
+
+    | 位置        | link/linkat | mkdir |
+    |-------------|-------------|-------|
+    | HMDFS       | EPERM       | OK    |
+    | /dev/shm    | OK          | EACCES|
+
+  受影响的典型场景是导出宿主目录给客户机的文件服务：qemu 的
+  `hw/9pfs/9p-local.c` 用 `linkat` 实现 9p 的 `Tlink`，被拒后服务端回
+  `Rlerror(EPERM)`；客户端 `v9fs_req_recv` 期望消息号 71（`Rlink`）却收到
+  7（`Rlerror`），直接断言失败——报错信息与「硬链接」字面毫无关联。
+
+  代偿可行性取决于**上游测试究竟断言什么**：qemu 的
+  `virtio-9p-test.c` 的 hardlink 用例断言 `stat(link)` 成功、类型为
+  `S_IFREG`、且 `st_dev`/`st_ino` 与源相同——这三项用**符号链接**均能满足
+  （`stat` 会跟随链接，故解析到同一 inode）。且该文件实测**不含任何
+  `st_nlink` 断言**（`grep -c st_nlink` == 0），因此符号链接与硬链接的差异
+  （nlink 计数、源删除后是否幸存、`AT_SYMLINK_NOFOLLOW`/`lstat` 可见性）
+  不被该测试观测。
+rec_approach: |-
+  1. 先查代偿的**语义前提**：`grep` 上游测试是否断言 `st_nlink`、是否用
+     `lstat`/`O_NOFOLLOW`、是否测试源删除后链接是否仍可读。三项都无才可以
+     用符号链接代偿；任一命中则必须标注 UNSUPPORTED（硬链接语义不可伪造）。
+  2. 仅在真实 `link`/`linkat` 返回 EPERM 时才代偿（其他错误码透传），并用
+     环境变量门禁；`linkat` 带 `AT_SYMLINK_FOLLOW` 时不做代偿（语义不同）。
+  3. 源路径需**绝对化**：`linkat` 的任一侧可相对目录 fd，而符号链接的目标是
+     写入字符串，须用 `/proc/self/fd/<dirfd>` 解析出绝对路径，否则链接在
+     其他 cwd 下解析失败。
+  4. 明确披露不可代偿面：nlink 计数、源删除后的幸存性、`lstat` 可见性、
+     `AT_SYMLINK_NOFOLLOW` 遍历、以及任何依赖硬链接做去重/配额统计的逻辑。
+solution: |-
+  qemu 9.2.4 验证 harness（不随配方发布）：`qtest_link_shim.c` 拦截
+  `link`/`linkat`，仅在 EPERM 时改为 `symlink`（目标绝对化），并通过
+  `/proc/self/fd/<dirfd>` 处理相对路径。
+
+  实测：`virtio-9p-tests/local` 全族由失败转为 **10/10 通过**；
+  判别性探针确认代偿后 `stat(link)` 得 `S_IFREG`、`st_dev` 与 `st_ino` 与源
+  相同（即该测试全部三项断言成立）。
+fallback: |-
+  若上游有 nlink/幸存性断言，只能标注 UNSUPPORTED 或把导出目录放到支持
+  `link(2)` 的文件系统（本机仅 `/dev/shm`，但其 `mkdir` 被拒，不适用）；
+  也可改用 9p 的其他后端（`synth`/`security_model=none` 不改变 link 语义）。
+reference_builds: []
+related_docs:
+  - DRAFT-3517-qemu-9.2.4-hmdfs-shm-fallocate-lock-mutual-exclusion

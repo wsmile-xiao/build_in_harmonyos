@@ -18,7 +18,7 @@
    export GOOS=linux
    export GOARCH=arm64
    export GOPROXY=https://goproxy.cn,direct
-   ~/usr/local/go1263/bin/go build -ldflags="-s -w" -o caddy ./cmd/caddy/
+   ~/usr/local/go1263/bin/go build -ldflags="-w -X github.com/caddyserver/caddy/v2.CustomVersion=v2.11.2" -o caddy ./cmd/caddy/
    ```
 4. DESTDIR staging安装:
    ```bash
@@ -68,5 +68,5 @@
 - GOPROXY=https://goproxy.cn,direct 加速依赖下载
 ---
 
-**编译结束**: 2026-06-02 01:02
+**编译结束**: 2026-08-05 14:04
 **最终状态**: built

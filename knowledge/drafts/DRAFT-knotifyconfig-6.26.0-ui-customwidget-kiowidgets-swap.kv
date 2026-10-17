@@ -1,0 +1,104 @@
+# ══════════════════════════════════════════════════════════════════════
+# Draft knowledge entry — 把 .ui 里的 KIOWidgets 自定义控件换成 Qt 原生控件：
+# 换 <widget class> 还不够，必须同时删掉 <customwidgets> 块
+# Software: knotifyconfig 6.26.0 (KDE Frameworks 6)
+# Gate: conan create 全绿 + test_package 往返测试通过
+# Status: DRAFT — same-stem .md/.kv pair
+# ══════════════════════════════════════════════════════════════════════
+
+id:                     DRAFT-knotifyconfig-6.26.0-ui-customwidget-kiowidgets-swap
+trigger_tool:           conan|cmake|uic|clang
+phase:                  configuration|codegen|compilation
+
+severity:               2
+category:               build-system, cmake, kde, portability, testing
+match_keywords:         KUrlRequester, KIOWidgets, KIOCORE_ONLY, KF6::KIOCore, customwidget, customwidgets, uic, .ui file, kurlrequester.h, setUrl, setStartDir, setMimeTypeFilters, QLineEdit, textChanged, KDE Frameworks 6, ohpcd
+
+error_signature:        Target ".*" links to:.*KF6::KIOWidgets.*but the target was not found|fatal error: 'kurlrequester.h' file not found|no member named 'setStartDir'|no member named 'setUrl'|no member named 'setMimeTypeFilters'
+
+title:                  KIOCORE_ONLY 基线上换掉 .ui 里的 KUrlRequester：只改 <widget class> 不够，遗留的 <customwidgets> 仍会让 uic 生成 #include <kurlrequester.h>
+
+root_cause: |
+  ohpcd 的 kio 以 KIOCORE_ONLY 形态发布：KF6::KIOWidgets / KIOGui /
+  KIOFileWidgets 都不构建（solid / kbookmarks / kjobwidgets / kiconthemes
+  6.26 未发布），而且连 KF6KIOCoreConfig.cmake 都没有——KF6::KIOCore 是由
+  KF6KIOTargets.cmake 导出的，必须先 find_package(KF6KIO) 才可见。
+  于是任何使用 KIOWidgets 控件的部件类都必须换成 Qt 原生控件。KDE 的
+  .ui 文件把这类控件声明成 <customwidget>，链接错误只是第一层：
+
+  ① configure 期：target_link_libraries 里的 KF6::KIOWidgets 找不到；
+  ② uic 代码生成期：把 <widget class="KUrlRequester"> 改成
+     <widget class="QLineEdit"> 之后，**<customwidgets> 块仍是 C++ 层面
+     的独立声明**，uic 照样为它生成 #include <kurlrequester.h>，编译期
+     报 fatal error: 'kurlrequester.h' file not found；
+  ③ 源码期：只属于原控件的 API（setStartDir / setMimeTypeFilters /
+     setUrl）在 QLineEdit 上不存在，逐个编译错误。
+
+  第 ② 步最阴——它在 configure 通过之后才炸，而且报的是"缺头文件"，
+  很容易让人以为是 include 路径问题而不是 .ui 残留。
+
+affected_scope:         所有在 .ui/.ui-style 界面里使用 KDE widgets 级控件
+  （KUrlRequester / KDirOperator / KFileWidget / KColorCombo 等）的 KF6
+  库与应用；尤其 kio 走 KIOCORE_ONLY 的 ohpcd 基线。凡"把某控件降级成
+  Qt 原生等价物"的适配都适用同一套清单。
+
+verification_cmd:        grep -c "<customwidget>" src/*.ui | grep -v "^0$" ; \
+                         conan create archives/k/<pkg>/<ver> -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing
+
+rec_priority:           1
+rec_approach:           three-pass-ui-widget-substitution-checklist
+rec_description: |
+  把一个 .ui 里的 KDE widgets 控件换成 Qt 原生控件要过三关，缺一不可：
+
+  1) 链接关：target_link_libraries 里 KF6::KIOWidgets → KF6::KIOCore。
+     注意 kio 6.26 的 KIOCORE_ONLY 不产出 KF6KIOCoreConfig.cmake，
+     KF6::KIOCore 只在 KF6KIOTargets.cmake 里，所以 find_package(KF6KIO)
+     必须保留，不能"因为不用 widgets 就把 KIO 整个删掉"——保留它依赖图
+     与上游差异最小，且有大量同款先例（audiocd、baloo 6.28.0、
+     libkomparediff2、kgoldrunner）。
+  2) 生成关：改 <widget class="X" name="N"> 的那一行（X → QLineEdit 等），
+     **并且把整个 <customwidgets>…</customwidgets> 块删掉**。判据不是
+     "有没有其它控件还用它"，而是"块里声明的类还有没有被引用"；本项目里
+     KUrlRequester 是该块唯一成员，块必须整体消失，否则 uic 仍生成
+     #include <kurlrequester.h>。改完用
+     `grep -c "<customwidget>" src/*.ui` 应为 0。
+  3) 源码关：把只属于原控件的调用逐个删掉或改写。改写前先确认
+     **信号/槽签名是否恰好一致**——这里 KUrlRequester::textChanged(QString)
+     与 QLineEdit::textChanged(QString) 同名同签名，所以构造函数里的
+     connect 一行都不用动；如果签名不同（例如 setUrl(QUrl) 对
+     setText(QString)），就要连槽函数一起改。
+     取值语义也要核：notifyrc 的 Sound 字段既可能是裸声音名也可能是路径，
+     上游 KUrlRequester::text() 与 QLineEdit::text() 返回的是同一个原始
+     字符串（上游注释亦写明 don't use .url() here），所以换成 setText/text
+     不改变落盘格式。
+
+  验证不要停在"编译过了"：test_package 里跑一次真实的读-改-存往返
+  （种子文件 → select → 改 → save → 读回断言），这样丢了一条 setText
+  会变成断言失败而不是一个静默写空的配置项。
+
+fallback:               若控件没有 Qt 原生等价物（KDirOperator / KFileWidget
+  这类带文件系统语义的），不能降级——只能等 kbookmarks / kjobwidgets /
+  kiconthemes 发布后重评 KIOCORE_ONLY。
+
+rec_command:            conan create archives/k/knotifyconfig/6.26.0 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing
+rec_auto_fix:           false
+rec_impl:               ""
+
+verify_builds:          本地 conan create（ohos-aarch64）+ test_package
+                        test_knotifyconfig 往返断言 9 条 + OHOS 制品断言 11 条
+
+upstream_refs:          knotifyconfig 6.26.0 src/CMakeLists.txt（KF6::KIOWidgets）、
+                        src/knotifyconfigactionswidgetbase.ui（KUrlRequester 与
+                        <customwidgets> 块）、src/knotifyconfigactionswidget.cpp
+                        （setStartDir/setMimeTypeFilters/setUrl 与 text()）；
+                        libktorrent 26.04.0 KIOWidgets→KIOCore 裁剪草稿
+                        （API 用量裁剪角度，与本条的 .ui 代码生成角度互补）
+
+related_rules:          R32, W0
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              11634
+source_commit:          077b171b8
+draft:                  true
+contributor_id:         2301_76770579
+last_updated:           2026-09-21

@@ -1,0 +1,31 @@
+#====================================================================
+# Draft: xcolmix 1.07 / libX11 1.8.10 / libforms 1.2.4 --
+#        本地 /opt/ohos-guest 的 stock musl guest libc 不导出 OHOS 的
+#        FD_SET 边界检查辅助符号 __fd_chk，凡是用过 FD_SET/FD_CLR 的
+#        依赖库都会在 aarch64 产物上 relocation 失败（exit=127）
+#====================================================================
+
+id:                     DRAFT-GUEST-MUSL-NO-FD-CHK-FORTIFY-HELPER
+trigger_tool:           conan|qemu|ld|clang
+phase:                  testing
+error_signature:        Error relocating \S+: __fd_chk: symbol not found|Error relocating \S+: __fd_chk|__fd_chk: symbol not found|Error relocating \S+: arc4random(_buf|_uniform)?: symbol not found|exit=127|rc=127
+
+severity:               2
+category:               environment|qemu|loader|libc|testing
+match_keywords:          __fd_chk, FD_SET, FD_CLR, sys/select.h, OHOS libc, musl guest libc, /opt/ohos-guest, ld-linux-aarch64.so.1, binfmt_misc, qemu-aarch64, relocation failed, exit 127, libX11, libXdmcp, arc4random_buf, loader shim, environment side, T017, cross compile then run
+
+title:                  本地 qemu guest musl 不导出 OHOS 的 __fd_chk：libX11/libXdmcp 等用过 FD_SET 的依赖在 aarch64 产物上 relocation 失败（exit=127），是宿主环境类问题而非配方缺陷——须在容器侧补 shim 反证，绝不能塞进配方
+
+root_cause:            本机执行 aarch64/OHOS 产物靠 binfmt_misc + /opt/ohos-guest/lib/ld-linux-aarch64.so.1，那份 guest libc 是 **stock musl 1.2.6**，它比 OHOS 的 musl 旧，缺少两类符号：(1) arc4random / arc4random_buf / arc4random_uniform（libXdmcp、libzip 等需要）；(2) **__fd_chk** —— OHOS 在 <sys/select.h> 里把 FD_SET/FD_CLR 宏改成先调 `void __fd_chk(int fd)` 做 fd 范围检查，任何 1990-2000 年代 X11 代码（libX11 1.8.10、libXdmcp、libforms）都大量使用 FD_SET/FD_CLR，于是它们的 .so 带 `U __fd_chk`。真机 OHOS libc 导出该符号（DevEco SDK 的 sysroot/usr/lib/aarch64-linux-ohos/libc.so 里 `nm -D` 可见 `__fd_chk`，且全部 `__*_chk` 别名到同一个 __chk_fail 地址），本地 guest libc 没有 ⇒ 加载期 relocation 失败、进程 exit=127。判别要点：exit=127（不是 1）+ 每条错误都是 `Error relocating <某个依赖 .so>:<符号>: symbol not found` + **栈里全是依赖库而不是被测二进制** ⇒ 环境类。反向确认：`grep -rn '__fd_chk' <sysroot>/usr/include/sys/select.h` 能看到宏定义，`nm -D --defined-only <SDK libc.so> | grep __fd_chk` 能看到真机有。
+affected_scope:         所有"依赖 90-2000 年代 X11/网络栈、且必须在本地 qemu guest 上真跑"的包：libX11 1.8.x、libXdmcp、libXau、libXpm、libforms、libzip 之类；以及任何测试里会执行链接了这些库的可执行文件的包。与 T017（arc4random 类）同源但符号类别不同，T017 里列的 libarc4shim.so 不覆盖 __fd_chk。
+verification_cmd:       nm -D --defined-only /opt/ohos-guest/lib/libc.so | grep -E '__fd_chk|arc4random' ; nm -D --defined-only "<DevEco SDK>/native/sysroot/usr/lib/aarch64-linux-ohos/libc.so" | grep -E '__fd_chk|arc4random' ; nm -D --undefined-only <dep>.so | grep __fd_chk ; grep -n '__fd_chk' <sysroot>/usr/include/sys/select.h
+
+rec_priority:           2
+rec_approach:           build-environment-side-fd-chk-shim-then-rerun-never-in-recipe
+rec_description:        (1) 先按 loader 类判据分层（exit=127 + 依赖库 relocation + 空输出 ⇒ 环境类），不要开单说配方问题。(2) 在**容器/环境侧**补 shim 并重跑同一批二进制做反证。__fd_chk 的语义很窄，照 <sys/select.h> 的宏实现即可（OHOS 侧它是越界即 abort 的检查函数）：用 OHOS 交叉编译器编一个 `void __fd_chk(int fd){ if (fd<0 || fd>=FD_SETSIZE) abort(); }` 的 .so，和已有的 /opt/ohos-guest/lib/libarc4shim.so 一起 LD_PRELOAD 后重跑，本例 exit=127 → rc=1 且输出符合预期。(3) 宿主 x86 ld.so 会刷 `ERROR: ld.so: object … from LD_PRELOAD cannot be preloaded … ignored.`，属正常噪声，不要当成失败。(4) **绝对不要**把 shim 路径、LD_PRELOAD 或任何运行期补丁写进 conanfile.py / test_package：那是把环境问题伪装成产品行为，同时踩 R39/R49 与"不许降低标准换绿"两条红线。自查口径：`grep -rn 'arc4shim\|fdchk\|LD_PRELOAD\|preload' archives/<字母>/<包>/` 应当只命中 notes.md 的说明文字。(5) 报告口径必须三层并列：①本地门禁 L1 红 ②根因分层结论（环境类/loader 类）③shim 反证后的真实数字，并把"真机 worker 上的逐例结果"列入未核验。(6) 依赖侧若真的与 OHOS libc 不匹配（例如依赖包在真机上就缺符号），另开 issue/PR 处理依赖包，不要在下游配方里绕过。
+rec_command:   export LD_PRELOAD=/opt/ohos-guest/lib/libarc4shim.so:/root/xc-shims/libfdchkshim.so && conan create archives/x/xcolmix/1.07 -pr:h=ohos-aarch64-wsl -pr:b=ohos-aarch64-wsl --build=missing
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:
+source_commit:

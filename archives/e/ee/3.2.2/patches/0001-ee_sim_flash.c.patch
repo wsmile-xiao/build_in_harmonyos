@@ -1,0 +1,128 @@
+diff --git a/ee_sim_flash.c b/ee_sim_flash.c
+new file mode 100644
+index 0000000000..9daa29c92b
+--- /dev/null
++++ b/ee_sim_flash.c
+@@ -0,0 +1,121 @@
++/**
++ * ee_sim_flash.c — OHOS 宿主平台模拟 Flash 实现
++ *
++ * 用一块映射在固定低地址（0x20000000，STM32 Flash 区典型布局）的 16 KiB
++ * 内存模拟 STM32 内嵌 Flash。固定低地址是关键：ee 库内部用 uint32_t
++ * 保存 Flash 基址并直接解引用访问（EE_Read），若缓冲区落在 4 GiB 之上
++ * 会被截断导致段错误；映射到 0x20000000 后该地址恒为合法低地址，
++ * 与 -fPIC/PIE 无关，消费者默认链接方式即可安全使用。
++ *
++ * 语义：
++ *   - 构造时整段置 0xFF（Flash 空态）
++ *   - HAL_FLASHEx_Erase：对目标页执行 memset(0xFF)（真实擦除语义）
++ *   - HAL_FLASH_Program：按半字写入（真实编程语义，1→0 与操作）
++ *   - 直接寻址读取由 EE_Read 经 Address 偏移完成
++ * HAL_FLASH_Unlock/Lock 在宿主平台为无操作（HAL_OK）。
++ * 若 mmap 固定地址失败（被占用等），HAL 函数如实返回 HAL_ERROR，
++ * EE_Format/EE_Write 会以真实错误失败，而非越界访问。
++ */
++#include <sys/mman.h>
++#include <unistd.h>
++#include "main.h"
++
++#define EE_SIM_BASE_ADDR 0x20000000UL
++
++static uint8_t *sim_flash = NULL;
++
++__attribute__((constructor)) static void ee_sim_flash_init(void)
++{
++    void *p = mmap((void *)(uintptr_t)EE_SIM_BASE_ADDR, (size_t)EE_SIM_FLASH_SIZE,
++                   PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    if (p == MAP_FAILED)
++    {
++        sim_flash = NULL;
++        return;
++    }
++    sim_flash = (uint8_t *)p;
++    memset(sim_flash, 0xFF, (size_t)EE_SIM_FLASH_SIZE);
++}
++
++static uint32_t flash_offset(uint32_t address)
++{
++    return address - FLASH_BASE;
++}
++
++HAL_StatusTypeDef HAL_FLASH_Unlock(void)
++{
++    return HAL_OK;
++}
++
++HAL_StatusTypeDef HAL_FLASH_Lock(void)
++{
++    return HAL_OK;
++}
++
++/* 将 pEraseInit 指定的页/扇区擦除为 0xFF；PageError 成功后写 0xFFFFFFFF（EE_Format 校验） */
++HAL_StatusTypeDef HAL_FLASHEx_Erase(FLASH_EraseInitTypeDef *pEraseInit, uint32_t *PageError)
++{
++    uint32_t offset;
++    uint32_t length;
++
++    if (pEraseInit == NULL || PageError == NULL || sim_flash == NULL)
++    {
++        return HAL_ERROR;
++    }
++
++    if (pEraseInit->TypeErase == FLASH_TYPEERASE_PAGES)
++    {
++        offset = flash_offset(pEraseInit->PageAddress);
++        length = pEraseInit->NbPages * FLASH_PAGE_SIZE;
++    }
++    else
++    {
++        /* SECTOR 模式：模拟平台仅一个 16 KiB 扇区，整段擦除 */
++        offset = 0U;
++        length = EE_SIM_FLASH_SIZE;
++    }
++
++    if (offset >= EE_SIM_FLASH_SIZE)
++    {
++        *PageError = 0U;
++        return HAL_ERROR;
++    }
++    if (length > (EE_SIM_FLASH_SIZE - offset))
++    {
++        length = EE_SIM_FLASH_SIZE - offset;
++    }
++
++    memset(sim_flash + offset, 0xFF, (size_t)length);
++    *PageError = 0xFFFFFFFFU;
++    return HAL_OK;
++}
++
++/* 按半字将 Data 编程到 Address（Flash 编程语义：与 0xFF 做与运算，只能 1→0） */
++HAL_StatusTypeDef HAL_FLASH_Program(uint32_t TypeProgram, uint32_t Address, uint64_t Data)
++{
++    uint8_t raw[2];
++    uint32_t offset;
++    uint32_t i;
++
++    (void)TypeProgram;
++    if (sim_flash == NULL || Address < FLASH_BASE)
++    {
++        return HAL_ERROR;
++    }
++    offset = flash_offset(Address);
++    if (offset >= EE_SIM_FLASH_SIZE)
++    {
++        return HAL_ERROR;
++    }
++
++    raw[0] = (uint8_t)(Data & 0xFFU);
++    raw[1] = (uint8_t)((Data >> 8) & 0xFFU);
++    for (i = 0U; i < 2U; i++)
++    {
++        if ((offset + i) < EE_SIM_FLASH_SIZE)
++        {
++            sim_flash[offset + i] &= raw[i];
++        }
++    }
++    return HAL_OK;
++}
+\ No newline at end of file

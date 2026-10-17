@@ -1,0 +1,161 @@
+# ═══ Draft knowledge entry — 上游 PKG_CHECK_MODULES 依赖的 .pc 模块已从生态消失（并入新包）：
+#     用 AC_ARG_VAR 逃生口，而不是补 .pc 文件或改 PKG_CONFIG_PATH ═══
+# Timestamp: 2026-09-20
+# Software: libXp 1.0.4 (X.Org X Print (Xp) 客户端库)
+# Gate: L1 (build) / rule1 模板 / rule12 鸿蒙特有测试
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-libxp-1.0.4-configure-pkgconfig-printproto-module-removed
+trigger_tool:           configure|autoconf|pkg-config|automake
+phase:                  configure
+error_signature:        Package( requirements)? \(.*\) were not met|
+                         Package '[a-z0-9._-]+proto', required by 'virtual:world', not found|
+                         The pkg-config script could not be found|
+                         was not found in the pkg-config search path|
+                         No package '[a-z0-9._-]+' found|
+                         Requires:\s*[a-z0-9._-]*-proto
+
+severity:               2
+category:               autotools, configure, pkg-config, conan, portability, ohos
+match_keywords:         PKG_CHECK_MODULES, AC_ARG_VAR, pkg-config, printproto,
+                         xorgproto, xextproto, was not found in the pkg-config,
+                         pkg-config script could not be found, virtual:world,
+                         AutotoolsToolchain, VirtualBuildEnv, xp.pc, Requires,
+                         XPRINT_CFLAGS, XPRINT_LIBS, OHOS
+
+title:                  上游 PKG_CHECK_MODULES 依赖的 .pc 模块已从生态消失（并入新包）时，
+                        用 AC_ARG_VAR 逃生口把 CFLAGS/LIBS 直接喂进去，而不是去补 .pc 文件
+
+root_cause: >
+  libXp 1.0.4（2010 年发布）的 configure.ac 写
+      PKG_CHECK_MODULES(XPRINT, [x11 >= 1.6] xext xextproto xau printproto)
+  这个列表在发布时是对的，但 X.Org 7.7 之后 printproto（连同 xextproto、
+  xf86rushproto 等）被并入 xorgproto 发行物，**此后没有任何包再提供
+  printproto.pc**。今天 xorgproto/2025.1 只装 include/ 与 share/pkgconfig/，
+  根本没有 lib/pkgconfig/；share/pkgconfig 下 29 个模块 .pc
+  （applewmproto … xwaylandproto）里没有 printproto。
+  于是出现「语义上依赖满足、pkg-config 元数据上不可满足」的错位：
+  头文件 Print.h / Printstr.h 由 xorgproto 提供得好好的，但 configure 的
+  PKG_CHECK_MODULES 仍然硬失败 —— 装了 pkg-config 时报
+  "Package 'printproto' ... not found"，没装 pkg-config 的瘦身 CI worker 上
+  报 "The pkg-config script could not be found"（两个失败入口，同一根因）。
+  同源缺陷还有一个消费期孪生：上游 xp.pc.in 里公开的 Requires 写死
+  "Requires: printproto"（Requires.private 的 x11 xext xau 反而是对的），
+  于是库构建成功、安装成功，但任何消费者 pkg-config --cflags xp 立刻失败。
+
+affected_scope: >
+  任何 configure.ac 里 PKG_CHECK_MODULES 列了「已被并入其它发行物的
+  *-proto / *-macros 模块」的上游包，尤其是 2010 前后发布、至今未更新的
+  X.Org 家族库（libXp、libXprintUtil、libXprintAppUtil 等以 printproto 为
+  直接依赖的库最典型）。判据是双空：制品仓 conan search '<mod>*' 为空，
+  且目标包产物内 find -name '<mod>.pc' 为空 —— 两者同时为空即为本条，
+  若只有前者为空而后者有，则是普通的「依赖未发布」而不是本条。
+  libXp 1.0.4 实证：设为非空后 configure 完全不调用 pkg-config，构建通过；
+  消费者测试 test_package 13/13 通过。
+
+verification_cmd: >
+  # 1) 复现构建期失败
+  conan create archives/l/libxp/1.0.4 -pr:h=<ohos-profile> -pr:b=<ohos-profile> --build=missing
+  #   → configure: error: Package 'printproto' ... not found
+  #     或 configure: error: The pkg-config script could not be found
+
+  # 2) 确诊「模块已从生态消失」而不是「路径没配」（双空判据）
+  ls <xorgproto-pkg>/share/pkgconfig/ | grep -i print   # → 无输出（29 个模块 .pc 里没有）
+  ls <xorgproto-pkg>/lib/pkgconfig/ 2>&1                # → No such file or directory
+  conan search 'printproto*' -r=<remote>                # → 空
+
+  # 3) 确认逃生口存在（用 tarball 自带的 configure，不要 autoreconf）
+  grep -n 'if test -n "$XPRINT_CFLAGS"' configure       # → 19277
+  grep -n 'if test -n "$XPRINT_LIBS"'  configure       # → 19294
+
+  # 4) 设有逃生口变量后重试
+  conan create archives/l/libxp/1.0.4 ... --build=missing
+  #   → checking for XPRINT... yes（链接行里不出现 pkg-config）
+  #   → test_package: libxp consumer checks: 13/13 passed
+
+  # 5) 确认消费期不被毒化
+  grep -n '^Requires' <pkg>/lib/pkgconfig/xp.pc   # 改写前有 printproto，改写后为 x11 xext
+  pkg-config --cflags xp                          # 改写前必失败，改写后成功
+
+rec_priority:           1
+rec_approach:           feed-PKG_CHECK_MODULES-AC_ARG_VAR-escape-hatch
+rec_description: >
+  在 generate() 里把 PKG_CHECK_MODULES 生成的 AC_ARG_VAR 变量
+  （本例 $XPRINT_CFLAGS / $XPRINT_LIBS）设成**非空**值，configure 的
+  "if test -n \"$XPRINT_CFLAGS\"" 分支直接命中，pkg_cv_* 不取 pkg-config、
+  pkg_failed 也不会被置 yes，于是既不查模块也不要求 pkg-config 可执行文件
+  存在。两个变量的值从**已发布的 Conan 依赖包 package_folder** 拼出
+  （-I<dep>/include…、-L<dep>/lib -lX11 -lXext -lXau）。这是逃生口而非补丁：
+  不改上游任何源文件，patches/ 为空，对「tarball 自带预生成 configure、
+  不跑 autoreconf」的场景同样成立。
+  配套必须同时修消费期：package() 里把安装出的 xp.pc 中公开的
+  "Requires: printproto" 改写为真实存在的 "Requires: x11 xext"，并把
+  prefix/libdir/includedir 改成 ${pcfiledir} 相对形式，否则坑只是被推迟到消费者。
+rec_command:            >
+  # conanfile.py generate() 内（伪码，实际按依赖目录计算）
+  env = <环境对象>
+  env.define("XPRINT_CFLAGS", "-I<dep>/include ...")
+  env.define("XPRINT_LIBS",   "-L<dep>/lib -lX11 -lXext -lXau")
+  g.generate(env=env)
+
+  # conanfile.py package() 内
+  replace_in_file(self, pc, "Requires: printproto", "Requires: x11 xext")
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      add-the-merged-package-to-requires-and-drop-the-dead-module
+fallback_description:   >
+  若上游走 autoreconf 路线（tarball 不带预生成 configure），可把 configure.ac
+  的模块列表改为实际存在的模块（x11 >= 1.6 xext xau xorgproto）后再 autoreconf。
+  不推荐作为首选：改了上游源码、扩大了补丁面，且会引入 autotools 版本漂移
+  （生成的 configure 与上游发布版不一致，diff 不可读）。仅在逃生口不存在
+  （configure 里没有对应的 if test -n "$PREFIX_CFLAGS"）时使用。
+fallback_command:       （autoreconf -fi 前先改 configure.ac 的 PKG_CHECK_MODULES 列表）
+fallback_auto_fix:      false
+fallback_impl:          patch
+
+forbid_1_pattern:       (printf|cat|echo).*>.*printproto\.pc|cp .*printproto\.pc
+forbid_1_reason:        自造一个空壳 printproto.pc 塞进 PKG_CONFIG_PATH 等于伪造一个
+                        生态里不存在的事实，掩盖真实的模块缺失；且空壳给出的空
+                        -I/-l 会把「找不到」变成「编不过/链不过」，症状后移更难定位。
+forbid_1_consequence:   知识库被污染；后续真需要该模块的包会踩到同一个空壳。
+
+forbid_2_pattern:       sed -i.*configure\.ac.*(printproto|xextproto)|autoreconf -fi
+forbid_2_reason:        改上游源码 + 重生成 configure，在 tarball 自带 configure 的场景
+                        属不必要的改动面扩大；且 autoreconf 需要远端可达的 autotools
+                        版本，可能造成 configure 与上游发布版不一致。
+forbid_2_consequence:   补丁面扩大、评审不可信、diff 不可读。
+
+forbid_3_pattern:       pkg_failed=no|printproto.*disabled.*echo|PKG_CHECK_MODULES.*ACTION-IF-NOT-FOUND.*:
+forbid_3_reason:        把 pkg_failed 硬写成 no 或静默吞掉 ACTION-IF-NOT-FOUND 等于伪造通过；
+                        被改写的 configure 是构建产物，消费者无从得知。
+forbid_3_consequence:   构建假通过，模块真缺失时无人发现。
+
+principles:             P014, P005, P006
+causes:                 []
+caused_by:              []
+similar_to:             E468（PkgConfigDeps 写出 .pc 但未把 generators 目录加进
+                        PKG_CONFIG_PATH —— E468 是「路径没配」，本条目是它的下一层：
+                        模块本身已不存在，扩展 PKG_CONFIG_PATH 完全无效）、
+                        DRAFT-ohos-la-libdir-hardcode（同批 libXp 适配里的另一类
+                        「依赖制品的构建期路径泄漏到消费期」问题：libXau.la 的
+                        libdir= 指向构建机临时目录）、
+                        DRAFT-libidl-0.8.14-conan-build-tools-and-autotools-mode
+                        （同族：autotools 的外部前提与 conan 提供的东西错位）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-libxp-1.0.4-configure-pkgconfig-printproto-module-removed.md
+last_updated:           2026-09-20
+source_event:           archives/l/libxp/1.0.4 适配（printproto.pc 全生态不存在 →
+                        AC_ARG_VAR 逃生口 → 构建通过，消费者 13/13）
+
+authors:                2301_76770579
+source_pr:              11355
+source_commit:          37bc07be6566b68762034c3e93ce62e1462abefa
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-20

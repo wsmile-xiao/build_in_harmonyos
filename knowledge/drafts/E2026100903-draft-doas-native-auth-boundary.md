@@ -1,0 +1,88 @@
+# 原生构建与真实账户、认证、权限转换能力必须分阶段验证（PR15075补充）
+
+本草稿身份为 E2026100903。2026-10-09当前main的E682已被sc-im草稿占用，故仅迁移本任务知识身份，不改foreign条目、产品或冻结日志。当前正确6.8.2 PR15075的fresh官方r018实际create RC0、CLI3/3及Harmony安全拒绝1/1；独立observed SHA256 `29be94d4f5245c1cf0e4761dd8c9fd289b8c3e203f36b62466d4fe4e1439a981`。真实正向认证与权限切换仍未验证；以下旧运行与失败保持历史含义，不跨run合并为PASS。
+
+状态：草稿。软件功能仍 FAIL；该知识是证据支持的新能力边界，不是豁免。
+
+## 历史平台宏意见修复的源表示（后续目标验证见文末）
+
+PR15075 的 AI 意见192795310指出纯语法分派只在平台宏下生效。本次去掉该宏，所有平台都以同一 `confpath && argc == 0` 真实模式进入原 `checkconfig`，不是以构建 OS 推断账户能力。原真实 UID 降权、解析器、退出行为及带命令/普通执行账户保护不变。官方 `refresh-patch --auto` 生成的0005补丁经字节重放，SHA256 `e77ff09882cf594f23454679e042cffc58a49cad8a4b9cfc25788540ffaef2cc`。此处仅证明源表示，当前新候选需要新目标事务；不沿用r018为新输入的通过结果，也不宣称认证或身份转换已完成。
+
+## 真部署安全拒绝与正向认证必须分开统计（2026-10-08）
+
+不能把“预期权限能力不可用”混进解析消费者的失败，亦不能把任意非零冒称安全行为通过。明确只测实际受限部署的产品保护时，应先核对真实平台、UID/EUID、安装模式和真实NSS，再要求对应原控制流的精确退出码/诊断，保留正常认证和身份转换的独立缺口。
+
+fresh r010 以正确官方6.8.2五补丁生产配方执行真实Conan create RC0，原CLI解析3/3；新增独立Harmony案例实际证明HarmonyOS、非root UID=EUID20020084、已安装0755签名ELF，并调用原普通`-n`执行接口。该域无self passwd，真实RC1与精确`doas: no passwd entry for self`相符，安全行为1/1。没有修改账户/权限/认证/系统服务，没有提供permit/nopass策略，也没有执行提升身份命令。
+
+`doas-security-conan-observed-oct08-r010.json` SHA256 `8bf71e0e983ba1f43b8fc95f9b7f512f884a3959cd149d89974764f9dea52673` 绑定实际产品及消费者输入、唯一launch、完整原WAL/receipt和release/postrelease own0。Windows最低oracle检查拒绝RC126和不相干认证诊断；测试目标上的安全拒绝不能追认历史失败或替代正向认证、shadow后端、SUID及真实有效身份转换，它们仍未证明。
+
+适用：本来会根据真实部署模式或NSS状态拒绝普通执行的权限敏感工具。只有“未授权不执行”的具体产品约束可以作为独立安全测试；不适用把命令没运行当成功认证、把虚构账户/逻辑OSAccount当内核身份、或把非预期signal/loader错误当预期拒绝。
+
+## 现象与通用触发特征
+
+程序已原生编译、签名并能够输出 usage，而配置检查报 `no passwd entry for self`。若使用“有二进制、能显示帮助、最后 shell 返回成功”作为统一结果，会把尚未到达解析器或认证后端的失败当成通过。这一模式适用于真实 UID→账户→认证→有效身份转换的工具，不依赖某个库名或路径。
+
+## 精确根因
+
+必须分别证明三种能力：当前进程 UID 能被真实 passwd/NSS 解析；实际后端能够正/负认证该账户；部署模式与系统策略允许受控有效身份切换。SSH/HDC 连接、数值 UID、进程 capabilities、配置 permit 行和 0755 非 setuid 二进制都不证明这些能力。
+
+本次官方 OpenDoas 6.8.2 原生 configure 未指定 --target/--host，make -j1 RC0，签名 ELF 的 usage 真正通过；好/坏配置 `-C` 实际都 RC1，stderr 为 `doas: no passwd entry for self`。UID/EUID20020084 无命名账户，0755 程序未 setuid-root，因此解析、认证与权限转换均未达到，整个事务是 FAIL。
+
+## 可复用修复与决策步骤
+
+1. 读取真实 UID/EUID/GID、getpwuid 是否成功、部署模式与相关策略，不读取或传输凭据。
+2. 对 parser、正/负认证、有效身份转换分别保存真实命令、RC 和输出，明确最深到达阶段。
+3. 原生 OS 识别失败时修源码中的真实 OS 分支；不强制 Linux target、不从另一 libc 收割 config.h。
+4. 环境能力不足时保持 fail-closed，不伪造 passwd、认证、UID 或 PASS。由环境所有者提供受控命名账户、真实认证后端和已授权的权限部署后，以全新事务补测。
+
+## 验证与新增知识增量
+
+`doas-native-observed-r001.json` SHA256 `f1a7b4ff301008cf74d262adc8f3318934b90feae7a67d74a26c4a044322c809` 独立复算同 r003 输入、命令 RC、日志哈希、完整 WAL/receipt 链、唯一 launch、真实 FAIL 与 release/postrelease own0。证据核算通过不代表软件通过。旧 PR HEAD `51aa67700a9889741ac8118b6606ff37e5876419` 仅身份上下文，探索源输入有独立哈希，不能追认为旧或新生产 tree 的 W3。
+
+查重已覆盖 graph/drafts/doc/operations。只有 socket-wrapper 草稿的 NSS ABI/伴随库介绍命中，未覆盖本次“原生构建 PASS 与真实账户/解析/认证/权限转换 FAIL”的阶段到达性结论。新增的是可跨工具复用的证据决策，而非复述包介绍。
+
+## 范围与安全边界
+
+### 本轮新增消费者反例
+
+共享 `/data/service/hnp/bin/bash` 硬编码并非程序运行需求。改用 Conan 实际 Python 启动探针、将已安装 ELF 解析为绝对路径并直接作为 subprocess argv 执行后，fresh r005 仍是实际 1/3：usage通过，但两项有效/无效配置都在账户查询处 RC1，未到 parser，认证与权限转换false。独立 `doas-native-observed-r005.json` SHA256 `49cdd0509c6eca76c38913be69dc8f2dafffde6329e3a61ced72facb19f14a66` 绑定真实二进制、各命令输出、唯一launch及release/postrelease own0。
+
+这个反例把启动器缺陷与真正功能能力缺失分开：纠正 shell 依赖不能提供命名账户或 SUID。真实官方 refresh-patch 四补丁已逐文件重放35源码、与原生测试输入字节一致；源自包含成功也不能替代真实认证或权限转换。
+
+进一步正式 Conan r006 已真实完成原 configure/build/sign/package，RREV/PID/PREV 和产品 ELF 已绑定，消费者仍仅真实1/3；有效和无效配置在 `no passwd entry for self` 处返回1，最终 create RC1。独立 `doas-formal-conan-observed-r006.json` SHA `55478cfd151c0ddcd9e8d72755ba29d7b1db80ce13c0b33e41b03cf2044506a5` 保存了这个反例：生产构建／打包可自包含，但功能、认证、权限转换仍不能宣称完成。官方 graph/doc 校验器输出0项不意味着 drafts 已被校验；实际 Pre-PR 的 draft路径、配对、draft:true、候选对象一致性才是对应入口，目前完整Pre-PR仍因真实功能失败而阻塞。
+
+适用于真实使用 passwd/NSS 的权限工具、策略守护程序；不适用于把 numeric EXTERNAL 协议认证强行等同 NSS 的情况。不得自动改系统账户/权限/服务、自动 setuid 部署或绕过认证。不得跨 UID、boot、run、transport 拼证据。
+
+## 执行拒绝不能冒充预期语法拒绝（2026-10-08）
+
+新增真实反例：HDC UID2000具名shell域三命令均目标RC126/Operation not permitted，传输RC0不表示执行成功，0/3保留。仅检查invalid-parser非零，会错误接受这类前置拒执；未出现一个已知getpwuid错误也不能证明到达parser。
+
+可变候选已将非法配置判定收紧为原parse.c yyerror真实`doas: syntax error at line N`及原配置失败RC1同时满足，并保留实际argv/输出记录。合法-C仅解析`permit 0`，不关闭密码认证、不执行提权。最小本地6/6 oracle检查和真实保存的HDC拒执判FAIL，证据`doas-consumer-oracle-directed-oct08-r001.json` SHA c9d81f71c0e3f9564a972915661296c1e196d141aa7840d59fa70b6110893d27。它不是新target执行或账户/认证/SUID PASS；旧r006等冻结输入和失败计数未改，当前新消费者仍待真正功能环境fresh验证。
+
+通用步骤是按原被测接口要求同时绑定错误类别、退出码和参数；不能把任意nonzero当负例成功，也不能凭排除单一已知错误推断阶段到达。该签名只适用于此原parser，其他程序须读其真实错误接口。
+
+## 纯语法模式不得初始化未使用的账户能力（2026-10-08）
+
+精确源码显示getopt实际先于mygetpwuid_r；问题不是“getopt前查账户”，而是纯`-C file`也在进入checkconfig前初始化未使用的账户/groups。原checkconfig先真实setresuid(uid,uid,uid)降权，再原parseconfig；argc0直接exit0，未调用permit或使用groups。带命令的-C才真正使用账户/组和策略。
+
+在Harmony/OHOS窄guard下，仅confpath且argc0提前调用同一原checkconfig，保留真实UID/drop失败、原语法错误和fail-safe出口。-s冲突、-u解析、带命令-C及普通执行均保留原检查；不模拟账户、不nopass、不改变密码或系统权限。这是模式所需能力的最小初始化边界，不是给认证路径降级。
+
+新独立r008真实configure/build/sign0，当前production probe在同目标3/3：合法-C RC0、非法-C RC1且原syntax error、usage RC1。带命令-C及普通-n执行仍各RC1/no passwd entry for self；不是正负认证或身份转换PASS。完整原WAL/receipt、唯一launch1及release/postrelease own0：doas-native-pure-syntax-observed-r008.json SHA4958deb65de433b544be37d90c540346426734035ad6a0182df3730ef540b125。新的doas.c第五补丁原官方refresh+1/1精确字节回放已绑定r008源；a1d27c21dff204ddab9520456a7eeaa044c4bc6e4c4e5c96ea02143e465b1d8a是doas-official-refresh-oct08-r004/result.json的SHA。旧四补丁不重复，旧r006/HDC失败未追认。
+
+可复用判据：先读原模式控制流，证明身份/权限状态在此模式不用，且必须保留原真实降权和参数拒绝。只延迟该独立纯解析路径的初始化；凡实际执行、权限检查或策略计算所需身份不得省略。模式仍需要真实账户时不适用；本结论不能泛化为doas全功能可用。
+
+## PR15075 平台宏评审修复补充（2026-10-09）
+
+上述r008的guard是历史实现。当前补充针对AI评论192795310：仅独立纯语法模式按`confpath && !argc`分派，不再依赖平台宏。原真实UID降权、parser、参数冲突拒绝和fail-safe均保留，带命令策略与普通执行仍走原账户检查。
+
+官方refresh-patch生成新0005，SHA256 e77ff09882cf594f23454679e042cffc58a49cad8a4b9cfc25788540ffaef2cc，精确回放匹配源字节。fresh r019独立观察doas-official-local-ci-observed-oct08-r019.json SHA256 999a0bd302154b579ef8b409b958496584b492a4382c280ee2d79315b71d7ffb：官方step35/create RC0，CLI3/3、鸿蒙安全拒绝1/1；唯一launch1、12回执/24WAL、release/postrelease own0。认证和真实权限切换仍未证明；不将历史r018或局部语法成功提升为完整权限功能、平台CI或提审PASS。
+
+## 实际权限位与安全断言的语义边界（PR15075补充，2026-10-10）
+
+实际CI104526/build91205进入产品后，恰等0755的检查失败且尚未记录actual mode。因此仅证明过强的模式检查失败，不能声称该CI读到0710或已证明HMDFS变换；这种根因推断必须保持未知。
+
+对普通非提权可执行文件，明确验证普通文件、owner执行、无SUID/SGID与group/world写位，先将真实mode写入日志再断言。不把chmod RC0当安全回读，不接受group/world可写、特殊权限位、目录或owner不能执行。最小10模式控制接受0755/0710/0500，拒绝4755/2755/0777/0775/0757/0660/0444及目录；实际拒绝产品命令仍须精确RC/诊断，非零与缺工具不算通过。
+
+fresh官方r020真实native create RC0，CLI3/3及鸿蒙负向安全1/1；实际mode0755、UID=EUID20020084，产品原拒绝RC1/no passwd entry for self。独立observed SHA256 `f58bce885e1a08d22a548291bb76d2b21ce774f0ef0128bb21e623be4176c18e`，原日志 `9503561f80376766e8d75af75f32728c41b1d6e6f06939fcb93fe9521b76eb2f`。唯一launch与release/postrelease own0，真实正向认证和身份切换仍未证明。
+
+适用于可选mode位不属于功能契约的非提权部署。若要求精确ACL、SUID部署或其他受控权限功能，不能套用此宽化；必须验证对应真实安全能力。这是在现有模式回读知识上的特殊位、文件类型、先记录再断言与认证阶段增量，不凭mode通过宣称完整功能。

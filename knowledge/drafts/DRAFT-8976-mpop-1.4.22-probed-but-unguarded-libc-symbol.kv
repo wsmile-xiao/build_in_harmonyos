@@ -1,0 +1,85 @@
+#====================================================================
+# DRAFT-8976-mpop-1.4.22-probed-but-unguarded-libc-symbol
+#   上游 AC_CHECK_FUNCS 已把该函数探测为「没有」，调用点却没守护
+#   —— 失败推迟到链接期（ld.lld: undefined symbol），用上游自己的宏补守护
+# 来源: PR feat(mpop): 1.4.22 适配 HarmonyOS PC
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-8976-mpop-1.4.22-probed-but-unguarded-libc-symbol
+trigger_tool:           configure|compiler|linker
+phase:                  linking
+error_signature:        'ld\.lld: error: undefined symbol: getpass'
+
+severity:               2
+category:               >-
+  libc-capability, autoconf, ac-check-funcs, unguarded-call-site, link-error,
+  ohos, musl, upstream-bug, password-prompt
+match_keywords:         >-
+  getpass, undefined symbol, ld.lld, 链接期失败, CCLD, AC_CHECK_FUNCS,
+  HAVE_GETPASS, config.h undef, 探测到了却没守护, 调用点未加条件编译,
+  OHOS libc 缺函数, musl 不提供, 口令提示, password.c, 功能后果披露
+title:                  >-
+  上游用 AC_CHECK_FUNCS 探测 libc 函数且探测结果正确（OHOS 上 HAVE_ 宏未定义），
+  但调用点漏加守护 ⇒ 失败推迟到链接期报 undefined symbol；处方是把上游自己的
+  HAVE_ 宏用起来加 #ifdef，并把功能后果做成可观察断言
+prescan_pattern:        'AC_CHECK_FUNCS\(|HAVE_[A-Z0-9_]+|undefined symbol'
+prescan_globs:          >-
+  configure.ac, configure.in, src/*.c, src/*.h, lib/*.c, config.h.in
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             >-
+  autoconf 的函数探测只写进 config.h，不会替调用点负责。上游 src/password.c:215
+  无条件调用 getpass()，因此当目标 libc 既不在 unistd.h 声明它、也不导出该符号时
+  （OHOS 实测如此），configure 阶段一切正常（生成的 config.h 里明明白白是
+  /* #undef HAVE_GETPASS */），失败推迟到最后链接：
+  ld.lld: error: undefined symbol: getpass / referenced by password.o:(password_get)。
+  机制性质：这是「探测—现实—调用点」三角的第三种失效形态，与已收录的两条兄弟条目互补：
+  E320 是探测为真而运行期不可用（要改判据用 AC_RUN_IFELSE），E516 是 libc 连符号结构都
+  不提供（要跳过 generic 路径）；本条是探测为假、上游却没用它探到的宏。
+  迷惑点在于报错位置离根因很远（CCLD 而不是 configure），容易被误判成
+  「依赖没声明 / 链接参数丢了 / conan 的 cpp_info 有问题」。
+
+affected_scope:         >-
+  任何在 OHOS/musl 上构建、且上游存在「AC_CHECK_FUNCS 探了但调用点漏守护」的 C 程序；
+  高发作区是历史悠久的终端/口令/进程类函数（getpass、ttyname_r、utmpx 一族、
+  crypt、fork 的可选路径等）。本题实证 mpop 1.4.22（getpass）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           guard-call-site-with-upstream-own-have-macro
+rec_description:        >-
+  【第一步 先定位到"探测已存在"】不要先去补链接参数。在同一份构建目录里查
+  config.h（或 configure 日志）里该函数的 HAVE_ 宏：本例 /* #undef HAVE_GETPASS */
+  说明上游的探测逻辑已经把"没有"这件事算对了，缺的只是调用点的条件编译。
+  【第二步 用上游自己的宏加守护，不要新增探测】
+  在调用点包一层 #ifdef HAVE_GETPASS（走 #include <config.h> 或上游已有的
+  config.h 引入路径），#else 分支保留上游已经实现的替代取数据路径；
+  补丁只动这一处，不改 configure.ac、不改探测宏集合、不 -include 一个假声明。
+  mpop 的 #else 分支不需要新写：它本来就支持 password_program/--passwordeval 与 netrc
+  两条取口令路径，守护后行为退化到这两条。
+  【第三步 把功能后果变成可观察事实，不要沉默】关掉的分支必须有替代品或断言。
+  本包做法：消费者测试里断言 mpop --version 打印的
+  "Authentication library: built-in"，并另设 3 条能力面声明跳过（附实测错误签名），
+  让"哪些能力在这个构建里不存在"从日志里读得出来，而不是靠 PR 正文保证。
+  【第四步 交付卫生】补丁走随包 patches/ 并在 conandata.yml 的 patches 段登记
+  patch_description 里写清"探测已存在、调用点漏守护"这一因果，审查人不必重跑链接即可判断。
+
+verification_cmd:       >-
+  cd archives/m/mpop/1.4.22 && python3 scripts/ohc-run.py conan-verify mpop 1.4.22
+
+doc_file:               knowledge/drafts/DRAFT-8976-mpop-1.4.22-probed-but-unguarded-libc-symbol.md
+last_updated:           2026-09-26
+source_event:           >-
+  mpop 1.4.22 适配 HarmonyOS PC（任务 8976）；触发场景：G2 conan create 的 CCLD 阶段
+  报 ld.lld: error: undefined symbol: getpass / referenced by password.o，
+  而同一份构建的 config.h 里已是 /* #undef HAVE_GETPASS */
+authors:                主理-63
+source_commit:          f0a58d003a
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-26

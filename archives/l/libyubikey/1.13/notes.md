@@ -1,148 +1,103 @@
 # libyubikey 1.13 适配笔记
 
-## 编译环境
-- 构建系统: autotools
-- 编译日期: 2026-06-06
-- 编译器: clang 15.0.4 / clang++
-- 目标平台: aarch64-unknown-linux-ohos
-- 内核: HongMeng Kernel 1.12.0
-- 状态: published
+## 依赖结论（W0）
 
-## 编译步骤
+- 无运行时依赖、无构建依赖（上游 configure.ac 仅 `AM_MISSING_PROG([A2X], a2x)`，a2x 只在 maintainer 模式重新生成 man 页时需要；tarball 自带预生成的 modhex.1/ykparse.1/ykgenerate.1）。
+- 无 Conan requires 声明，不需要拆分依赖适配。
 
-1. **init-build**: 下载并解压 libyubikey-1.13.tar.gz
-   ```bash
-   python3 $SKILL_ROOT/scripts/ohc-run.py init-build libyubikey 1.13 --url=https://developers.yubico.com/yubico-c/Releases/libyubikey-1.13.tar.gz
-   ```
+## Conan 适配（本轮，2026-09）
 
-2. **源码补丁**: 更新 config.guess/config.sub (E007)
-   - 原文件版本 2013-06-10，不识别 HarmonyOS / aarch64-unknown-linux-ohos
-   - 替换为 automake-1.17 版本（2023-08-22 / 2023-09-13），正确识别平台
-   ```bash
-   cp /storage/Users/currentUser/usr/local/share/automake-1.17/config.guess build-aux/config.guess
-   cp /storage/Users/currentUser/usr/local/share/automake-1.17/config.sub build-aux/config.sub
-   ```
+- 配方：`conanfile.py`（AutotoolsToolchain + Autotools），`conandata.yml` 固定官方 tarball URL 与 SHA256。
+- 构建：`build()` 执行 configure + `make -j1` + `make check`（上游回归套件）。
+- 打包：`autotools.install()` + `licenses/COPYING`，手工删除 libtool `*.la`。
+- package_info：`libs=["yubikey"]`，`bindirs=["bin"]`，runenv PATH 指向 bin/（modhex/ykparse/ykgenerate）。
+- configure 参数：`A2X=true`（man 页已预生成，防止缺失 a2x 时干扰）。
+- 默认 `shared=False`（静态库），与 2026-06 真机构建产物一致。
+- test_package：CMake 消费测试 21 个断言 + 已安装 `modhex` CLI 冒烟 1 个断言，共 22 个（与 MANIFEST.yml/manifest.yaml 一致）。
 
-3. **环境适配工具**: 创建 LD wrapper 和 mktemp wrapper
-   - LD wrapper: 链接后自动调用 sign-elf 签名 ELF 二进制（解决 Permission denied）
-   - mktemp wrapper: 使用 umask 002 创建临时目录（解决 HMDFS 组权限问题）
+## 源码与构建系统分析（W1）
 
-4. **configure**: 使用 bash + GNU ld + mktemp wrapper
-   ```bash
-   PATH=/storage/Users/currentUser/tmp/mktemp-bin:$PATH \
-   CONFIG_SHELL=/data/service/hnp/bin/bash \
-   /data/service/hnp/bin/bash ./configure --prefix=$DEFAULT_PREFIX \
-     LDFLAGS="-L/storage/Users/currentUser/usr/local/lib -fuse-ld=/storage/Users/currentUser/tmp/ld-wrapper.sh"
-   ```
+- 上游：Yubico yubico-c（libyubikey），BSD-2-Clause，纯 C，无第三方依赖。
+- 源码归档：官方 Release tarball（含完整 tests/selftest.c），SHA256 `04edd0eb09cb665a05d808c58e1985f25bb7c5254d2849f36a0658ffc51c3401`（本机已复核）。
+- 构建系统：autotools + libtool；产物 libyubikey（static/shared 由 configure 决定）+ 3 个命令行工具 modhex/ykparse/ykgenerate + man 页。
+- 上游测试：`make check` → tests/selftest（1 个测试二进制，17 个 assert：modhex-1.1/1.2/2/3、hex-1/2/3/4/5、aes-1.1/1.2、otp-1、crc-1/2/3/4）。
 
-5. **make**: 单线程编译成功
-   ```bash
-   make -j1
-   ```
+## 补丁
 
-6. **make install DESTDIR**: staging 隔离安装
-   ```bash
-   make install DESTDIR=$TEST_PREFIX HELP2MAN=/bin/true
-   ```
-   产物位于 `$TEST_PREFIX/$DEFAULT_PREFIX/`
+| 文件 | 原因 | 说明 |
+|------|------|------|
+| 0001-build-aux-config.guess.patch | E007 平台识别 | 2013-06-10 版不识别 HarmonyOS；替换为 automake-1.17 版（2023-08-22，含 `__OHOS__` 检测 → aarch64-unknown-linux-ohos） |
+| 0002-build-aux-config.sub.patch | E007 平台识别 | 2013 版不识别 linux-ohos；替换为 automake-1.17 版（2023-09-13，canonicalize linux-ohos 三元组） |
 
-7. **make check**: 全部测试通过
-   ```bash
-   make check
-   # 结果: TOTAL=1 PASS=1 FAIL=0 SKIP=0 ERROR=0
-   ```
+两补丁均为脚本整文件替换，无 C 代码改动，平台检测类补丁。
 
-8. **ELF 签名验证**: 签名并验证 staging 二进制可执行
-   ```bash
-   ohc-run.py sign-elf $STAGING_PREFIX/bin/modhex
-   ohc-run.py sign-elf $STAGING_PREFIX/bin/ykparse
-   ohc-run.py sign-elf $STAGING_PREFIX/bin/ykgenerate
-   ```
+## 真机 shadow CI 迭代记录
 
-9. **verify-build**: 质量门禁 G1-G4 通过
+### r1（2026-09-27，job libyubikey-1.13-20260927）
 
-10. **package**: 预编译包制作成功（ohc-run.py package 9步管线）
+- 排队 wait_seconds=0（锁空闲），L0 静态门禁全过，conan create 到 configure 阶段失败。
+- 报错原文：`/system/bin/sh: .../configure: Permission denied` → `ConanException: Error 126`。
+- 设备探针定位（两个独立根因，均为当日设备 HMDFS 行为）：
+  1. **脚本 execve 被拒**：新建脚本 chmod 777 实际落盘 `rwxr-x---` 且 owner 显示 20001006（非当前会话 uid），任何直接 execve 返回 126；`sh script` / `bash script` 解释执行正常；**编译出的 ELF 二进制可直接执行**（工具链自动签名）。→ 修法：configure 经 `sh ./configure` 调用（anubis/4.3 配方同款），`CONFIG_SHELL=/bin/sh SHELL=/bin/sh`。
+  2. **config.status mktemp 坑**（同 6 月问题 #4、abnfgen/anubis 配方先例）：`(umask 077 && mktemp -d "./confXXXXXX")` 产生的 setgid 目录不可写 → `could not setup config files machinery`。修法：configure 运行前把该分支替换为 `tmp=./conf$$-$RANDOM && mkdir "$tmp"`（configure 会把该段原样嵌入 config.status，必须改 configure 本身）。
+- 探针全链路验证：`sh ./configure` → `make -j1` → `make check`（TOTAL=1 PASS=1）→ `make install DESTDIR` 全部通过，产物 bin/lib/include 齐全。
+- 配方修复：build() 改为解释器调用 + mktemp 补丁 + TMPDIR 默认 ~/tmp（/tmp 只读）。
 
-11. **本地部署验证**: make install（不带 DESTDIR）+ 签名 + 功能验证
-    ```bash
-    make install HELP2MAN=/bin/true
-    ohc-run.py sign-elf ~/usr/local/bin/modhex
-    ~/usr/local/bin/modhex abcdefghijklmnopqrstuvwxyz
-    # 输出: hbhdhehfhghhhihjhkhlhnhrhthuhvicibidieifigihiiijikil
-    ```
+### r2（同 job）
 
-12. **finish**: 收尾完成，状态 published
+- 报错原文：`checking for ar... no` → `checking the archiver (link -lib) interface... unknown` → `configure: error: could not determine link -lib interface`。
+- 根因：CI conanbuild 环境 PATH 不含 `/data/service/hnp/bin`（CC 以绝对路径引用，clang 可用），ar/ranlib 解析不到。
+- 解法：OHOS 时把 `/data/service/hnp/bin` 前置到 PATH（commit 1b402b5961）。
 
-## 遇到的问题与解决方案
+### r3（同 job）
 
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-| 1 | C compiler cannot create executables | OpenHarmony SDK 的 lld 链接器依赖 libxml2.so.16，但 musl 动态链接器找不到该库 | 使用 `-fuse-ld=/data/service/hnp/bin/ld`（GNU ld）替代 SDK 内的 lld，GNU ld 不依赖 libxml2 |
-| 2 | cannot run C compiled programs (Permission denied) | OpenHarmony 安全机制要求 ELF 二进制必须签名才能执行，configure 的 conftest 测试二进制未签名导致无法执行 | 创建 LD wrapper 脚本，链接完成后自动调用 `ohc-run.py sign-elf` 签名所有可执行 ELF 文件 |
-| 3 | config.guess unable to guess system type | 源码自带 config.guess 版本为 2013-06-10，不识别 HarmonyOS 和 aarch64-unknown-linux-ohos 三元组 | 替换为 automake-1.17 版本的 config.guess（2023-08-22）和 config.sub（2023-09-13），正确识别平台 (E007 模式) |
-| 4 | config.status subs1.awk Permission denied | HMDFS 文件系统下 mktemp -d（umask 077）创建的临时目录被 UID 20001006 拥有，而当前进程 UID 为 20020082，组权限仅为 setgid（无读/写权限），导致无法在临时目录内创建文件 | 创建 mktemp wrapper 脚本，使用 umask 002 替代 umask 077 创建临时目录，确保目录具有组可写权限 (drwxrws--x) |
+- 编译、上游 `make check`（PASS: selftest, TOTAL=1 PASS=1）、安装全过；test_package 21 检查仅 `otp generate/parse roundtrip` 失败。
+- 根因：test.c 断言 bug——`yubikey_generate()` 会**原地加密** token 结构体（yktoken.c），原断言拿加密后的 tok 与解密结果比对，必然不等。本机仅交叉编译未运行，未提前抓住（教训：能用解释器模拟跑的断言尽量本机先跑一遍）。
+- 解法：保存原始字节常量，parsed 与常量比对（与上游 selftest otp-1 语义一致，commit 2e25a81ca7）。
 
-## 源码修改清单
+### r4（2026-09-27 15:07，run codex-1.13-libyubikey-1.13-20260927-conan-20260927-150715-23005）——最终结果
 
-| 文件 | 原因 | 方式 | 补丁文件 |
-|------|------|------|----------|
-| build-aux/config.guess | E007: 2013版不识别 HarmonyOS / aarch64-unknown-linux-ohos | 替换为 automake-1.17 版本 (2023-08-22) | 0001-build-aux-config.guess.patch ✅ |
-| build-aux/config.sub | E007: 2013版不识别 HarmonyOS / aarch64-unknown-linux-ohos | 替换为 automake-1.17 版本 (2023-09-13) | 0002-build-aux-config.sub.patch ✅ |
-
-## 依赖版本
-
-- 无依赖（required 和 optional 都为空）
-
-## 验证结果
-
-```bash
-# make check 真实执行输出
-PASS: selftest
-============================================================================
-Testsuite summary for libyubikey 1.13
-============================================================================
-# TOTAL: 1
-# PASS:  1
-# SKIP:  0
-# XFAIL: 0
-# FAIL:  0
-# XPASS: 0
-# ERROR: 0
-============================================================================
-
-# 二进制功能验证
-$ ~/usr/local/bin/modhex abcdefghijklmnopqrstuvwxyz
-hbhdhehfhghhhihjhkhlhnhrhthuhvicibidieifigihiiijikil
-
-$ ~/usr/local/bin/modhex -d ccbhcvlugnicnrtubnterhevtvivitb
-（解码输出二进制数据）
-
-$ ~/usr/local/bin/ykparse
-Usage: ykparse <aeskey> <token>
-
-$ ~/usr/local/bin/ykgenerate
-Usage: ykgenerate <aeskey> <yk_internalname> <yk_counter> <yk_low> <yk_high> <yk_use>
+```text
+wait_seconds=0
+exit code: 0
+L0_RESULT=pass: all checks passed（含 L0j：registry 无 1.13，首次发布）
+L1_RESULT=pass: upstream tests + test_package executed
+L2_RESULT=pass: modhex --version OK（ykparse/ykgenerate --version 非零，仅记录）
+L4_RESULT=warn: 补丁中 "targets" 注释含 "gets" 子串的已知误报
+L5_RESULT=pass: bin/ has content
+上游测试: TOTAL=1 PASS=1 FAIL=0 SKIP=0
+test_package: 21 checks, 0 failures + modhex CLI 冒烟通过
+Build Summary: Success 1 / Failed 0
 ```
 
-## 交付物
+## Test evidence
 
-| 文件                                | 大小    | 说明                          |
-|-------------------------------------|---------|-------------------------------|
-| libyubikey-1.13-ohos-aarch64.tar.gz | 267KB   | 预编译包（strip + ELF签名）   |
-| libyubikey-1.13-ohos-aarch64-debug.tar.gz | 75KB | 调试符号包                    |
+- 2026-06-06 ohc-run 真机构建（历史，ohc-run 流程）：
+  - `make check`：TOTAL=1 PASS=1 FAIL=0 SKIP=0。
+  - `modhex abcdefghijklmnopqrstuvwxyz` → `hbhdhehfhghhhihjhkhlhnhrhthuhvicibidieifigihiiijikil`（真机实测）。
+- 2026-09-27 Conan shadow CI r4：L0/L1/L2/L5 pass、L4 warn（误报）、exit 0；上游 1/1；test_package 21 断言 + CLI 冒烟全过。
 
-预编译包包含：3个二进制（modhex/ykparse/ykgenerate）、1个静态库（libyubikey.a）、1个头文件（yubikey.h）、3个man手册页
 
-## 注意事项
 
-1. 需使用 LD wrapper 签名脚本解决 OpenHarmony ELF 签名要求（链接后自动签名）
-2. 需使用 mktemp wrapper 解决 HMDFS 目录权限问题（umask 002 替代 077）
-3. 需使用 GNU ld (/data/service/hnp/bin/ld) 替代 SDK 的 lld（lld 依赖 libxml2.so.16）
-4. 仅编译静态库（libyubikey.a），无共享库（configure 判定 linker 不支持 shared libraries）
-5. CONFIG_SHELL 必须设置为 bash，避免 toybox sh 兼容性问题
-6. G0 干净构建验证因 Python subprocess 平台限制失败，已手动验证构建可复现
+## 历史：2026-06 ohc-run 真机构建经验（对 shadow CI 排障仍有用）
 
----
+| # | 问题 | 解决方案 |
+|---|------|----------|
+| 1 | C compiler cannot create executables | SDK lld 依赖 libxml2.so.16 找不到；用 GNU ld（`-fuse-ld=...`）替代 |
+| 2 | cannot run C compiled programs (Permission denied) | OHOS 要求 ELF 签名；LD wrapper 链接后自动 sign-elf |
+| 3 | config.guess unable to guess system type | 替换 config.guess/config.sub 为 2023 版（本轮已固化为补丁） |
+| 4 | config.status subs1.awk Permission denied | HMDFS mktemp umask 077 组权限问题；mktemp wrapper umask 002 |
 
-**编译结束**: 2026-06-06 10:05
-**最终状态**: published
+## 下一步（真机 shadow CI）
+
+1. 在真机用隔离 job 执行单包 CI：
+   ```sh
+   sh "$HOME/bin/ohos-prepare-isolated-conan-job.sh" \
+     --user codex \
+     --job libyubikey-1.13-<timestamp> \
+     --package archives/l/libyubikey/1.13 \
+     --repo-source <existing-repo>
+   sh "$HOME/ohos-users/codex/<job>/run-conan-heavy.sh"
+   ```
+2. 记录 L0/L1/L2/L4/L5 结果、上游测试数量（预期 TOTAL=1 PASS=1）、test_package（预期 22/22）。
+3. 关注点：若制品仓已存在 libyubikey/1.13 且配方不同（R37），需递增为 1.13.1 并同步目录/配方/test_package/MANIFEST/分支名。

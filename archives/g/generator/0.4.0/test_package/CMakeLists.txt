@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_generator LANGUAGES CXX)
+find_package(generator CONFIG REQUIRED)
+add_executable(test_generator test.cpp)
+target_compile_features(test_generator PRIVATE cxx_std_20)
+target_link_libraries(test_generator PRIVATE tl::generator)
+enable_testing()
+add_test(NAME generator_consumer COMMAND test_generator)

@@ -1,0 +1,82 @@
+#====================================================================
+# DRAFT-10050-ohos-musl-declares-ns-name-ntop-but-does-not-impl
+# OHOS musl libc 在 <arpa/nameser.h> 声明 ns_name_ntop() 但不实现，
+# 且完全没有 libresolv，导致 BIND 风格的 DNS 工具链接失败
+# 来源: wrapsrv 1.0.0 适配 (2026-10-01)
+#====================================================================
+
+id:                     DRAFT-10050
+trigger_tool:           clang|make|conan create|ld.lld
+phase:                  linking
+error_signature:        undefined symbol: ns_name_ntop|undefined symbol: ns_initparse|cannot find -lresolv|ld.lld-15: error: undefined symbol
+match_keywords:         ns_name_ntop, ns_name_uncompress, ns_initparse, ns_parserr, arpa/nameser.h, resolv.h, libresolv, -lresolv, musl, OHOS, libc.a, res_query, res_init, herror, dn_expand, dns, SRV, RFC 2782, wrapsrv, undefined symbol
+category:               libc, linking, porting
+severity:               2
+status:                 draft
+agent_id:               A7F3
+forbid_1_pattern:       _GNU_SOURCE
+forbid_1_reason:        本条目根因是 libc 缺少 BIND 的名字渲染函数，与特性测试宏无关。
+forbid_2_pattern:       ns_name_ntop
+forbid_2_reason:        本条目的修复目标恰恰是补上 ns_name_ntop 的等价实现，故不能作为"禁止模式"；排查时应改用 res_query / libresolv 作为判据。
+root_cause: >
+  OHOS 的 libc 是 musl。musl 的 <arpa/nameser.h> 直接抄了 BIND 的头文件，
+  里面声明了 ns_initparse()/ns_parserr()/ns_name_ntop()/ns_skiprr()，
+  但 musl 只实现了其中一部分：
+    实测 llvm-nm 扫 sysroot libc.a 得到的 ns_/dn_/res_ 符号全集是
+    ns_get16 ns_get32 ns_initparse ns_name_uncompress ns_parserr ns_put16
+    ns_put32 ns_skiprr dn_comp dn_expand dn_skipname res_bind_socket res_init
+    res_query res_querydomain res_search res_send __res_mkquery __res_msend ...
+  —— **没有 ns_name_ntop**。于是任何调用 BIND 的
+  "wire 格式域名 -> 文本域名" 函数的程序（老 DNS 工具很常见）在 OHOS 上
+  编译干净、链接失败：
+    ld.lld-15: error: undefined symbol: ns_name_ntop
+    >>> referenced by wrapsrv.c
+  第二个坑同时出现：这些老项目的 Makefile 一般写死 LDFLAGS = -lresolv，
+  而 OHOS **根本没有 libresolv**（sysroot 里 find -name '*resolv*' 为空，
+  resolver 全在 libc），于是报 "cannot find -lresolv"。
+  两者其实是同一个根因的两面：**musl 把 resolver 内联进 libc，
+  同时砍掉了 BIND 私有的一批 ns_*/dns 名字 API。**
+  反过来 glibc/macOS 自带 BIND libresolv，所以上游作者从未遇到过。
+rec_approach: >
+  两处都要处理，但都不要用平台宏（PF5/R8 硬约束）：
+  (1) **丢掉 -lresolv**：在 recipe 里覆盖 Makefile 变量
+      （本例 `make CC=<conan conf 的 c> LDFLAGS=`）。不丢任何功能 ——
+      res_query()/ns_initparse()/ns_parserr() 本来就是 libc 符号。
+      切勿改成 "-lresolv -lresolv" 之类试探式堆链接参数。
+  (2) **补一个树内的 wire->text 域名渲染器**替换 ns_name_ntop() 调用点。
+      实现只依赖 RFC 1035 线格式本身：逐 label 读长度字节（> NS_MAXLABEL 报错）、
+      0xc0 掩码视作压缩指针并校验"必须指向更早位置"（这同时天然给出循环上界）、
+      末段去掉尾点、根域名输出 "."、每段写入前按 buflen 检查
+      (len + label + 2 > buflen)。返回值语义与 BIND 一致（-1 表示失败，
+      否则为 presentation 长度），调用点只需把 perror() 的标签同步改名。
+      这样在 glibc 上语义完全等价，对非鸿蒙平台透明。
+  注意 SRV rdata 的 target 按 RFC 1035 4.1.4 / RFC 2782 **不允许压缩**，
+  所以真实场景走非压缩分支；压缩分支是防御性的，且必须说明它以"传入指针
+  为基准"解释（上游把 ns_rr_rdata() 裸指针当 ns_name* 传，本身就没有可用
+  的报文基址）。
+  排查口诀：老 DNS 工具在 OHOS 上链接失败且报的是 ns_*/dns_* 符号，
+  基本都是这一条；先 `llvm-nm --defined-only <sysroot>/usr/lib/aarch64-linux-ohos/libc.a | grep -oE '\b(ns_|dn_|res_)[a-z_0-9]+' | sort -u`
+  拿到 OHOS 真实有的符号全集，再决定缺哪个补哪个，不要凭 glibc 经验猜。
+rec_command: >
+  conan create archives/w/wrapsrv/1.0.0 --name=wrapsrv --version=1.0.0 \
+  -pr:h=ohos-aarch64-wsl -pr:b=ohos-aarch64-wsl --build=missing
+verification_cmd: >
+  conan create archives/w/wrapsrv/1.0.0 --name=wrapsrv --version=1.0.0 \
+  -pr:h=ohos-aarch64-wsl -pr:b=ohos-aarch64-wsl --build=missing
+verification_expect: >
+  三段式证据链（本条已实测，OHOS aarch64 真实产物 + qemu 执行）：
+  (a) 不打补丁直接编译 -> `ld.lld-15: error: undefined symbol: ns_name_ntop`，
+      没有任何二进制产出；即使手工把 -lresolv 去掉也仍然失败（证明两处必须都改）；
+  (b) 打补丁 + LDFLAGS= -> 在上游自带的 -Wall -Wextra -Werror 下零告警编过，
+      实测链接出的 aarch64 ELF 可执行；
+  (c) 消费者用例 -> test_package 对**交付二进制**跑 27 项断言全过
+      （TOTAL=27 PASS=27 FAIL=0）。其中 %h 替换的期望值 "primary.example.com"
+      只能由正确的 wire->text 转换产生，即补丁本身被真实执行并断言到；
+      5 组变异（删二进制/改 target/改端口/改优先级/改 rdlength）分别杀死
+      23/4/2/3/9 项断言，确认测试非空壳、对补丁敏感。
+applies_to:
+  - "调用 BIND 私有 ns_*/dns_* API 的老 DNS 工具与服务（wrapsrv/dnspython 类/nslookup 类）"
+  - "Makefile 里写死 LDFLAGS = -lresolv 的 C 项目"
+  - "任何 #include <arpa/nameser.h> 并使用 ns_initparse/ns_parserr/ns_msg_* 的程序"
+principles:              P005, P014
+caused_by:

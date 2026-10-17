@@ -1,0 +1,93 @@
+# DRAFT: libqtxdg (qtxdg) 3.12.0 适配 —— Qt5 Conan 配置缺口 + 非 PIC 静态库强制 STATIC
+
+- 条目主题：把 CMake + Qt5 的 C/C++ 库适配到 HarmonyOS PC 时，Conan CMakeDeps 无法替代
+  原生 Qt5 配置所需的可变通做法，以及 OpenHarmony 上 zlib/glib 只有非 PIC 静态库时的
+  「共享库 vs 静态库」抉择。
+- 状态：草稿（待知识库主编审核，拟提升编号 Exxx）
+- 关联软件：qtxdg（libqtxdg / Qt5Xdg）3.12.0 —— kylin-calendar/5.0.0.0 的第一个
+  `find_package(Qt5Xdg 3.3.1 REQUIRED)` 依赖。
+
+error_signature: "relocation R_AARCH64_ADR_PREL_PG_HI21 cannot be used against symbol .* recompile with -fPIC|Could NOT find GLIB \\(missing: GLIB_GIO_UNIX_INCLUDE_DIR\\)|_qt5_Core_check_file_exists|Target \"?Qt5::Svg\"? .*not found|'gio/gio\\.h' file not found"
+root_cause: "OpenHarmony 制品仓的 zlib/glib 只有非 PIC 静态归档，无法链进 .so；且 qt5-qtbase 包内原生 Qt5 umbrella cmake 配置烘焙了构建机路径（不可重定位），Conan CMakeDeps 又不产出 Qt5 宏/私有头/大写 GLIB_* 变量。"
+rec_approach: "1) 目标库改 STATIC（BUILD_SHARED_LIBS=OFF / add_library 去 SHARED）；2) 生成 CMAKE_PROJECT_INCLUDE shim 补齐 moc/qdbusxml2cpp/私有头/qt5_add_dbus_interface 并把 zlib::zlib 置空；3) deps.set_property('glib','cmake_find_mode','none') 让 FindGLIB 走 module 模式；4) 生成 gio-unix-2.0.pc；5) 把 glib 传递静态归档注入 PUBLIC 接口。"
+match_keywords: ["recompile with -fPIC", "R_AARCH64_ADR_PREL_PG_HI21", "GLIB_GIO_UNIX_INCLUDE_DIR", "CMAKE_FIND_PACKAGE_PREFER_CONFIG", "qt5-qtbase 不可重定位", "Qt5::Svg not found"]
+severity: 2
+category: platform, cmake, compat, build-system
+error_excerpt: "ld.lld: error: relocation R_AARCH64_ADR_PREL_PG_HI21 cannot be used against symbol 'z_errmsg'; recompile with -fPIC"
+last_updated: 2026-10-08
+
+## 适用场景
+
+CMake + Qt5（qt5-qtbase/5.15.2.x）的 C/C++ 库向 HarmonyOS PC 适配，出现以下任一现象：
+
+- 链接 `.so` 时报 `relocation R_AARCH64_ADR_PREL_PG_HI21 ... recompile with -fPIC`
+  （对象来自 `libz.a` / `libglib-2.0.a` 等静态归档）。
+- `find_package(GLIB REQUIRED COMPONENTS ... gio-unix)` 报
+  `Could NOT find GLIB (missing: GLIB_GIO_UNIX_INCLUDE_DIR)`。
+- 用 qt5-qtbase 包内**原生** Qt5 umbrella 配置时 `find_package(Qt5Core)` 直接
+  `_qt5_Core_check_file_exists` FATAL（路径形如 `<pkg>/../b//mkspecs/linux-clang`）。
+- 换成 Conan CMakeDeps 目标后，`Qt5::Svg` not found、`QT5_ADD_DBUS_INTERFACE`
+  / `qt5_generate_moc` 未定义、`Qt5Gui_PRIVATE_INCLUDE_DIRS` 为空、
+  `qplatformdefs.h` 找不到。
+- 编译期 `'gio/gio.h' file not found`（上游只用**大写** `GLIB_INCLUDE_DIRS`，
+  而 CMakeDeps 的 `glib-config.cmake` 只定义小写 `glib_INCLUDE_DIRS`）。
+
+## 诊断步骤
+
+1. `ld.*: error: relocation R_AARCH64_* ... -fPIC` + `>>> defined in .../libz.a`
+   → 判定为「非 PIC 静态库进共享库」。
+2. `find_package(GLIB ...)`：先确认命中的是 **module 模式（FindGLIB.cmake）**
+   还是 **config 模式（CMakeDeps glib-config.cmake）**——
+   `CMAKE_PREFIX_PATH`/`GLIB_DIR` 出现在 CMakeCache 即 config 模式被选中。
+   Conan 的 CMakeToolchain 会 `set(CMAKE_FIND_PACKAGE_PREFER_CONFIG ON)`。
+3. 用 qt5-qtbase 包内 `lib/cmake/Qt5Core/Qt5CoreConfigExtrasMkspecDir.cmake`
+   是否含 `.../b//mkspecs/...` 判断原生配置是否可重定位。
+4. `nm -D`/`readelf -d` 看 qt5-qtbase 的 `libQt5Core.so`：若 `NEEDED libz.so`
+   且自身不导出 zlib 符号，则消费端**不需要**静态链 zlib。
+
+## 修复方案（qtxdg 3.12.0 实测）
+
+- **静态化**：`Qt5Xdg`/`Qt5XdgIconLoader` 改 `STATIC`（upstream `add_library(... SHARED)`
+  写死）。同 quazip 先例。图标引擎插件保持 `MODULE`（PIC），仅在 shim 里把
+  `zlib::zlib` 置为空的 INTERFACE 目标并 `set(zlib_FOUND TRUE)`，避免非 PIC zlib
+  混进模块。
+- **补齐 Qt5 宏**：`generate()` 产出 `qtxdg_qt5_compat.cmake`，经
+  `CMAKE_PROJECT_INCLUDE` 注入，设置 `Qt5Core_MOC_EXECUTABLE` /
+  `Qt5DBus_QDBUSXML2CPP_EXECUTABLE` / `Qt5Core|Qt5Gui_PRIVATE_INCLUDE_DIRS`、
+  `include(qt5-qtbase 的 Qt5CoreMacros.cmake、Qt5DBusMacros.cmake)`、
+  `include_directories(<qtbase>/mkspecs/linux-clang)`。
+- **find_package 改写**：`find_package(Qt5 ... Widgets Svg Xml DBus)` →
+  `find_package(Qt5 ... CONFIG REQUIRED)` + `find_package(qt5-qtsvgv CONFIG REQUIRED)`。
+- **GLIB 走 module 模式**：`deps.set_property("glib", "cmake_find_mode", "none")`。
+- **gio-unix pc**：`generate()` 写 `gio-unix-2.0.pc`（`Cflags: -I${includedir}`，
+  prefix 指 glib 包，令 find_path 命中 `include/gio-unix-2.0/gio/gdesktopappinfo.h`）。
+- **传递静态归档**：把 glib 的 `libffi.a/libgmodule-2.0.a/libintl.a/libpcre2-8.a/libz.a`
+  注入 `Qt5Xdg` 的 PUBLIC 链接接口，否则消费者/test 报 `ffi_* / g_libintl_* /
+  g_module_* / pcre2_* / inflate*` undefined。
+- **自包含构建期工具**：上游 `find_package(lxqt-build-tools REQUIRED)`（制品仓无）
+  → 配方自带官方源码，`build()` 内先配置+安装到 build 目录子前缀
+  （其 config.cmake 会把 modules/find-modules 追加进 `CMAKE_MODULE_PATH`）；
+  配置它时用最简 `Qt5CoreConfig.cmake` 桩满足其无条件 `find_package(Qt5Core)`。
+- **可移植性**：上游测试硬编码 `/tmp`（OHOS E002 只读）→ 改 `QDir::tempPath()`
+  并给 ctest 注入可写 `TMPDIR`。
+
+## 证据（真实执行）
+
+- qtxdg 3.12.0：`conan create`（ohos-aarch64 profile）成功；build() 内
+  `ctest` 3/3 通过（qtxdg_test / tst_xdgdirs / tst_xdgdesktopfile）；
+  test_package 15/15 断言通过。
+- W3 `finish`：JC 0，`L0_RESULT=pass`、`L1_RESULT=pass`（L1a–L1e），
+  `.ci-result.json exit_code=0`。
+
+## 推广价值
+
+- 所有 CMake + Qt5 库向 HarmonyOS PC 的适配（qt5-qtbase 原生配置不可重定位、
+  Conan CMakeDeps 缺 Qt5 宏是普遍现象）。
+- 所有依赖 glib/zlib（非 PIC 静态）的库：共享库 vs 静态库的抉择判据。
+- 「自有 CMake 宏包未发布则配方自带源码」的可复制模式。
+
+## 查重关键词
+
+Qt5 Conan、CMakeDeps、CMAKE_FIND_PACKAGE_PREFER_CONFIG、FindGLIB、gio-unix-2.0.pc、
+非 PIC 静态库、zlib、glib、libffi、pcre2、libqtxdg、Qt5Xdg、lxqt-build-tools、
+qt5-qtbase 不可重定位、qt5-qtsvgv、HarmonyOS PC

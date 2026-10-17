@@ -1,0 +1,59 @@
+#====================================================================
+# DRAFT knowledge entry - zip 归档携带的"空输出目录"解压即丢，makefile 链接期 cannot open output file
+# Source package: simh/3.8.1（上游源码 zip 含空 BIN/ 目录）；模式可推广到任意同类归档
+#====================================================================
+
+id: DRAFT-conan-zip-empty-output-dir-lost-on-extract
+trigger_tool: make|ld.lld|conan|unzip
+phase: source|compilation
+error_signature: ld\.lld: error: cannot open output file|cannot open output file .*/BIN/|No such file or directory.*-o
+severity: 2
+category: source-archive, make, linking, conan
+match_keywords: zip 空目录, empty directory, BIN/, 解压丢失, extraction drops, cannot open output file, ld.lld, makedirs, mkdir -p, makefile 输出目录, strip_root, 源码归档
+
+title: 源码 zip 归档里的空输出目录（如 BIN/）解压后不存在，makefile 直接写 BIN/<target> 会在链接期报 cannot open output file——build() 需先 os.makedirs
+
+root_cause: >
+  zip 格式以"条目"存储，空目录只是一个独立条目；部分下载/解压链路（Conan get()、
+  CI pre-download、校验工具）会丢弃纯目录条目，解压后该目录不存在。上游 makefile
+  习惯把输出目录当"已存在"直接写（simh: BIN = BIN/，链接规则 -o BIN/<sim>，
+  无任何 mkdir），于是编译全部成功、到链接写目标文件时才失败：
+      ld.lld: error: cannot open output file BIN/pdp1: No such file or directory
+  失败点在链接期且逐 target 重复报错，容易被误判为"编译器/链接器问题"。
+  tar.gz 归档通常保留空目录条目，故此坑集中于 zip 源。
+
+affected_scope: >
+  所有"zip 源码归档 + 手写 makefile + makefile 不自建输出目录"的组合。
+  判据：解压后 ls <预期输出目录> 不存在，而 makefile 里有 `BIN = BIN/` 之类的
+  输出目录变量且规则直接 -o $(BIN)xxx。simh 3.8.1 实测：不建目录 0/26 全灭，
+  预建后 26/26。
+
+verification_cmd: >
+  unzip -l simhv38-1.zip | grep -c 'BIN/'   # -> 0（空目录条目不存在）
+  # 复现: conan create（或 make）→ ld.lld: error: cannot open output file BIN/<target>
+  # 修复后: os.makedirs(<source_folder>/BIN, exist_ok=True) → 26/26 全部链接成功
+
+rec_priority: 1
+rec_approach: pre-create-output-dir-in-build
+rec_description: >
+  在 conanfile.build() 里、调用 make 之前 os.makedirs(<source_folder>/<输出目录>,
+  exist_ok=True)。不推荐打补丁改上游 makefile（改动面大且不可复用）；也不依赖
+  makefile 自己 mkdir（上游没有该逻辑）。Conan 侧更通用的做法是在 build() 开头对
+  makefile 中声明的输出目录变量做一次存在性预建。
+rec_command: >
+  os.makedirs(os.path.join(self.source_folder, "BIN"), exist_ok=True)   # 在 self.run(make ...) 之前
+rec_auto_fix: true
+rec_impl: conan-recipe-build
+similar_to: [DRAFT-csstidy-1.4-zip-backslash-source-drop, DRAFT-conan-downloader-xgzip-content-encoding]
+conflicts_with: []
+notes: >
+  查重说明：csstidy 条目讲 zip 内反斜杠路径致源码"丢失"，xgzip 条目讲 Content-Encoding
+  破坏归档流——均与"空目录条目丢失→链接期 cannot open output"不同因不同果；
+  避坑指南 6.2 仅提醒 strip_root 需实检，未覆盖空目录条目丢失。此坑为独立新条目。
+  判定空目录丢失的旁证：unzip -l 归档清单里只有文件条目、无目录条目。
+verify_builds: >
+  simh/3.8.1 本机对照实验（预建/不预建 BIN/：26/26 vs 0/26）+ 真机 shadow CI
+  2026-09-27（预建后 26/26，L0-L5 全 pass）。
+authors: codex
+source_pr: pending
+source_commit: 9eb7708c16 (feat/simh-3.8.1)

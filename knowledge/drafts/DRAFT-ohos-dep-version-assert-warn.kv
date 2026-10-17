@@ -1,0 +1,94 @@
+#====================================================================
+# DRAFT-ohos-dep-version-assert-warn — 上游库对依赖版本区间做硬断言，而制品仓
+#   只有新版时：先实测告警是否 gate 行为
+# 对应人类文档: knowledge/drafts/DRAFT-ohos-dep-version-assert-warn.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-ohos-dep-version-assert-warn
+trigger_tool:           python|pip|conan
+phase:                  configuration|runtime
+error_signature:        RequestsDependencyWarning|
+                         doesn't match a supported version|
+                         check_compatibility|
+                         Package .* requires .*, but .* is installed|
+
+severity:               2
+category:               python, dependency, version, compat, packaging
+match_keywords:         RequestsDependencyWarning, check_compatibility, requires_dist,
+                        版本区间, pin, urllib3 2.x, chardet 3.x, 遗留依赖, 依赖降级,
+                        PF4 依赖闸, W2 原子性, 告警是否 gate 行为
+title:                  上游库对依赖版本区间做硬断言而制品仓只有新版时，先实测断言是"仅告警"还是
+                        "真阻断"，再决定是否降级适配整条遗留依赖链
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             上游包（如 requests 2.22.0）在 import 期用 assert 校验依赖版本区间
+                        （urllib3>=1.21.1,<1.26 / chardet>=3.0.2,<3.1.0 / idna>=2.5,<2.9），
+                        而制品仓只发布了新版（urllib3 2.7.0 / chardet 5.2.0 / idna 3.18）。
+                        此时 import 会抛 RequestsDependencyWarning —— 但该 assert 被
+                        try/except 包住，**只发告警、不阻断任何代码路径**。真正需要判断的是：
+                        新版依赖是否在**实际调用路径**上仍然工作。若不实测就认定"必须降级"，
+                        就得额外适配并发布 3~4 个遗留包，既拖长链路又与 W2/PF4 的"一个 PR
+                        只动一个包、不得捎带依赖"直接冲突。
+affected_scope:         上游 requires_dist 为窄版本区间、而制品仓只有更新版本的所有 Python 包
+                        （requests/charset-normalizer 时代前的 web 栈、老牌解析库等），
+                        以及任何"报依赖不匹配"但不确定是否致命的场景。
+verification_cmd:        PYTHONPATH=<deps> python3 -W error::UserWarning -c "import requests"
+                        # 再用真实调用路径复核（GET/重定向/超时/Retry/idna 编码）见 md 实测表
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           use-prebuilt-package
+rec_description:        采用制品仓已发布的新版依赖，用**实测**证明告警非致命：跑通真实调用路径
+                        （HTTP 往返、重定向、超时传播、Retry 对象、非 ASCII 域名 idna 编码、
+                        异常类层次），并把这条告警在 test_package 里显式断言（存在且仅一条），
+                        使将来行为变化能被立刻发现。在配方注释与 notes.md 写明"告警属预期"。
+rec_command:            self.requires("urllib3/2.7.0")  # 而非降级适配 urllib3/1.25.3
+rec_auto_fix:           false
+rec_impl:               manual-workaround
+
+fallback_priority:      2
+fallback_approach:      adapt-legacy-dependency-chain
+fallback_description:   仅当实测发现新版**确实**在关键路径上失败（类型错误/行为变更）时，才按
+                        拓扑序先适配并发布遗留依赖（如 urllib3/1.25.3、chardet/3.0.4、idna/2.8），
+                        且这些包必须各自独立 PR，不得与本包捎带提交（W2 / PF4 依赖闸）。
+fallback_command:       conan download "urllib3/1.25.3" -r=ohpcd --only-recipe   # 先确认是否已发布
+fallback_auto_fix:      false
+fallback_impl:          dependency-first
+
+forbid_1_pattern:       在同一 PR 内新增 archives/.*/(urllib3|chardet|idna)/|
+                        self\.requires\("(urllib3|chardet|idna)/1\.|/2\.8"\).*# 捎带
+forbid_1_reason:        为一个"仅告警"的版本区间断言去适配整条遗留依赖链，属于把无必要的依赖包
+                        捎带进本 PR；W2 要求一个 PR 只允许一个软件目录，PF4 依赖闸在创建 PR 前
+                        就会拦截缺失依赖。
+forbid_1_consequence:   PR 被 CI JC6/PF1 直接拦截，浪费整轮 CI；依赖图被无意义地拉长。
+
+forbid_2_pattern:       warnings\.filterwarnings\("ignore".*\)（在配方/包内全局屏蔽该告警）
+forbid_2_reason:        全局屏蔽会掩盖将来真实的依赖行为变更；正确做法是在消费者测试里显式断言
+                        该告警存在且唯一。
+forbid_2_consequence:   用户侧静默获得行为不一致的依赖组合，问题延后暴露。
+
+principles:             dependency-first, real-consumer-test, reproducible-build-test
+
+causes:                 []
+caused_by:              []
+similar_to:             [E2176, E396]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-dep-version-assert-warn.md
+last_updated:           2026-09-16
+source_event:           requests 2.22.0 适配（依赖策略实测）
+
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:         9C75

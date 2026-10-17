@@ -2,16 +2,15 @@
 
 ## 编译环境
 - 构建系统: cmake
-- 编译日期: 2026-04-21
-- 编译器: clang/clang++
+- 编译日期: 2026-08-06
+- 编译器: clang/clang++ 15.0.4
 - 状态: success
 
 ## 编译步骤
-1. 下载源码 `https://github.com/ArthurSonzogni/ftxui/archive/refs/tags/v6.1.9.tar.gz`
+1. 下载源码 `https://github.com/ArthurSonzogni/FTXUI/archive/refs/tags/v6.1.9.tar.gz`
 2. CMake 配置:
    ```bash
-   cmake -DCMAKE_INSTALL_PREFIX=$DEFAULT_PREFIX \
-     -DFTXUI_BUILD_EXAMPLES=OFF \
+   cmake -DFTXUI_BUILD_EXAMPLES=OFF \
      -DFTXUI_BUILD_DOCS=OFF \
      -DFTXUI_BUILD_TESTS=OFF \
      -DFTXUI_ENABLE_INSTALL=ON \
@@ -36,6 +35,17 @@
 - pkg-config: lib/pkgconfig/ftxui.pc ✅
 - 纯 header+static library，无需安全弹窗 ✅
 
+## Conan 配方验证 (2026-08-06)
+- conan create: PASS
+- G0-G4 + L2/L4/L5: ALL PASS
+- W3 本地 CI 模拟: PASS
+- 链接顺序: ftxui-component → ftxui-dom → ftxui-screen
+- system_libs: pthread
+
 ## 注意事项
 - 测试因 googletest FetchContent 问题被跳过
 - 无源码修改，无需补丁
+- 消费者测试 (test_package) 使用 C++ 编写，验证 text+Render+Screen API
+
+## 结束
+COMPLETED

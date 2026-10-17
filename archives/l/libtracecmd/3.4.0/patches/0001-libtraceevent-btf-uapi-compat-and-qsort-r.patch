@@ -1,0 +1,87 @@
+From: clancyxie <clancyxie@noreply.gitcode.com>
+Subject: [PATCH] libtraceevent: build trace-btf.c on the OHOS SDK
+
+The bundled libtraceevent 1.9.0 is statically linked into libtracecmd, and its
+BTF front end does not compile against the OHOS native SDK:
+
+ * <linux/btf.h> there predates Linux 5.2, so BTF_KIND_FLOAT/DECL_TAG/TYPE_TAG/
+   ENUM64 and struct btf_decl_tag/btf_enum64 are missing and NR_BTF_KINDS is 16
+   (too small for btf_kind_str[] indexed by kinds 16..19).
+ * qsort_r(3) is a GNU extension and is not declared by the OHOS libc, which
+   clang 15 rejects as an implicit function declaration.
+
+Both are guarded by #ifndef, so a newer toolchain keeps using its own header.
+--- a/src/trace-btf.c
++++ b/src/trace-btf.c
+@@ -9,6 +9,36 @@
+ #include <stdbool.h>
+ 
+ #include <linux/btf.h>
++
++/*
++ * The OHOS SDK ships a pre-5.2 <linux/btf.h>: BTF_KIND_MAX stops at
++ * BTF_KIND_DATASEC, so the kinds below are undefined and NR_BTF_KINDS is too
++ * small to index btf_kind_str[] with them. Values and layouts follow
++ * include/uapi/linux/btf.h from Linux.
++ */
++#ifndef BTF_KIND_ENUM64
++#define BTF_KIND_FLOAT		16
++#define BTF_KIND_DECL_TAG	17
++#define BTF_KIND_TYPE_TAG	18
++#define BTF_KIND_ENUM64		19
++
++#undef BTF_KIND_MAX
++#define BTF_KIND_MAX		BTF_KIND_ENUM64
++#undef NR_BTF_KINDS
++#define NR_BTF_KINDS		(BTF_KIND_MAX + 1)
++
++/* BTF_KIND_DECL_TAG is followed by a single struct btf_decl_tag. */
++struct btf_decl_tag {
++	__s32	component_idx;
++};
++
++/* BTF_KIND_ENUM64 is followed by vlen struct btf_enum64 entries. */
++struct btf_enum64 {
++	__u32	name_off;
++	__u32	val_lo32;
++	__u32	val_hi32;
++};
++#endif /* BTF_KIND_ENUM64 */
+ 
+ #include "event-parse.h"
+ #include "event-utils.h"
+@@ -149,6 +179,25 @@
+ 	return strcmp(name_a, name_b);
+ }
+ 
++/*
++ * qsort_r(3) is a GNU extension the OHOS libc does not provide; the comparator
++ * context is passed in a thread local instead. btf_load() is the only caller
++ * and never re-enters qsort().
++ */
++static __thread struct tep_btf *sort_btf;
++
++static int cmp_funcs_sort(const void *A, const void *B)
++{
++	return cmp_funcs(A, B, sort_btf);
++}
++
++static void tep_qsort_funcs(struct tep_btf *btf)
++{
++	sort_btf = btf;
++	qsort(btf->funcs, btf->nr_funcs, sizeof(btf->funcs[0]), cmp_funcs_sort);
++	sort_btf = NULL;
++}
++
+ struct tcmd_search {
+ 	struct tep_btf		*btf;
+ 	const char		*name;
+@@ -207,7 +256,7 @@
+ 		type = (void *)type + size;
+ 	}
+ 
+-	qsort_r(btf->funcs, btf->nr_funcs, sizeof(btf->funcs[0]), cmp_funcs, btf);
++	tep_qsort_funcs(btf);
+ 	return 0;
+ }
+ 

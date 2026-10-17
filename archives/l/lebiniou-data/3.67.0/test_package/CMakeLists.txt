@@ -1,0 +1,4 @@
+cmake_minimum_required(VERSION 3.15)
+project(lebiniou_data_test LANGUAGES CXX)
+add_executable(lebiniou_data_probe lebiniou_data_probe.cpp)
+target_compile_features(lebiniou_data_probe PRIVATE cxx_std_11)

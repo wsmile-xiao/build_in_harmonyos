@@ -1,0 +1,92 @@
+#====================================================================
+# DRAFT-ohos-setuptools-bootstrap-and-dist-info — setuptools 自举构建（无需宿主预装）
+#   与 dist-info 的**必需性**：Python 3.12 下 Python 包的构建前置
+# 触发事件: setuptools 84.0.0 适配（PR #11266）；关联 greenlet 3.5.6（PR #10408）
+#   被判 rule 4「缺依赖」166/172，构建期报 No module named 'setuptools'（CI #10488）
+#====================================================================
+
+id:                     DRAFT-ohos-setuptools-bootstrap-and-dist-info
+trigger_tool:           python|setuptools|pip|build|conan
+phase:                  configuration|compilation|packaging
+error_signature:        No module named 'setuptools'|
+                         ModuleNotFoundError.*setuptools|
+                         PackageNotFoundError.*setuptools|
+                         distutils.*not found.*3\.12|
+                         build-backend.*setuptools\.build_meta
+
+severity:               2
+category:               ohos|python|build-system|packaging|dependency
+match_keywords:         setuptools, bootstrap, 自举, dist-info, egg-info,
+                         importlib.metadata, version.py, PackageNotFoundError,
+                         distutils removed, Python 3.12, setup.py, build_meta,
+                         PEP 517, tool_requires, host site-packages, greenlet,
+                         No module named setuptools
+
+title:                  setuptools 自举（构建它自己无需宿主预装）与 dist-info 对 version.py 的功能必需性
+
+root_cause:             两件事：①Python 3.12 **移除了 stdlib 的 distutils 回退路径**，
+                         而上游包 setup.py 普遍顶层 `import setuptools`（pyproject 亦声明
+                         build-backend=setuptools.build_meta、requires=["setuptools>=43"]），
+                         故 setuptools 是 Python 包构建的**硬前置**而非可选工具；借用宿主/
+                         CI worker 的 setuptools 路径不可靠（宿主有没有、版本是否兼容不可控）
+                         —— 此即 greenlet CI #10488 报 No module named 'setuptools' 的成因。
+                         ②构建 setuptools 自身时**不需要**宿主预装：只要构建 cwd 位于
+                         解包根，`import setuptools` 解析到**源码树自身**（实测 __file__
+                         指向解包目录、__version__=84.0.0）。③setuptools/version.py 经
+                         `importlib.metadata.version('setuptools')` 取版本，而该 API 按
+                         dist-info/egg-info **目录名**解析 → 纯手工 copy 的包目录树没有
+                         元数据 → setuptools.__version__ 取不到值（PackageNotFoundError），
+                         故必须经 setup.py 装配元数据后再打包。
+
+affected_scope:         所有走 setup.py / pyproject(setuptools.build_meta) 构建的 Python 包
+                         （需显式声明 setuptools 为构建依赖）；以及任何**本身是 Python 构建
+                         工具**的包（setuptools/pip/wheel/flit/build/hatchling）——需确认
+                         自举条件与元数据自我解析需求
+
+rec_priority:           1
+rec_approach:           explicit-build-dependency-plus-metadata-assembly
+rec_description:        下游 Python 包：在 conanfile.py 显式声明
+                         `tool_requires("setuptools/84.0.0")`（勿借用宿主路径）。
+                         构建 setuptools 自身：确认构建 cwd 在解包根以使 import 解析到
+                         源码树自身（自举），并经 setup.py 装配 dist-info 后打包
+                         （接受 *.dist-info 或 *.egg-info，二者均可被 importlib.metadata 解析）。
+rec_command: >
+  # 下游 Python 包
+  def build_requirements(self):
+      self.tool_requires("setuptools/84.0.0")
+  # 自举验证
+  python3 -c "import setuptools; print(setuptools.__file__, setuptools.__version__)"
+  # 元数据必需性验证
+  python3 -c "import importlib.metadata as m; print(m.version('setuptools'))"
+rec_auto_fix:           false
+rec_impl:               conan-recipe-tool-requires
+
+forbid_1_pattern:       在配方里把宿主/CI worker 的 site-packages（setuptools 目录）塞进 PYTHONPATH 以"解决"缺 setuptools
+forbid_1_reason:        宿主是否安装、版本是否兼容均不可控（greenlet CI #10488 即此成因），
+                        CI 上会复现失败
+forbid_1_consequence:   本地看似可行、CI 红；构建不可复现
+
+forbid_2_pattern:       打包 setuptools 时手工 copy 包目录而不装配 dist-info/egg-info
+forbid_2_reason:        setuptools/version.py 经 importlib.metadata.version('setuptools')
+                        按元数据目录名解析，缺元数据是**功能性故障**而非少个版本号
+forbid_2_consequence:   setuptools.__version__ 取不到值（PackageNotFoundError），
+                        消费者与自检中断
+
+forbid_3_pattern:       把 dist-info 当作可选装饰在打包脚本里忽略
+forbid_3_reason:        对按元数据自我解析的包（setuptools 等）元数据是运行前提
+forbid_3_consequence:   包"装上了但版本解析失败"，问题延迟到消费期才暴露
+
+principles:             构建前置依赖显式声明（勿借宿主路径）; Python 构建工具适配先问
+                        自举条件与元数据依赖; 3.12 移除 distutils 后 setuptools 是硬依赖
+
+verification_cmd:       python3 -c "import setuptools; print(setuptools.__file__, setuptools.__version__)"
+                         # 自举: __file__ 指向解包目录, __version__ = 84.0.0
+                         python3 -c "import importlib.metadata as m; print(m.version('setuptools'))"
+                         # 缺 dist-info 时抛 PackageNotFoundError
+
+related_docs:           doc/E177.md, doc/E036.md, doc/E434.md,
+                         DRAFT-ohos-source-copy-python-no-dist-info-version-unavailable
+
+source_event:           archives/s/setuptools/84.0.0 PR#11266（关联 greenlet PR#10408 CI#10488）
+first_seen_project:     setuptools/84.0.0
+last_updated:           2026-09-20

@@ -1,0 +1,114 @@
+#====================================================================
+# DRAFT-mpi-cmakedeps-include-dirs-empty — mpich/open-mpi 经 CMakeDeps 生成的
+#   <pkg>_INCLUDE_DIRS_RELEASE 为空，MPI::MPI_C 目标不带 include 目录，
+#   消费方 <mpi.h> 找不到；缺陷在他人归档，须在自身包侧 package_info 转发
+# 对应人类文档: knowledge/drafts/DRAFT-mpi-cmakedeps-include-dirs-empty.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-mpi-cmakedeps-include-dirs-empty
+trigger_tool:           clang|cmake|conan
+phase:                  compilation
+error_signature:        fatal error: 'mpi\.h' file not found|
+                        mpi\.h: No such file or directory|
+                        (mpich|open-mpi)_INCLUDE_DIRS_RELEASE.*(为空|empty)|
+                        Cannot find include file "mpi\.h"
+severity:               2
+category:               cmake, cmakedeps, conan, build-system, dependency-missing
+match_keywords:         mpich, open-mpi, MPI::MPI_C, CMakeDeps, INCLUDE_DIRS_RELEASE,
+                        empty include dirs, mpi.h file not found, package_info,
+                        cpp_info.includedirs, package_folder, transitive include,
+                        superlu-dist, ptscotch, SKILL 0.2, others' archive
+title:                  mpich/open-mpi 经 CMakeDeps 生成的 <pkg>_INCLUDE_DIRS_RELEASE 为空，
+                        MPI::MPI_C 目标不带 include 目录 → 消费方 'mpi.h' file not found
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             制品仓里 mpich（实测 5.0.1.2）与 open-mpi（实测 5.0.10）
+                        经 Conan 2 的 CMakeDeps 生成 `FindXXX.cmake` / config 数据时，
+                        `<pkg>_INCLUDE_DIRS_RELEASE` 解析结果为**空字符串**。CMakeDeps
+                        随即把 `MPI::MPI_C` 这类导入目标的 INTERFACE_INCLUDE_DIRECTORIES
+                        留空。于是：**所有公开头里包含 `<mpi.h>` 的下游包**（并行数值库
+                        最典型）在消费者编译时直接
+                          `fatal error: 'mpi.h' file not found`，
+                        而 MPI 库本身可正常链接（libdirs 正常）——表现为"库链接得上、
+                        头找不到"的割裂症状，极易误判为自己的 include 接线漏了。
+                        缺陷位于**他人的归档** archives/m/mpich、archives/o/open-mpi：
+                        按 SKILL §0.2 铁律不越权修改他人归档，故正确做法是在
+                        **自身包的 package_info() 里显式把 MPI 头目录转发给下游**。
+
+affected_scope:         任何 requires(MPI) 且**公开头直接 `#include <mpi.h>`** 的包
+                        （并行数值/图计算/求解器类）。本批实测两者、两种 MPI 实现：
+                        superlu-dist 9.0.0（→ open-mpi，SRC/include/superlu_defs.h:56）、
+                        ptscotch 7.0.12（→ mpich，src/libscotch/library_pt.h）。
+                        更一般地：任何"公开头依赖某个 CMakeDeps 元数据不完整包"的场景。
+verification_cmd:       # ① 直接看生成物里该变量是否为空
+                        grep -rE "(mpich|open-mpi)_INCLUDE_DIRS_RELEASE" <build>/generators/
+                        # ② 反证：确认 MPI 包自身有 include 目录（缺陷在元数据而非包内容）
+                        ls "$(conan cache path mpich/5.0.1.2)"*/include/mpi.h
+                        # ③ 复现：消费者编译含 <mpi.h> 的公开头
+                        clang++ -c consumer.cpp -I<own-pkg-include>   # → 'mpi.h' file not found
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           forward-mpi-includedir-in-package-info
+rec_description:        在自身包的 `package_info()` 中，从依赖对象取 MPI 包的实际
+                        `package_folder`，把其 `include` 目录**追加**到
+                        `self.cpp_info.includedirs`，从而穿过 CMakeDeps 的空元数据
+                        把 MPI 头目录传给下游消费者。附 `os.path.isdir` 守卫避免
+                        路径不存在时污染 cpp_info。**不修改** mpich/open-mpi 归档
+                        （SKILL §0.2），修复落在有权限的自身包内。
+rec_command:            mpi_inc = os.path.join(
+                            self.dependencies["open-mpi"].package_folder, "include")
+                        if os.path.isdir(mpi_inc):
+                            self.cpp_info.includedirs.append(mpi_inc)
+rec_auto_fix:           false
+rec_impl:               recipe-package-info
+
+fallback_priority:      2
+fallback_approach:      declare-in-generate-or-report-upstream
+fallback_description:   若不便改 includedirs（例如包不公开 <mpi.h>），可在
+                        `generate()` 里手写把 MPI 头目录注入
+                        `CMAKE_INCLUDE_PATH`/`CMAKE_PREFIX_PATH`（限于本包构建）；
+                        或按 §0.2 先征得授权后修 MPI 归档的 package_info 根因。
+                        前者只解本包，后者才解全仓——需用户/管理员授权。
+fallback_command:       list(PREPEND CMAKE_PREFIX_PATH "<mpi-package-folder>/include")
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       (改|修改|patch).*archives/(m/mpich|o/open-mpi)|
+                        \bmpich\b.*(越权|未授权).*(修改|patch)|
+                        在本 PR 里.*修.*mpich.*归档
+forbid_1_reason:        mpich/open-mpi 是他人归档，SKILL §0.2 铁律禁止越权修改；
+                        把根因修复混入本包 PR 会造成多包改动与被拒。
+forbid_1_consequence:   提交被门禁/评审驳回，且污染本 PR 的单包边界。
+
+forbid_2_pattern:       (消费者|下游).*自己.*(加|填).*-I.*mpi\.h|
+                        让消费方.*自行.*(修补|绕过).*include
+forbid_2_reason:        包的公开头**自己**包含 <mpi.h>，提供可被消费的头是包的
+                        责任；把修复推给消费方等于交付不可用产物。
+forbid_2_consequence:   消费者拿到包后编译即失败，适配不被认可。
+
+principles:             consumer-contract, upstream-source-untouched
+
+causes:                 []
+caused_by:              []
+similar_to:             [E216]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-mpi-cmakedeps-include-dirs-empty.md
+last_updated:           2026-09-26
+source_event:           superlu-dist 9.0.0（open-mpi）与 ptscotch 7.0.12（mpich）
+                        适配中，消费者编译公开头时报 'mpi.h' file not found
+
+authors:                ohpcd <ohpcd@localhost>
+source_pr:
+source_commit:
+
+metrics_success_count:  2
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-26
+
+draft:                  true

@@ -178,8 +178,7 @@ def persist_handoff(data: HandoffData, project_dir: str | None = None) -> None:
         "precompiled_available": data.precompiled_available,
     }
 
-    with open(status_path, "w", encoding="utf-8") as f:
-        json.dump(status, f, ensure_ascii=False, indent=2)
+    _save_status_locked(status_path, status)
 
 
 def update_build_status(
@@ -208,8 +207,7 @@ def update_build_status(
 
     status[status_key].update(extra_fields)
 
-    with open(status_path, "w", encoding="utf-8") as f:
-        json.dump(status, f, ensure_ascii=False, indent=2)
+    _save_status_locked(status_path, status)
 
     # If completed, clean up the per-build .handoff.json
     if new_status in ("completed", "published"):
@@ -218,6 +216,27 @@ def update_build_status(
             hp = _handoff_json_path(archive_dir)
             if os.path.isfile(hp):
                 os.rename(hp, hp + ".resolved")
+
+
+def _save_status_locked(status_path: str, status: dict, mutator=None) -> None:
+    """v12.6: 事务式独占锁——读-改-写全程在锁内（修 P1 并发互覆盖）。
+
+    mutator(status)->None 时，锁内重读最新状态再变更，避免覆盖他进程更新。
+    """
+    import fcntl
+    lock_path = status_path + ".lock"
+    with open(lock_path, "w", encoding="utf-8") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            if mutator is not None:
+                status = _load_build_status(status_path)
+                mutator(status)
+            tmp = status_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(status, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, status_path)
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def _load_build_status(path: str) -> dict:

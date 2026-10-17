@@ -10,6 +10,8 @@
 | **Meson** | 存在 `meson.build` | `meson.build` | 添加平台检测 | systemd |
 | **Makefile** | 存在 `Makefile` | `Makefile`, `*.mk` | 直接修改 | bzip2 |
 | **QMake** | 存在 `.pro` 文件 | `*.pro` | 修改 .pro 文件 | Qt 项目 |
+| **无构建/打包族** | 无 configure/CMakeLists/meson.build/Makefile 编译目标（header-only 库/数据资源/脚本工具） | 源码树无构建文件 | 纯 copy 打包 + `self.info.clear()` | doctest, datafile（见 §12，v12.21） |
+| **Python C 扩展** | 存在 `setup.py` 且含 `build_ext`/`ext_modules`/Cython 源 | `setup.py`, `*.pyx`, `*.c` | setuptools 交叉编译覆盖 CC/CFLAGS/LDSHARED | lxml, pycairo（见 §14） |
 
 ## 2. 构建系统识别命令
 
@@ -516,3 +518,80 @@ make install
 **适用软件**：man-db 2.13.1
 
 <!-- ~~### 10.5 上游 config.guess 已含 HarmonyOS 但 config.sub 不完整~~ → 已迁移至 graph/E072.kv + doc/E072.md -->
+
+## 11. Meson 适配详解（v12.21 补——166 配方 4.8%，此前仅一行表格）
+
+### 11.1 识别与工具链
+
+- 识别特征：`meson.build`；上游要求 python3 ≥ 3.7
+- Conan 2 标准姿势：`from conan.tools.meson import Meson, MesonToolchain`（模板 `conanfile-meson.py.tmpl`）
+
+### 11.2 交叉编译 ohos 三元组
+
+Meson 的平台判定取自 cross/native file 的 `[host_machine]`。鸿蒙（musl）配置：
+
+```ini
+[binaries]
+c = 'clang'
+cpp = 'clang++'
+ar = 'llvm-ar'
+strip = 'llvm-strip'
+pkg-config = 'pkg-config'
+
+[host_machine]
+system = 'linux'          # musl 内核口径用 linux，勿写 ohos（meson 无此系统名）
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+```
+
+> 注意：meson 无 `ohos` 系统名，写 `linux` + musl sysroot 即可；`b_ohos` 之类的伪属性不存在。
+
+### 11.3 常见坑
+
+| 坑 | 症状 | 处置 |
+|---|---|---|
+| wrap 依赖拉网 | `Downloading ... wrap` 走不出去 | `--wrap-mode=nodownload`，依赖走 conan requires |
+| python 纯脚本检测 | 检测脚本用 `os.uname()` 判平台 | 走 subprojects 补丁或 `meson setup -Dxxx` 显式覆盖检测结果 |
+| `-Doptimization` 与 build_type | Debug/Release 不一致告警 | MesonToolchain 自动映射，勿手动重复传 |
+| samu/ninja 缺失 | `ninja: command not found` | tool_requires("ninja/...")，勿用裸 self.run 绕过 |
+
+## 12. 无构建/打包族（v12.21 新增——普查 26%，此前零模板）
+
+### 12.1 识别
+
+源码树**没有**可编译目标：无 configure/CMakeLists.txt/meson.build/Makefile 的编译规则。三个子类：
+
+| 子类 | 特征 | 例 |
+|---|---|---|
+| A. Header-only 库 | 仅 .h/.hpp，cpp_info 为空库 | doctest, catch2 |
+| B. 数据/资源包 | 字体/配置/表数据，装到 share/ | tzdata, datafile |
+| C. 脚本工具 | perl/python/bash CLI，只装不编 | flawfinder, imgp |
+
+### 12.2 模板与要点
+
+- 模板：`templates/conanfile-headeronly.py.tmpl`（三变体注释块，conan-init 可选 `headeronly`）
+- 关键点：`package_id()` 里 `self.info.clear()`（无编译 → 单一 package_id，不做平台矩阵）；`no_copy_source = True`
+- **R34 同样适用**：test_package 必须写 test.c/test.cpp 真实 include 并调用接口（header-only 也要编一个用到它的翻译单元），不能只 print
+- **R51 同样适用**：上游测试三步法照常（header-only 库的上游测试也要清点+运行+如实申报）
+- recipe-search：此类配方在 catalog 中标记 `headeronly`/`copy`，相似度 0.30 构建系统权重恢复命中
+
+## 13. QMake（Qt5 存量处理要点，v12.21）
+
+存量 14 例（qt/qt5-*/qscintilla2/dxflib 等）全为 Qt5 系。**新任务不再产生 QMake**（Qt6 已全面 CMake 化），维护存量时注意：
+
+1. PATH 需含宿主 qmake；qmake 生成 Makefile 后走标准 make 流程
+2. 平台差异注入用 `.pro` 文件变量（`QMAKE_CXXFLAGS += -D__OHOS__` 须走 R8 例外流程——patches/ 禁令不豁免 .pro）或 `qmake CONFIG+=` 传参
+3. mkspecs 无 ohos 规格：用 `linux-clang` mkspec + 手动覆盖 sysroot/编译器变量
+4. 优先级判定：若上游同时提供 CMakeLists.txt，改走 CMake 模板（勿为旧 .pro 增加新适配面）
+
+## 14. Python C 扩展构建（setup.py build_ext，v12.21）
+
+存量 6 例（lxml/pycairo/python3-cairo/xapian-bindings 等），python-gssapi 系新任务仍会遇到（R47 判定 C/C++ 扩展属合法 cpp 任务，不挂起）：
+
+1. **解释器**：目标机 python3（版本须与 sysconfig 平台标签匹配）；宿主跑 setup.py 用 `--no-user-cfg`
+2. **交叉编译覆盖**：`CC/LDSHARED/AR/CFLAGS/LDFLAGS` 环境变量注入 clang 与 sysroot——setuptools 不理解三元组，只认环境变量
+3. **平台标签**：musl 无 manylinux 标签，`bdist_wheel` 会尝试纯平台名——用 `--plat-name=linux_aarch64` 显式指定；扩展含 C 代码不可打成 py3-none-any（R34 同族问题：纯标记包装无编译产物）
+4. **Cython 预生成物**：优先用上游发布包里的 .c（勿现场 cythonize，版本漂移会引入构建差异）
+5. **conan 依赖注入**：C 扩展链接 conan 库（如 lxml→zlib/libxml2）时，把 `cpp_info` 的 include/lib 路径显式并入 `CFLAGS/LDFLAGS`——setuptools 不会读 conan 包
+6. 参考配方：`archives/l/lxml/6.1.1/conanfile.py`、`archives/p/pycairo/1.29.0/conanfile.py`

@@ -1,0 +1,66 @@
+# ═══ Draft knowledge entry — 构建/链接/打包全部通过而运行期崩溃：内嵌材质只含 MOBILE 着色器、而设备每个驱动都上报 DESKTOP —— 构 ═══
+# Timestamp: 2026-09-17
+# Software: filament 1.76.1
+# Gate: HarmonyOS PC conan create（pass 1 + pass 2 + package + test_package 全链路）
+# Status: DRAFT — 需人工/AI 审核后 promote 为 E-entry
+#
+# To promote:
+#   1. 审核 error_excerpt 与实际验证
+#   2. 改名为 E0XX.kv 并移动到 knowledge/graph/
+#   3. 在 knowledge/graph/index.tsv 添加一行
+#   4. 编写 knowledge/doc/E0XX.md
+
+id:                     DRAFT-filament-1.76.1-runtime-shader-model-mismatch
+trigger_tool:           runtime|matc|cmake|conan
+phase:                  runtime|testing
+error_signature:        was not built for (desktop|mobile)|
+Compiled material contains shader models|
+core dumped|SIGSEGV.*Engine::create
+
+severity:               3
+category:               runtime|shader|build-configuration|conan
+match_keywords:         shader model, ShaderModel, MOBILE, DESKTOP, matc, MATC_TARGET, material, default material, Engine::create, MaterialDefinition, runtime-only, -p all, FILAMENT_LINUX_IS_MOBILE, compiled material, bitmask
+title:                  构建/链接/打包全部通过而运行期崩溃：内嵌材质只含 MOBILE 着色器、而设备每个驱动都上报 DESKTOP —— 构建期 matc 目标必须覆盖运行期驱动实际上报的着色器模型
+
+root_cause: >
+  渲染引擎把材质（着色器）以**构建期**产物内嵌进库，把**运行期**驱动上报的着色器模型作为查表键；两者取值域不同且都取决于平台判断，一旦不一致，链接期毫无征兆。
+  Filament 的具体链路：`MaterialDefinition::create()` 取引擎的 `ShaderModel`，与材质位掩码比对，不匹配即 `return nullptr`，随后 `Engine::create()` 在该空指针上崩溃（SIGSEGV）。
+    - 材质侧：`MATC_TARGET` 由 `IS_MOBILE_TARGET` 决定，而该变量由 `FILAMENT_LINUX_IS_MOBILE` 置位；该宏为 ON 时 matc 只产出 MOBILE 变体（位掩码 0x2）。
+    - 驱动侧：该平台上 `NoopDriver` / `VulkanDriver` / `OpenGLContext` / `WebGPUDriver` / `MetalDriver` **全部无条件返回 `ShaderModel::DESKTOP`**。
+    - 于是任何驱动都找不到匹配变体 —— 但错误只在运行期出现，且表象是崩溃而非报错。
+
+trigger_condition: >
+  渲染/图形类库把着色器在构建期编译并内嵌，运行期按驱动上报的着色器模型查表；构建期与运行期对'这套着色器属于移动还是桌面'的判断来自**两个相互独立**的配置。
+
+solution: >
+  不要用「关掉移动开关」来对齐 —— 该开关往往还承载链接行为（本例中它同时决定是否链接宿主专用的 GL 加载器）。正确做法是让构建期产出**同时覆盖两个着色器族**：
+    `tc.variables["MATC_OPT_FLAGS"] = "-p;all"`
+  要点：值必须用 CMake 的 list 分隔符 `;` 写成两个元素。写成 `"-p all"` 时，它在 CMake list 中是**单个**元素，经 `add_custom_command` 会被引号包住，目标程序收到的是**一个** argv `-p all`，其 getopt 把整串当作平台名而报 `Unrecognized platform. Must be 'desktop'|'mobile'|'all'.`。
+
+verification: >
+  三层验证，均不需要重新编译整包：
+    1. CMake 管道：用最小工程复刻该 `set()` 行 —— 加值前 `[-p;mobile]`，加值后 `[-p;mobile;-p all]`；
+    2. 目标程序 argv：用打印 `$@` 的假程序替换 matc —— `"-p all"` 得 `argv=[-p all]`（单个），`"-p;all"` 得 `argv=[-p] [all]`（两个）；
+    3. 产物：同一个材质源，`-p mobile` 49345 B / `-p desktop` 45422 B / `-p all` 83913 B（rc 均为 0）。
+    端到端：修复后 `Engine::create()` 不再崩溃，14 项运行期断言全绿，退出码 0。
+
+applicability: >
+  构建期生成着色器/材质并内嵌的图形库（Filament、Skia 系、自研引擎），或任何在构建期把'平台能力'固化成产物、在运行期又从驱动/内核重新探测的工程。
+
+counterexample: >
+  若运行期驱动上报的模型与构建期目标天然一致（桌面构建 + 桌面驱动），则该问题不出现；但**不要在交叉/移动平台上假设这一点** —— 本例中构建期判断为移动、驱动却上报桌面。
+
+recovery_condition: >
+  把 `-p all` 改回单一 `-p mobile` 后，`Engine::create()` 立即恢复 SIGSEGV。
+
+doc_file:               knowledge/draft/DRAFT-filament-1.76.1-runtime-shader-model-mismatch.md
+last_updated:           2026-09-17
+source_event:           filament 1.76.1 HarmonyOS PC 适配 (PR #10480)
+
+authors:                ohos-farm
+source_pr:              10480
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-17

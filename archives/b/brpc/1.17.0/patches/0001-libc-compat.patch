@@ -1,0 +1,180 @@
+--- a/src/butil/compat.h
++++ b/src/butil/compat.h
+@@ -64,6 +64,7 @@
+ 
+ #elif defined(OS_LINUX)
+ 
++#include <sys/cdefs.h>   // __BEGIN_DECLS / __END_DECLS 并非由所有 libc 随 pthread.h 传递
+ #include <sys/epoll.h>
+ 
+ #else
+--- a/src/butil/errno.cpp
++++ b/src/butil/errno.cpp
+@@ -52,9 +52,18 @@
+             return -1;
+         }
+     } else {
++#if defined(OS_MACOSX) || !defined(__GLIBC__)
++        // XSI 版 strerror_r（返回 int）是 POSIX 标准接口；glibc 在 _GNU_SOURCE
++        // 下才提供返回 char* 的 GNU 扩展版，musl 等仅实现 XSI 版。
++        const int rc = strerror_r(error_code, tls_error_buf, ERROR_BUFSIZE);
+ #if defined(OS_MACOSX)
+-        const int rc = strerror_r(error_code, tls_error_buf, ERROR_BUFSIZE);
+         if (rc != EINVAL)
++#else
++        if (rc == 0) {
++            desc = tls_error_buf;
++        }
++        if (desc && strncmp(desc, "Unknown error", 13) != 0)
++#endif
+ #else
+         desc = strerror_r(error_code, tls_error_buf, ERROR_BUFSIZE);
+         if (desc && strncmp(desc, "Unknown error", 13) != 0)
+@@ -84,6 +93,13 @@
+         if (rc == 0 || rc == ERANGE/*bufsize is not long enough*/) {
+             return butil::tls_error_buf;
+         }
++#elif !defined(__GLIBC__)
++        // XSI 版 strerror_r（返回 int）是 POSIX 标准接口；glibc 在 _GNU_SOURCE
++        // 下才提供返回 char* 的 GNU 扩展版，musl 等仅实现 XSI 版。
++        const int rc = strerror_r(error_code, butil::tls_error_buf, butil::ERROR_BUFSIZE);
++        if (rc == 0) {
++            return butil::tls_error_buf;
++        }
+ #else
+         s = strerror_r(error_code, butil::tls_error_buf, butil::ERROR_BUFSIZE);
+         if (s) {
+--- a/src/butil/time.cpp
++++ b/src/butil/time.cpp
+@@ -26,7 +26,9 @@
+ #define _GNU_SOURCE
+ #endif
+ #include <string.h>                          // memmem
+-#undef _GNU_SOURCE
++// 上游此处 #undef _GNU_SOURCE 会在严格按特性宏裁剪头文件的 libc（如 musl）上
++// 隐藏后续 <time.h> 的 CLOCK_* 宏；本 TU 由构建系统全局传入 _GNU_SOURCE，
++// 保持其有效直到翻译单元结束（glibc 下行为不变，CLOCK_* 本来可见）。
+ 
+ #include "butil/time.h"
+ 
+--- a/src/bthread/errno.h
++++ b/src/bthread/errno.h
+@@ -23,6 +23,7 @@
+ #define BTHREAD_ERRNO_H
+ 
+ #include <errno.h>                    // errno
++#include <sys/cdefs.h>                 // __BEGIN_DECLS/__END_DECLS 并非由所有 libc 随 errno.h 传递
+ #include "butil/errno.h"               // berror(), DEFINE_BTHREAD_ERRNO
+ 
+ __BEGIN_DECLS
+--- a/src/bthread/errno.cpp
++++ b/src/bthread/errno.cpp
+@@ -24,7 +24,12 @@
+ // Define errno in bthread/errno.h
+ extern const int ESTOP = -20;
+ 
+-BAIDU_REGISTER_ERRNO(ESTOP, "The structure is stopping")
++// clang: BAIDU_REGISTER_ERRNO 的模板特化要求 error_code 是常量表达式，
++// clang 拒绝从同 TU 后续的 extern const 定义补全初始化器（gcc 容忍，报
++// "initializer of 'ESTOP' is unknown"）。改为直接调用注册函数，语义等价
++//（模板特化仅用于编译期重复注册检测，ESTOP 全库仅此一处注册）。
++const int ALLOW_UNUSED bthread_errno_dummy =
++    ::butil::DescribeCustomizedErrno(ESTOP, "ESTOP", "The structure is stopping");
+ 
+ extern "C" {
+ 
+--- a/src/bthread/task_control.cpp
++++ b/src/bthread/task_control.cpp
+@@ -23,6 +23,7 @@
+ #include <set>
+ #include <regex>
+ #include <sys/syscall.h>                   // SYS_gettid
++#include <sched.h>                         // sched_setaffinity, cpu_set_t (non-glibc Linux)
+ #include "butil/scoped_lock.h"             // BAIDU_SCOPED_LOCK
+ #include "butil/errno.h"                   // berror
+ #include "butil/logging.h"
+@@ -365,7 +366,19 @@
+ }
+ 
+ void TaskControl::bind_thread_to_cpu(pthread_t pthread, unsigned cpu_id) {
+-#if defined(OS_LINUX)
++#if defined(OS_LINUX) && !defined(__GLIBC__)
++        // pthread_setaffinity_np 是 glibc 的 GNU 扩展；musl 等仅提供
++        // sched_setaffinity(pid, ...) + pthread_gettid_np（_GNU_SOURCE），
++        // 组合实现等价的线程绑核。
++        cpu_set_t cs;
++        CPU_ZERO(&cs);
++        CPU_SET(cpu_id, &cs);
++        auto r = sched_setaffinity(pthread_gettid_np(pthread), sizeof(cs), &cs);
++        if (r != 0) {
++            LOG(WARNING) << "Failed to bind thread to cpu: " << cpu_id;
++        }
++        (void)r;
++#elif defined(OS_LINUX)
+         cpu_set_t cs;
+         CPU_ZERO(&cs);
+         CPU_SET(cpu_id, &cs);
+--- a/src/brpc/builtin/rpcz_service.cpp
++++ b/src/brpc/builtin/rpcz_service.cpp
+@@ -498,7 +498,9 @@
+             microseconds = 999999;
+         }
+     }
+-    return timelocal(&timeinfo) * 1000000L + microseconds;
++    // timelocal 是 glibc/BSD 扩展；POSIX 的 mktime 与其语义等价（均按本地
++    // 时区解释 struct tm），且 musl 等非 glibc libc 无 timelocal。统一用 mktime。
++    return mktime(&timeinfo) * 1000000L + microseconds;
+ }
+ 
+ static bool ParseUint64(const std::string* str, uint64_t* val) {
+--- a/src/brpc/global.cpp
++++ b/src/brpc/global.cpp
+@@ -293,10 +293,8 @@
+             if (MallocExtension_ReleaseFreeMemory != NULL) {
+                 MallocExtension_ReleaseFreeMemory();
+             } else {
+-#if defined(OS_LINUX)
+-                // GNU specific.
+-                malloc_trim(10 * 1024 * 1024/*leave 10M pad*/);
+-#endif
++                // malloc_trim 是 glibc 特有扩展（非 POSIX，musl 等无），且仅是
++                // 归还空闲内存给 OS 的优化（跳过不影响正确性）。为可移植性不再调用。
+             }
+         }
+     }
+--- a/src/brpc/builtin/pprof_service.cpp
++++ b/src/brpc/builtin/pprof_service.cpp
+@@ -39,9 +39,8 @@
+ #include "butil/fd_guard.h"
+ 
+ extern "C" {
+-#if defined(OS_LINUX)
+-extern char *program_invocation_name;
+-#endif
++// program_invocation_name 是 glibc 特有全局符号（非 POSIX），改用
++// /proc/self/cmdline 读取（Linux 通用，glibc/musl 均可用）。
+ int BAIDU_WEAK ProfilerStart(const char* fname);
+ void BAIDU_WEAK ProfilerStop();
+ }
+@@ -467,7 +466,20 @@
+     info.end_addr = std::numeric_limits<uintptr_t>::max();
+     info.offset = 0;
+ #if defined(OS_LINUX)
+-    info.path = program_invocation_name;
++    // program_invocation_name 是 glibc 特有全局符号（非 POSIX）；
++    // 读 /proc/self/cmdline 取程序路径（Linux 通用）。
++    {
++        FILE* fcmd = fopen("/proc/self/cmdline", "r");
++        if (fcmd != NULL) {
++            char cmd[4096];
++            size_t n = fread(cmd, 1, sizeof(cmd) - 1, fcmd);
++            fclose(fcmd);
++            if (n > 0) {
++                cmd[n] = '\0';
++                info.path = cmd;
++            }
++        }
++    }
+ #elif defined(OS_MACOSX)
+     info.path = getprogname();
+ #endif

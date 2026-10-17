@@ -4,7 +4,7 @@
 - 构建系统: autotools
 - 编译日期: 2026-06-01
 - 编译器: clang/clang++
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
@@ -53,3 +53,7 @@
 
 - libblockdev-3.4.0-ohos-aarch64.tar.gz (12.8MB, strip+签名)
 - libblockdev-3.4.0-ohos-aarch64-debug.tar.gz (25.8MB, debug symbols)
+---
+
+**编译结束**: 2026-08-10 05:36
+**最终状态**: built

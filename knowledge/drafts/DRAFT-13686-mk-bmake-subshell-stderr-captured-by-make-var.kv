@@ -1,0 +1,99 @@
+# ═══ Draft knowledge entry — bmake 的 `!=` 只取 stdout；失败探测的 stderr + bmake 自身 warning 被测试配方的 2>&1 折入被 diff 的输出，整批用例假性 FAILED ═══
+# Timestamp: 2026-09-29
+# Software: mk（mk-configure）0.40.0（所有 bmake/NetBSD make 驱动 + 文本比对型测试的工程）
+# Gate: 上游 minitest（bmake test，diff expect.out）/ W3 本地 CI
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+# 修正记录: v2（2026-09-29）— 初稿误称"bmake 把 stderr 并入变量值"，经 W4 独立审计实测证伪后改写为真实链路
+
+id:                     DRAFT-13686-mk-bmake-subshell-stderr-captured-by-make-var
+trigger_tool:           make|test
+phase:                  testing|configuration
+error_signature:        ^sh: [a-z_-]+: inaccessible or not found$|
+                         ^(bmake|make)\[[0-9]+\]: .*warning: ".*" returned non-zero status$|
+                         .*\.test\.out.*(inaccessible|not found)
+severity:               2
+category:               compat|portability|testing|build-system
+match_keywords:         bmake, NetBSD make, != assignment, command substitution,
+                         stderr folded by 2>&1, test_output, expect.out, minitest,
+                         mkc.minitest.mk, id -un, "returned non-zero status",
+                         diff mismatch, HarmonyOS, OPSYS, 批量用例同时失败
+title:                  bmake/NetBSD make 的 `!=` 与 GNU make 一致（**只取 stdout**）；
+                         失败探测（OHOS 上的 id -un）在 bmake 自身 stderr 上留下的
+                         `sh: ... inaccessible or not found` 与
+                         `warning: "..." returned non-zero status`，被测试配方自带的
+                         `2>&1` 折入被 diff 的 *.test.out → 一批无关用例同时 FAILED
+
+root_cause: >
+  bmake（NetBSD make，实测 20200710）的 `VAR != cmd` 与 GNU make 的 `$(shell cmd)`
+  一样**只捕获 stdout**，stderr 不进入变量值（实测：`X != sh -c 'echo OUT; echo ERR
+  1>&2; exit 1'` → `bmake -V X` = `OUT`；GNU make 同结果）。真正的污染链路是两跳：
+  (1) 探测命令失败（OHOS 设备用户库不含构建 uid，`id -un` 报
+      `sh: id: inaccessible or not found`，bmake 再补一条
+      `warning: "id -un" returned non-zero status`）——两者都写在 **bmake 自身的 stderr**；
+  (2) 测试配方惯用 `${MAKE} <target> 2>&1 | ...` 把内层 make 的 **stderr 与 stdout 折成
+      同一流**（本例上游 tests/ 45 个用例目录中有 18 个的 test.mk 含 `2>&1`，如 tests/endianness/test.mk:8
+      `${MAKE} showme 2>&1 | ...`），于是这两行随 stdout 一起被 mkc.minitest.mk 捕获进
+      `*.test.out`，令 `diff expect.out` 判定失败。
+  现象特征是"一批看似无关的用例同时 FAILED"，diff 实际一侧多出上述两行——极易被逐个
+  误判为各用例自身缺陷。**注意勿与同批其他失败混淆**：同一轮里 5 个安装型用例失败源于
+  "无 chown 的用户盘"（见姊妹草稿 DRAFT-13686-mk-ohos-shell-alias-breaks-exec-probe），
+  `tests/mkc_features` 源于 libc 无 fts，`tests/FSRCDIR` 另叠加设备缺 automake。
+affected_scope: >
+  所有以 bmake/NetBSD make 驱动、且测试配方对内层 make 做 `2>&1` 折流并比对文本期望的工程
+  （mk-configure 系 mk/mkc.minitest.mk；BSD 源码树回归测试同构）。触发条件是"探测命令会失败"，
+  不限于 id——uname/which/pkg-config --version 等在受限平台上失败时同构。
+verification_cmd: >
+  printf 'ID = id\n.if ${ID} != "@ID@"\n_MKC_USER != ${ID:Uid} -un\n.endif\nshowme:\n\t@echo "U=[${_MKC_USER}]"\n' > d.mk
+  bmake -r -f d.mk showme 2>&1        # → 出现 sh: id: ... + warning: "id -un" ...
+  bmake -r -f d.mk showme 2>/dev/null  # → 仅 U=[]（两行不在 stdout）
+  bmake -V _MKC_USER                  # → 空（stderr 未进入变量值）
+rec_priority:           1
+rec_approach:           silence-probe-stderr-and-neutralize-exit
+rec_description: >
+  对可能失败的探测命令**同时**静默 stderr 并把退出码归零：
+  `_MKC_USER != ${ID:Uid} -un 2>/dev/null || true`。二者缺一不可——`2>/dev/null` 去掉
+  `sh: ... inaccessible or not found`，`|| true` 让 bmake 不再打印
+  `warning: "..." returned non-zero status`；平台侧"不知道就是不知道"，变量落回其原有
+  缺省（`ROOT_USER ?= ${ROOT_USER.${OPSYS}:Uroot}` → `root`）。
+rec_command:            VAR != cmd 2>/dev/null || true
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      make-probe-succeed-at-os-level
+fallback_description:   >
+  在系统层让探测命令成功（提供可用的 id(1)/补全用户库条目）。OHOS 设备用户库不含构建 uid
+  （`id -u` → `id: bad uid 20020084`），通常不可行；仅作理论回退。
+fallback_command:       （不推荐）
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       != .*2>/dev/null(?![^|]*\|\|)
+forbid_1_reason:        只重定向 stderr 而不把退出码归零：bmake 仍会打印
+                        `warning: "..." returned non-zero status`，该 warning 同样经配方的
+                        `2>&1` 折入被 diff 的输出，问题只解决一半。
+forbid_1_consequence:   测试仍 FAILED，且报错形态从命令输出变成 bmake warning，更难定位。
+forbid_2_pattern:       expect\.out.*(inaccessible|not found)|把报错行加进 expect\.out
+forbid_2_reason:        把环境相关的报错文本写进期望输出——掩盖真因，换机器/换用户即碎，
+                        等于废弃该用例。
+forbid_2_consequence:   用例丧失回归价值，评审驳回。
+
+principles:             P013, P014
+causes:                 []
+caused_by:              []
+similar_to:
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-13686-mk-bmake-subshell-stderr-captured-by-make-var.md
+last_updated:           2026-09-29
+source_event:           archives/m/mk/0.40.0
+
+authors:                GaoPengqiang <GaoPengqiang@noreply.gitcode.com>
+source_pr:              13686
+source_commit:          91cb4612f4
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-29

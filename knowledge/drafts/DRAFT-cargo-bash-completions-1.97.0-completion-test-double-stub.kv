@@ -1,0 +1,68 @@
+#====================================================================
+# DRAFT-completion-test-double-stub —— shell 补全脚本包的 test_package 必须同时提供
+#   「被补全命令桩」与「bash-completion 框架函数桩」，否则脚本的存在性守卫会让
+#   complete 根本不注册，测试要么假失败、要么退化成 grep 空壳
+#
+# 对应文档: knowledge/drafts/DRAFT-cargo-bash-completions-1.97.0-completion-test-double-stub.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-cargo-bash-completions-1.97.0-completion-test-double-stub
+source_lib:             cargo-bash-completions 1.97.0
+trigger_tool:           conan_test|bash|shell
+phase:                  testing
+error_signature:        complete: [a-z-]+: no completion specified|bash: _get_comp_words_by_ref: command not found|_filedir: command not found|bash: command not found|COMPREPLY.*(empty|未生成)|declare -F _[a-z]+.*not found
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               testing, shell, portability
+match_keywords:         bash-completion, completion, complete -F, compgen, COMPREPLY, _get_comp_words_by_ref, _filedir, _comp_command_offset, command -v, 守卫, guard, 桩, stub, shim, test_package, R34, PF3, PATH
+title:                  shell 补全脚本包的 test_package 需要「双桩」：被补全命令桩（满足脚本顶部 `command -v <cmd>` 守卫并喂子命令列表）+ bash-completion 框架函数桩；另外收窄 PATH 做负向测试必须在子 shell 内部进行，否则连解释器都找不到
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             现代 shell 补全脚本普遍有两项运行期前提。其一是**存在性守卫**：整段定义挂在 `command -v <cmd> >/dev/null 2>&1 &&` 之后（cargo.bashcomp.sh 的函数定义与 `complete -F _cargo cargo` 由 `&&` 串成一条链），PATH 里没有被补全命令时函数不定义、补全不注册——CI clean 环境几乎不会装被补全的命令（cargo/docker/pip），于是 `complete -p <cmd>` 报 "no completion specified"，容易被误读为"脚本损坏"，测试作者转而退化成 `grep 'complete -F'` 这种字符串断言（PF3/L1e 判定为空壳）。其二是**框架依赖**：脚本调用 bash-completion 提供的 `_get_comp_words_by_ref`/`_filedir`/`_comp_command_offset`，clean 环境未必装 bash-completion，直接驱动补全函数会报 command not found。此外负向测试（验证守卫生效）若在**外层**写 `PATH=<empty> bash -c …`，会连 `bash` 自身都无法定位，报 `bash: command not found`——失败原因与被测对象无关，是夹具自身 bug。
+affected_scope:         所有 shell 补全脚本包：cargo-bash-completions、docker-completion、pip-completion、bundler-completion、brew-cask-completion、open-completion、boom-completion、dh-shell-completions 等，以及任何 test_package 需要 source 上游 shell 库并驱动其函数的包。
+verification_cmd:       bash -c 'PATH="$STUB_DIR:$PATH"; source harness.bash; source <completion_file>; complete -p <cmd>; COMP_WORDS=(<cmd> ""); COMP_CWORD=1; _<cmd>; printf "%s\n" "${COMPREPLY[@]}"'  # 期望输出 -F _<cmd> 与非空候选
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           double-stub-harness-for-completion-tests
+rec_description:        test_package 自带两个夹具：①被补全命令桩（可执行脚本，实现脚本真正调用的子命令，如 `cargo --list` 输出 "Installed Commands:" + 子命令表，供 `awk 'NR>1 {print $1}'` 解析），放进 PATH 满足守卫；②bash-completion 框架函数桩（`_get_comp_words_by_ref` 把 COMP_WORDS/COMP_CWORD 映射到 cur/prev/words/cword，`_filedir`/`_comp_command_offset` 置空）。桩函数内**不得**用 local，靠 bash 动态作用域写回补全函数里已声明的 `local cur prev words cword`。再用 `COMP_WORDS=(cmd "")` + `COMP_CWORD=1` 直接驱动补全函数并断言 COMPREPLY 内容，即可在零外部依赖下做到真实功能验证（R34/PF3）。负向断言（无命令时不注册）把 PATH 收窄写在子 shell **内部**：`bash -c 'PATH="$2"; source "$1"; declare -F _cmd …' _ <file> <emptydir>`，source/declare/echo 均为内建。
+rec_command:            printf '%s\n' '_get_comp_words_by_ref(){ local a; for a in "$@"; do case $a in cur) cur="${COMP_WORDS[COMP_CWORD]}";; prev) prev="${COMP_WORDS[COMP_CWORD-1]:-}";; words) words=("${COMP_WORDS[@]}");; cword) cword=$COMP_CWORD;; esac; done; }' '_filedir(){ :; }' '_comp_command_offset(){ :; }' > harness.bash
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      load-system-bash-completion-if-present
+fallback_description:   宿主确实安装了 bash-completion 时可改 source /usr/share/bash-completion/bash_completion 取真实 helper；但必须保留桩作为回退分支，否则 CI clean 环境会失败——被补全命令桩无论如何都不能省（守卫是脚本自身逻辑，不是框架提供）。
+fallback_command:       [ -r /usr/share/bash-completion/bash_completion ] && . /usr/share/bash-completion/bash_completion || . harness.bash
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       grep -q ["']complete -F|assert.*grep.*complete|echo ["']test (passed|ok)["']
+forbid_1_reason:        只 grep 脚本里有没有 `complete -F` 字样、不真实加载并驱动补全函数，属于空壳测试。
+forbid_1_consequence:   PF3 测试闸在建 PR 前直接拦截；侥幸过闸也会被 CI L1e 破坏性反向验证识破。
+
+forbid_2_pattern:       PATH=("")?\S*\s+bash -c|env -i\s+bash -c
+forbid_2_reason:        在外层清空/收窄 PATH 再调 bash，会导致解释器自身无法定位。
+forbid_2_consequence:   报 `bash: command not found`，与被测对象无关的假失败，容易误导排查方向（实测浪费一轮）。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P003
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E325]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-cargo-bash-completions-1.97.0-completion-test-double-stub.md
+last_updated:           2026-09-21
+source_event:           cargo-bash-completions 1.97.0 HarmonyOS PC 适配（test_package A1–A7 构造与 A4 夹具修复）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                nyaco3 <aqjCItYW1QmEJQuF.gcw_XDpqZ8sO@noreply.gitcode.com>

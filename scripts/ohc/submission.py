@@ -43,6 +43,20 @@ def _archive_dir(letter: str, name: str, version: str,
     return Path(pdir or find_project_dir()) / "archives" / letter / name / version
 
 
+def _git_head(project_dir=None) -> str | None:
+    """当前 HEAD 短哈希（v12.17 S1: submit-state commit_hash 源）。"""
+    import subprocess as _sp
+    try:
+        r = _sp.run(["git", "rev-parse", "--short", "HEAD"],
+                    cwd=str(project_dir or Path.cwd()),
+                    capture_output=True, text=True, timeout=15)
+        if r.returncode == 0:
+            return r.stdout.strip() or None
+    except Exception:
+        pass
+    return None
+
+
 # ═══════════════════════════════════════════════════════
 # Simple YAML helpers (no external deps)
 # ═══════════════════════════════════════════════════════
@@ -229,14 +243,15 @@ def _check_test_report(ver_dir: Path) -> bool:
 # ═══════════════════════════════════════════════════════
 
 def _scan_draft_entries(software: str, pdir: str | None = None) -> list[str]:
-    """Scan knowledge/graph/draft/ for .kv files belonging to this software.
+    """Scan knowledge/drafts/ for .kv files belonging to this software.
 
     We match by looking at the contributor_id field or by scanning all draft
     .kv files (since drafts don't have explicit software tagging).
 
     Returns list of draft .kv file paths.
     """
-    draft_dir = Path(graph_dir(pdir)) / "draft"
+    project = Path(pdir) if pdir else Path(find_project_dir())
+    draft_dir = project / "knowledge" / "drafts"
     if not draft_dir.is_dir():
         return []
     return sorted([str(f) for f in draft_dir.glob("E*-draft-*.kv")])
@@ -636,6 +651,41 @@ def _generate_pr_body(software: str, version: str, ver_dir: Path) -> Path:
     return pr_body_path
 
 
+CI_REPAIR_STATE = ".ci-repair-state.json"
+MAX_CI_REPAIR_ROUNDS = 2  # 停损阈值（SKILL 反馈 0829-1: 修复循环必须机器可数）
+
+
+def _ci_repair_round(ver_dir: Path, pr_number: int | None) -> int:
+    """CI 修复循环轮次计数：每次 CI 失败 HANDOFF 时 +1，返回当前轮次。
+
+    达到 MAX_CI_REPAIR_ROUNDS 后 HANDOFF 切换为停损指引（上报 build_failed，
+    不再盲目重试）。CI 转绿时 _ci_repair_reset 清零。
+    """
+    path = ver_dir / CI_REPAIR_STATE
+    data: dict = {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    data["rounds"] = int(data.get("rounds", 0)) + 1
+    data["last_pr_number"] = pr_number
+    data["last_ts"] = datetime.utcnow().isoformat() + "Z"
+    try:
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+    except Exception:
+        pass
+    return data["rounds"]
+
+
+def _ci_repair_reset(ver_dir: Path) -> None:
+    """CI 转绿后清零修复轮次（新一轮失败重新计数）。"""
+    try:
+        (ver_dir / CI_REPAIR_STATE).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _emit_submit_handoff(software: str, version: str, ver_dir: Path,
                          project_dir: str, reason: str,
                          actions: list[str],
@@ -646,6 +696,13 @@ def _emit_submit_handoff(software: str, version: str, ver_dir: Path,
         resume_with_flag: If True, resume_cmd includes --resume (for AI Review
             HANDOFFs where gates already passed and PR already created).
     """
+    # v12.10: 经验事件累积——单一咽喉，失败/中断分支的经验不随工作区回收丢失
+    try:
+        from .feedback import record_event
+        record_event(ver_dir, f"handoff:{reason}",
+                     " | ".join(a.replace("\n", " ") for a in actions[:3]))
+    except Exception:
+        pass
     from .handoff import HandoffData, emit_handoff
     resume_cmd = f"python3 scripts/ohc-run.py submit {software} {version}"
     if resume_with_flag:
@@ -669,7 +726,8 @@ def _emit_submit_handoff(software: str, version: str, ver_dir: Path,
 
 
 def cmd_submit(software: str, version: str,
-               pdir: str | None = None, resume: bool = False) -> int:
+               pdir: str | None = None, resume: bool = False,
+               no_wait: bool = False) -> int:
     """Submit PR: gates → self-check → git push → create PR → AI Review → CI.
 
     Gates (all blocking with HANDOFF):
@@ -686,12 +744,25 @@ def cmd_submit(software: str, version: str,
        Phase 3: Wait for review opinions (poll 5min, 30min timeout)
        Phase 4: AI evaluates opinions → HANDOFF (accept: fix+resolve, reject: reply only)
        Phase 5: Review complete → proceed to CI
+       (--no-wait / OHC_SUBMIT_NO_WAIT=1: 跳过 5/6，PR 创建即返回——
+        ⚠️ 环未闭非成功：CI 是评论触发型（无人评论 /rebuild 不自动跑），
+        result 草稿会写 loop_pending 里程碑，需 follow-up --resume 续环)
     6. Monitor CI via gitcode_pr.py ci-status (poll 30s, 40min timeout)
+       （CI 由 _monitor_ci 自动评论 /rebuild 触发，非平台自动）
     """
     project_dir = pdir or find_project_dir()
     agent_id = get_agent_id(project_dir)
     letter = software[0].lower()
     ver_dir = _archive_dir(letter, software, version, project_dir)
+    if resume:
+        # v12.15: resume 刷新预算计时起点（平台重试重新分配预算；
+        # 防旧时间线把续跑任务立即误判为预算耗尽）
+        try:
+            from .feedback import record_event
+            record_event(ver_dir, "task_started",
+                         "submit --resume 重启预算计时（v12.15）")
+        except Exception:
+            pass
 
     if not ver_dir.exists():
         log_fail(f"❌ 版本目录不存在: {ver_dir}")
@@ -720,9 +791,49 @@ def cmd_submit(software: str, version: str,
         repo = "OpenHarmonyPCDeveloper/build_in_harmonyos"
         pr_number = saved_pr
         branch_name = saved_branch
-        pr_url = f"https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/pull/{pr_number}"
+        pr_url = f"https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/merge_requests/{pr_number}"
 
         log_ok(f"  📂 恢复提交: PR #{pr_number}, Phase {review_phase}, 分支 {branch_name}")
+
+        # ── R42 防猝死草稿：进入监控前先落 partial 保底（resume 同样生效）──
+        from .result_report import write_pr_draft
+        write_pr_draft(software, version, pr_number, pr_url)
+
+        # ── v12.10: feedback 骨架前置（幂等：旧任务恢复时补齐骨架）──
+        try:
+            from .feedback import ensure_feedback_skeleton
+            ensure_feedback_skeleton(software, version, pdir=project_dir,
+                                     reason="resume_pr_exists")
+        except Exception:
+            pass
+
+        # ── R42/v12.12: --no-wait 退出 = 环未闭，显式留 follow-up 信号 ──
+        # （0828 复盘证伪"平台异步"假设: CI 是评论触发型，无人评论 /rebuild
+        #   就永远不跑；AI Review 也需会话内监控闭环。此退出路径必须让
+        #   result 草稿带 loop_pending 里程碑，供 worker/平台扫描派发 follow-up）
+        if no_wait:
+            log_ok("  ⏭️  no-wait: 跳过 AI Review/CI 监控（环未闭，非成功）")
+            log_warn("   ⚠️ PR 创建 ≠ 成功——CI 不会自动跑（评论触发型），"
+                     "AI Review 需闭环；本 PR 需 follow-up 续环")
+            try:
+                from .result_report import write_lifecycle_draft
+                write_lifecycle_draft(
+                    software, version, "loop_pending",
+                    pr_number=pr_number, pr_url=pr_url,
+                    summary=(f"PR #{pr_number} 已创建但 CI/AI 闭环未启动"
+                             f"（no-wait 退出）。follow-up 续环: "
+                             f"python3 scripts/ohc-run.py submit "
+                             f"{software} {version} --resume"))
+            except Exception:
+                pass
+            try:
+                from .feedback import record_event
+                record_event(ver_dir, "loop_pending",
+                             f"no-wait 退出，CI/AI 闭环未启动；follow-up: "
+                             f"submit --resume (PR #{pr_number})")
+            except Exception:
+                pass
+            return 0
 
         if review_phase < 5:
             # Still in AI Review phases
@@ -738,7 +849,38 @@ def cmd_submit(software: str, version: str,
             elif review_result == "timeout":
                 return 1
             elif review_result == "review_complete":
-                pass  # Proceed to CI
+                pass  # Proceed to closure verification & CI
+
+        # 闭环校验：所有检视意见必须有回复
+        unreplied = _verify_review_closure(gitcode_pr, repo, pr_number)
+        if unreplied:
+            log_fail(f"❌ 检视意见闭环校验未通过: {len(unreplied)} 条意见未回复")
+            closure_text = ""
+            for op in unreplied:
+                closure_text += f"  - comment_id: {op.get('comment_id', '')}: {op.get('body', '')[:150]}\n"
+            try:
+                from .result_report import write_lifecycle_draft
+                write_lifecycle_draft(
+                    software, version, "loop_pending", pr_number=pr_number, pr_url=pr_url,
+                    summary=(f"PR #{pr_number} 检视意见 {len(unreplied)} 条未闭环"
+                             f"（反馈 0829-2: 完成前必须逐条处理）。续环: "
+                             f"python3 scripts/ohc-run.py submit {software} {version} --resume"))
+            except Exception:
+                pass
+            _emit_submit_handoff(software, version, ver_dir, project_dir,
+                "review_closure_incomplete",
+                [
+                    f"PR #{pr_number} 有 {len(unreplied)} 条检视意见未回复（闭环未完成）：",
+                    "",
+                    closure_text,
+                    "检视意见必须全部在讨论串内回复（accept 或 reject），",
+                    "处理命令: python3 scripts/gitcode_pr.py handle-review-opinion \\",
+                    f"    --repo {repo} --number {pr_number} --comment-id <id> --action accept|reject --reason '...'",
+                    "",
+                    f"全部处理完后: python3 scripts/ohc-run.py submit {software} {version} --resume",
+                ],
+                resume_with_flag=True)
+            return 1
 
         # Phase 5: CI monitoring
         log_info(f"监控 CI 状态 (PR #{pr_number})...")
@@ -746,11 +888,40 @@ def cmd_submit(software: str, version: str,
 
         if ci_status == "FAILED":
             log_fail(f"❌ CI 构建失败")
+            detail = _fetch_ci_failure_detail(gitcode_pr, repo, pr_number)
+            if detail:
+                log_fail("── CI 失败详情（最新失败评论摘要）──")
+                for ln in detail.splitlines():
+                    log_fail(f"  {ln}")
+            rnd = _ci_repair_round(ver_dir, pr_number)
+            try:
+                from .result_report import write_lifecycle_draft
+                write_lifecycle_draft(
+                    software, version, "loop_pending", pr_number=pr_number, pr_url=pr_url,
+                    summary=(f"PR #{pr_number} CI 失败（修复第 {rnd}/"
+                             f"{MAX_CI_REPAIR_ROUNDS} 轮）。续环: python3 "
+                             f"scripts/ohc-run.py submit {software} {version} --resume"))
+            except Exception:
+                pass
+            if rnd >= MAX_CI_REPAIR_ROUNDS:
+                acts = [f"⚠️ 停损: CI 已连续 {rnd} 轮修复仍红，勿再盲目重试",
+                        f"上报: python3 scripts/ohc-run.py result {software} {version} "
+                        f"--status build_failed --failed-reason 'CI 连续 {rnd} 轮失败: <一句话根因>' --force",
+                        f"证据留档: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}",
+                        "人工介入排查（依赖缺失/环境差异/上游缺陷），排查后重开需 reset-rerun"]
+            else:
+                acts = [f"自诊断: python3 scripts/gitcode_pr.py diagnose --repo {repo} --number {pr_number}",
+                        f"（diagnose 对'类别: 未知'做日志二次归类，输出证据行+修复要点）",
+                        f"按诊断定位原因并修复（本地 W3 复验后再推）",
+                        f"修复后 push: git push origin {branch_name}",
+                        f"⚠️ push 本身不会触发 CI（评论触发型）——必须续环: python3 "
+                        f"scripts/ohc-run.py submit {software} {version} --resume（resume 自动评论 /rebuild 重跑 CI）",
+                        f"修复轮次: {rnd}/{MAX_CI_REPAIR_ROUNDS}（连续 {MAX_CI_REPAIR_ROUNDS} 轮仍红 → 停损上报）",
+                        f"完整日志: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}"]
+            if detail:
+                acts.insert(0, "── CI 失败详情见上方摘要 ──")
             _emit_submit_handoff(software, version, ver_dir, project_dir,
-                "ci_build_failed",
-                [f"CI 构建失败，请查看 PR #{pr_number} 的 CI 评论",
-                 f"修复后 push 新 commit: git push origin {branch_name}",
-                 f"查看 CI: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}"])
+                "ci_build_failed", acts)
             return 1
         elif ci_status == "TIMEOUT":
             log_fail(f"❌ CI 监控超时")
@@ -762,6 +933,13 @@ def cmd_submit(software: str, version: str,
             return 1
         elif ci_status == "PASSED":
             log_ok(f"  ✅ CI 构建通过")
+            _ci_repair_reset(ver_dir)
+            try:
+                from .feedback import record_event
+                record_event(ver_dir, "ci_passed", f"PR #{pr_number}")
+            except Exception:
+                pass
+            _maybe_upgrade_result(software, version, pr_number, pr_url)
 
         # ── SKILL_FEEDBACK (final phase) ──
         log_info("生成 SKILL_FEEDBACK 报告...")
@@ -771,6 +949,10 @@ def cmd_submit(software: str, version: str,
             feedback_ret = cmd_feedback(software, version, pdir=project_dir)
         except Exception as e:
             log_warn(f"  ⚠️ SKILL_FEEDBACK 生成失败: {e}")
+
+        # ── v12.10: 反馈完整即自动入仓（commit+push 任务分支，随 PR 进 main）──
+        if feedback_ret == 0:
+            _push_feedback_to_branch(project_dir, branch_name)
 
         # ── Success ──
         print(f"\n  ✅ PR 提交完成: {software} {version}")
@@ -845,7 +1027,15 @@ def cmd_submit(software: str, version: str,
     # ── Gate 3/4: W4 Pre-PR audit ──
     audit_result_path = ver_dir / "reports" / "audit-result.json"
     if not audit_result_path.exists():
+        misplaced = ver_dir / ".audit-result.json"
+        misplaced_note = ""
+        if misplaced.exists():
+            misplaced_note = (f"检测到错误位置的 {misplaced}（带点前缀、不在 reports/ 下）——"
+                              "这就是它不被读取的原因。正确位置（唯一权威）: "
+                              f"{audit_result_path}")
         log_fail("❌ Gate 3/4: W4 Pre-PR 审计未执行 (audit-result.json 不存在)")
+        if misplaced_note:
+            log_fail(f"⚠️ {misplaced_note}")
         _emit_submit_handoff(software, version, ver_dir, project_dir,
             "w4_audit_not_done",
             ["W4 Pre-PR 审计未执行，请先完成审计",
@@ -930,7 +1120,7 @@ def cmd_submit(software: str, version: str,
     archive_path = f"archives/{letter}/{software}/{version}/"
     software_archive_root = f"archives/{letter}/{software}/"
     result = subprocess.run(
-        [_GIT, "add", archive_path, "knowledge/graph/draft/"],
+        [_GIT, "add", archive_path, "knowledge/drafts/"],
         cwd=project_dir, capture_output=True, text=True)
     if result.returncode != 0:
         log_fail(f"❌ git add 失败: {result.stderr.strip()}")
@@ -950,7 +1140,7 @@ def cmd_submit(software: str, version: str,
             # Allow: current package archive, software-level files (commands.json etc), knowledge drafts
             if not f.startswith(archive_path) \
                and not (f.startswith(software_archive_root) and f.count("/") <= 3) \
-               and not f.startswith("knowledge/graph/draft/"):
+               and not f.startswith("knowledge/drafts/"):
                 unexpected.append(f)
         if unexpected:
             log_fail(f"❌ 暂存了不属于当前包的文件 (违反 W2 原子性):")
@@ -970,7 +1160,15 @@ def cmd_submit(software: str, version: str,
         [_GIT, "commit", "-m", pr_title],
         cwd=project_dir, capture_output=True, text=True)
     if result.returncode != 0:
-        if "nothing to commit" in result.stdout.lower() or "nothing to commit" in result.stderr.lower():
+        # git 无变更的多种措辞（2.45 实测），全部按"无变更（可能已提交）"处理：
+        #   干净树: "nothing to commit, working tree clean"
+        #   仅未跟踪文件: "nothing added to commit but untracked files present"
+        #   有未暂存修改: "no changes added to commit"
+        _commit_out = (result.stdout + "\n" + result.stderr).lower()
+        if any(s in _commit_out for s in (
+                "nothing to commit",
+                "nothing added to commit",
+                "no changes added to commit")):
             log_warn("  ⚠️ git commit: 无变更（可能已提交）")
         else:
             log_fail(f"❌ git commit 失败: {result.stderr.strip()}")
@@ -1051,25 +1249,36 @@ def cmd_submit(software: str, version: str,
     repo = "OpenHarmonyPCDeveloper/build_in_harmonyos"
 
     log_info("创建 GitCode PR...")
-    pr_result = subprocess.run(
-        [sys.executable, gitcode_pr, "create-pr",
-         "--repo", repo,
-         "--source", branch_name,
-         "--target", "main",
-         "--title", pr_title,
-         "--description", pr_body_text],
-        capture_output=True, text=True, timeout=30)
+    try:
+        pr_result = subprocess.run(
+            [sys.executable, gitcode_pr, "create-pr",
+             "--repo", repo,
+             "--source", branch_name,
+             "--target", "main",
+             "--title", pr_title,
+             "--description", pr_body_text],
+            capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        log_fail("❌ 创建 PR 命令超时（30s），网络可能不稳定")
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "pr_creation_timeout",
+            [f"gitcode_pr.py create-pr 超时，请手动重试或检查网络",
+             f"手动创建: python3 scripts/gitcode_pr.py create-pr --repo {repo} --source {branch_name} --target main --title '{pr_title}'"])
+        return 1
 
     pr_number = None
     if pr_result.returncode == 0:
         pr_number = _parse_pr_number(pr_result.stdout)
     elif "already exists" in pr_result.stderr.lower() or "409" in pr_result.stderr:
         log_warn("  PR 已存在，查找现有 PR 编号...")
-        list_result = subprocess.run(
-            [sys.executable, gitcode_pr, "list-prs",
-             "--repo", repo, "--source-branch", branch_name],
-            capture_output=True, text=True, timeout=15)
-        pr_number = _parse_pr_number(list_result.stdout)
+        try:
+            list_result = subprocess.run(
+                [sys.executable, gitcode_pr, "list-prs",
+                 "--repo", repo, "--source-branch", branch_name],
+                capture_output=True, text=True, timeout=15)
+            pr_number = _parse_pr_number(list_result.stdout)
+        except subprocess.TimeoutExpired:
+            log_warn("  list-prs 查询超时，稍后可用 --resume 恢复")
 
     if not pr_number:
         log_fail(f"❌ PR 创建/查找失败")
@@ -1082,7 +1291,7 @@ def cmd_submit(software: str, version: str,
         return 1
 
     log_ok(f"  PR #{pr_number} 已创建/找到")
-    pr_url = f"https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/pull/{pr_number}"
+    pr_url = f"https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/merge_requests/{pr_number}"
 
     # ── Save initial submit state ──
     if not resume:
@@ -1090,7 +1299,54 @@ def cmd_submit(software: str, version: str,
             "pr_number": pr_number,
             "review_phase": 1,
             "branch_name": branch_name,
+            # v12.17 S1: success 四必填项源头补全（CI 绿自动上报时
+            # 显式读取，不依赖 cwd git 推导——串扰机/环境异常兜底）
+            "commit_hash": _git_head(project_dir),
         })
+
+    # ── R42 防猝死草稿：PR 创建瞬间即落 partial 保底（默认路径同样生效）──
+    # 3681 教训: agent 建完 PR 后继续等 AI Review/CI（最长 1h+2400s），
+    # 期间被杀则 result.json 未写 → 真实成果被记为 failed。
+    from .result_report import write_pr_draft
+    write_pr_draft(software, version, pr_number, pr_url)
+
+    # ── v12.10: feedback 骨架前置（R42 同款先落盘，与 result 草稿同步）──
+    # 旧流程 feedback 在 CI 绿后才生成且只写本地——期间被杀即永久丢失。
+    try:
+        from .feedback import ensure_feedback_skeleton, record_event
+        if ensure_feedback_skeleton(software, version, pdir=project_dir,
+                                    reason="pr_created"):
+            record_event(ver_dir, "pr_created", f"PR #{pr_number} {pr_url}")
+            log_ok("  ✅ SKILL_FEEDBACK 骨架已前置落盘（v12.10）")
+    except Exception as e:
+        log_warn(f"  ⚠️ feedback 骨架前置失败(不阻塞): {e}")
+
+    # ── R42/v12.12: 预算不足时的退出通道（--no-wait）──
+    if no_wait:
+        log_ok("  ⏭️  no-wait: 跳过 AI Review/CI 监控（环未闭，非成功）")
+        log_warn("   ⚠️ PR 创建 ≠ 成功——CI 不会自动跑（评论触发型），"
+                 "AI Review 需闭环；本 PR 需 follow-up 续环")
+        log_info(f"   follow-up 续闭环: "
+                 f"python3 scripts/ohc-run.py submit {software} {version} --resume")
+        try:
+            from .result_report import write_lifecycle_draft
+            write_lifecycle_draft(
+                software, version, "loop_pending",
+                pr_number=pr_number, pr_url=pr_url,
+                summary=(f"PR #{pr_number} 已创建但 CI/AI 闭环未启动"
+                         f"（no-wait 退出）。follow-up 续环: "
+                         f"python3 scripts/ohc-run.py submit "
+                         f"{software} {version} --resume"))
+        except Exception:
+            pass
+        try:
+            from .feedback import record_event
+            record_event(ver_dir, "loop_pending",
+                         f"no-wait 退出，CI/AI 闭环未启动；follow-up: "
+                         f"submit --resume (PR #{pr_number})")
+        except Exception:
+            pass
+        return 0
 
     # ── Monitor AI Review (atomgit-bot): 5-phase flow ──
     log_info(f"监控 AI Review (PR #{pr_number})...")
@@ -1106,7 +1362,38 @@ def cmd_submit(software: str, version: str,
     elif review_result == "timeout":
         return 1
     elif review_result == "review_complete":
-        pass  # Proceed to CI monitoring
+        pass  # Proceed to closure verification & CI monitoring
+
+    # ── 闭环校验：所有检视意见必须有回复（accept/reject 均可）──
+    unreplied = _verify_review_closure(gitcode_pr, repo, pr_number)
+    if unreplied:
+        log_fail(f"❌ 检视意见闭环校验未通过: {len(unreplied)} 条意见未回复")
+        closure_text = ""
+        for op in unreplied:
+            closure_text += f"  - comment_id: {op.get('comment_id', '')}: {op.get('body', '')[:150]}\n"
+        try:
+            from .result_report import write_lifecycle_draft
+            write_lifecycle_draft(
+                software, version, "loop_pending", pr_number=pr_number, pr_url=pr_url,
+                summary=(f"PR #{pr_number} 检视意见 {len(unreplied)} 条未闭环"
+                         f"（反馈 0829-2: 完成前必须逐条处理）。续环: "
+                         f"python3 scripts/ohc-run.py submit {software} {version} --resume"))
+        except Exception:
+            pass
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "review_closure_incomplete",
+            [
+                f"PR #{pr_number} 有 {len(unreplied)} 条检视意见未回复（闭环未完成）：",
+                "",
+                closure_text,
+                "检视意见必须全部在讨论串内回复（accept 或 reject），",
+                "处理命令: python3 scripts/gitcode_pr.py handle-review-opinion \\",
+                f"    --repo {repo} --number {pr_number} --comment-id <id> --action accept|reject --reason '...'",
+                "",
+                f"全部处理完后: python3 scripts/ohc-run.py submit {software} {version} --resume",
+            ],
+            resume_with_flag=True)
+        return 1
 
     # ── Monitor CI (poll every 30s, timeout 40min) ──
     log_info(f"监控 CI 状态 (PR #{pr_number})...")
@@ -1114,11 +1401,40 @@ def cmd_submit(software: str, version: str,
 
     if ci_status == "FAILED":
         log_fail(f"❌ CI 构建失败")
+        detail = _fetch_ci_failure_detail(gitcode_pr, repo, pr_number)
+        if detail:
+            log_fail("── CI 失败详情（最新失败评论摘要）──")
+            for ln in detail.splitlines():
+                log_fail(f"  {ln}")
+        rnd = _ci_repair_round(ver_dir, pr_number)
+        try:
+            from .result_report import write_lifecycle_draft
+            write_lifecycle_draft(
+                software, version, "loop_pending", pr_number=pr_number, pr_url=pr_url,
+                summary=(f"PR #{pr_number} CI 失败（修复第 {rnd}/"
+                         f"{MAX_CI_REPAIR_ROUNDS} 轮）。续环: python3 "
+                         f"scripts/ohc-run.py submit {software} {version} --resume"))
+        except Exception:
+            pass
+        if rnd >= MAX_CI_REPAIR_ROUNDS:
+            acts = [f"⚠️ 停损: CI 已连续 {rnd} 轮修复仍红，勿再盲目重试",
+                    f"上报: python3 scripts/ohc-run.py result {software} {version} "
+                    f"--status build_failed --failed-reason 'CI 连续 {rnd} 轮失败: <一句话根因>' --force",
+                    f"证据留档: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}",
+                    "人工介入排查（依赖缺失/环境差异/上游缺陷），排查后重开需 reset-rerun"]
+        else:
+            acts = [f"自诊断: python3 scripts/gitcode_pr.py diagnose --repo {repo} --number {pr_number}",
+                    "（diagnose 对'类别: 未知'做日志二次归类，输出证据行+修复要点）",
+                    f"按诊断定位原因并修复（本地 W3 复验后再推）",
+                    f"修复后 push: git push origin {branch_name}",
+                    f"⚠️ push 本身不会触发 CI（评论触发型）——必须续环: python3 "
+                    f"scripts/ohc-run.py submit {software} {version} --resume（resume 自动评论 /rebuild 重跑 CI）",
+                    f"修复轮次: {rnd}/{MAX_CI_REPAIR_ROUNDS}（连续 {MAX_CI_REPAIR_ROUNDS} 轮仍红 → 停损上报）",
+                    f"完整日志: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}"]
+        if detail:
+            acts.insert(0, "── CI 失败详情见上方摘要 ──")
         _emit_submit_handoff(software, version, ver_dir, project_dir,
-            "ci_build_failed",
-            [f"CI 构建失败，请查看 PR #{pr_number} 的 CI 评论",
-             f"修复后 push 新 commit: git push origin {branch_name}",
-             f"查看 CI: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}"])
+            "ci_build_failed", acts)
         return 1
     elif ci_status == "TIMEOUT":
         log_fail(f"❌ CI 监控超时")
@@ -1130,6 +1446,13 @@ def cmd_submit(software: str, version: str,
         return 1
     elif ci_status == "PASSED":
         log_ok(f"  ✅ CI 构建通过")
+        _ci_repair_reset(ver_dir)
+        try:
+            from .feedback import record_event
+            record_event(ver_dir, "ci_passed", f"PR #{pr_number}")
+        except Exception:
+            pass
+        _maybe_upgrade_result(software, version, pr_number, pr_url)
 
     # ── SKILL_FEEDBACK (final phase) ──
     log_info("生成 SKILL_FEEDBACK 报告...")
@@ -1140,6 +1463,10 @@ def cmd_submit(software: str, version: str,
     except Exception as e:
         log_warn(f"  ⚠️ SKILL_FEEDBACK 生成失败: {e}")
 
+    # ── v12.10: 反馈完整即自动入仓（commit+push 任务分支，随 PR 进 main）──
+    if feedback_ret == 0:
+        _push_feedback_to_branch(project_dir, branch_name)
+
     # ── Success ──
     print(f"\n  ✅ PR 提交完成: {software} {version}")
     print(f"     PR: #{pr_number}")
@@ -1147,6 +1474,136 @@ def cmd_submit(software: str, version: str,
     print(f"     分支: {branch_name}")
     print(f"     标题: {pr_title}")
     return feedback_ret
+
+
+def _push_feedback_to_branch(project_dir: str, branch_name: str) -> None:
+    """v12.10: feedback 终稿自动入仓（best-effort，失败仅告警不阻塞）。
+
+    只提交 feedback/SKILL_FEEDBACK_*.md——.feedback-state.json 是 JC5 未白名单
+    的本地运行时文件，绝不入仓。仅推送完整终稿（骨架/占位稿不推：
+    避免 PR 转绿后再触发一次 CI 重跑）。OHC_FEEDBACK_PUSH=0 可关闭。
+    """
+    if os.environ.get("OHC_FEEDBACK_PUSH", "1") == "0":
+        log_info("  ⏭️ OHC_FEEDBACK_PUSH=0，跳过 feedback 自动入仓")
+        return
+    try:
+        feedback_dir = Path(project_dir) / "feedback"
+        if not feedback_dir.exists():
+            return
+        files = sorted(feedback_dir.glob("SKILL_FEEDBACK_*.md"))
+        if not files:
+            return
+
+        def _git(*args, timeout=30):
+            return subprocess.run(["git", *args], cwd=project_dir,
+                                  capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace",
+                                  timeout=timeout)
+        if not branch_name:
+            cur = _git("rev-parse", "--abbrev-ref", "HEAD")
+            branch_name = cur.stdout.strip() if cur.returncode == 0 else ""
+        if not branch_name or branch_name in ("main", "master"):
+            log_warn(f"  ⚠️ 当前分支 {branch_name or '?'} 非任务分支，"
+                     f"跳过 feedback 入仓（防误推主干）")
+            return
+        rel = [str(f.relative_to(project_dir)).replace("\\", "/")
+               for f in files]
+        _git("add", "--", *rel)
+        staged = _git("diff", "--cached", "--name-only")
+        if not staged.stdout.strip():
+            log_info("  ℹ️ feedback 无新变更可提交")
+            return
+        c = _git("commit", "-m",
+                 "docs: add SKILL_FEEDBACK report (auto, v12.10)")
+        if c.returncode != 0:
+            log_warn(f"  ⚠️ feedback commit 失败: "
+                     f"{(c.stderr or c.stdout).strip()[:120]}")
+            return
+        p = _git("push", "origin", branch_name, timeout=120)
+        if p.returncode != 0:
+            log_warn(f"  ⚠️ feedback push 失败(已本地提交，可随下次提交入仓): "
+                     f"{(p.stderr or p.stdout).strip()[:120]}")
+            return
+        log_ok(f"  ✅ SKILL_FEEDBACK 已入仓并推送（{branch_name}，随 PR 进 main）")
+    except Exception as e:
+        log_warn(f"  ⚠️ feedback 入仓异常(不阻塞): {e}")
+
+
+def _maybe_upgrade_result(software: str, version: str,
+                          pr_number: int, pr_url: str) -> None:
+    """CI 绿即终态：自动升级 result 草稿为 success。
+
+    R42 闭环：partial 草稿（PR 创建时）→ success（CI 绿时）。
+    v12.17（S1 空回执修复，208 例教训）:
+      - 不再要求 OHC_RESULT_OUT 已设置——result_cli 自带输出链
+        （OHC_RESULT_OUT > $HOME fallback），环境变量缺失/串扰机
+        也会落盘，杜绝"CI 绿但不落盘"路径
+      - 显式传 --pr-url/--pr-number（不靠推导链），success 回执
+        必带 pr_url，平台 SUCCESS_NO_PR/回填流直接可用
+    """
+    try:
+        from .result_report import result_cli
+        # v12.17 S1: 显式补全 success 四必填项（pr_url/pr_number/branch/
+        # commit_hash），不依赖 cwd git 推导——submit-state 已在 PR 创建时
+        # 存 branch_name/commit_hash，环境异常机也能落完整回执
+        state = _load_submit_state(_archive_dir(
+            software[0].lower(), software, version, find_project_dir())) or {}
+        branch = state.get("branch_name") or ""
+        commit_hash = state.get("commit_hash") or _git_head(find_project_dir()) or ""
+        argv = [software, version, "--status", "success",
+                "--summary", f"CI 校验通过 PR #{pr_number}: {pr_url}",
+                "--pr-number", str(pr_number), "--pr-url", pr_url,
+                "--no-ci-verify", "--force"]
+        if branch:
+            argv += ["--branch", str(branch)]
+        if commit_hash:
+            argv += ["--commit-hash", str(commit_hash)]
+        # --no-ci-verify: 本函数仅由 submit 的 CI-PASSED 分支调用（已实证绿）；
+        # 复跑 API 核验在通道抖动时会 ERROR 误降级 partial → 平台非终态黑洞
+        #（心愿单报告 S1: 208 例回执缺失的机制之一）。守门仅约束手动上报路径。
+        rc = result_cli(argv)
+        if rc == 0:
+            log_ok("   result.json 已升级为 success（CI 绿终态，含 pr_url）")
+        else:
+            log_warn(f"   result 自动升级失败 rc={rc}——手动补报: "
+                     f"ohc-run.py result {software} {version} "
+                     f"--status success --pr-url {pr_url} --force")
+    except Exception as e:
+        log_warn(f"   result 升级异常(不阻塞 CI 结论): {e}——手动补报: "
+                 f"ohc-run.py result {software} {version} "
+                 f"--status success --pr-url {pr_url} --force")
+
+
+def _fetch_ci_failure_detail(gitcode_pr: str, repo: str,
+                             pr_number: int) -> str | None:
+    """CI 失败后自动提取最新失败评论的报错摘要（免 agent 二次查询）。
+
+    调 gitcode_pr.py ci-status --json 拿全部 CI 评论，取最后一条
+    "校验失败"，从 body 提取错误关键行（error/失败/❌/gate）。
+    任何异常返回 None，不阻塞主流程。
+    """
+    try:
+        r = subprocess.run(
+            [sys.executable, gitcode_pr, "ci-status", "--json",
+             "--repo", repo, "--number", str(pr_number)],
+            capture_output=True, text=True, timeout=60)
+        out = r.stdout or ""
+        if "--- JSON ---" not in out:
+            return None
+        data = json.loads(out.split("--- JSON ---")[-1].strip())
+        failed = [c for c in data if "校验失败" in c.get("body", "")]
+        if not failed:
+            return None
+        body = failed[-1].get("body", "")
+        # 优先错误关键行；无关键行则取正文前 1200 字
+        keys = ("error", "Error", "ERROR", "失败", "❌", "gate", "Gate",
+                "exit", "missing", "No such")
+        lines = [ln.strip() for ln in body.splitlines()
+                 if ln.strip() and any(k in ln for k in keys)]
+        detail = "\n".join(lines[:25]) if lines else body[:1200]
+        return detail[:1500] or None
+    except Exception:
+        return None
 
 
 def _parse_pr_number(output: str) -> int | None:
@@ -1169,20 +1626,78 @@ def _parse_pr_number(output: str) -> int | None:
     return None
 
 
+def _verify_review_closure(gitcode_pr: str, repo: str, pr_number: int) -> list:
+    """校验检视意见闭环：每条意见后是否有非 bot 回复。
+
+    返回未回复意见列表；空列表 = 闭环通过。
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, gitcode_pr, "monitor-review", "--json",
+             "--repo", repo, "--number", str(pr_number)],
+            capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        log_warn("  ⚠️ 闭环校验查询超时（已放行）——请手动确认检视意见已全部回复:")
+        log_warn(f"     python3 scripts/gitcode_pr.py monitor-review --repo {repo} --number {pr_number}")
+        return []
+    out = result.stdout
+    if "--- JSON ---" not in out:
+        log_warn("  ⚠️ 闭环校验输出无法解析（已放行）——请手动确认检视意见已全部回复:")
+        log_warn(f"     python3 scripts/gitcode_pr.py monitor-review --repo {repo} --number {pr_number}")
+        return []
+    try:
+        data = json.loads(out.split("--- JSON ---")[-1].strip())
+        return data.get("unreplied_opinions", [])
+    except json.JSONDecodeError:
+        log_warn("  ⚠️ 闭环校验 JSON 解析失败（已放行）——请手动确认检视意见已全部回复")
+        return []
+
+
 def _monitor_ci(gitcode_pr: str, repo: str, pr_number: int,
-                timeout: int = 600, interval: int = 30) -> str:
+                timeout: int = 600, interval: int = 30,
+                trigger: bool = True) -> str:
     """Poll CI status until completion or timeout.
+
+    平台变更后 CI 需主动评论 /rebuild 触发。trigger=True 时先触发一次构建
+    再轮询（避免干等导致超时）。若 CI 已在排队/运行则跳过触发。
 
     Returns: 'PASSED', 'FAILED', 'TIMEOUT', or 'UNKNOWN'
     """
     import time as _time
     elapsed = 0
 
+    if trigger:
+        # 先查当前状态，CI 已在跑则不重复触发
+        try:
+            pre = subprocess.run(
+                [sys.executable, gitcode_pr, "ci-status",
+                 "--repo", repo, "--number", str(pr_number)],
+                capture_output=True, text=True, timeout=15)
+            pre_out = pre.stdout
+        except subprocess.TimeoutExpired:
+            pre_out = ""
+        if not any(s in pre_out for s in ("RUNNING", "QUEUED", "PASSED", "FAILED")):
+            log_info(f"  平台 CI 需主动触发，评论 /rebuild (PR #{pr_number})...")
+            try:
+                subprocess.run(
+                    [sys.executable, gitcode_pr, "trigger-ci",
+                     "--repo", repo, "--number", str(pr_number)],
+                    capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired:
+                log_warn("  trigger-ci 超时（继续轮询，CI 可能已触发）")
+            _time.sleep(10)  # 等平台响应启动构建
+
     while elapsed < timeout:
-        result = subprocess.run(
-            [sys.executable, gitcode_pr, "ci-status",
-             "--repo", repo, "--number", str(pr_number)],
-            capture_output=True, text=True, timeout=15)
+        try:
+            result = subprocess.run(
+                [sys.executable, gitcode_pr, "ci-status",
+                 "--repo", repo, "--number", str(pr_number)],
+                capture_output=True, text=True, timeout=15)
+        except subprocess.TimeoutExpired:
+            log_warn("  ci-status 查询超时，继续等待...")
+            _time.sleep(interval)
+            elapsed += interval
+            continue
 
         output = result.stdout
         if "PASSED" in output:
@@ -1246,10 +1761,13 @@ def _save_submit_state(ver_dir: Path, state: dict) -> None:
 
 def _call_monitor_review(gitcode_pr: str, repo: str, pr_number: int) -> dict | None:
     """Call gitcode_pr.py --json monitor-review and parse result."""
-    result = subprocess.run(
-        [sys.executable, gitcode_pr, "--json", "monitor-review",
-         "--repo", repo, "--number", str(pr_number)],
-        capture_output=True, text=True, timeout=30)
+    try:
+        result = subprocess.run(
+            [sys.executable, gitcode_pr, "--json", "monitor-review",
+             "--repo", repo, "--number", str(pr_number)],
+            capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return None
     if result.returncode != 0:
         return None
     # Parse JSON from stdout (after "--- JSON ---" marker)
@@ -1451,15 +1969,11 @@ def _monitor_ai_review(gitcode_pr: str, repo: str, pr_number: int,
             })
             return "review_complete"
         else:
-            # Build HANDOFF with review opinions
             opinions_text = ""
             for i, op in enumerate(opinions):
                 opinions_text += f"\n{'='*60}\n"
                 opinions_text += f"### 检视意见 [{i+1}/{len(opinions)}]\n"
-                opinions_text += f"comment_id: {op.get('comment_id', '')}\n"
-                did = op.get("discussion_id", "")
-                if did:
-                    opinions_text += f"discussion_id: {did}\n"
+                opinions_text += f"comment_id: {op.get('comment_id', '')}  ← 处理时用 --comment-id\n"
                 opinions_text += f"内容:\n{op.get('body', '')[:1000]}\n"
             opinions_text += f"\n{'='*60}\n"
 
@@ -1472,7 +1986,7 @@ def _monitor_ai_review(gitcode_pr: str, repo: str, pr_number: int,
                     "",
                     opinions_text,
                     "━━━ 处理方式 ━━━",
-                    "每条检视意见用 handle-review-opinion 命令处理：",
+                    "每条检视意见用 handle-review-opinion 命令处理（回复会挂在意见讨论串内）：",
                     "  · accept（接纳）：修改代码 + 回复 + 脚本自动标记已解决",
                     "  · reject（拒绝）：仅回复说明原因 + 请审核人员评估，不标记已解决",
                     "",
@@ -1482,20 +1996,20 @@ def _monitor_ai_review(gitcode_pr: str, repo: str, pr_number: int,
                     f"  1. 修改代码并: git push origin {branch_name}",
                     f"  2. 处理: python3 scripts/gitcode_pr.py handle-review-opinion \\",
                     f"       --repo {repo} --number {pr_number} \\",
-                    f"       --discussion-id <id> --action accept \\",
+                    f"       --comment-id <comment_id> --action accept \\",
                     f"       --reason '修改了xxx，添加了yyy'",
                     "",
                     "【拒绝意见（不修改）】",
                     f"  python3 scripts/gitcode_pr.py handle-review-opinion \\",
                     f"       --repo {repo} --number {pr_number} \\",
-                    f"       --discussion-id <id> --action reject \\",
+                    f"       --comment-id <comment_id> --action reject \\",
                     f"       --reason '该意见不适用，因为...'",
                     "",
-                    "━━━ 完成条件 ━━━",
-                    f"  所有 {len(opinions)} 条检视意见都已处理后，继续:",
-                    f"  python3 scripts/ohc-run.py submit {software} {version} --resume",
+                    "━━━ 完成条件（闭环校验）━━━",
+                    f"  所有 {len(opinions)} 条检视意见必须全部在讨论串内回复（accept 或 reject），",
+                    "  未回复的意见会在 --resume 时被检测到并重新拦截。",
+                    f"  处理完后继续: python3 scripts/ohc-run.py submit {software} {version} --resume",
                     "",
-                    "  其中：接纳的意见已由脚本标记已解决；拒绝的意见已请审核人员评估。",
                     "  ⚠️ 非 CI 状态通知（如 ohpcd-robot 的 CI 排队/构建/失败）不需要回复。",
                 ],
                 resume_with_flag=True)
@@ -1584,7 +2098,7 @@ def _review_single(software: str, version: str,
         _record("1. 补丁完整性", "PASS", "无补丁目录")
 
     # ── Check 2: E编号冲突检测 ──
-    draft_dir = Path(graph_dir(project_dir)) / "draft"
+    draft_dir = Path(project_dir) / "knowledge" / "drafts"
     index_path = Path(graph_dir(project_dir)) / "index.tsv"
     existing_ids: set[str] = set()
     if index_path.exists():
@@ -1913,6 +2427,23 @@ def cmd_post_merge(software: str, version: str,
             f.write(separator + feedback_content)
         log_ok("  收割 skill-feedback.md")
 
+    # v12.10: 兼容新协议——同时收割 feedback/SKILL_FEEDBACK_<id>.md
+    # （cmd_feedback 实际写入路径；旧链路只认 archives/.../reports/，基本空转）
+    try:
+        from .feedback import feedback_status
+        st = feedback_status(software, version, pdir=project_dir)
+        if st["exists"]:
+            fid_content = Path(st["path"]).read_text(encoding="utf-8")
+            root_feedback.parent.mkdir(parents=True, exist_ok=True)
+            sep = (f"\n\n---\n## {software} {version} "
+                   f"SKILL_FEEDBACK_{st['feedback_id']} (post-merge)\n\n")
+            with open(root_feedback, "a", encoding="utf-8") as f:
+                f.write(sep + fid_content)
+            log_ok(f"  收割 feedback/SKILL_FEEDBACK_{st['feedback_id']}.md"
+                   f"（状态: {'complete' if st['complete'] else 'pending'}）")
+    except Exception as e:
+        log_warn(f"  收割 SKILL_FEEDBACK 失败(不阻塞): {e}")
+
     # ── Step 6: Output summary ──
     print(f"\n  ✅ Post-merge Summary:")
     print(f"     Software: {software}")
@@ -1943,10 +2474,15 @@ def submit_cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--project-dir", "-p", default=None)
     parser.add_argument("--resume", action="store_true",
                          help="从上次 HANDOFF 处恢复（跳过已完成阶段，从状态文件继续）")
+    parser.add_argument("--no-wait", action="store_true",
+                         help="R42: PR 创建即上报，跳过 AI Review/CI 监控"
+                              "（等价环境变量 OHC_SUBMIT_NO_WAIT=1）")
     args = parser.parse_args(argv)
     return cmd_submit(args.software, args.version,
                       pdir=getattr(args, "project_dir", None),
-                      resume=getattr(args, "resume", False))
+                      resume=getattr(args, "resume", False),
+                      no_wait=args.no_wait
+                      or os.environ.get("OHC_SUBMIT_NO_WAIT", "").strip() == "1")
 
 
 def review_cli(argv: list[str] | None = None) -> int:

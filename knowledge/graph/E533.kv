@@ -1,0 +1,110 @@
+#====================================================================
+# bsdtar-3.7.7 — libarchive 3.7.7 CLI 工具集 HarmonyOS PC 适配知识
+#
+# 本条目为知识库扩展草稿（路径 B），基于已合并 PR #6160 的实际证据。
+# 覆盖核心问题：autotools 跨平台感知、hmdfs 文件系统权限特性、
+# 依赖边界冻结、上游测试套件平台差异分类与 test_package 验证。
+#====================================================================
+
+id:                     E533
+trigger_tool:           autotools|configure|make|conan
+phase:                  porting|testing|cross-compilation
+
+error_signature:        config.guess.*HarmonyOS|Permission denied.*tmp|assertion_file_mode|umask 077|hmfs.*mode|setgid|owner-bits-only|R_AARCH64_ADR_PREL_PG_HI21.*z_errmsg|fPIC|liblzma.*runtime.*load|make check.*failed
+
+severity:               2
+category:               hmdfs, ohos, portability, autotools, dependency
+match_keywords:         bsdtar, libarchive, autotools, config.guess, HarmonyOS,
+                        OHOS, aarch64-linux-ohos, hmdfs, hmfs, umask, Permission denied,
+                        assertion_file_mode, owner-bits-only, setgid, zlib, fPIC,
+                        xz, liblzma, make check, test_package, pkg-config, rpath,
+                        configure, autoconf, portability, cross-compilation
+
+title:                  libarchive/bsdtar 3.7.7 HarmonyOS PC 适配: autotools 跨平台 + hmdfs 权限 + 依赖边界 + 测试套件分类
+
+root_cause: >
+  1. config.guess 缺乏 HarmonyOS 识别分支，configure 无法推断 aarch64-unknown-linux-ohos
+     triplet，导致构建系统类型检测失败。libarchive 3.7.7 内置的 config.guess 是 2021-10-26
+     版本，无 HarmonyOS 条目。
+  2. hmdfs（HarmonyOS Distributed File System）强制 setgid 位、裁剪 group/other 权限位，
+     且 mkdir 默认 umask 077 在大赛中因平台原因生效（非容器环境），导致 configure 临时目录
+     创建失败（Permission denied）以及测试套件中 assertion_file_mode 精确 0755 断言失败。
+  3. 实际链接依赖仅 zlib + liblzma(xz)（bzip2/zstd/lz4/openssl/libxml2 在 OHOS 上
+     configure 未检测到），但 zlib 官方制品仓的 libz.a 未以 -fPIC 编译，链接共享库时触发
+     R_AARCH64_ADR_PREL_PG_HI21 重定位错误；xz 的 pkg-config 优先指向 harmonybrew 系统
+     共享库导致运行时 .so 加载失败。
+  4. 上游 `make check` 5 套件合计 801 条用例，因平台已知限制（hmdfs 硬链接不支持、
+     权限位差异、未编译加密 backend）产生 39 failed + 226 skipped，非库本身缺陷。
+
+affected_scope: >
+  基于 autotools 构建系统的 libarchive 系 CLI 工具（bsdtar, bsdcpio, bsdcat,
+  bsdunzip）在 HarmonyOS PC（arm64）上适配时，涉及 config.guess 增强、hmdfs 文件系统
+  兼容性、精确依赖冻结与测试套件平台差异分类的联动方案。相近的 libarchive 次版本
+  （3.7.x 系列）可复用相同补丁思路，但 patch 上下文（test_main.c 中函数位置、config.guess
+  基线）需要逐版本适配。
+
+verification_cmd:       CI_PACKAGES="archives/b/bsdtar/3.7.7" zsh ci/conan/build_and_test.sh
+
+rec_priority:           1
+rec_approach:           autotools-hmdfs-dependency-boundary-test-classification
+rec_description: >
+  1. config.guess 增强：在 `case $UNAME_MACHINE:$UNAME_SYSTEM:$UNAME_RELEASE:$UNAME_VERSION`
+     分支前插入 HarmonyOS 条目，将 aarch64 映射为 ${MACHINE}-unknown-linux-ohos。
+  2. hmdfs 权限兼容：configure 临时目录创建 umask 从 077 改为 002；test_main.c 中
+     assertion_file_mode 比较改为 owner-bits-only（0700 掩码比较），容忍 setgid 和
+     其他位差异。
+  3. 依赖冻结：声明 zlib/1.3.1.1（-fPIC 重建版）和 xz/5.6.2 为唯一强制依赖；
+     configure 传 `--without-xml2` 禁用可选 libxml2；generate() 中通过
+     extra_cflags/extra_ldflags 将 conan 依赖的 include/lib 路径置前以覆盖 pkg-config
+     的 harmonybrew 系统路径。
+  4. 测试分类：`make check` 保留全部 5 套件 801 条注册项，不接受平台宏整体跳过；
+     已知 hmdfs 硬链接失败（E079）、权限位失败（E011/E129）和加密 backend 未编译失败
+     作为独立类别记录，不阻塞适配结论。
+  5. test_package 验证：执行 bsdtar --version 确认工具和依赖版本字符串，内存 tar 读取
+     验证 libarchive 库 API，tar 创建-提取往返验证 CLI 完整性。
+
+rec_command:            apply patches 0001-0003, configure --build=aarch64-unknown-linux-gnu --without-xml2, make, make check, make install
+rec_auto_fix:           false
+rec_impl:               libarchive-bsdtar-ohos-porting
+
+fallback_priority:      2
+fallback_approach:      manual-package-version
+fallback_description: >
+  若 config.guess 补丁无法干净应用（偏移较大或上游基线已变），可传递
+  `--build=aarch64-unknown-linux-gnu` 并设置 `OHOS=1` 环境变量绕过检测；
+  hmdfs 补丁应在 test_main.c 中定位当前版本的 assertion_file_mode 函数位置。
+fallback_command:       configure --build=aarch64-unknown-linux-gnu && make
+fallback_auto_fix:      false
+
+forbid_1_pattern:       (__OHOS__|HarmonyOS).*OS.*skip|remove.*test.*registration|delete.*test.*case
+forbid_1_reason:        平台宏不能替代逐条测试能力评估；删除注册项会掩盖回归
+forbid_1_consequence:   测试套件注册数减少，能力恢复后不会自动补充覆盖
+
+forbid_2_pattern:       (skip|ignore).*make.*check|make.*check.*skip
+forbid_2_reason:        make check 是唯一的全量 L1 测试输出，跳过即失去适配证据
+forbid_2_consequence:   无法证明上游测试在 OHOS 上实际运行状态
+
+forbid_3_pattern:       conan.requires.*zlib/1.3.1[^.]|conan.requires.*zlib/1\.[^3]
+forbid_3_reason:        非 -fPIC 的 zlib 版本无法链接共享库，会触发 aarch64 重定位错误
+forbid_3_consequence:   构建失败，CI 报告 R_AARCH64_ADR_PREL_PG_HI21 错误
+
+forbid_4_pattern:       --without-xml2.*--with-xml2|--with-xml2
+forbid_4_reason:        libxml2 不在 conan 依赖图中，链接会引入不可控的系统库
+forbid_4_consequence:   运行时依赖不可追踪，CI 构建不一致
+
+principles:             P001, P005, P013, P016
+similar_to:             E007, E011, E079, E129, E041, E005
+
+doc_file:               knowledge/drafts/bsdtar-3.7.7.md
+last_updated:           2026-08-27
+source_event:           bsdtar/3.7.7 HarmonyOS PC adaptation, PR #6160
+
+authors: junshi_liu <liujsh2023@lzu.edu.cn>
+source_pr: !6811
+source_commit:          cabbe9707d9f0e8b19b0c442c99a914897e5b7c6
+
+metrics_success_count:  2
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-08-27
+

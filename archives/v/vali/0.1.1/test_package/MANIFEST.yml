@@ -1,0 +1,90 @@
+# test_package/MANIFEST.yml — vali 0.1.1
+# 位置: archives/v/vali/0.1.1/test_package/MANIFEST.yml
+# 用途: 声明上游测试来源与数量口径（L0e 门禁要求本文件存在）
+
+package: vali/0.1.1
+homepage: "https://gitlab.freedesktop.org/emersion/vali"
+
+# ── 上游测试 ─────────────────────────────────────────────────────────
+# 上游 test/meson.build 注册 2 条 test()：
+#   test('basic',         test_basic)
+#   test('certification', certification, args: ['self-test'])
+# 本配方在 build() 内以 meson.test()（等价 `meson test -v -C <build>`）真实执行，
+# 上游测试零修改，不做任何裁剪。
+upstream_check_command: "meson test"
+upstream_test_in_build: true
+upstream_test_command: "meson test -v"
+
+upstream_tests:
+  - file: test/basic.c
+    source: vali-0.1.1/test/basic.c
+    description: >-
+      客户端/服务端全链路往返：socketpair(AF_UNIX, SOCK_STREAM) + fork 出服务
+      子进程，覆盖 ①Echo 的结构体入参/出参（含 enum、bool 数组、map）逐字段核对、
+      ②CountUntil 的多回复流（value 与 more 语义）、③Stop 收尾，最后核对子进程
+      WIFEXITED && WEXITSTATUS == 0。注意该文件显式要求 NDEBUG 关闭
+      （`#ifdef NDEBUG` 则打印提示并 return 1），所以配方必须把 meson 的
+      b_ndebug 置为 false，见 notes.md §2.3。
+    command: "meson test -v basic"
+  - file: test/certification.c
+    source: vali-0.1.1/test/certification.c
+    description: >-
+      Varlink 官方认证套件（Test1..Test11）：以 `self-test` 模式在 socketpair
+      上同时起服务端与客户端，用 json-c 直接构造/比对报文，覆盖方法调用、错误
+      回传、多回复、oneway、参数类型校验等协议细节。它只依赖 vali 公共 API 与
+      json-c，不需要任何生成代码。
+    command: "meson test -v certification"
+
+# ── 本包自带的消费者用例 ─────────────────────────────────────────────
+test_package_tests:
+  - file: test_vali.c
+    description: >-
+      消费者测试：以库的使用者身份（只 include 包内 vali.h，链接包内 libvali.a）
+      跑一次真实的 Varlink 通信，四种报文形态全覆盖 ——
+      ①成功路径：手工构造 JSON 参数调用 Echo，核对回显与 oneway 标记；
+      ②错误路径：服务端 close_with_error 后客户端拿到 vali_error.name，
+        并核对 vali_error_finish() 的契约（它对**零值**结构安全，但**不是幂等**的
+        —— 不置零字段，连调两次会 double free；用例清零后再调一次以钉住这条契约）；
+      ③单向调用：vali_client_call_oneway() 不被回复阻塞，紧接着的普通调用
+        依然能正确匹配回复（若服务端错误地回复 oneway 请求，这里会立刻错位暴露）；
+      ④多回复：vali_client_call_more() + vali_client_call_wait() 循环，直到
+        vali_client_call_is_done() 为真，逐条核对 n 的值。
+      失败时打印 文件:行号 并以非 0 退出码上报。
+    command: "./test_vali"
+
+# ── 数量口径 ─────────────────────────────────────────────────────────
+# 上游以 meson 注册的 test() 条目为口径：2 条（basic / certification）。
+upstream_test_total: 2
+upstream_test_count_method: "auto"
+upstream_test_audit: >-
+  源码级审计（v0.1.1 tarball）：test/meson.build 内 test() 出现 2 次
+  （basic、certification）；其中 certification 以 args: ['self-test'] 运行。
+  两条用例内部都由 assert()/CHECK 自行断言，meson 只把它们当作 2 个测试条目，
+  故不把内部断言数并入 2，避免重复计数。
+
+test_counting:
+  # 上游 meson 注册的独立测试条目数
+  upstream_independent_total: 2
+  # 消费者用例：自研 CHECK 宏，每个调用点自带且仅带一条断言。
+  # 这里记的是**源码里的静态调用点数**（与 CI 的裸 grep 口径一致）。
+  integration_independent_total: 25
+  # 运行时真实执行的断言次数 = 18 处独立调用点 + 3 处位于 4 轮循环内的调用点 × 4
+  integration_runtime_assertions: 30
+  shared_static_counted_once: true
+  counting_note: >-
+    消费者用例采用 NDEBUG 安全的自研 CHECK / CHECK_STREQ 宏（CMake Release 会定义
+    NDEBUG，assert() 会被预处理掉，用它会让测试退化为必然通过的假测试）。
+    宏调用点固定为 25 处（CHECK 22 + CHECK_STREQ 3），不随构建配置变化；
+    这 25 处里有 4 处位于互斥分支（if 成功分支与 else 的 CHECK(0)），实际只走其中一支，
+    另有 3 处位于 test_more_replies 的 `for (i = 0; i <= 3; i++)` 循环体内。
+    因此运行时实际执行 18 + 3×4 = 30 次 —— 与真机输出
+    `test_vali: 30 checks run, 0 failed` 逐字对应（同样出现在 CI 内嵌的那次
+    `conan create` 日志中，见 notes.md §10.4 / §10.6）。
+    测试失败时以非 0 退出码上报，并能被 self.run() 的返回值捕获。
+
+# 静态调用点数（CI 的静态 grep 口径，必须与源码一致）
+test_case_count: 25
+assertion_count: 25
+# 运行时断言次数（真机实测口径，供 PR 正文的"通过率分母"引用）
+runtime_assertion_count: 30
+

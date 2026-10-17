@@ -1,0 +1,4 @@
+cmake_minimum_required(VERSION 3.15)
+project(installkernel_test LANGUAGES CXX)
+add_executable(installkernel_probe installkernel_probe.cpp)
+target_compile_features(installkernel_probe PRIVATE cxx_std_11)

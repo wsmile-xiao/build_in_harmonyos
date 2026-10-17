@@ -1,0 +1,159 @@
+# ═══ Draft knowledge entry — babeltrace 1.5.11 autotools 适配链 ═══
+# Timestamp: 2026-08-24
+# Software: babeltrace 1.5.11
+# Gate: PR #6048 / CI build #29565（conan create 失败链）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-6048
+trigger_tool:           configure|autotools|automake|conan|libtool
+phase:                  configure|build|package|test_package
+error_signature:        configure: error: glib is required in order to compile BabelTrace|
+                         pkg-config --modversion glib-2.0 returned 2\.88\.0, but GLIB \(48\..*\) was found|
+                         subs1\.awk: Permission denied|
+                         not a valid libtool archive|
+                         could not create '/lib/python3\.12/site-packages': Read-only file system|
+                         No rule to make target 'install'|
+                         Error parsing options\.\n.*usage : babeltrace|
+                         config\.status: error: cannot find input file: 'lib/Makefile\.in'|
+                         Error loading shared library libxml2\.so\.16: \(needed by .*llvm/bin/lld\)|
+                         Error relocating .*llvm/bin/lld: xmlFreeDoc: symbol not found
+
+severity:               2
+category:               autotools|configure|glib|hmdfs|conan|libtool|python-bindings|gitignore
+match_keywords:         AM_PATH_GLIB_2_0, glibtest, conftest, disable-glibtest, umask 077,
+                         config.status, automake maintainer, autoconf regenerate, subs1.awk,
+                         pcre2.la libdir, not a valid libtool archive, disable-python-bindings,
+                         prefix=/ , DESTDIR, make install, test_package, --version unsupported,
+                         .gitignore, cannot find input file, Makefile.in missing, checkout
+title:                  babeltrace 1.5.11 autotools 适配：AM_PATH_GLIB_2_0 运行检测、automake 再生成、python-bindings 配置、.gitignore 误伤预生成产物等六类坑的修复链
+
+root_cause: >
+  1) AM_PATH_GLIB_2_0 宏在非 cross_compiling 下会编译并运行 conftest 程序读取运行时 glib
+     版本符号；CI worker 系统 glib 48.x 与 Conan glib/2.88.0.1 冲突，pkg-config 报 2.88.0
+     但 conftest 读到 48.-2147483648.-16176855 → configure 报 glib is required。
+  2) babeltrace 1.5.11 configure 的 --enable-python-bindings 解析 bug：只要该选项被设置
+     (enableval=$enable_python_bindings; enable_python=yes)，即使传 --disable-python-bindings
+     也把 enable_python 置为 yes，反而启用 python bindings，其 setup.py 在 make install 时
+     写 /lib/python3.12/site-packages（只读）报错。
+  3) automake maintainer 规则在 make 阶段检测 configure.ac/aclocal.m4/Makefile.am/m4/*.m4
+     比 configure 新时重新运行 autoconf/automake，重新生成的 configure 恢复 umask 077，
+     覆盖 build() 中的 umask 077→022 替换（证据：b/configure~ 为替换版、b/configure 为再生成版）。
+  4) pcre2 配方的 .la 文件 libdir='//lib'（--prefix=/ 产生），libtool 解析报
+     "not a valid libtool archive"。
+  5) configure 不设 --prefix=/ 时 make install 落到 DESTDIR/usr/local/...，Conan 标准布局
+     (bin/、lib/、include/) 为空，test_package 与下游找不到；test_package 用 --version
+     断言但 babeltrace 1.5.11 CLI 不支持该选项（exit 1）。
+  6) CI #30510（补交 6) 条后）：.gitignore 的编译产物规则 archives/**/lib/、include/、
+     bin/ 误伤 patches/autotools 预生成产物镜像中的 lib/Makefile.in、include/Makefile.in、
+     lib/prio_heap/Makefile.in、tests/bin/Makefile.in、tests/bin/intersection/Makefile.in、
+     tests/lib/Makefile.in —— 6 个文件从未被 git 提交，CI checkout 后 configure 的
+     AC_CONFIG_FILES 找不到 lib/Makefile.in → config.status: error: cannot find input
+     file。本地构建用的是工作区文件（含未提交的这 6 个），所以本地通过、CI 失败。
+  7) CI #30527（E266 模式，环境级）：OHOS SDK 的 lld（llvm/bin/lld）动态链接
+     libxml2.so.16，CI worker 沙箱默认库搜索路径找不到 → lld 无法启动 →
+     "Error loading shared library libxml2.so.16 / Error relocating lld:
+     xmlFreeDoc: symbol not found" → clang 链接 libbabeltrace.la 失败。本地 SDK
+     llvm/lib 有实体 libxml2.so.16 故本地通过。不能用 -fuse-ld=GNU ld（GNU ld
+     产物在 OHOS 沙箱 Permission denied exit 126 不可执行），须前置 SDK
+     llvm/lib 到 LD_LIBRARY_PATH（参照已合入的 libgsf）。
+
+affected_scope:         autotools 老项目（configure 由 automake 1.x 生成）在 HarmonyOS PC
+                        (HMDFS + 系统旧 glib) 上的 Conan 适配；同类坑也影响依赖 glib 的
+                        autotools 项目。
+
+verification_cmd:       在干净 Conan home 下执行
+                        conan create . -pr:h=.../ohos-aarch64 -pr:b=.../ohos-aarch64
+                        --build=missing --build="babeltrace/*"
+                        应完整通过 configure/make/make install/test_package。
+
+rec_priority:           1
+rec_approach:           autotools-five-fix-chain（disable-glibtest + 禁 maintainer 再生成 +
+                        pcre2.pc 静态化 + prefix=/ + 断言改 --help）
+rec_description: >
+  1) configure 追加 --disable-glibtest：跳过 AM_PATH_GLIB_2_0 的 conftest 运行检测，
+     仅保留 pkg-config --atleast-version 校验（2.88.0 >= 2.22.0 已通过）。
+  2) 不传 --disable-python-bindings：该 configure 解析 bug 会让选项被设置即启用 python；
+     不传则走 else 分支 enable_python=no，正确禁用，避免 setup.py 写只读 /lib。
+  3) build() 中对 configure/config.status 做 umask 077→022 替换后，把 configure.ac、
+     aclocal.m4、Makefile.am、Makefile.in、m4/*.m4 的时间戳设为过去 (2000-01-01)，
+     使 configure 保持最新，阻止 automake maintainer 规则在 make 阶段重新运行
+     autoconf 覆盖替换。
+  4) generate() 中 patch pcre2.pc 的 Libs 为 .a 绝对路径（从 self.dependencies 取
+     package_folder，不硬编码本机路径），让 libtool 不解析 pcre2 的 .la。
+  5) configure 传 --prefix=/ --libdir=/lib --bindir=/bin --includedir=/include，使
+     make install DESTDIR=$package_folder 落到 Conan 标准布局；package() 手工
+     `make install DESTDIR=... -j1`（cwd=self.source_folder，-j1 避免 HMDFS mkfifo 报错）。
+  6) test_package 冒烟断言用 --help（exit 0）而非 --version（babeltrace 1.5.11 不支持）。
+  7) 预生成 autotools 产物（patches/autotools/ 目录镜像）必须逐个确认已 git 提交：
+     在 .gitignore 中为命中编译产物规则（archives/**/lib/、include/、bin/）的子目录
+     加针对性例外（!archives/b/babeltrace/1.5.11/patches/autotools/lib/ 等），
+     并用 `git archive HEAD <dir> | tar -t` 模拟 CI checkout 核对文件齐全
+     （configure.ac 的 AC_CONFIG_FILES 引用到的每个 .in 都在）。
+  8) E266（lld 缺 libxml2.so.16）：generate() 中对 AutotoolsToolchain 的
+     environment 前置 SDK llvm/lib 到 LD_LIBRARY_PATH（用 glob 兜底 SDK 版本目录），
+     让 lld 能加载正确的 libxml2；不要用 -fuse-ld=GNU ld（OHOS 沙箱产物不可执行）。
+
+rec_command:            ./configure --disable-glibtest --disable-debug-info \
+                          --prefix=/ --libdir=/lib --bindir=/bin --includedir=/include
+rec_auto_fix:           false
+rec_impl:               conan-recipe-autotools-harmonyos
+
+fallback_priority:      2
+fallback_approach:      cross_compiling=yes 让 AM_PATH_GLIB_2_0 跳过运行检测
+fallback_description:   若 configure 传 --host 使 cross_compiling=yes，glib.m4 的版本检测
+                        走 "assumed OK" 分支不运行 conftest；但需验证目标平台 triplet。
+fallback_command:       ./configure --host=aarch64-linux --build=x86_64-linux ...
+fallback_auto_fix:      false
+fallback_impl:          cross-compile-skip-runtime-check
+
+forbid_1_pattern:       --disable-python-bindings
+forbid_1_reason:        babeltrace 1.5.11 configure 解析 bug：选项被设置即 enable_python=yes
+forbid_1_consequence:   setup.py 在 make install 时写只读 /lib 报错，package() 失败
+
+forbid_2_pattern:       touch (configure|config\.status).*without.*downdating.*deps
+forbid_2_reason:        只 touch configure 而不同时把 configure.ac/aclocal.m4/m4/*.m4
+                        设为过去，automake 仍可能在 make 阶段触发 autoconf 再生成
+forbid_2_consequence:   重新生成的 configure 恢复 umask 077，config.status 建临时目录
+                        subs1.awk Permission denied
+
+forbid_3_pattern:       (Autotools\(self\)\.install|autotools\.install)\(\)\s*$
+forbid_3_reason:        手工 configure/make 在 source_folder 运行时，Autotools.install()
+                        默认在 build_folder (build-release) 执行 make install
+forbid_3_consequence:   make: *** No rule to make target 'install'，package() 失败
+
+forbid_4_pattern:       (git add|git commit).*patches/autotools.*without.*git (ls-files|archive).*check
+forbid_4_reason:        仅凭工作区构建通过（本地文件在磁盘上）不能证明 git 提交内容齐全；
+                        .gitignore 的编译产物规则会静默漏掉 patches 里的 lib//include//bin/
+                        子目录文件（CI #30510 实测 6 个 Makefile.in 未提交）
+forbid_4_consequence:   CI checkout 后 configure 报 cannot find input file: 'lib/Makefile.in'，
+                        本地通过、PR 失败
+
+forbid_5_pattern:       -fuse-ld=.*(GNU ld|/data/service/hnp/bin/ld)
+forbid_5_reason:        GNU ld 产物在 OHOS 沙箱中 Permission denied (exit 126) 不可执行
+                        （需 ELF 签名），lld 产物才可执行（libgsf 已验证）
+forbid_5_consequence:   链接产物不可执行，test_package/运行时失败
+
+principles:             P001, P003, P011
+similar_to:             E007, E011, E114, E236, E266, E120
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-6048-babeltrace-glibtest-autotools.md
+last_updated:           2026-08-24
+source_event:           PR #6048 feat(babeltrace): 1.5.11 适配 HarmonyOS PC；
+                        CI build #29565（glib 检测）→ #30510（.gitignore 漏交 Makefile.in）
+                        → #30527（lld 缺 libxml2.so.16，E266 环境级）
+authors:                yanjiaxin
+source_pr:              6048
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-08-24

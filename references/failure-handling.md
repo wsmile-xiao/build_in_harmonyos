@@ -2,7 +2,7 @@
 
 # 失败处理标准流程（R11 + R12 强制执行）
 
-来源: SKILL.md §1.2（失败处理标准流程完整版）
+来源: SKILL.md §1.3 与 §4
 
 > **任何脚本步骤失败或编译错误触发时，必须按以下顺序执行。跳过任何一步都是 bug。**
 
@@ -53,11 +53,11 @@
   │    → grep -i "关键词" knowledge/graph/index.tsv
   │    → 找到 E 编号 → 读 knowledge/doc/E{NNN}.md
   │
-  └─ ③ 人类浏览（备选）
-       → 阅读 knowledge/error-patterns.md 总览表
-       → 按 E 编号查找对应条目
-
-  └─ ② 搜索同类软件的 manifest.yaml（同 build_system）
+  ├─ ③ 人类浏览（备选）
+  │    → 阅读 knowledge/error-patterns.md 总览表
+  │    → 按 E 编号查找对应条目
+  │
+  └─ ④ 搜索同类软件的 manifest.yaml（同 build_system）
        → autotools 项目怎么处理的？→ 参考其 configure 参数
        → 同类错误别人怎么修的？→ 直接复用方案
 ```

@@ -1,0 +1,79 @@
+version: "4.0.3"
+software: libsoci
+status: built
+build_date: "2026-09-28"
+build_system: cmake
+
+source:
+  url: "https://github.com/SOCI/soci/archive/refs/tags/v4.0.3.tar.gz"
+  sha256: "4b1ff9c8545c5d802fbe06ee6cd2886630e5c03bf740e269bb625b45cf934928"
+  tar_format: tar.gz
+
+build:
+  system: cmake
+  configure_options:
+    - "-DSOCI_SHARED=ON"        # 跟随 shared 选项（R26）
+    - "-DSOCI_STATIC=OFF"
+    - "-DSOCI_TESTS=ON"         # 上游 catch + CTest 套件
+    - "-DSOCI_CXX11=ON"
+    - "-DSOCI_SQLITE3=ON"
+    - "-DSOCI_EMPTY=ON"
+    - "-DSOCI_MYSQL=OFF"        # OHOS 上没有客户端库，显式关闭
+    - "-DSOCI_POSTGRESQL=OFF"
+    - "-DSOCI_ODBC=OFF"
+    - "-DSOCI_FIREBIRD=OFF"
+    - "-DSOCI_DB2=OFF"
+    - "-DSOCI_ORACLE=OFF"
+    - "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"   # 上游 cmake_minimum_required(VERSION 2.8)
+    # 仅 os=OHOS 时注入（self.settings.os=="OHOS"）：CMake 没有 Platform/HarmonyOS.cmake，
+    # 平台变量 CMAKE_SHARED_LIBRARY_SONAME_CXX_FLAG 为空 ⇒ 共享库无 DT_SONAME、DT_NEEDED
+    # 记录相对路径，ctest 运行期加载失败（CI #65351）。补 SONAME 旗标；NO_VERSIONED_SONAME
+    # 保证产物仍无版本号且不建软链（HMDFS 不支持建链）。
+    - "-DCMAKE_SHARED_LIBRARY_SONAME_C_FLAG=-Wl,-soname,"
+    - "-DCMAKE_SHARED_LIBRARY_SONAME_CXX_FLAG=-Wl,-soname,"
+    - "-DCMAKE_PLATFORM_NO_VERSIONED_SONAME=ON"
+  dependencies:
+    - sqlite3/3.49.1
+  cc: clang
+  cxx: clang++
+
+patches_applied:
+  - file: "patches/0001-catch-urng-unsigned-result-type.patch"
+    target: "tests/catch.hpp"
+    description: >-
+      Catch v1.9.6 的 RandomNumberGenerator::result_type 是有符号的 std::ptrdiff_t；
+      OHOS 的 libc++ 会静态断言拒绝有符号 result_type 的 URNG（LLVM D120630），
+      编译 tests/empty 与 tests/sqlite3 目标时直接失败。改为 unsigned int（与
+      min()=0/max()=1000000 取值范围一致），不改变洗牌语义。
+
+test_passed: 3
+test_failed: 0
+
+test_results:
+  # 上游官方测试（catch + CTest）：ctest 注册 2 个测试二进制，全部通过；
+  # 其中 soci_sqlite3_test 实际执行 65 个 catch 用例 / 1715 条断言。
+  upstream_registered: 2
+  upstream_executed: 2
+  upstream_passed: 2
+  upstream_failed: 0
+  upstream_skipped: 0
+  upstream_catch_cases: 65
+  upstream_catch_assertions: 1715
+  # 完整消费者用例（平台 rule12）：test_package/test_libsoci.cpp，14 步真实数据访问流程
+  test_package_registered: 1
+  test_package_executed: 1
+  test_package_passed: 1
+  test_package_failed: 0
+  assertion_count: 14
+  # 适配自检（M）：交付形态（库/头/许可/CMake 集成/纯净性）
+  adapter_self_checks: 13
+
+knowledge_gained:
+  - "SOCI 的后端是独立动态库（soci_core + soci_<backend>）；只适配 SQLite3 时显式关掉其余后端，SOCI 本身对缺失依赖只告警不报错。"
+  - "上游 cmake_minimum_required(VERSION 2.8) 在 CMake ≥3.31/4.x 会直接报错，需传 CMAKE_POLICY_VERSION_MINIMUM=3.5。"
+  - "SOCI 自带 cmake/modules/FindSQLite3.cmake（老式 find_path/find_library），交叉构建下要直接预设 SQLITE3_INCLUDE_DIR/SQLITE3_LIBRARY 缓存变量指向 conan 的 sqlite3 包。"
+  - "SOCI 必须配置 SOCI_CXX11=ON 才能被 C++11 及以上的消费者使用，否则 soci-config.h 会让消费者编译报 'SOCI must be configured with C++11 support when using C++11'。"
+  - "上游安装自带 lib/cmake/SOCI/SOCIConfig.cmake（目标 SOCI::soci_core/soci_sqlite3/soci_empty）；测试包同时兼容 Conan 生成的 SOCI::SOCI 目标与上游分目标。"
+  - "⚠️ OHOS 的 libc++ 明确拒绝 result_type 为有符号整型的 URNG（__libcpp_random_is_valid_urng 静态断言，LLVM D120630 引入）。SOCI 4.0.3 自带的 Catch v1.9.6（tests/catch.hpp）把 RandomNumberGenerator::result_type 定义成 std::ptrdiff_t，于是 std::shuffle（→ std::uniform_int_distribution::operator()<RNG>）编译失败：error: static assertion failed due to requirement '__libcpp_random_is_valid_urng<Catch::RandomNumberGenerator, void>::value'。修法：把该 typedef 改成 unsigned int（补丁 0001）。libstdc++ 不检查这个约束，所以本地/其它平台不会暴露。"
+  - "libc++ 与 libstdc++ 的差异在本项目里要当心：凡是「老代码 + 随机数/生成器」的组合，libc++ 的 static_assert 会比 libstdc++ 严格得多；本地用 gcc 复现不到，只能靠 CI 的 OHOS clang+libcxx-ohos 暴露。"
+  - "⚠️ 平台层坑（CI #65351）：Conan 的 CMakeToolchain 把 CMAKE_SYSTEM_NAME 设成 HarmonyOS，而 CMake 没有 Platform/HarmonyOS.cmake ⇒ CMAKE_SHARED_LIBRARY_SONAME_CXX_FLAG 为空，共享库链接时不发 -soname。后果不只是 VERSION/SOVERSION 失效（产物无版本号），更致命的是 ld/lld 会把链接命令行上的**相对路径**写进 DT_NEEDED（实测 ../../../lib/libsoci_core.so）——带斜杠的 DT_NEEDED 不参与任何搜索路径，连 LD_LIBRARY_PATH 都救不了，运行期只能按字面量查找。修法：cache_variables 里补 CMAKE_SHARED_LIBRARY_SONAME_{C,CXX}_FLAG=-Wl,-soname, 并开 CMAKE_PLATFORM_NO_VERSIONED_SONAME=ON（同仓库 yajl/2.1.0、expat/2.8.4、yaml-cpp/0.9.0 先例）。另注意该平台同样没有 RPATH 旗标，构建树里跑测试还要显式给 LD_LIBRARY_PATH=<build_folder>/lib。"

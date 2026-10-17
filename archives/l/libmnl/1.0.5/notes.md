@@ -125,3 +125,83 @@
 **编译结束**: 2026-06-01 15:08
 **最终状态**: published
 ished
+---
+
+## 七、v3 Conan 配方迁移（2026-09）
+
+> 本节记录 v2 残档向 v3 Conan 配方框架补齐（参照 references/migration-guide.md，
+> 先例 archives/l/libnfnetlink/1.0.2/）。v2 阶段的 manifest.yaml / notes.md /
+> patches/ 原样保留复用。
+
+### 新增文件
+
+| 文件 | 说明 |
+|------|------|
+| conanfile.py | Autotools 配方：export_conandata_patches + basic_layout + AutotoolsToolchain；build() 末尾 `autotools.make(target="check")` 集成上游测试入口；cpp_info.libs=["mnl"] |
+| conandata.yml | sources(url + sha256) + patches（Conan 2.x list 格式，L0f 强制） |
+| test_package/conanfile.py | 消费者测试入口（test() + self.run，bash 包裹执行 ELF，同 zlib 先例） |
+| test_package/CMakeLists.txt | find_package(libmnl REQUIRED)，链接 libmnl::libmnl |
+| test_package/test.c | 冒烟测试：netlink 消息/属性 round-trip + mnl_socket_open/bind/get_portid/close（无需 CAP_NET_ADMIN） |
+| test_package/MANIFEST.yml | 上游测试声明（L0e 强制），assertion_count=6 |
+
+### 复用与决策
+
+1. **patches/ 三补丁原样复用**（对净版 1.0.5 `patch -p1 --dry-run` 全部通过）：
+   0001 config.guess HarmonyOS、0002 config.sub linux-ohos、0003 configure HMDFS
+   mktemp=TMPDIR+chmod 755。与 libnfnetlink 先例不同，未叠加
+   replace_in_file("umask 077"→"umask 022") 双保险——0003 已直接修订 configure，
+   无需运行时改写。
+2. **shared vs static：最终选 static-only**（`--enable-static --disable-shared`）。
+   决策链：最初按 migration-guide「非系统同名库默认动态」与上游默认选 shared
+   （R26 核实过：/system/lib{,64}、/lib{,64}、/usr/lib、/vendor/lib64 均无
+   libmnl.so，非系统同名库，R26 不是决策驱动）；CI 实测暴露：HarmonyOS 平台
+   （CMAKE_SYSTEM_NAME=HarmonyOS）下 CMake 对 imported shared 库不注入任何
+   RPATH/RUNPATH（readelf 仅 NEEDED；对照 CMAKE_SYSTEM_NAME=Linux 注入
+   RUNPATH 正常运行），叠加消费环境不注入依赖 libdir 的 LD_LIBRARY_PATH——
+   消费者二进制没有任何运行期搜索路径，运行期
+   `Error loading shared library libmnl.so.0`，任何 out-of-tree 消费者都得
+   显式 LD_LIBRARY_PATH（musl 加载器本身的 DT_RPATH/DT_RUNPATH/
+   LD_LIBRARY_PATH 三机制经真机探针证实全部有效，失败与加载器能力无关）。
+   故改 static-only 使消费者开箱可运行，与同族 libnfnetlink/1.0.2 先例
+   （CI PASS）一致。注意上游 configure.ac 有 AC_DISABLE_STATIC，必须显式
+   `--enable-static` 覆盖，否则 `--disable-shared` 会落空（既非 shared 也非
+   static）。机理探针与分歧记录沉淀于知识草稿
+   `knowledge/drafts/DRAFT-ohos-cmake-harmonyos-imported-shared-no-runpath-*`。
+3. **上游无独立 testsuite**：configure.ac 无 AC_CHECK_LIB/PKG_CHECK_MODULES
+   （零外部依赖），无 TESTS 运行器；`make check` = check-recursive，实际效果是
+   编译并链接 examples/ 下 20 个 check_PROGRAMS（genl 2 + kobject 1 +
+   netfilter 6 + rtnl 11；计数实证：CI round-05 日志 check 阶段 20 条 CCLD 行，
+   编译+链接即上游验证）；
+   示例执行需内核 Netlink 数据，不属 make check 范围。真实执行验证由
+   test_package 消费者冒烟测试承担（L1a/L1b/L1e 门禁）。
+
+### 状态
+
+v3 六件套补齐完成：conanfile.py / conandata.yml / test_package(4 文件) /
+manifest.yaml（未改，v2 版本级格式保留，无 v3 规范强制修改项）/
+notes.md（本节）/ patches（复用 3 补丁）。
+
+### CI 回修记录（2026-09-06）
+
+1. **test_package 消费者 sockaddr_storage 冲突（已修复）**：库自身与 examples
+   构建零冲突（库内 `-I${top_srcdir}/include` 命中捆绑 linux 头，定义的是异名
+   `__kernel_sockaddr_storage`）；但消费者只装 `libmnl/libmnl.h`，
+   `<linux/netlink.h>` 落到 OHOS sysroot 的 bionic 风格拷贝，其无条件
+   `sockaddr_storage` 与 musl `sys/socket.h` 在两种 include 顺序下都重定义。
+   修复：test.c 顶部预定义 `_UAPI_LINUX_SOCKET_H` 并补
+   `typedef unsigned short __kernel_sa_family_t;`（libnfnetlink 守卫同型的
+   消费侧变体；include 顺序路线实证无效）。修复后 clang -Wall -Wextra 零警告。
+   知识申报说明：该守卫模式已被知识图谱 E091/E119 覆盖，消费侧增量不另行
+   申报，完整证据保留在 test.c 头部注释与本节。
+2. **shared 交付的消费者运行期加载失败（已修复，改 static-only）**：shared 交付
+   时 test_package 二进制链接成功但运行期报
+   `Error loading shared library libmnl.so.0`。经审计探针裁定机理为：
+   CMAKE_SYSTEM_NAME=HarmonyOS 下 CMake 对 imported shared 库不注入任何
+   RPATH/RUNPATH（=Linux 对照注入正常），且 conanrun 环境不注入依赖 libdir
+   的 LD_LIBRARY_PATH——消费者无任何运行期搜索路径；musl 加载器三机制
+   （DT_RPATH/DT_RUNPATH/LD_LIBRARY_PATH）本设备全部有效，与加载器无关。
+   见上文决策 2，改 static-only 交付。机理改判与三方分歧记录沉淀于知识草稿
+   `knowledge/drafts/DRAFT-ohos-cmake-harmonyos-imported-shared-no-runpath-*`。
+3. **CI 基础设施观察（非阻塞，未动 ci/**）**：pre-download 步骤的 python 环境
+   报 `[Errno 2] No such file or directory: 'curl'`，随后 conan 自行直连
+   netfilter.org 下载源码包成功（HTTP 200，SHA256 与固定值一致）。

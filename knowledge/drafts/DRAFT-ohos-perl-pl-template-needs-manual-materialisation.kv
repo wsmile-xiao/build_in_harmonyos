@@ -1,0 +1,168 @@
+#====================================================================
+# DRAFT-ohos-perl-pl-template-needs-manual-materialisation —— Perl 发行的
+#   .PL 模板脚本须在配方内自行实例化（不跑 MakeMaker 时）
+# 对应文档: knowledge/drafts/DRAFT-ohos-perl-pl-template-needs-manual-materialisation.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-ohos-perl-pl-template-needs-manual-materialisation
+trigger_tool:           perl|conan|make|custom
+phase:                  build|packaging
+error_signature:        ^sh: .*: No such file or directory$|
+                         Exec format error|
+                         (Bad|bad) interpreter.*(perl)|
+                         .*/(podselect|perl[a-z0-9_-]*|[a-z0-9_-]+): not found|
+                         cannot execute.*(script|perl)|
+                         (bin/)?[a-z0-9_-]+: not found
+
+severity:               2
+category:               perl, conan, packaging, build-system, shebang
+match_keywords:         Perl, .PL, PL_FILES, MakeMaker, ExtUtils::MakeMaker,
+                         脚本模板, shebang, /usr/local/bin/perl, startperl,
+                         可执行脚本, bin/, podselect, 配方不跑 MakeMaker,
+                         perl-* 惯例
+title:                  Perl 发行版里的 **`.PL` 脚本**须**运行它**才能实例化 ——
+                        它不是"替换首行"的模板而是**生成器**；产物首行由
+                        `$Config{startperl}` 决定（本平台是 `: # use perl` 的
+                        shell/perl **polyglot**，**非 `#!`**），须经 shell 执行
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:            Perl 发行版常把可执行脚本以 **`.PL`** 形式分发（如
+                        ``scripts/podselect.PL``），由 ``Makefile.PL`` 的
+                        ``PL_FILES`` 机制在构建期"实例化"。
+                        **关键（实测订正）**：``.PL`` **不是"替换首行即得产物"的
+                        模板**，而是一个**生成器脚本**——它自带
+                        ``print OUT <<"!GROK!THIS!"`` / ``print OUT <<'!NO!SUBS!'``
+                        两段 heredoc、末尾 ``close OUT`` / ``chmod 0755, $file``，
+                        必须**运行它**才会在自身旁边写出真正的可执行文件
+                        （``$file = basename($0, '.PL')``）。因此"把 ``.PL`` 首行
+                        shebang 换掉就当产物交付"是**根本性误解**：交付出去的仍是
+                        生成器（文件里还留着 ``print OUT`` 代码），根本不是那个工具。
+                        另**必须知道产物首行的真实形态**：生成器写出的是
+                        ``print OUT <<"!GROK!THIS!";`` 段，即 ``$Config{'startperl'}``
+                        的值。实测本平台 ``perl -V:startperl`` = **``: # use perl``**，
+                        故产物首行是 **shell/perl polyglot**（``: # use perl`` +
+                        下一行 ``eval 'exec perl -S $0 "$@"' if 0;``），
+                        **不是 ``#!``**。断言 ``#!`` 会**误杀合法产物**。
+                        而本仓的 perl-* 配方惯例是 **package_type=application +
+                        直接拷 ``lib/`` 到 ``lib/perl5``，不跑 MakeMaker**
+                        （perl-carp 1.50 先例）。于是：
+                          · 若配方只拷 ``lib/``：脚本**整个丢失**（``bin/`` 为空），
+                            消费方按文档调用即 ``command not found``；
+                          · 若配方"改首行"当交付：交付的是**生成器本体**，语法上能跑
+                            但行为不是该工具（且 ``$file``/heredoc 残留）；
+                          · 正确做法是**运行生成器**（等价于 MakeMaker 的 PL_FILES），
+                            并校验产物**不再含生成器标记**（``!NO!SUBS!`` /
+                            ``!GROK!THIS!`` / ``print OUT``）。
+                        polyglot 头还带来一个执行方式陷阱：内核会以 ENOEXEC 拒绝它
+                        （Python 直接 execve 报 ``OSError: [Errno 8] Exec format
+                        error``），须**经 shell 执行**（shell 的 ENOEXEC 回退会改用
+                        ``sh`` 重跑同一文件）——这正是消费方点脚本时的真实路径。
+affected_scope:        所有含 ``.PL`` 模板脚本（或被 MakeMaker 生成的其它构建期
+                        产物）的 Perl 发行版适配；含 ``EXE_FILES`` 的发行版尤其明显。
+                        与"纯模块发行版"（只有 ``lib/``）不同：那类不涉及脚本生成。
+                        与一般 shebang 问题不同：此处的错误 shebang 来自**上游模板
+                        未经实例化**，而非配方写错。
+verification_cmd:       ① 发行版是否含 .PL 脚本与其目标脚本名：
+                          ls scripts/*.PL 2>/dev/null; grep -n "PL_FILES\|EXE_FILES" Makefile.PL
+                        # ② 判定它是**生成器**而非模板（决定性——决定修法）：
+                        grep -nE "print OUT|!NO!SUBS!|!GROK!THIS!|basename\(\\\$0" scripts/<name>.PL
+                        #    有命中 → 必须**运行它**，改首行是错的方向
+                        # ③ 产物首行的真实形态（勿假定 #!）：
+                        perl -V:startperl                  # 本平台: ': # use perl'
+                        # ④ 交付后校验（须**经 shell** 真实执行，勿只看文件存在）：
+                        grep -c "print OUT" <pkg>/bin/<name>   # 应为 0（无生成器残留）
+                        sh <pkg>/bin/<name> -help              # 须能运行
+                        #    注意：直接 execve 该脚本会 ENOEXEC（Exec format error）
+                        #    ——polyglot 头依赖 shell 的 ENOEXEC 回退，故须经 sh
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           run-the-pl-generator-and-verify-no-generator-residue
+rec_description:        在 ``build()`` 内**运行 ``.PL`` 生成器**（等价于 MakeMaker 的
+                        ``PL_FILES``，但不跑完整 MakeMaker）：
+                          ① 用本仓 perl-* 配方通用的候选列表探测解释器
+                             （``shutil.which("perl")`` → ``/storage/.../usr/local/bin/perl``
+                             → ``/data/service/hnp/bin/perl`` → ``/usr/bin/perl``）；
+                          ② ``cd scripts && <perl> <name>.PL`` —— 生成器自己写出
+                             ``<name>``（``$file = basename($0, '.PL')``）；
+                          ③ **校验产物不再含生成器标记**（``!NO!SUBS!`` /
+                             ``!GROK!THIS!`` / ``print OUT``）——这是"真的执行了"的
+                             判据；若仍命中，说明拿到的还是生成器本体，须报错；
+                          ④ ``chmod 755`` 后由 ``package()`` 放进 ``<pkg>/bin/``，
+                             ``package()`` 内**同样**校验生成器标记（双保险）。
+                        **不要**试图"替换首行 shebang"：``.PL`` 是生成器而非模板，
+                        产物首行由 ``$Config{startperl}`` 决定（本平台为
+                        ``: # use perl`` 的 polyglot，**非 ``#!``**）。
+                        消费者测试须**经 shell 真实执行**该脚本（``sh <script> -help``
+                        与一次真实取段），不能只断言文件存在；也**不要**用
+                        ``[perl, script]`` 方式调用（那会绕过头部，掩盖实例化缺陷）。
+rec_command:            # build() 内（示意）：
+                        #   scripts = os.path.join(self.source_folder, "scripts")
+                        #   self.run(f'"{perl}" {name}.PL', cwd=scripts)
+                        #   text = open(os.path.join(scripts, name)).read()
+                        #   for m in ("!NO!SUBS!", "!GROK!THIS!", "print OUT"):
+                        #       if m in text: raise ConanException("still the generator")
+                        # 验证（经 shell，非直接 execve）：
+                        #   sh <pkg>/bin/<name> -help
+                        #   sh <pkg>/bin/<name> -sections NAME <some>.pm
+rec_auto_fix:           false
+rec_impl:               run-the-pl-generator-and-verify-no-generator-residue
+
+fallback_priority:      2
+fallback_approach:      run-makemaker-pl-files-only
+fallback_description:   若模板的实例化逻辑复杂（多处 ``$Config{}`` 替换）而难以手工
+                        复刻，可退化为**真跑一次 MakeMaker 的 PL_FILES 步骤**（仅生成
+                        脚本、不安装、不编译 XS）。代价：需要 MakeMaker 可用
+                        （核心模块，通常具备），且会引入构建期副作用；仅在手工替换
+                        不可行时使用，并在 notes.md 说明为何偏离"不跑 MakeMaker"的惯例。
+fallback_command:       # perl Makefile.PL && make <script>  （或 make pure_all 的子目标）
+fallback_auto_fix:      false
+fallback_impl:          run-makemaker-pl-files-only
+
+forbid_1_pattern:       把.*\.PL.*(首行|shebang|第一行).*(替换|替换成|改).*(即|就).*(生成|当作|视为).*产物|
+                         (直接|简单).*(拷贝|复制|copy).*\.PL.*(当|作为).*脚本.*(交付|安装)|
+                         把.*\.PL 文件.*(改名|rename).*去掉后缀.*(即|就).*当作.*可执行
+forbid_1_reason:        ``.PL`` 是**生成器**（自带 ``print OUT`` heredoc 与
+                        ``close OUT`` / ``chmod`` 收尾），不是"改首行即得产物"的模板。
+                        **实测证据**：把 ``podselect.PL`` 首行改掉后交付，产物里仍含
+                        ``print OUT`` 代码、且 ``$file`` 逻辑未执行 —— 交付的是生成器
+                        本体，不是该工具。必须**运行生成器**。
+forbid_1_consequence:   交付的 bin/ 脚本"存在但根本不是该工具"（或行为异常），
+                        缺陷在消费方运行期才暴露，且比"脚本缺失"更难诊断。
+
+forbid_2_pattern:       只断言.*bin/.*(文件存在|isfile).*(便|即).*认为.*脚本可用|
+                         消费者测试.*(未|不).*真实执行.*生成的脚本
+forbid_2_reason:        脚本类交付物的价值在**可执行**；只判存在会漏掉 shebang 未替换、
+                        权限位未设等真实缺陷（本仓 R34 要求真实 API 用法）。
+forbid_2_consequence:   缺陷逃逸到消费方运行期。
+
+principles:             measure-not-assume, upstream-compat-evidence
+
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-perl-pl-template-needs-manual-materialisation.md
+last_updated:           2026-09-16
+source_event:           perl-pod-parser 1.67 适配（scripts/podselect.PL 3730 B；
+                        实测其为**生成器**：含 print OUT <<"!GROK!THIS!" / <<'!NO!SUBS!'
+                        与 close OUT / chmod 0755, $file；**运行它**后生成 podselect
+                        2524 B，首行为 $Config{startperl} 即 ': # use perl' 的 polyglot
+                        （非 #!）。配方改为运行生成器 + 校验无生成器残留；消费者测试经
+                        sh 真实执行并取段。**订正此前"改首行即可"的错误结论**）
+
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:        6E19

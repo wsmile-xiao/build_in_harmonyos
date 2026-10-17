@@ -1,45 +1,35 @@
-# apr 1.7.6 适配笔记
+# APR 1.7.6 HarmonyOS adaptation
 
-## 编译环境
-- 构建系统: {cmake|autotools|makefile|meson|custom}
-- 编译日期: {2026-04-30}
-- 编译器: clang/clang++
-- 状态: {published|built|failed}
+## Build environment
 
-## 编译步骤
+- Build system: autotools
+- Target: HarmonyOS PC, `os=OHOS`, `arch=armv8`
+- Compiler: clang/clang++
+- Status: library and consumer test validated on device; upstream suite has an OHOS platform failure
 
-{用文字描述实际编译步骤，包括关键的 configure/cmake 命令}
+## Adaptation
 
-## 遇到的问题与解决方案
+The recipe applies four focused patches:
 
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-{按需添加行}
+- `0011-config.guess-harmonyos.patch`: recognizes `HarmonyOS` and maps aarch64 to `aarch64-unknown-linux-ohos`.
+- `0012-config.guess-libc-ohos.patch`: adds OHOS libc detection for compiler-based config.guess paths.
+- `0013-config.sub-ohos.patch`: accepts the `ohos-linux` triplet.
+- `0014-configure-hmdfs-umask.patch`: changes temporary-directory creation from umask `077` to `022` for HMDFS compatibility.
 
-## 源码修改
+## Dependencies
 
-{如有补丁，列出文件名和修改内容；无则删除此节}
+APR has no Conan runtime dependencies.
 
-## 依赖版本
+## Verification
 
-{列出本次编译依赖的具体软件版本}
-
-## 验证结果
-
-```bash
-{验证命令和结果}
+```text
+conan create archives/a/apr/1.7.6 \
+  -pr:h ci/conan/profiles/ohos-aarch64 \
+  -pr:b ci/conan/profiles/ohos-aarch64 \
+  -r=ohpcd --build=missing
+EXIT=0
+configure: aarch64-unknown-linux-ohos
+test_package: test_apr built and executed
 ```
 
-## 交付物
-
-| 文件 | 大小 | 说明 |
-|------|------|------|
-{有打包产物时添加；无则删除此节}
-
-## 注意事项
-
-{需要特别注意的点；无则删除此节}
----
-
-**编译结束**: 2026-04-30 12:03
-**最终状态**: built
+The upstream suite contains 45 test modules and is recorded for comparison, but is not counted as passed on OHOS. The device run identified platform failures after successful compilation: `testmutexscope` exited 159 (`SIGSYS`) because the proc-mutex pshared syscall is sandbox-rejected; `testall` exited 139 (`SIGSEGV`) with failures in `testdso` (8/9, `.libs` dlopen path), `testfile` (4/61, hardlink/errno semantics), `testfilecopy` (2/4, copy API), `testflock` (2/3, fork/exec), `testfnmatch` (2/4, libc result), and `testmmap` (crash after mmap return 2). The recipe therefore does not execute `make check`. The Conan consumer test remains the supported adaptation smoke test.

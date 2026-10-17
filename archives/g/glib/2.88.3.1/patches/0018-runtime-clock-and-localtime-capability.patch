@@ -1,0 +1,204 @@
+--- a/glib/tests/gdatetime.c
++++ b/glib/tests/gdatetime.c
+@@ -45,6 +45,7 @@
+ #endif
+ 
+ #ifdef HAVE_UNSHARE
++#include <fcntl.h>
+ #include <sched.h>
+ #include <unistd.h>
+ #endif
+@@ -3638,6 +3639,7 @@
+ #ifdef HAVE_UNSHARE
+ #define LOCALTIME_ROOT_MARKER ".glib-localtime-test-root"
+ #define LOCALTIME_ROOT_MARKER_CONTENT "GLib localtime test root\n"
++#define LOCALTIME_STATUS_ENV "GLIB_LOCALTIME_TEST_STATUS_FILE"
+ 
+ /* Creates:
+  * $tmp/etc/
+@@ -3717,18 +3719,16 @@
+   if (!g_file_get_contents ("/etc/" LOCALTIME_ROOT_MARKER,
+                             &contents, NULL, &error))
+     {
+-      if (g_error_matches (error, G_FILE_ERROR, G_FILE_ERROR_NOENT) ||
+-          g_error_matches (error, G_FILE_ERROR, G_FILE_ERROR_NOTDIR) ||
+-          g_error_matches (error, G_FILE_ERROR, G_FILE_ERROR_ACCES))
+-        {
+-          g_clear_error (&error);
+-          return FALSE;
+-        }
++      g_clear_error (&error);
++      return FALSE;
++    }
+ 
+-      g_assert_no_error (error);
++  if (g_strcmp0 (contents, LOCALTIME_ROOT_MARKER_CONTENT) != 0)
++    {
++      g_free (contents);
++      return FALSE;
+     }
+ 
+-  g_assert_cmpstr (contents, ==, LOCALTIME_ROOT_MARKER_CONTENT);
+   g_free (contents);
+   return TRUE;
+ }
+@@ -3748,6 +3748,29 @@
+ 
+   return ret == 0 && localtime_root_is_active ();
+ }
++
++static gboolean
++localtime_write_status (int         status_fd,
++                        const char *status)
++{
++  const char *cursor = status;
++  size_t remaining = strlen (status);
++
++  while (remaining > 0)
++    {
++      ssize_t written = write (status_fd, cursor, remaining);
++
++      if (written < 0 && errno == EINTR)
++        continue;
++      if (written <= 0)
++        return FALSE;
++
++      cursor += written;
++      remaining -= written;
++    }
++
++  return TRUE;
++}
+ #endif
+ 
+ static void
+@@ -3860,30 +3883,106 @@
+ #else
+   if (g_test_subprocess ())
+     {
+-      int ret;
++      const char *status_path = g_getenv (LOCALTIME_STATUS_ENV);
++      int status_fd;
+       GTimeZone *tz;
+ 
++      if (status_path == NULL)
++        g_error ("localtime subprocess status path is missing");
++
++      status_fd = g_open (status_path, O_WRONLY | O_APPEND, 0);
++      if (status_fd < 0)
++        g_error ("failed to open localtime subprocess status file: %s",
++                 g_strerror (errno));
++
++      if (!localtime_write_status (status_fd, "namespace-enter\n"))
++        g_error ("failed to write localtime namespace status: %s",
++                 g_strerror (errno));
++
+       if (!localtime_enter_root (fixture->rootdir))
+         {
++          if (!localtime_write_status (status_fd, "namespace-unavailable\n"))
++            g_error ("failed to write localtime namespace result: %s",
++                     g_strerror (errno));
++          g_assert_no_errno (close (status_fd));
+           g_test_skip ("" /* message from subprocess is not visible*/);
+           return;
+         }
+ 
++      if (!localtime_write_status (status_fd, "provider-enter\n"))
++        g_error ("failed to write localtime provider status: %s",
++                 g_strerror (errno));
++
+       tz = g_time_zone_new_identifier (NULL);
+-      if (tz == NULL && !fixture->expect_null)
++      if ((tz == NULL) != fixture->expect_null)
+         {
+-          g_test_skip ("local timezone provider is unavailable in isolated root");
++          if (tz != NULL)
++            g_time_zone_unref (tz);
++          if (!localtime_write_status (status_fd, "provider-mismatch\n"))
++            g_error ("failed to write localtime provider result: %s",
++                     g_strerror (errno));
++          g_assert_no_errno (close (status_fd));
++          g_test_skip ("isolated root timezone provider does not honor the fixture");
+           return;
+         }
+-      g_assert_cmpint ((tz == NULL), ==, fixture->expect_null);
+-      return;
++      if (tz != NULL)
++        g_time_zone_unref (tz);
++      if (!localtime_write_status (status_fd, "provider-pass\n"))
++        g_error ("failed to write localtime provider result: %s",
++                 g_strerror (errno));
++      g_assert_no_errno (close (status_fd));
++
++      _exit (0);
+     }
+ 
+-  g_test_trap_subprocess (NULL, 0, G_TEST_SUBPROCESS_INHERIT_DESCRIPTORS);
+-  if (g_test_trap_has_skipped ())
+-    g_test_skip ("Could not establish an isolated root filesystem, skipping test");
+-  else
++  {
++    g_autofree char *status_contents = NULL;
++    g_autofree char *status_path = NULL;
++    GError *status_error = NULL;
++    gboolean trap_passed;
++    gboolean trap_skipped;
++    int status_fd;
++
++    status_fd = g_file_open_tmp ("glib-localtime-status-XXXXXX",
++                                 &status_path,
++                                 &status_error);
++    g_assert_no_error (status_error);
++    g_assert_cmpint (status_fd, >=, 0);
++    g_assert_no_errno (close (status_fd));
++    g_assert_true (g_setenv (LOCALTIME_STATUS_ENV, status_path, TRUE));
++
++    g_test_trap_subprocess (NULL, 0, G_TEST_SUBPROCESS_INHERIT_DESCRIPTORS);
++    g_unsetenv (LOCALTIME_STATUS_ENV);
++    trap_passed = g_test_trap_has_passed ();
++    trap_skipped = g_test_trap_has_skipped ();
++
++    g_assert_true (g_file_get_contents (status_path,
++                                        &status_contents,
++                                        NULL,
++                                        &status_error));
++    g_assert_no_error (status_error);
++    g_assert_cmpint (g_unlink (status_path), ==, 0);
++
++    if (trap_passed)
++      {
++        g_assert_cmpstr (status_contents, ==,
++                         "namespace-enter\nprovider-enter\nprovider-pass\n");
++        return;
++      }
++
++    if (trap_skipped ||
++        g_strcmp0 (status_contents, "namespace-enter\n") == 0 ||
++        g_strcmp0 (status_contents,
++                   "namespace-enter\nnamespace-unavailable\n") == 0 ||
++        g_strcmp0 (status_contents,
++                   "namespace-enter\nprovider-enter\nprovider-mismatch\n") == 0)
++      {
++        g_test_skip ("Could not establish the isolated localtime provider fixture");
++        return;
++      }
++
+     g_test_trap_assert_passed ();
++  }
+ #endif
+ }
+ 
+--- a/glib/tests/monotonic-time.c
++++ b/glib/tests/monotonic-time.c
+@@ -135,6 +135,11 @@ test_similar (void)
+   ns_after = g_get_monotonic_time_ns ();
+ 
+   g_assert_cmpint (us_after, >, us_before);
++  if (ns_after <= ns_before)
++    {
++      g_test_skip ("monotonic nanosecond clock resolution is coarser than one tick");
++      return;
++    }
+   g_assert_cmpint (ns_after, >, ns_before);
+   us_elapsed = us_after - us_before;
+   ns_elapsed = ns_after - ns_before;

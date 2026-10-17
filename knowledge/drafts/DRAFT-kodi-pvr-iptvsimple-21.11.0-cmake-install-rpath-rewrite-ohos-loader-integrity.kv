@@ -1,0 +1,23 @@
+id: KODIPVR01
+error_signature: "Error loading shared library <path>/lib*.so: Permission denied（dlopen 失败；同一文件在 cmake --install 之前的链接器输出可正常 dlopen）"
+match_keywords: dlopen,Permission,denied,cmake,install,RUNPATH,RPATH,rewrite,ELF,signature,codesign,integrity,test_package,module,SKIP_RPATH,conan,binary-addon
+category: ohos-loader,linking,cmake
+severity: high
+root_cause: OHOS（musl）加载器对可 dlopen 的 ELF 做整文件内容校验（链接期记录的完整性/签名值，产物带 .note.ohos.ident/.codesign）。任何链接后的文件改动都会使校验失败，dlopen 返回 EACCES「Permission denied」。实测（kodi-pvr-iptvsimple 21.11.0，CMake MODULE）：链接器直接输出 build/Release/pvr.iptvsimple.so 可 dlopen；cmake --install 后的同名文件 dlopen 失败；两者仅差 230 字节——cmake --install 的 RPATH 改写在原地把构建期 RUNPATH 字符串清零并重写若干路径字符串。对可加载文件在任意偏移（含加载器不读取的 .debug_* 节）翻转 1 字节即复现 EACCES，把全部差异字节还原即恢复可加载——证明是整文件完整性校验而非结构/权限/rpath 语义问题。陷阱在于失败发生在 conan test_package 的 dlopen/link 阶段（不是编译期），报错文案指向主库路径，容易被误判为权限/依赖/对齐问题（互见 E077：patchelf/strip/objcopy 显式改 ELF 后签名失效，修复是重新签名；E653：NDK 产物内容级拒载）。本条的独立价值：触发者是 CMake install 的隐式 RPATH 改写（非显式改 ELF 工具），且存在构建期预防修法而非事后签名。
+rec_approach: 让打包产物与链接器输出逐字节一致，杜绝任何链接后修改。CMake 配方：CMakeToolchain 置 CMAKE_SKIP_RPATH=ON，链接器不植入 DT_RUNPATH，cmake --install 不再改写 ELF（安装文件与 build 产物同哈希）。若确需安装后改写 RPATH，则必须按 E077 的四步（去签名→改 ELF→重签名→chmod）处理，不能裸改。
+solution_cmds: |
+  # conanfile.py generate()：避免 cmake --install 的 RPATH 改写
+  tc = CMakeToolchain(self)
+  tc.variables["CMAKE_SKIP_RPATH"] = True
+  # 验证：安装产物应与链接器输出逐字节一致
+  sha256sum build/Release/<target>.so "$PKG/lib/<target>.so"   # 应相同
+  # 判别探针（设备）：同一 .so 若「链接器输出可载、install 后不可载」即命中本条
+  /path/to/dlt <链接器输出.so>       # 期望 ok
+  /path/to/dlt <install 后.so>       # 期望 Error loading shared library ...: Permission denied
+  # 取证：差异字节范围（cmp -l // python 逐字节比对），确认仅 rpath/debug 字符串被改写
+verification: "对同一目标：链接器输出 dlopen 成功、cmake --install 产物 dlopen EACCES；对可加载副本翻转任意 1 字节即 EACCES、还原全部差异字节即恢复可加载（证伪「权限/依赖/对齐/rpath 语义」等单因子解释）。修法验证：置 CMAKE_SKIP_RPATH=ON 后 install 产物与 build 产物 sha256 相同且 dlopen 成功。"
+fallback: 若无法关闭 RPATH 植入（如需真实运行期搜索路径），改用 E077 的四步签名流程；或在 package() 内用 tools.files.copy 直接打包 build 产物（不经 cmake --install），同样保证零修改。
+doc_refs: "doc/E077.md, doc/E135.md, doc/E083.md, knowledge/drafts/DRAFT-E653-isospec-ohos-dlopen-ndk-shared-library-permission-denied.md"
+prescan_pattern: "add_library\\([^)]*MODULE|cmake --install|CMAKE_INSTALL_RPATH|BUILD_RPATH|patchelf|DT_RUNPATH"
+applies_to: any-cmake-shared-module,any-dlopen-plugin,conan-test-package,kodi-binary-addon
+last_updated: 2026-10-10

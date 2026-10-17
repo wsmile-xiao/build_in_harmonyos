@@ -1,0 +1,54 @@
+#====================================================================
+# DRAFT — OHOS SDK 的 libc++ 只有 std::ranges 命名空间，没有任何 ranges 算法：
+#         std::ranges::all_of / std::ranges::find 在任何 -std= 下都编不过，
+#         而且报错是 "no member named 'all_of' in namespace 'std::ranges'"，
+#         看起来像漏了 #include <algorithm>
+# Timestamp: 2026-09-17
+# Software: libheif 1.23.0（libheif/box.cc，CMake 工程，上游自己 set(CMAKE_CXX_STANDARD 20)）
+# Status: DRAFT — 待复审提升为正式 E 条目
+#
+# 探针证据（OHOS 设备，/data/service/hnp/bin/clang++ version 15.0.4，
+#           Target: aarch64-unknown-linux-ohos）：
+#   -std=c++20: error: no member named 'all_of' in namespace 'std::ranges'
+#               error: no member named 'find'   in namespace 'std::ranges'
+#   -std=c++17: error: no member named 'ranges' in namespace 'std'
+#   即：C++20 下命名空间存在、算法不存在；C++17 下命名空间都没有。
+#   把三处调用改成 std::all_of / std::find（<algorithm> 已在同文件包含）后，
+#   该文件立刻编过，libheif-tools 1.23.0 设备验证 G0-G4 / L2 / L4 / L5 全绿。
+#
+# To promote:
+#   1. Review the evidence below
+#   2. Rename to Ennn.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/Ennn.md
+#====================================================================
+
+id:                     DRAFT-libheif-tools-1.23.0-ohos-libcxx-has-no-ranges-algorithms
+trigger_tool:           clang++|cmake|ninja|make
+phase:                  compilation
+error_signature:        no member named '\w+' in namespace 'std::ranges'| no member named 'ranges' in namespace 'std'| std::ranges::(all_of|find|count|any_of|transform|sort)
+severity:               3
+category:               libcxx|toolchain|compatibility|cpp20|portability
+match_keywords:         std::ranges, ranges algorithms, all_of, any_of, ranges::find, C++20, CMAKE_CXX_STANDARD 20, libc++ 15, OHOS SDK, aarch64-unknown-linux-ohos, missing #include algorithm, LLVM 15, ranges namespace exists, feature probe
+title:                  OHOS SDK 的 libc++（clang 15.0.4）实现了 std::ranges 命名空间但没有 ranges 算法：std::ranges::all_of / ranges::find 在任何 -std= 下都编不过，报错酷似漏包含 <algorithm>
+root_cause:             libc++ 把 C++20 ranges 拆成两部分交付：`std::ranges` 命名空间 （views、concepts、subrange 等）与 ranges 版算法 （std::ranges::all_of / find / count / transform ...）。 OHOS SDK 自带的 libc++（clang 15.0.4，Target aarch64-unknown-linux-ohos）只交付了前者，算法部分缺失。 于是报错形态非常具有误导性： -std=c++20 -> "no member named 'all_of' in namespace 'std::ranges'" -std=c++17 -> "no member named 'ranges' in namespace 'std'" 第一条看起来就是"忘了 #include <algorithm>"，而源码里 <algorithm> 明明已经包含；第二条则让人以为要升级 -std。 实际上把 -std 提到 c++20 也修不好，因为该实现根本没有那些算法。 更隐蔽的一点：上游 CMakeLists 里往往已经写了 set(CMAKE_CXX_STANDARD 20) + CMAKE_CXX_STANDARD_REQUIRED ON， 构建日志不会提示标准不够，只会在编译某个具体文件时炸掉， 容易被误判成"这个文件少了头文件"而去做无意义的补丁。
+affected_scope:         all OHOS/HarmonyOS 上编译的使用 C++20 ranges 算法的第三方库， 尤其是上游声明 C++20、代码里直接写 std::ranges:: 的现代 C++ 工程（图像/媒体类库近年大量引入）。用 <ranges> 的 views （管道、filter、transform 视图）通常没事，出问题的只有 ranges 版算法。
+verification_cmd:       设备上一次编译即可判定（不需要完整工程）： cat > t.cc <<'EOF' #include <algorithm> #include <array> int main(){ std::array<int,3> a{1,2,3}; return (int)std::ranges::count(a,2); } EOF clang++ -std=c++20 t.cc -o t && ./t 报 "no member named 'count' in namespace 'std::ranges'" 即命中本条目（注意 <algorithm> 已经包含，不是头文件问题）。 静态扫描判据：grep -rn 'std::ranges::' <src>/ | grep -v '::views'
+rec_priority:           1
+rec_approach:           patch-ranges-calls-to-classic-algorithms
+rec_description:        把 ranges 算法换回 <algorithm> 里的等价物，迭代器自己给： - return std::ranges::all_of(v, pred); + return std::all_of(v.begin(), v.end(), pred); - if (std::ranges::find(arr, x) == arr.end()) ... + if (std::find(arr.begin(), arr.end(), x) == arr.end()) ... 这类改写语义完全一致（都是 O(n) 线性查找/遍历，无投影参数时 ranges 版就是迭代器版的薄包装），改动面小、可读性不变， 也不需要引入 ranges 库依赖。 配套动作：先在源码里统计影响面（本包只有 libheif/box.cc 的 3 处）， 确认 <algorithm> 已被包含；补丁按上游文件路径编号并在 conandata.yml 里声明，notes.md 记录触发条件与替换对照。
+rec_command:            grep -rn 'std::ranges::' <src> | grep -v '::views'   # 先列影响面
+rec_auto_fix:           false
+rec_impl:               rewrite-ranges-algorithms-to-iterator-algorithms
+principles:             
+doc_file:               drafts/DRAFT-libheif-tools-1.23.0-ohos-libcxx-has-no-ranges-algorithms.md
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+last_updated:           2026-09-17
+source_event:           libheif-tools 1.23.0 适配：libheif/box.cc 用 std::ranges::all_of / std::ranges::find，OHOS libc++ 没有 ranges 算法，改为 std::all_of / std::find
+source_pr:              
+source_commit:          
+authors:                username- <ajOovSKTQ0vaLwZB.username-@noreply.gitcode.com>

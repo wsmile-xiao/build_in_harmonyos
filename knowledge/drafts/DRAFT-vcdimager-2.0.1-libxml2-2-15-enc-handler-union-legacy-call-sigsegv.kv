@@ -1,0 +1,106 @@
+#================================================================================
+# DRAFT —— libxml2 2.15 把 enc-handler 回调槽改成匿名 union ⇒ 旧式 legacyFunc 型
+#          调用「编译通过、运行期参数错位 SIGSEGV」
+# 归属：vcdimager/2.0.1 适配 HarmonyOS PC（构建主机 B，2026-09-26）；起草署名 主理-64
+#
+# ★ error_signature 的凭据（先说清，免得被当成转述或造词）：
+#   第 6 轮（2026-09-25 21:22 起手）的 reports/conan-create.log 已被后续轮次覆盖，且
+#   reports/ 被仓内 .gitignore 忽略（.gitignore:96）⇒ 那一轮的日志盘上已无原件。本棒复核过
+#   全部落点（z45 与 z64 两个任务目录的 verify-1..14 分轮日志、worktree 的 .ci_logs/、
+#   archives/ 全库 grep "invalid operands to binary expression"），命中的只有 notes.md 里的
+#   中文转述与 w3 日志中已打补丁版的告警行，**没有** error 原文。
+#   ⇒ 下面四条 error 行由本棒在**同一棵第 6 轮缓存树**（未打补丁版源码，
+#     p/b/vcdim2af57a684b90d/b，legacyFunc 计数 0）上复现取得——编译参数原样取自该树
+#     Makefile（make -n 读出的 flags），只把 -c/-o/-MT/-MD/-MP/-MF 换成 -fsyntax-only、
+#     不落任何产物。四条均为编译器逐字原样输出（含绝对路径与行列号），复现命令见
+#     verification_cmd，输出全文见同名 .md 的「阶段一」代码块。
+#================================================================================
+
+id:                     DRAFT-vcdimager-2.0.1-libxml2-2-15-enc-handler-union-legacy-call-sigsegv
+title:                  libxml2 2.15 enc-handler 匿名 union 同址双签名——旧式 legacyFunc 调用编得过、运行期参数错位 SIGSEGV
+severity:               3
+category:               api, runtime, patch, portability, compilation
+trigger_tool:           clang|make|conan|automake
+phase:                  build|testing|runtime
+approach:               上游把回调槽改成匿名 union（两成员同址、签名不同）之后，「改成员名让编译通过」只是第一层修复；必须查清库内部实际往这块存储里填的是哪个成员，并用运行期探针复验调用式——编得过不等于修好
+
+keywords:               libxml2, libxml2 2.15, xmlCharEncodingHandler, xmlCharEncodingHandlerPtr, xmlFindCharEncodingHandler, anonymous union, legacyFunc, func, xmlCharEncConvFunc, xmlCharEncodingInputFunc, xmlCharEncodingOutputFunc, SIGSEGV, Signal 11, vcdimager, vcdxbuild, vcd_xml_common.c, enc-handler
+
+error_signature:        "/storage/Users/currentUser/tmp/ch/home-主理-45-vcdimager/p/b/vcdim2af57a684b90d/b/frontends/xml/vcd_xml_common.c:245:14: error: invalid operands to binary expression ('void *' and 'union (unnamed union at /storage/Users/currentUser/tmp/ch/home-主理-45-vcdimager/p/libxme5a5c01c709a6/p/include/libxml2/libxml/encoding.h:205:5)')|/storage/Users/currentUser/tmp/ch/home-主理-45-vcdimager/p/b/vcdim2af57a684b90d/b/frontends/xml/vcd_xml_common.c:246:29: error: called object type 'union (unnamed union at /storage/Users/currentUser/tmp/ch/home-主理-45-vcdimager/p/libxme5a5c01c709a6/p/include/libxml2/libxml/encoding.h:205:5)' is not a function or function pointer|/storage/Users/currentUser/tmp/ch/home-主理-45-vcdimager/p/b/vcdim2af57a684b90d/b/frontends/xml/vcd_xml_common.c:250:14: error: invalid operands to binary expression ('void *' and 'union (unnamed union at /storage/Users/currentUser/tmp/ch/home-主理-45-vcdimager/p/libxme5a5c01c709a6/p/include/libxml2/libxml/encoding.h:201:5)')|/storage/Users/currentUser/tmp/ch/home-主理-45-vcdimager/p/b/vcdim2af57a684b90d/b/frontends/xml/vcd_xml_common.c:251:28: error: called object type 'union (unnamed union at /storage/Users/currentUser/tmp/ch/home-主理-45-vcdimager/p/libxme5a5c01c709a6/p/include/libxml2/libxml/encoding.h:201:5)' is not a function or function pointer"
+
+match_keywords:         xmlCharEncodingHandler, legacyFunc, xmlCharEncConvFunc, encoding.h, invalid operands to binary expression, called object type, is not a function or function pointer, SIGSEGV, Signal 11, vcdxbuild, enc-handler union, 编得过运行期崩
+
+root_cause:             libxml2 2.15 的 struct _xmlCharEncodingHandler 把 input/output 两枚回调槽由函数指针改成匿名 union（成员 func 是 6 参 xmlCharEncConvFunc、成员 legacyFunc 是 4 参旧型 xmlCharEncodingInputFunc/OutputFunc，两成员同址），本棒在制品头文件实读得 struct 起于 encoding.h:199、input 的 union 起于 :201、output 的 union 起于 :205、func 型 typedef 在 :179-181（与编译器报错里的 unnamed union at encoding.h:201:5 与 :205:5 对字一致）。上游 2018 年的 handler->output(...) 直调在 C 里不再合法（union 既不是标量也不可调用）⇒ 编译期报 invalid operands to binary expression 与 is not a function or function pointer；而把它改成 handler->output.legacyFunc(...) 之后**编译通过**，但 2.15 内部只把新式 6 参指针填进这块存储（探针实测 in.func==in.legacyFunc、out.func==out.legacyFunc 同址、inCtxt 与 outCtxt 均为 0），按 4 参 legacyFunc 型调用即参数错位——callee 把第 1 个实参（out 缓冲区）当作 vctxt 去解引用，当场 SIGSEGV。⇒ 缺陷分层：编译期那条只暴露「槽位换了形态」，真正致命的是「同一块存储两副签名，库只填其中一员」，后者编译器完全看不见
+
+rec_priority:           1
+rec_approach:           probe-which-union-member-the-library-fills-and-revalidate-the-call-at-runtime
+rec_description:        |
+  1) 见到「成员改成 union」这类编译错，先去**制品里的头文件实读**该 struct，抄下 union 的
+     成员名、各自类型与行号；再读该类型的 typedef 参数表，判断两成员是否同址不同签名。
+  2) 关键一问——库内部实际往这块存储里填的是**哪个成员**：用只读探针打印两成员的指针值
+     （同址则相等）与配套 context 字段是否非空。本例 libxml2 2.15 把新式 6 参指针填进
+     union，故 legacyFunc 读出来的其实是个 xmlCharEncConvFunc。
+  3) 按库实际填充的那一员写调用式（本例 handler->output.func(handler->outputCtxt, out,
+     &out_size, in, &temp, 0)，input 侧同理用 inputCtxt，末位 flush 传 0）。判空守卫仍可用
+     任一成员——同址 ⇒ 判空恒等价，但**决定生死的是调用签名而不是成员名**。
+  4) 修完必须**运行期复验**，不许以「编译过了 / 补丁 apply 过了」收口——两臂探针（只差调用式，
+     同一 handler、同一输入）加一次真实数据的端到端跑（本包是 vcdxgen 生成 XML 再由
+     vcdxbuild 读回），并留 rc 读数。判据一句话：回调槽被 union 化的库，编译通过只是入场券。
+rec_command:            |
+  # 取签名原文（只读，不落产物；在失败那一轮的缓存树里做）
+  cd <该轮缓存树>/b/build-release/frontends/xml && make -n vcd_xml_common.o   # 抄出原始 flags
+  clang -fsyntax-only <同一组 flags> <该树>/b/frontends/xml/vcd_xml_common.c  # 逐字复现 error 行
+  # 两臂探针（只差调用式）
+  clang -w -I$L/include/libxml2 -L$L/lib -lxml2 -o armA armA.c && ./armA ; echo ARM_A_RC=$?   # 139
+  clang -w -I$L/include/libxml2 -L$L/lib -lxml2 -o armB armB.c && ./armB ; echo ARM_B_RC=$?   # 0
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      use-high-level-libxml2-conversion-api-instead-of-the-handler-slot
+fallback_description:   若调用点只是「把一串字节按编码转一次」，优先改用 libxml2 的高层转换/解析接口（xmlReadDoc、xmlEncodeEntitiesReentrant、UTF8ToUTF8Char 一类），彻底不碰 _xmlCharEncodingHandler 的槽位，也就绕开 union 化；只有确需 handler->name 判方向、或需要直接持有转换上下文的代码才按首选方案改调用式。
+fallback_command:       上游侧另开补丁把 _convert() 换成高层接口调用（本包未采用，理由见 .md 的「已试过的失败方案」）
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+affected_scope:         任何在 libxml2 2.15 之前年代写成 handler->input(...) / handler->output(...) 直调 xmlCharEncodingHandlerPtr 槽位的 C/C++ 代码（本条实拍于 vcdimager 2.0.1 的 frontends/xml/vcd_xml_common.c:245-251，凡 xmlFindCharEncodingHandler / xmlGetCharEncodingHandler 取回 handler 再直调的包同面）；只用 xmlReadDoc / xmlParseFile 等高层接口、不碰该结构体的包不适用；同样判据可推广到任何「上游把回调槽改成 union（成员同址但签名不同）」的库升级
+
+verification_cmd:       |
+  # —— 以下全部命令于 2026-09-26 在构建主机 B（HarmonyOS PC aarch64）实跑，读数见 .md ——
+  # (1) 复现第 6 轮的四条 error 原文（只读语法检查，不写任何产物）
+  H=$HOME/tmp/ch/home-主理-45-vcdimager
+  B=$H/p/b/vcdim2af57a684b90d/b            # 第 6 轮（未打补丁）缓存树，grep -c legacyFunc = 0
+  C=$H/p
+  cd $B/build-release/frontends/xml && /data/service/hnp/bin/clang -fsyntax-only \
+    -DHAVE_CONFIG_H -I. -I$B/frontends/xml -I../.. -I$B -I$C/poptd6cc6991ec8c4/p/include \
+    -I$B/include/ -I$B/lib/ -I$C/libxme5a5c01c709a6/p/include/libxml2 \
+    -I$C/libxme5a5c01c709a6/p/include -I$C/libcde894bc8d0f1a1/p/include -DNDEBUG -O3 \
+    -Wall -Wbad-function-cast -Wcast-align -Wchar-subscripts -Wdeclaration-after-statement \
+    -Wendif-labels -Winline -Wmissing-declarations -Wmissing-prototypes -Wnested-externs \
+    -Wno-sign-compare -Wpointer-arith -Wundef -Wunused -Wwrite-strings \
+    $B/frontends/xml/vcd_xml_common.c ; echo REPRO_RC=$?     # 实拍 REPRO_RC=1，四条 error 逐字见 .md
+  # (2) 头文件实读（union 成员名与行号自证）
+  awk 'NR>=199 && NR<=213 {printf "%d\t%s\n", NR, $0}' $C/libxme5a5c01c709a6/p/include/libxml2/libxml/encoding.h
+  # (3) 两臂探针——同一 handler、同一 UTF-8 输入，只差调用式
+  L=$C/libxme5a5c01c709a6/p
+  cd $HOME/tmp/uc2/z64-vcdimager/probe
+  LD_LIBRARY_PATH=$L/lib ./probe ; echo PROBE_RC=$?          # 实拍 PROBE_RC=0，两成员同址
+  LD_LIBRARY_PATH=$L/lib ./armA ; echo ARM_A_RC=$?           # 实拍 ARM_A_RC=139（SIGSEGV）
+  LD_LIBRARY_PATH=$L/lib ./armB ; echo ARM_B_RC=$?           # 实拍 ARM_B_RC=0，out=abc
+
+similar_to:             "knowledge/drafts/DRAFT-tweeny-4.1.0-v4-api-consumer-migration.kv:10（其 error_signature 四条全是编译期符号/类型错——no member named、static assertion failed）与同文件 :14（root_cause 为破坏性 API 升级⇒消费者改调用式迁移）；层次不同——本条的独有面是「编译期那条只暴露槽位换形态，改完成员名编得过之后，真正致命的参数错位要到运行期才崩」，tweeny 那条到编译期为止；另 knowledge/graph/E490.kv:8（Permission denied 执行位家族）与 knowledge/graph/E114.kv:5（config.status mktemp 写拒绝）同为 autotools 适配面但层次各不同，与本条机制无关"
+
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+principles:
+doc_file:               knowledge/drafts/DRAFT-vcdimager-2.0.1-libxml2-2-15-enc-handler-union-legacy-call-sigsegv.md
+last_updated:           2026-09-26
+source_event:           vcdimager 2.0.1 适配 HarmonyOS PC（构建主机 B；证据绑 HEAD 44c3feea4f 的 conan-verify PASS 与 W3 本地 CI 通过）
+authors:                主理-64
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-26

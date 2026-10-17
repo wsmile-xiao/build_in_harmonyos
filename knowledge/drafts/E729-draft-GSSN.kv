@@ -1,0 +1,60 @@
+entry_id: E729
+title: autotools tag 归档新包在本设备 autoreconf 自举的 perl 双解释器陷阱——PATH 优先级、shebang 写死、重定位参数三件套
+category: build-system, autotools, perl, toolchain, environment
+severity: high
+error_signature: "Perl_my_cxt_init|\\.aclocal-real: error|\\.autoreconf-real: error|couldn't open directory '//|Can't load .*auto/Cwd/Cwd\\.so"
+root_cause: |
+  设备上同时存在两套 perl，且与 autotools 工具链的绑定关系互相矛盾：
+  (1) HNP 的 /data/service/hnp/bin/perl = 5.42.0（非 i-thread 构建，无 Perl_my_cxt_init 符号），
+      /data/service/hnp/bin/autoreconf 是它的 perl 脚本；
+  (2) conan 的 perl/5.42.2 = aarch64-linux-thread-multi，conanbuild 的 PERL5LIB 指向它的 XS 目录，
+      而 conan 包装的 autoconf 系 .real 脚本 shebang 就是 conan perl；
+  (3) ohpcd automake/1.18 恰恰相反：.aclocal-real/.automake-real 的 shebang 写死
+      `#!/data/service/hnp/bin/perl`（与 PERL5LIB 互斥，方向不可调和——两套 perl 的 XS ABI
+      谁也加载不了谁的 .so）；
+  (4) conanbuildenv 的 PATH 把 /data/service/hnp/bin 排在 tool_requires 之前 ⇒ 裸调 autoreconf
+      命中 HNP 脚本 + conan PERL5LIB = 必崩 `Perl_my_cxt_init: symbol not found`；
+      反向（conan autoreconf + 只清 PERL5LIB）也不行：conan perl 的 @INC 编译进的前缀是坏的
+      `//lib/perl5/...`（--prefix=/ 家族），脱离 PERL5LIB 连 Cwd 都找不到；
+  (5) 即便用 PATH shim 绕过 shebang，两个坑仍在：autoreconf 通过 $ACLOCAL/$AUTOMAKE 环境变量的
+      **绝对路径**调用工具（绕过 PATH），且 .real 脚本里的 acdir/libdir 编译前缀是 `//share/...`
+      ——不带重定位参数就报 `couldn't open directory '//share/aclocal-1.18'`。
+match_keywords: autoreconf, aclocal, automake, libtoolize, PERL5LIB, Perl_my_cxt_init, shebang, perl 5.42.2, i-thread, tool_requires, PATH 优先级, aclocal --automake-acdir, couldn't open directory, Cwd.so, XSLoader, tag 归档, autotools 自举
+rec_approach: autoreconf-perl-unify-shim
+rec_description: |
+  四件事同做，缺一即崩（gss-ntlmssp 1.2.0 本地 create-1..6 六轮逐坑实测）：
+  1) build_requirements 同源拉齐 autoconf/2.72 + automake/1.18 + libtool/2.5.4（三件套缺一，
+     CI worker 也没有 automake/libtool，device-facts §一.4）；
+  2) build() 把 tool_requires 各包 bin 前置到 PATH，且 autoreconf 这一类关键调用必须用
+     **命令行内联 PATH 前缀**——只改 os.environ 无效，conanbuild 环境脚本会把 profile 的
+     /data/service/hnp/bin 重新压到最前（实测）；
+  3) 为 aclocal、automake 生成 shim：`exec <conan perl> <pkg>/bin/.<name>-real`，把两套 perl
+     统一到 conan perl（PERL5LIB 原样保留）；shim 必须复刻 ohpcd 包装脚本的重定位参数
+     `--automake-acdir=<pkg>/share/aclocal-1.18 --system-acdir=<pkg>/share/aclocal`、
+     `--libdir=<pkg>/share/automake-1.18`（.real 编译前缀是 `//`）；
+  4) autoreconf 调用再加内联 `ACLOCAL=<shim-aclocal> AUTOMAKE=<shim-automake>`，
+     否则 autoreconf 按 $ACLOCAL 绝对路径调用会绕过 PATH shim。
+  自检：日志出现 `[shim] N perl shims -> …`、`RUN: ACLOCAL=…_perlshim/… autoreconf`、
+  且 autoreconf 段无 Perl_my_cxt_init（仅 AC_ERROR obsolete 警告属正常）。
+rec_command: |
+  # 复现（设备任意目录）：HNP perl 加载 conan perl 的 XS 必崩
+  CP=$(find "$HOME/.conan2/p" -maxdepth 1 -type d -name 'perl*' | head -1)
+  /data/service/hnp/bin/perl -I "$CP/lib/perl5/5.42.2" -MCwd -e1   # 预期: Perl_my_cxt_init: symbol not found
+  # 同一 PERL5LIB 换 conan perl 即正常
+  "$CP/bin/perl" -I "$CP/lib/perl5/5.42.2" -MCwd -e1 && echo OK
+  # 修复验证（本任务配方）：三行自检
+  grep -a '\[shim\] 2 perl shims' "$HOME/tmp/gss-ntlmssp-1.2.0/local-create-14.log"
+  grep -ac 'RUN: ACLOCAL=.*_perlshim/aclocal AUTOMAKE=.*_perlshim/automake' "$HOME/tmp/gss-ntlmssp-1.2.0/local-create-14.log"
+  grep -ac 'Perl_my_cxt_init' "$HOME/tmp/gss-ntlmssp-1.2.0/local-create-14.log"
+affected_scope: 所有上游只有 git tag 归档（无 configure/、无发行 tarball）需要 build() 内 autoreconf 自举的 autotools 新包；凡 tool_requires 拉进 conan perl/automake 的包均在射程内
+verification_cmd: grep -a '\[shim\] 2 perl shims' "$HOME/tmp/gss-ntlmssp-1.2.0/local-create-14.log" && grep -ac 'Perl_my_cxt_init' "$HOME/tmp/gss-ntlmssp-1.2.0/local-create-14.log"
+related_entries: device-facts §一.4（worker 缺 automake）、device-facts §一.23（PERL5LIB 毒丸）
+last_updated: 2026-09-25
+notes: |
+  来源任务：gss-ntlmssp 1.2.0（feat/gss-ntlmssp-1.2.0，任务卡 14159）。
+  定位链：local-create-1.log（HNP autoreconf 崩）→ create-3（inline PATH 后仍命中 HNP
+  autoreconf，conanbuild 重排覆盖 os.environ）→ create-4（shim 生效但 .real 报
+  `//share/aclocal-1.18` 缺参）→ create-6（$ACLOCAL 绝对路径绕过 PATH，再补内联变量）→
+  create-6 起 autoreconf 全绿（仅 AC_ERROR obsolete 警告）。
+  同族判读：与 device-facts §一.23（conan autoconf 毒丸）互补——那条给的是"显式
+  tool_requires"这一半，本条补齐"PATH 优先级 + shebang 统一 + 重定位参数 + $ACLOCAL"另一半。

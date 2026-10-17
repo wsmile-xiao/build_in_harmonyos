@@ -1,0 +1,85 @@
+#====================================================================
+# DRAFT - itools 1.1 实证：pkg.m4 的 PKG_CHECK_MODULES 展开会让 autoconf 2.72
+#         把 ac_fn_c_try_link 的函数定义排到首次调用之后，链接探测静默假失败
+#         而 configure 仍以 0 退出
+# 命名：DRAFT-<包>-<版本>-<slug>.kv（AGENTS §6.2③）
+# 写法约束（实测）：ohc-run.py draft-review 是逐行朴素解析器、不是 YAML 解析器，
+#   用块标量 ">-" 会让它把标题读成 ">-" 并误判 root_cause 缺失；
+#   故所有被门禁检查的字段一律写成单行双引号标量，且值内不出现 "空格+#"
+#   与裸反斜杠（AGENTS 2026-09-25 的 .kv 静默损坏警告）。长文在配套 .md 里。
+# 本条取代旧稿 DRAFT-itools-1.1-autotools-mixed-toolchain-pairing：旧稿把成因
+#   归给 conan automake 1.18 与本机 autoconf 混配，2026-09-29 的单变量最小复现
+#   证伪了该归因（详见 .md 的证伪段与 evidence 段）。
+#====================================================================
+
+# Layer 0: Error Surface
+id:                     "DRAFT-itools-1.1-pkg-check-modules-try-link-late-definition"
+trigger_tool:           "autoconf|aclocal|autoreconf|configure"
+phase:                  "configuration"
+error_signature:        "configure: line N: ac_fn_c_try_link: command not found 出现在 configure 正常退出且构建最终成功的日志里"
+
+# Layer 1: Recognition
+severity:               3
+category:               "build-system, autotools, pkg-config, autoconf, silent-misprobe"
+match_keywords:         "ac_fn_c_try_link, command not found, PKG_CHECK_MODULES, pkg.m4, autoconf 2.72, HAVE_ 假阴性, 探测静默失败, itools, OHOS"
+title:                  "PKG_CHECK_MODULES 使 autoconf 2.72 把 ac_fn_c_try_link 定义排在首次调用之后，链接探测假失败但 configure 退出码仍为 0"
+
+# Layer 2: Diagnosis
+root_cause:             "configure.ac 里出现 pkg.m4 的 PKG_CHECK_MODULES 时，autoconf 2.72 生成的 configure 会把 C 链接探测辅助函数 ac_fn_c_try_link 的函数体发在两处，且两处都排在它的首次调用之后（实测首次调用第 1537 行、首个定义第 4594 行，定义块共 2 个）。首调用落在 AC_PROG_CC 之后那些探测里，此时函数尚未定义，于是每条先被调到的链接探测都报 command not found 并被判为否，config.h 里的 HAVE_ 宏因此成批假阴性。同一份 configure.ac 只把 PKG_CHECK_MODULES 换成等价的 AC_CHECK_LIB，定义就回到首次调用之前（首个定义第 1477 行早于首调用第 1568 行，定义块 1 个），说明触发变量是 PKG_CHECK_MODULES 的宏展开本身，与 autoconf 与 automake 是否同族、automake 取哪个发布无关。"
+affected_scope:         "一切 configure.ac 使用 PKG_CHECK_MODULES 且由 autoconf 2.72 现场自举的 autotools 包。若上游代码不消费这些 HAVE_ 宏则产物行为不受影响，但探测结论已经失真，必须如实申报；若上游用 AC_CHECK_HEADERS 之类由 try_compile 完成的探测则不受本条影响（try_compile 与 try_run 的定义仍在前段）。"
+verification_cmd:        "cd <生成的 configure 所在目录>; u=$(grep -n 'if ac_fn_c_try_link' configure | head -1 | cut -d: -f1); d=$(grep -n '^ac_fn_c_try_link ()' configure | head -1 | cut -d: -f1); k=$(grep -c '^ac_fn_c_try_link ()' configure); d 非空且 d 大于 u 即命中本条，随后 grep -c 'command not found' <configure 运行日志> 并 grep -rn 'HAVE_' <上游目录> 判断消费面"
+
+# Layer 3: Solution Space
+rec_priority:           1
+rec_approach:           "detect-and-declare-misprobe-before-delivery"
+rec_description:        "把 configure 日志里的 command not found 当作交付前硬查项而不是噪音：命中即认定这批链接探测结论失真，再按消费面分流。上游源码 grep 不消费相关 HAVE_ 宏时，产物行为无损，可在已知限制与 notes 里逐条列明哪些探测被假失败、以及判据是消费点为零；上游确实消费时不得照原样交付，须消除 PKG_CHECK_MODULES 这条展开路径（改用显式 AC_CHECK_LIB 与 AC_CHECK_HEADERS 组合，或按其依赖语义自己拼装），改完必须用 verification_cmd 复测定义行号回到调用之前才算修好。"
+rec_command:            "grep -n -e 'command not found' 本次构建的 configure 日志; 再分别 grep -rn HAVE_STRCASECMP 与 grep -rn HAVE_ALARM 上游源码目录, 统计消费点数量"
+rec_auto_fix:           false
+rec_impl:               "conan-recipe"
+
+fallback_priority:      2
+fallback_approach:      "avoid-autoreconf-at-build-time"
+fallback_description:   "随包导出预生成 configure 可以解决 CI 侧缺 host autotools 导致根本跑不起来的问题，但它不修复本条的探测失真——生成物里的错位定义被原样带过去。两者要分别申报：导出形态照已合入的 libxmi 1.2（compat 目录）与 afflib 3.7.22（generated 目录），本条的失真判定仍要走 verification_cmd。"
+fallback_command:       "grep -nE 'self\\.run\\(.*autoreconf' <配方> 应无命中，再用 verification_cmd 复核导出件"
+fallback_auto_fix:      false
+fallback_impl:          "conan-recipe"
+
+forbid_1_pattern:       "见 ac_fn_c_try_link command not found 就用 ac_cv_ 缓存变量或预设 cross_compiling 把它盖掉"
+forbid_1_reason:        "错位定义属于生成物本身损坏，缓存变量只会把探测结论替换成人为设定，配方换机器即不可复现，且 AGENTS 的 E467 明文禁止预设 cross 与改 LIBS 通道"
+forbid_1_consequence:   "探测结论与真实平台能力脱钩，问题下移到 make 或以缺符号形式再现"
+
+forbid_2_pattern:       "见 cannot guess build type 就直接补 --build 与 --host 三元组当作本条的解法"
+forbid_2_reason:        "三元组是知识库 E007 与 E072 与 E160 那一族老 config.guess 不认识 HarmonyOS 的解法。本条的 command not found 与该文案只是同名家族里的不同成因，实测同一份错位 configure 在三元组未改的情况下也能 configure 退出 0 并走完构建"
+forbid_2_consequence:   "把文案相同当成成因相同，盖住探测失真这一层，交付物带着成批 HAVE_ 假阴性进入审查"
+
+# Layer 4: Principles / Layer 5: Relations
+principles:             "P005,P013"
+causes:                 []
+caused_by:              []
+similar_to:             [E007, E072, E160, E232, E467, E540]
+conflicts_with:         []
+prerequisite_of:        []
+
+# Safety boundary and evidence
+safety_boundary:        "只在 configure 由 autoconf 现场生成且 configure.ac 含 PKG_CHECK_MODULES 时适用；判据是首个 ac_fn_c_try_link 调用行号早于首个定义行号，且定义块数大于 1。若上游根本不跑 autoconf（tarball 自带 configure 且配方不自举），或探测结果无人消费且申报已如实标注，则本条只作为申报义务提示，不构成返工。"
+release_condition:      "autoconf 或 pkg.m4 版本升级后若 verification_cmd 不再命中（定义回到调用之前），本条解除，改为普通探测记录"
+
+# Metadata
+doc_file:               "knowledge/drafts/DRAFT-itools-1.1-pkg-check-modules-try-link-late-definition.md"
+last_updated:           "2026-09-29"
+source_event:           "itools 1.1（平台任务 7546，PR 12629）方案 A 落地轮的真机 conan create 日志与两组单变量最小复现"
+authors:                "new_hw-10"
+
+# Evidence（逐字可核）
+evidence_1:             "缺陷组实测（P 组，15 行 configure.ac 含 PKG_CHECK_MODULES，autoconf 2.72 与 automake 1.17 同族且 ACLOCAL_PATH 指向 pkg-config 0.29.2 的 share/aclocal）：autoreconf 退出 0，sh -n configure 退出 0，首次调用在第 1537 行、首个定义在第 4594 行、定义块 2 个"
+evidence_2:             "对照组实测（Q 组，与 P 组逐字相同，仅把 PKG_CHECK_MODULES 换成等价的 AC_CHECK_LIB 两参形式）：首次调用在第 1568 行、首个定义在第 1477 行、定义块 1 个，即定义先于调用。单变量差值证明触发点是 PKG_CHECK_MODULES 宏展开，与 automake 版本或工具混配无关"
+evidence_3:             "本包真机读数（2026-09-29 conan create，CREATE_RC 为 0）：随包导出的 configure 里 ac_fn_c_try_link 定义在第 4831 行而首次调用在第 1724 行；日志共 4 处 command not found，分别是 checking for pow in -lm 报第 5065 行、checking for error_at_line 报第 5283 行、checking for alarm 与 checking for strcasecmp 均报第 1724 行"
+evidence_4:             "失真假阴性坐实：该次构建生成的 config.h 里 HAVE_ALARM 与 HAVE_STRCASECMP 均为未定义形态（形如 /* #undef HAVE_ALARM */），而同一份 config.h 里由 try_compile 与 try_run 完成的探测正常（checking whether the C compiler works 为 yes、checking whether we are cross compiling 为 no、checking for GNU libc compatible malloc 为 yes）"
+evidence_5:             "消费面判定：上游 itools 1.1 的 ical.c 与 idate.c 与 ipraytime.c 对 HAVE_STRCASECMP、HAVE_ALARM、HAVE_ERROR_AT_LINE 的引用数均为 0，全包条件编译点仅 5 处且只消费 TM_IN_SYS_TIME 与 HAVE_TM_GMTOFF，故本次失真未改变产物行为；同轮 test_package 的 12 条行为断言全部通过"
+evidence_6:             "旧稿归因的证伪读数：旧稿引用过的那份 定义 1526 早于 调用 1755 的 configure，实测未带 ACLOCAL_PATH 生成，其中 PKG_CHECK_MODULES 原始宏文本仍留在第 4658 行，sh -n 直接在该行报 syntax error 与 unexpected ITL，即那份件根本无法运行，不能作为顺序正常的证据"
+
+# Quality metrics
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      "2026-09-29"

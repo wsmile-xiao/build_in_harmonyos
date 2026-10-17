@@ -84,8 +84,14 @@ make check
 - lib/libJudy.a
 
 **本地安装路径**: ~/usr/local/lib/libJudy.*, ~/usr/local/include/Judy.h
-
 ---
 
-**编译结束**: 2026-05-29 14:56
-**最终状态**: published
+**编译结束**: 2026-08-07 01:50
+**最终状态**: built
+---
+
+**编译结束**: 2026-08-07 01:52
+**最终状态**: built
+
+---
+**Update**: 2026-08-07 — Added out-of-tree build patches (0004-0009), fixed doc build.

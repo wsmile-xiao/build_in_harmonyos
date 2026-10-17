@@ -1,0 +1,139 @@
+#====================================================================
+# DRAFT-freetype-2.14.3.2.1-hmdfs-script-exec
+#   HarmonyOS PC 真机（HMDFS 用户存储）禁止直接 exec shebang 脚本：
+#   configure/libtool 等必须以显式解释器调用
+# 来源: PR fix(freetype): 2.14.3.2.1 适配 HarmonyOS PC（真机 conan create 实证）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# 辨别性指纹 = HMDFS 路径语境 + 文件有 +x 且经 sh 可运行 + 直接 exec 报 EACCES。
+# 不收录泛化的 `Permission denied`（太宽），必须与下列签名组合出现。
+id:                     DRAFT-freetype-2.14.3.2.1-hmdfs-script-exec
+trigger_tool:           sh|bash|make|conan|libtool|configure
+phase:                  configuration|compilation|installation
+error_signature:        /system/bin/sh:\s+[^ ]+: Permission denied|
+                        Error 126 while executing|
+                        cannot execute:\s+Permission denied|
+                        jobserver mkfifo:.*Operation not permitted
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               build-system, ohos, hmdfs, autotools, shell, exec
+match_keywords:         HMDFS, Permission denied, Error 126, configure,
+                        libtool, shebang, exec, 脚本, 解释器, sh 调用,
+                        conan create, 真机, EACCES, x 位, chmod 不生效,
+                        /storage/Users/currentUser
+title:                  HMDFS 用户存储禁止直接 exec shebang 脚本：configure/libtool 须经 sh（$(SHELL)）调用
+prescan_pattern:        Permission denied|Error 126 while executing
+prescan_globs:          *.log, **/*.log, conanfile.py
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             HarmonyOS PC 真机的用户存储（HMDFS，挂载于
+                        /storage/Users/currentUser）对 shebang 脚本的**直接
+                        exec 一律返回 EACCES**，与文件权限位无关：
+                        ① 文件模式 -rwxrwx---（owner 正确）照样被拒；
+                        ② chmod 不生效（E046 同源）；③ 把脚本 cp 到 ~/tmp
+                        再 exec 同样被拒；④ `sh <脚本>` 显式解释器调用正常；
+                        ⑤ ELF 二进制的 exec 完全正常。
+                        实测决策矩阵：`sh ~/…/configure --version` 能跑出
+                        "Copying modules.cfg"，而直接 `~/…/configure` 报
+                        `/bin/sh: <stdin>[369]: …: Permission denied`。
+                        影响面：所有在真机原生构建（ohos 原生 conan create）
+                        的 autotools 工程——conan 的 autotools.configure()
+                        直接 exec 顶层 configure（Error 126）；make 配方
+                        直接 exec configure/libtool/install-sh（EACCES）。
+                        CI（Linux worker）不受影响，但 sh 前缀方案在
+                        Linux 上同样合法（libtool 官方标准形式就是
+                        $(SHELL) $(top_builddir)/libtool）。
+
+affected_scope:         所有在 HMDFS 上原生构建、构建链中由 make 配方或工具
+                        直接 exec shebang 脚本的工程。本题实证：freetype
+                        2.14.3.2.1 真机 conan create 全链路 3 个 exec 点
+                        （顶层 configure、detect.mk 内层 configure、
+                        libtool 编译/链接/安装），逐一改为解释器调用后
+                        18/18 消费者探针全绿。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           full-chain-interpreter-invocation
+rec_description:        全链路解释器调用，按 exec 点分层处置：
+                        ① 配方层：不用 conan 的 autotools.configure()
+                          （它直接 exec 脚本），改 self.run("sh '<cfg>'
+                          <参数>", env="conanbuild")，参数必须与 conan
+                          Autotools 默认完全一致——重点是 --prefix=/
+                          （conan 的 autotools.install() 以
+                          DESTDIR=<package_folder> 执行 make install，
+                          prefix 传 package_folder 会路径翻倍嵌套）。
+                        ② 构建系统层：make 配方里直接 exec 脚本的调用点
+                          改 $(SHELL) 前缀（detect.mk 的 configure 调用、
+                          unix-cc.in 的 LIBTOOL 定义——后者与 libtool
+                          官方 aclocal 标准形式
+                          '$(SHELL) $(top_builddir)/libtool' 完全一致，
+                          上游模板自己偏离了标准）。
+                        ③ install 工具层：AC_PROG_INSTALL 在 PATH 找不到
+                          ELF install 时会回退 install-sh 脚本——把
+                          /system/bin（toybox install ELF）加入 PATH
+                          （conan generate() 里 env.append_path），
+                          零补丁解决。
+                        安全面（无需改）：config.guess/config.sub/
+                        config.status 上游本身就是经 $SHELL 调用的
+                        （autoconf 生成代码 ac_config_guess="$SHELL
+                        ${ac_aux_dir}config.guess" 等）。
+rec_command:            sh '<source>/configure' --prefix=/ '--bindir=${prefix}/bin' …
+rec_auto_fix:           false
+rec_impl:               recipe-sh-invoke + source-patch（detect.mk/unix-cc.in）
+
+fallback_priority:      2
+fallback_approach:      cmake-build-system-switch
+fallback_description:   freetype 类同时带 CMakeLists 的上游可切 CMake 构建
+                        （cmake/ninja/编译器都是 ELF，无脚本 exec 点）；
+                        但改动面大（配置项平移、.pc 文件差异），且换构建
+                        系统偏离既有版本归档惯例，仅在补丁不可行时考虑。
+fallback_command:       cmake -S . -B build -DFT_DISABLE_ZLIB=TRUE …
+fallback_auto_fix:      false
+fallback_impl:          build-system-switch
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       chmod.*\+x|chmod 755
+forbid_1_reason:        该拒绝与 x 位无关（HMDFS 语义层拒绝），chmod 无效
+                        （E046），只会误导排查方向
+forbid_1_consequence:   反复 chmod 后仍 Permission denied，浪费时间且掩盖
+                        "必须经解释器"这个真因
+forbid_2_pattern:       sed.*#!/bin/sh|去掉 shebang
+forbid_2_reason:        破坏脚本在 CI（Linux）与真机的可移植性；正确做法是
+                        调用侧加解释器，不是改脚本本体
+forbid_2_consequence:   CI 与真机行为分叉，维护两套
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+# 签名家族重叠说明：E046（HMDFS chmod 不生效）与本源同宗（HMDFS 语义层
+# 拒绝文件系统操作），但作用对象不同：E046 是权限位写入被吞，本条是
+# 脚本 exec 被拒。两者常在同一真机任务中先后出现。
+similar_to:             E046（HMDFS chmod 不生效，同源——HMDFS 语义层拒绝）
+caused_by:
+conflicts_with:
+
+# ═══ 元数据 ═══
+verification_cmd:       conan create . --build=missing -pr:h ~/.conan2/profiles/ohos-aarch64
+                        # 期望：18/18 消费者探针全绿，日志无 Error 126
+doc_file:               knowledge/drafts/DRAFT-freetype-2.14.3.2.1-hmdfs-script-exec.md
+last_updated:           2026-09-26
+source_event:           PR fix(freetype): 2.14.3.2.1 适配 HarmonyOS PC；
+                        真机 ohos 原生 conan create 首轮
+                        `configure: Permission denied` + Error 126；
+                        决策矩阵实验（sh 可跑 / 直接 exec 被拒 / cp 后仍拒 /
+                        ELF 正常）定位 HMDFS 脚本 exec 语义；
+                        全链路 sh 化后 18/18 探针全绿
+authors:                LIMInGZE666
+source_pr:              fix/freetype-2.14.3.2.1
+source_commit:          668a63673
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-26

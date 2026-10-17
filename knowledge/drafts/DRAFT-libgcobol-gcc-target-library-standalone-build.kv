@@ -1,0 +1,53 @@
+#=============================================================================
+# DRAFT-libgcobol-gcc-target-library-standalone-build.kv — GCC target library 在 OHOS 上的独立构建
+# 库: libgcobol 16.1.1
+# 适配轮次: R01 (2026-09-22)
+# 关联: E012 (找不到 llvm-ar), E011/E052/E060 (config.status HMDFS 临时目录), E046/E087 (HMDFS 无执行位), E004 (运行时符号加载)
+# 非重复: GCC target library 独立构建完整链路（选择性解压+HMDFS configure+LLVM 工具链+C23 类型+compiler-rt 链接）未被任何已有条目覆盖
+#=============================================================================
+
+# ── Layer 0: 错误面 ──
+id:                     DRAFT-libgcobol-gcc-target-library-standalone-build
+trigger_tool:           clang|clang++|ld.lld|conan|tarfile|configure
+phase:                  source|configure|link|runtime
+error_signature:        No space left on device|configure: Permission denied|cannot find install-sh|no acceptable ld found|subs1.awk.*Permission denied|unknown type name '_Float32'|unable to find library -lgcc|__divti3: symbol not found|Link tests are not allowed after GCC_NO_EXECUTABLES
+
+# ── Layer 1: 识别层 ──
+severity:               2
+category:               build-system, toolchain, gcc-target-library, hmdfs, musl, compiler-rt
+match_keywords:         GCC target library, libgcobol, gcc-cobol, standalone build, selective extraction, tarfile, install-sh, config.guess, llvm-ar, ld.lld, _Float32, _Float64, __divti3, __gttf2, clang_rt.builtins, libgcc, GCC_NO_EXECUTABLES, BASE-VER, subs1.awk, confXXXXXX
+
+# ── Layer 2: 诊断层 ──
+title:                  GCC target library（libgcobol）在 OHOS 上的独立构建与多环节适配
+root_cause:            GCC target library 深度耦合 GCC 树（configure 依赖 ../gcc/BASE-VER 与树根 aux 脚本），无独立 tarball；OHOS 叠加 HMDFS 权限限制、LLVM-only 工具链、C++ 编译器 C23 类型差异、compiler-rt（非 libgcc）链接模型，普通 C/C++ autotools 配方无法直接复用。
+affected_scope:        GCC 16 target library（libgcobol/libobjc 等）在 OHOS/AArch64/musl 上的独立 Conan 构建；其他需从父项目源码树选择性提取子目录的库。
+verification_cmd:      tar -tf gcc-16.1.0.tar.xz | grep -E 'libgcobol/configure|gcc/BASE-VER|install-sh'; /data/service/hnp/bin/clang++ --print-file-name=libclang_rt.builtins.a; nm -D libgcobol.so 2>/dev/null | grep -E '__gg__power_of_ten'
+
+# ── Layer 3: 方案层 ──
+rec_priority:           1
+rec_approach:           gcc-target-library-standalone-build
+rec_description:        在 source() 用 download()+tarfile 只选择性解压 libgcobol/ 与 gcc/BASE-VER 及树根 aux 脚本（避免解压 2GB GCC 树耗尽 HMDFS 磁盘）；build() 用 /bin/sh 执行 configure（HMDFS 无执行位）、export LLVM 工具链绝对路径（E012）、patch configure 的 mktemp 到 $TMPDIR（E011/E052/E060）、patch 源码 _Float32/_Float64→float/double（C23 类型 clang++ 不认识）；make 链接阶段显式 LIBS='-lclang_rt.builtins'（128-bit 运算符号在 compiler-rt，OHOS 无 libgcc）。
+rec_command:            |
+  # source(): 选择性解压
+  tarfile.open(archive,"r:xz") 只提取 libgcobol/、gcc/BASE-VER、树根直接文件
+  # build(): HMDFS + LLVM + compiler-rt 多环节
+  export AR=/data/service/hnp/bin/llvm-ar NM=/data/service/hnp/bin/llvm-nm \
+         RANLIB=/data/service/hnp/bin/llvm-ranlib LD=/data/service/hnp/bin/ld.lld
+  TMPDIR=/data/storage/el2/base/cache /bin/sh libgcobol/configure \
+    --build=aarch64-unknown-linux-musl --host=aarch64-unknown-linux-musl \
+    --disable-multilib --disable-libquadmath --with-target-libxml2-*=...
+  make -j1 LIBS='-lclang_rt.builtins'
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+# ── Layer 4: 验证层 ──
+verification_evidence: |
+  1. 真机 shadow CI conan create exit code 0（Total 1 / Success 1 / Failed 0）
+  2. test_package 3 条真实计算断言通过：__gg__power_of_ten(2)=100, (0)=1, (5)=100000
+  3. L0/L1/L4/L5 全 pass（L1 含 L1e 破坏性负测试），L2 skip（库包无 bin/）
+  4. run 目录 codex-16.1.1-libgcobol-16.1.1-shadow-20260921-204917-conan-20260922-001719-8947 logs/exit-code.txt=0
+
+# ── Layer 5: 排除层 ──
+excludes:               |
+  - 完整上游测试 make check-cobol 需 GCOBOL 前端，本包以 test_package 消费断言验证，未执行 check-cobol
+  - libgcobol 16.1.0 之后 HEAD 的 posix/compat COBOL 子库需 gcobol 编译器，不在本包范围

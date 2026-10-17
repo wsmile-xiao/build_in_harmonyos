@@ -1,0 +1,91 @@
+#====================================================================
+# E2165-draft.kv — 知识图谱条目草稿
+# 对应的人类文档: E2165-draft.md
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具
+# phase:         出错阶段
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E2165
+trigger_tool: runtime
+phase: runtime|testing
+error_signature: Signal 31|SIGSYS|openat2.*seccomp|core dumped
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签 (自由文本, 用于分组过滤)
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 3
+category: portability|syscall-probing|runtime
+match_keywords: openat2, SIGSYS, seccomp, syscall probe, Signal 31, core dumped
+title: Probe openat2 (or similar syscalls) in a child process; treat SIGSYS child death as "not supported"
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: A runtime capability probe calls the openat2 syscall to detect kernel support; on OHOS the syscall is absent and the seccomp policy terminates the whole process with SIGSYS (signal 31) instead of returning ENOSYS, so an errno-based fallback never runs and the process dies.
+affected_scope: Any runtime feature probe that issues a syscall not present in the target kernel where seccomp kills unknown syscalls rather than returning ENOSYS.
+verification_cmd: Run the binary on the target; observe 'Signal 31 (core dumped)'. Confirm the probe is the crashing call, then switch to a child-process probe.
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: child-process-probe
+rec_description: Run the openat2 probe in a forked child process; in the child issue the syscall and _exit(fd >= 0 ? 0 : 1); in the parent waitpid() and treat WIFEXITED+WEXITSTATUS==0 as supported, WIFSIGNALED(SIGSYS) or non-zero exit as not supported (leave the capability flag false). This is pure POSIX, platform-macro-free, and never kills the caller (R8-compliant).
+rec_command: 'const pid_t pid = fork(); if (pid == 0) { int fd = FileUtils::openat2(AT_FDCWD, ".", O_RDONLY, 0, OPENAT2_RESOLVE_IN_ROOT); _exit(fd >= 0 ? 0 : 1); } if (pid > 0) { int st = 0; waitpid(pid, &st, 0); d_enableOpenat2 = (WIFEXITED(st) && WEXITSTATUS(st) == 0); }'
+rec_auto_fix: true
+rec_impl: source-patch-child-process-probe
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:       skip-probe-safe-default
+fallback_description:   If even a child-process probe is undesirable (e.g. no fork on the target), skip the probe entirely and leave the capability flag at its safe default (false); ensure every consumer has a fallback path for false. Do NOT gate the probe with platform macros (#if defined(__OHOS__)) — that violates R8; keep the decision out of source.
+fallback_command:       Omit the probe; leave d_enableOpenat2 = false.
+fallback_auto_fix:      false
+fallback_impl:          source-patch-guard-syscall-probe
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:       syscall\([^)]*openat2[^)]*\).*errno\s*==\s*ENOSYS
+forbid_1_reason:        Assuming an absent syscall reports ENOSYS is false when seccomp kills the process with SIGSYS; the errno fallback never executes.
+forbid_1_consequence:   The whole process (and every test in it) crashes with Signal 31 instead of falling back.
+forbid_2_pattern:       __OHOS__|#if\s*defined\s*\(\s*__OHOS__\s*\)
+forbid_2_reason:        R8 forbids platform conditional-compilation macros in source/patches; platform decisions must stay in the build system (feature macros) or use POSIX mechanisms (e.g. child-process probe).
+forbid_2_consequence:   PR review gate rejects the patch (R8 violation, request changes).
+# forbid_3_pattern:
+# forbid_3_reason:
+# forbid_3_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file: E2165-draft.md
+last_updated: 2026-08-29
+source_event: recc 1.4.13 (buildbox) PlatformInfo openat2 probe killed by seccomp SIGSYS on OHOS after the E2164 stoi fix unblocked execution past version parsing
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                akajhsbnz
+source_pr:              7006
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-08-29
+
+draft: true
+contributor_id: akajhsbnz

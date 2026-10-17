@@ -1,0 +1,35 @@
+#====================================================================
+# Draft: anacron 2.3 on OHOS/HarmonyOS -- bare Makefile bakes the
+#        RUNTIME spool path into a compile-time macro with no runtime
+#        override port, and tempnam() lands on the read-only /tmp
+#====================================================================
+
+id:                     DRAFT-ANACRON-23-SPOOL-BAKE-NO-RUNTIME-OVERRIDE
+trigger_tool:           conan|clang|make
+phase:                  compilation|runtime
+error_signature:        Can't chdir to .*spool|Can't open temporary file.*Read-only file system|getpwuid\(\) error.*No such file or directory|tempnam\(NULL, NULL\)|fatal error.*'obstack.h' file not found
+
+severity:               2
+category:               build-system, platform, runtime, portability
+match_keywords:         anacron, spool, SPOOLDIR, ANACRONTAB, chdir, tempnam, P_tmpdir, TMPDIR, Read-only file system, obstack, getpwuid, PREFIX, installdirs, Makefile, baked path
+
+title:                  裸 Makefile 把运行时行为路径（spool/anacrontab）烧成编译期宏且上游无运行时覆盖口：必须在 make 变量层四路分离注入，再给 spool 补一个环境变量覆盖口
+
+root_cause:             anacron 2.3 的 Makefile 用 ALL_CPPFLAGS 把 SPOOLDIR 与 ANACRONTAB 以 -D 烧进二进制，而 main() 起手就 chdir(SPOOLDIR)、失败即 die_e() 中止，上游唯一给的运行时开关 -t 只能覆盖 anacrontab 文件，spool 一个覆盖口都没有。与此同时 installdirs 目标拼的是 $(PREFIX)$(SPOOLDIR) —— 这个双拼只有在 PREFIX 为空、SPOOLDIR 为相对路径时才成立，而编译期宏又要求 SPOOLDIR 是绝对路径，两者互相矛盾。于是在只读根文件系统上（OHOS/HarmonyOS 的 /var/spool 连父目录都不存在）出现「make 覆盖 PREFIX 也救不回来」的死局。另有两个同源的运行时地雷：runjob.c 用 tempnam(NULL, NULL) 取临时文件名，解析到 P_tmpdir=/tmp（只读），且实测本平台 libc 忽略 TMPDIR（设了 TMPDIR 后返回值仍是 /tmp/temp_*），故 E002 常见的「改 TMPDIR」解法在此无效；runjob.c 的 username() 对 getpwuid() 返回 NULL 直接 die_e() 中止，而本平台的 app/sandbox uid 刻意不入 /etc/passwd（文件存在、15382 B，但 uid 20020084 查不到）。第三层是 readtab.c include <obstack.h>：musl/HarmonyOS 不提供 GNU obstack。制品仓并非没有实现——musl-obstack/1.2.3 在库且被 dwarves/dwz/box64/elfutils 等 4 个配方 requires（初版只用 obstack/gnulib/libiberty/gnu-obstack 四个精确名检索、漏检了它）；本包仍选 vendor，理由是 application 包免引入 shared 依赖与 SONAME 打包面，并有 LGPL-2.1 §6 允许重标注为 GPL v2+ 的许可证依据。
+
+affected_scope:         所有「编译期把运行时才生效的绝对路径烧成宏、且上游不给覆盖口」的裸 Makefile 项目（守护进程/守护类工具尤其典型，因为它们的 spool、pidfile、lockdir 全是这类路径）；以及任何在 musl 系统上依赖 GNU obstack 的老 C 项目；验收只停在 conan create 而不真跑一次「配置文件 + 产物落地」的流程。
+
+verification_cmd:       conan create archives/a/anacron/2.3 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+rec_priority:           1
+rec_approach:           bake-path-four-way-makevar-override-plus-env-fallback
+rec_description:        (1) 先分清烧死的是「构建期路径」还是「运行时行为路径」——前者 make 覆盖即解（见 similar_to 的 M18），后者覆盖 PREFIX 只改安装落点、运行时仍读编译期宏，必须额外加运行时覆盖口。(2) 上游 installdirs 若拼 $(PREFIX)$(SPOOLDIR) 这类「PREFIX + 绝对路径」，则 PREFIX 保持空串并把 BINDIR/MANDIR/SPOOLDIR/ANACRONTAB 四个绝对路径逐个传，绕开双拼同时让编译宏与安装落点保持一致。(3) 覆盖口优先做成环境变量（本例 ANACRON_SPOOL），语义是「缺省仍用编译期宏」，这样本机与 CI 各自 create 时零配置可用，跨机复用二进制时才有逃生口。(4) 临时文件落在只读 /tmp 且 libc 忽略 TMPDIR 时，不要试图用环境变量解决——改用程序已经 chdir 进入、且由本包自己拥有的可写目录（此处 tempnam(spool, prefix)）。(5) getpwuid 返回 NULL 的分支若上游写的是 die_e()，要收窄成「取不到就退回 $LOGNAME/$USER」，因为该地址只服务于邮件头这类信息性字段。(6) 缺系统头文件（obstack.h）时先查制品仓有没有对应包——检索词要覆盖别名变体（本包首版只用 obstack/gnulib/libiberty/gnu-obstack 四个精确名，漏了 musl-obstack/1.2.3，导致错误地把 vendor 写成唯一出路）；确认有可用包时仍可按包形态取舍（application 包优先 vendor 以免引入 shared 依赖与 SONAME 面，库包则直接 requires），vendor 侧把许可证写进 notes（LGPL-2.1 §6 允许重标注 GPL v2+），配方用 exports_sources 随行、source() 摊平进源码树，由上游 Makefile 的 wildcard *.c 自动纳入 objects。(7) 验收必须真跑一次「建 anacrontab + 建 spool + 跑 job + 查时间戳」，只验编译和 -V 拦不住这类「装完一跑就中止」的包。
+
+rec_command:            make -j1 CC=<clang> CPPFLAGS=-I. PREFIX= BINDIR=<pkg>/bin MANDIR=<pkg>/share/man SPOOLDIR=<pkg>/var/spool/anacron ANACRONTAB=<pkg>/etc/anacrontab INSTALL_DIR=mkdir -p INSTALL_PROGRAM=cp INSTALL_DATA=cp
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+similar_to:             M18 DRAFT-PKG-VER-suckless-baked-paths-makevar-override（同族但不同层——M18 的 P1 也是 make 报 cc：No such file or directory + Error 127，解法是 make 命令行覆盖 CC/INCS/LIBS，属**构建期**路径且 make 覆盖即解；本条的 SPOOLDIR 是**运行时 chdir 目标**，make 覆盖只改安装落点，运行时仍读编译期宏 ⇒ 必须新增覆盖口，该层 M18 未覆盖）· E108/E174 与 M13（install(1) 缺失与 INSTALL_* 变量覆盖，本包同款撞到，但已被既有条目覆盖，不作为本条新知识）· E338（getpwuid/homedir 为 NULL 回退，同族——那条签名是解引用 SIGSEGV、解法是环境变量注入路径；本条签名是上游 die_e() 主动中止、解法是退回 $LOGNAME/$USER）· E002（/tmp 只读，其常规解法是改 TMPDIR，本条实测该解法无效，是 E002 未写的另一条解法）· ⚠ knowledge/drafts/ 两条近邻（W4 P1-1 补披露，原报 0 不成立）：DRAFT-c-ares-lite-1.33.1-harmonyos-autotools-portability 其「tempnam(NULL) 与 $TMPDIR（OHOS，R15）」节已覆盖「OHOS 的 tempnam(NULL,prefix) 忽略 TMPDIR、回退只读 /tmp」同一机制（连直接设 TMPDIR 对未修改入口无效都一致）⇒ 本条 tempnam 层不作新知识主张、仅作组合组分（差异：它触发在上游 gtest 测试 TempFile/TempNam、解法是打补丁改入口；本包触发在守护运行时 runjob.c、解法是 tempnam(已 chdir 的自有 spool)）· DRAFT-dwarves-public-header-shim-transitive 其 error_signature 的 fatal error 与 obstack.h file not found 与本包首错同签名，但解法是 requires musl-obstack/1.2.3 垫片（DRAFT-argp-musl-gap-bridge 同族）⇒ 本包 application 形态选 vendor、obstack 层亦不作新知识主张 · 四范围（汇总/graph index/经验库/B草稿库）对 tempnam/obstack/spool 双拼确为 0 命中，新知识位只落核心层（2026-10-06 实测）
+caused_by:
+source_event:           anacron 2.3 任务 14914，2026-10-06 本机实测四轮 conan create 逐层暴露——第一条真实错误 make 报 cc：No such file or directory（Makefile:63 gregor.o Error 127），随后 gregor.c const 赋值被 clang 拒绝、readtab.c fatal error.*'obstack.h' file not found、Makefile:67 installdirs Error 127（install 命令缺失）、Can't open temporary file.*Read-only file system、getpwuid() error：No such file or directory；最终 conan create rc=0 且 test_package 7/7 PASS
+source_pr:
+source_commit:

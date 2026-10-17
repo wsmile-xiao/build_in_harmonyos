@@ -1,0 +1,118 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E684.kv，填写各字段
+# 对应的人类文档: doc/E684.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E684
+trigger_tool: conan|clang|lang-preflight|patch
+phase: configuration|testing
+error_signature: bad interpreter|/usr/bin/perl.*No such file or directory|Unknown option .S perl|detected_language.*other|无可统计源文件|Can't exec .locale
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: ohos, portability, build-system
+prescan_pattern: '#!/usr/bin/perl'
+prescan_globs: mencal, *.pl, *.pm, *.sh
+match_keywords: mencal, perl, shebang, env perl, bad interpreter, /usr/bin/perl, lang-preflight, lang_detect, extensionless, 单文件脚本, system none, toybox env, -S, locale, abi-compliance-checker
+title: OHOS 单文件 Perl 脚本包适配套路：shebang 必须改 /usr/bin/env perl（设备与 worker 均无 /usr/bin/perl，toybox env 无 -S 故 -w 不可保留），lang-preflight 对无扩展名脚本恒判 other 须按 §4.2 人工复核留证
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: 设备与 CI worker 的 perl 都在 HNP 路径（/data/service/hnp/bin/perl 5.42.0），/usr/bin/perl 不存在，上游 shebang 直执即 rc=126 bad interpreter；shebang 改 /usr/bin/env perl 后可直执（/usr/bin/env 存在＝toybox）。上游 shebang 上的 -w 开关无法随 env 形式保留（toybox env 不支持 -S，实测 rc=125），实测去掉 -w 前后 stdout/stderr 行为一致。lang_detect 只按扩展名与构建系统统计，无扩展名单文件脚本恒返回 other（无可统计源文件）且不嗅探 shebang，若按真实语言传 perl 会触发假 env_unsupported 终态并污染 result 草稿链。缺 locale 命令时 mencal 类 backtick 降级只产生 stderr 两行噪声，stdout 正确，测试应只断言 stdout。
+affected_scope: 一切单文件（无扩展名或脚本型）发行物的新增包任务；尤其 perl 系（仓库已有 340 个 system perl 包）与任何依赖 shebang 直执的 CLI 包；lang-preflight 门禁阶段。
+verification_cmd: cd /storage/Users/currentUser/tmp/mencal-3.0/w0src/mencal-3.0 && head -1 mencal && ./mencal -V; echo rc=$?
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: shebang-env-perl-and-lang-manual-review
+rec_description: 新增单文件脚本包时三步走。一 shebang：在 .work 里改首行为 #!/usr/bin/env perl（不要试 env -S 保 -w，toybox 不支持），track-edit add 登记后 refresh-patch --auto 产补丁并在 build() 加守卫断言（首行不符即 RuntimeError）防补丁静默失效假绿。二 lang-preflight：检测报 other 且 evidence 为无可统计源文件时，先用 file 与 head -1 人工复核定真实语言，再以 --lang other 取 rc=0 过门禁（真实语言证据进 notes/feedback/知识草稿三处披露），禁止按 perl 传参吃假 env_unsupported 终态（依据 device-facts §4.2 误判不构成终止依据）。三 测试与产物：build 只做安装树装配（system none），test_package 断言直执（证明 shebang 生效）加 -V 版本串；运行期噪声（缺 locale 等）只断言 stdout 不断言 stderr 为空；测试临时目录走 TMPDIR 链而非 PWD（否则落进工作区污染提交面）。
+rec_command: conan create /storage/Users/currentUser/ws/worktrees/mencal-3.0/archives/m/mencal/3.0 -pr:h=/storage/Users/currentUser/ws/worktrees/mencal-3.0/ci/conan/profiles/ohos-aarch64 -pr:b=/storage/Users/currentUser/ws/worktrees/mencal-3.0/ci/conan/profiles/ohos-aarch64 --build=missing
+rec_auto_fix: false
+rec_impl:               impl-name                   # 内置实现名 (见 DESIGN §5)
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:
+fallback_description:
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:
+forbid_1_reason:
+forbid_1_consequence:
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E684-draft-DACA.md
+last_updated: 2026-09-23
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: DACA

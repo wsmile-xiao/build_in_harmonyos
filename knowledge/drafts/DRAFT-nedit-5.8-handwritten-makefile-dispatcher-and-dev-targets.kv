@@ -1,0 +1,126 @@
+# ═══ Draft knowledge entry — 手写 makefile 的"分发器陷阱"与开发者专用目标边界 ═══
+# Timestamp: 2026-09-20
+# Software: nedit 5.8
+# Gate: G2 (conan create)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-nedit-5.8-handwritten-makefile-dispatcher-and-dev-targets
+trigger_tool:           make|conan|clang
+phase:                  build|install
+error_signature:        error while loading shared libraries: libXm\.so\.4|
+                         source/nedit -V|\@source/nedit|make\[1\]: \*\*\* .*Error|
+                         pod2man: not found|This make file is intended for
+                         NEdit developers only|no rule to make target `check'
+severity:               2
+category:               build-system|makefile|dev-target-boundary|portability
+match_keywords:         .DEFAULT, dispatcher Makefile, platform makefile,
+                         makefiles/Makefile.linux, Makefile.common, sub-make,
+                         libNUtil.a, libXlt.a, libXmL.a, target nedit nc,
+                         rpath, LD_LIBRARY_PATH, doc/Makefile developers only,
+                         pod2man, setext, faq.xsl, nedit.man, nc.man,
+                         no check target, hand-written makefile
+
+title:                  手写 makefile 项目的"分发器陷阱"：顶层 make 的最后一步是
+                        执行刚链接出来的二进制；以及"上游默认目标"与"开发者专用
+                        目标"的边界该怎么判
+
+root_cause: >
+  nedit 没有 autotools/CMake，只有一套手写 makefile：顶层 Makefile 是
+  .DEFAULT 分发器 —— 它把 makefiles/Makefile.<平台> 拷进 util/、Xlt/、
+  Microline/XmL/、source/，跑四次子 make，然后**最后一行**是 @source/nedit -V，
+  即执行刚刚链接出来的二进制。在 conan create 里这一行必然失败：新链接的
+  nedit 的 DT_NEEDED 是 Conan 缓存里的 libXm.so.4，既没有 rpath 也没有
+  LD_LIBRARY_PATH，加载器会以 "error while loading shared libraries" 终止，
+  整轮构建在"已经编完"之后才倒下，报错点离真正的起因很远。同样的仓库里还存在
+  另外两类目标，混在一起看很容易全跑或全不跑：(a) 交付物必需
+  （bin/nedit、bin/nedit-nc、share/man 的 nedit.1/nedit-nc.1）；
+  (b) 开发者专用（doc/Makefile 首行自述 "This make file is intended for NEdit
+  developers only"，doc/ 下的 setext/faq 目标需要 perl / XSLT 处理器）；
+  (c) 上游根本不存在（五个 makefile 里没有任何 check / test / ctest 目标）。
+affected_scope: >
+  所有"手写 makefile + 顶层分发器"的项目（Microline/Xlt 血统的编辑器、老 X11
+  工具），以及任何"上游默认 make 目标里夹带一次执行自身产物"的仓库；也包括
+  "把上游所有 make 目标一网打尽"的移植思路 —— 它既会踩到分发器陷阱，也会为了
+  文档去拉 perl/pod2man/texinfo 这类与交付物无关的工具链依赖。
+verification_cmd: >
+  grep -n '@source/' Makefile makefiles/Makefile.*
+  grep -n 'DEFAULT\|^[a-z]*:' Makefile
+  grep -rn '^check\|^test\|ctest' source/Makefile.common util/Makefile.common
+    Xlt/Makefile.common Microline/XmL/Makefile.common
+  sed -n '1,20p' doc/Makefile
+rec_priority:           1
+rec_approach:           drive-sub-makes-directly-and-classify-every-target
+rec_description: >
+  三步。(a) 先判定顶层 Makefile 是"真构建"还是"分发器"：如果是分发器，只复刻它
+  的前半段（把平台 makefile 放进子目录），然后按依赖顺序直接驱动子 make
+  （util → Xlt → Microline/XmL → source；前三个产出静态库，第四个链接它们），
+  逐个给出明确 target，而不是依赖顶层默认目标。复刻时用**拷贝**而非符号链接：
+  上游用 ln -s，Windows 与 HMDFS 上符号链接的权限语义都不友好，拷贝是等价的。
+  (b) 上游把 CC/AR/CFLAGS/ARFLAGS/LIBS 都用 `=` 赋值（不是 `?=`），make 的
+  命令行赋值优先级高于文件内赋值，所以这些变量可以在 make 调用行上直接覆盖，
+  不必改任何上游文件 —— 这同时解决了上游写死的 cc/ar 与 /usr/X11R6 路径。
+  (c) 给每个目标分类后再决定跑不跑：交付物必需 → 跑；开发者专用 → 显式调用
+  （本包为了 share/man 跑了 `make -C doc man VERSION=...`，并接受 pod2man 这一
+  额外工具依赖）或明确跳过并在 notes.md 里记录原因；上游不存在 → 绝不凭空发明，
+  manifest 里如实写 upstream_tests.exists=false / test_count=0。
+rec_command: >
+  for sub, target in (("util","libNUtil.a"), ("Xlt","libXlt.a"),
+                      ("Microline/XmL","libXmL.a"), ("source","nedit nc")):
+      self.run(f'cd "{src}/{sub}" && make -f Makefile.linux '
+               f'CC=... AR=... ARFLAGS=-urs CFLAGS=... LIBS=... -j1 {target}')
+rec_auto_fix:           false
+rec_impl:               recipe-side-build
+
+fallback_priority:      2
+fallback_approach:      patch-out-the-trailing-exec-line
+fallback_description: >
+  若某个项目的分发器结构复杂到无法安全复刻（例如四次子 make 之间有隐式顺序依赖
+  或生成文件传递），可以改打补丁：只删掉顶部 Makefile 里"执行自身产物"的那一行
+  （nedit 里就是 @source/nedit -V），其余原样使用。代价是仓库里多一个补丁，
+  且补丁锚点（那一行）随上游版本漂移；收益是完整复用上游的 make 编排逻辑，
+  包括它自己的顺序与生成规则。本包未采用，因为四次子 make 的顺序在 Makefile
+  里是显式且线性的，直接驱动更透明。
+fallback_command:       patch Makefile: remove line "@source/nedit -V"
+fallback_auto_fix:      true
+fallback_impl:          recipe-side-patch
+
+forbid_1_pattern:       顶层 make( <platform>| *\.DEFAULT)?$ 且未剥掉执行产物那一行
+forbid_1_reason:         顶层默认目标在构建末尾执行刚链接出来的二进制，此时它
+                           的 rpath/LD_LIBRARY_PATH 尚未指向 Conan 依赖目录。
+forbid_1_consequence:    构建在"已经编完"之后才失败，报错是加载器错误而非编译
+                           错误，极易误判为"链接参数不对"而浪费整轮 CI。
+forbid_2_pattern:        make -j\$\{?\(?nproc|make -j\$\(nproc\)|make -j[2-9]
+forbid_2_reason:         缺 -j1 的手写 makefile 在并行下经常因为隐式依赖（生成
+                           头文件、静态库顺序）竞态失败；E074 也记录了 jobserver
+                           FIFO 在 OHOS 上的问题。
+forbid_2_consequence:    随机、不可复现的构建失败，重跑可能过，无法归因。
+forbid_3_pattern:        把 doc/ 、faq 、html 等目标一并纳入默认构建
+forbid_3_reason:         这些目标需要 perl / pod2man / XSLT 处理器，与交付物
+                           无关；上游自己就把它们排除在默认构建外（"users may
+                           not have Perl installed"）。
+forbid_3_consequence:    为一个 .1 手册页把整条构建链绑死在 worker 的 perl 上，
+                           换 worker 就随机失败。
+forbid_4_pattern:        在没有 check/test 目标时凭空写 make check 或自己编造
+                           上游用例数
+forbid_4_reason:         上游五个 makefile 全部只有 all/*.a/nedit/nc/clean；
+                           rule4 要求声明的"上游实测 N"必须不小于评审方的朴素
+                           扫描值，编造会同时踩 rule4 与可信度。
+forbid_4_consequence:    上游根本没跑过的东西写进 manifest，属于虚假声明。
+
+principles:             P001
+similar_to:             DRAFT-unuran-1.12.0-configure-auxdir-triplet-patch-and-doc-subdir-make
+conflicts_with:
+prerequisite_of:        DRAFT-nedit-5.8-headless-smoke-test-for-motif-x11-apps
+
+doc_file:               knowledge/drafts/DRAFT-nedit-5.8-handwritten-makefile-dispatcher-and-dev-targets.md
+last_updated:           2026-09-20
+source_event:           archives/n/nedit/5.8
+
+authors:                2301_76770579
+source_pr:              11631
+source_commit:          e8f7c9b9e
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20

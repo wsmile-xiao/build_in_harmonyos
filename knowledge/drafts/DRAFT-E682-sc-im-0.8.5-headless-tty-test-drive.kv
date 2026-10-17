@@ -1,0 +1,137 @@
+#====================================================================
+# DRAFT-E682-sc-im-0.8.5-headless-tty-test-drive
+#   终端类程序无控制终端时的三处测试断点：freopen(/dev/tty) 致 rc=255 污染
+#   冒烟闸、toybox env 不支持 -S、valgrind 不在档 —— 非交互驱动优先 + 可选化补丁
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-E682-sc-im-0.8.5-headless-tty-test-drive
+trigger_tool:           make|conan create|conan-verify|bash
+phase:                  testing|build
+error_signature:        Bad file descriptor|
+                         exit\(-1\) after freopen\("/dev/tty"|
+                         Unknown option 'S'|
+                         valgrind.*not found|
+                         all \d+ of \d+ .* tests failed
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               testing, tty, pty, shell-compat, valgrind, ohos,
+                        upstream-tests, conan-verify, portability
+match_keywords:         控制终端, controlling terminal, /dev/tty, freopen, pty,
+                        pty.fork, headless, 无头, 255, exit -1, Bad file descriptor,
+                        env -S, toybox env, valgrind, memcheck, SKIP, assert.sh,
+                        --version 返回非零, L2 冒烟, nocurses, 管道驱动, run_all_tests
+title:                  终端类程序（ncurses/TUI）在无控制终端环境跑上游测试与冒烟闸的三处断点与处置次序：先修致命 /dev/tty、再补 shell 兼容、最后把不可得工具可选化并如实计 SKIP
+prescan_pattern:        freopen\s*\(\s*"/dev/tty"|#!/usr/bin/env -S |valgrind -v --log-file|
+                        assert_iffound_notcond
+prescan_globs:          src/*.c, src/*.h, tests/*.sh, src/*, Makefile, */Makefile
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             三层独立机制叠加，症状互不相似但都落在「上游按有 TTY、
+                        有 GNU 工具的桌面环境写测试」这一前提上：
+                        ① 致命 tty 假定（本条主症）。sc-im 的 read_stdin() 读完
+                        管道后无条件 `freopen("/dev/tty","rw",stdin)`，失败即
+                        `perror(NULL); exit(-1)`；nocurses 分支还有
+                        `f = fopen("/dev/tty","rw"); if (f==NULL) sc_error(...)`。
+                        无控制终端（conan create / conan-verify L2 / CI / 纯管道）
+                        下**每一次非交互运行**——--version、--help、管道命令——都
+                        rc=255，且 stderr 多一行 `Bad file descriptor`。两个后果：
+                        (a) conan-verify L2 与 CI L2 的 `--version`/`--help` 双失败
+                        → 冒烟闸 FAIL（sc-im 实测 scopen 同时因②失败 → tested=0）；
+                        (b) 上游 assert.sh 是**精确整串比对**，多出的杂散行让全部
+                        功能断言失配（补丁前实测 11 条功能断言全红）。
+                        ② shell 形态差。`/usr/bin/env -S` 是 coreutils 特性，OHOS
+                        的 /usr/bin/env 是 toybox（实测 rc=125 "Unknown option 'S'"）：
+                        run_all_tests.sh 的入口行与 src/scopen 的 shebang 都直接失效
+                        （scopen 安装后不可执行，L2 再失一分）。
+                        ③ 工具不在档。设备无 valgrind，`conan list valgrind* -r=ohpcd`
+                        0 条；上游每脚本 8 条 memcheck 断言 + 一条 `rm *_vallog`，
+                        缺席时功能断言因①失配、随后 `rm` 在 `set -e` 下提前退出，
+                        整套测试连 assert_end 摘要都打不出来（实测只有一串
+                        每行 grep 都报 `No such file or directory`（目标 *_vallog）然后 rc=1）。
+affected_scope:         所有 ncurses/TUI/终端交互类程序的 conan-verify L2、CI L2 与
+                        上游 assert.sh 精确比对测试（sc-im 0.8.5 实证；mdp/ired 同族
+                        见 similar_to）。凡「CI 里 --version 返回非零」的包应先查
+                        ①，凡「测试入口在设备上 rc=125」查②，凡「memcheck 断言全红」查③。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           headless-portability-patch-then-noninteractive-driver
+rec_description:        【处置次序：修致命 → 补 shell → 可选化并如实计数】
+                        第一步（决定性）：把「假定有控制终端」改成「没有就降级」。
+                          read_stdin() 中 freopen 失败由 `perror + exit(-1)` 改为
+                          `sc_debug(...) + clearerr(stdin) + put(quit_afterload,1) + return`；
+                          main() 的 nocurses 分支 f==NULL 时同样置 quit_afterload
+                          （否则下方 fgetws(..., f) 解引用 NULL）。要点：
+                          - 消息降级为 sc_debug：sc_error 在 nocurses 下写 stderr，
+                            会污染上游断言的输出契约（比对是整串的）；
+                          - 只改失败路径，有 TTY 时行为与上游逐字一致；
+                          - 收益：--version/--help/管道全部 rc=0，L2 闸恢复、
+                            上游断言在**纯管道（无 pty）**下即可通过。
+                        第二步：`#!/usr/bin/env -S bash -a` → `#!/usr/bin/env bash`
+                          （-a 是 allexport，对脚本无作用）；OHOS 上更彻底的写法是
+                          `#!/data/service/hnp/bin/bash`（见 device-facts §一.26）。
+                        第三步：不可得工具**可选化补丁**，绝不装作跑过：
+                          - VALGRIND_CMD 改为 `command -v valgrind` 探测，缺席置空
+                            （功能断言直接跑被测程序）；
+                          - 8 条 memcheck 断言包进 `if [ -n "$VALGRIND_CMD" ]`，
+                            else 分支打印 `SKIP[<suite>]` 行（后接 8 memcheck assertions）
+                            由驱动脚本按 SKIP 行计数 —— 不进 PASS；
+                          - `rm *_vallog` 加 `-f` 或存在性守卫，否则 `set -e` 提前退。
+                        第四步：驱动方式「非交互优先」。补丁后纯管道即可跑通
+                          （sc-im 实测 nopty 与 pty 两模式同分：返修第二轮后为
+                          PASS 71/FAIL 0/SKIP 20/NOT_RUN 9，返修前为 PASS 11/SKIP 80），
+                          pty 作为交叉核对留证即可；计数口径
+                          用断言调用数（grep -cE '^\s*(assert|assert_raises|assert_iffound_notcond)\b'，
+                          TOTAL = PASS+FAIL+SKIP+NOT_RUN 必须自洽。
+                        【铁律】缺工具的断言记 SKIP/NOT_RUN 并写技术原因，
+                        禁止把「文件不存在导致 grep 空结果」的空过计为 PASS
+                        （assert_iffound_notcond 对缺失文件恰好静默通过=假绿面）。
+rec_command:            复现 ①（补丁前形态，未打补丁源码）— 非 tty 下 --version 返回码
+                        SCIM_SRC=$HOME/tmp/sc-im-0.8.5/w0/fresh_orig   ※ 未打补丁源码
+                        ※ 复现 ②：设备 env 是否支持 -S
+                        /usr/bin/env -S bash -c 'echo ok'; echo "rc=$?"   ※ 期望 rc=125
+                        ※ 复现 ③：valgrind 在档与否
+                        conan list "valgrind*" -r=ohpcd | grep -c "valgrind/"
+                        ※ 修后复验（本任务驱动，两模式同分）
+                        SCIM_TEST_PTY=0 python3 $HOME/tmp/sc-im-0.8.5/run_upstream_tests.py
+                        SCIM_TEST_PTY=1 python3 $HOME/tmp/sc-im-0.8.5/run_upstream_tests.py
+rec_auto_fix:           false
+rec_impl:               manual-portability-patch + driver-counting
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       把.*rc=255.*(忽略|视为正常)|--version.*失败.*但.*不影响
+forbid_1_reason:         conan-verify L2 与 CI L2 直接按 rc==0 判定，双失败即
+                        tested=0 → 冒烟闸 FAIL；忽略等于把红闸当绿
+forbid_1_consequence:   采信轮 rc=1，无法进 finish；或 CI 冒烟告警连带审查质疑
+forbid_2_pattern:       grep.*没有输出.*即通过|文件不存在.*->.*PASS|空结果.*通过
+forbid_2_reason:         assert_iffound_notcond 对缺失 vallog 恰好静默通过，属假绿面；
+                        未执行的断言必须显式 SKIP 并计数
+forbid_2_consequence:   rule4 少报/谎报判定（审查以实测 N 对账）
+forbid_3_pattern:       装假 valgrind|伪造.*vallog|写个 stub 顶替 valgrind
+forbid_3_reason:         memcheck 断言本体是内存检查，伪造日志=伪造测试证据
+forbid_3_consequence:   数据造假，审查一票否决
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             DRAFT-E569-mdp-stdin-tty-freopen-pty-dual-channel（同族：freopen(/dev/tty) 失败致命；
+                        该条给 pty 双通道驱动法，本条给「改失败路径为降级」的移植补丁法——当失败面覆盖
+                        --version/冒烟闸时 pty 法救不了 conan-verify L2，必须改码）、
+                        DRAFT-ired-0.6-interactive-tty-wrapper-exclude-headless-l2（无头 CI 交互包装脚本挂起，
+                        属「必须排除出 L2」的另一处置分支）
+caused_by:              device-facts §一.16（无 /bin/bash、无 id）、§一.25/26（toybox timeout/sh 形态差）
+conflicts_with:
+prerequisite_of:        R51 上游测试三步法在终端类程序上的可执行性
+
+# ═══ 元数据 ═══
+verification_cmd:       SCIM_TEST_PTY=0 python3 $HOME/tmp/sc-im-0.8.5/run_upstream_tests.py
+                        ※ 期望 TOTAL=100 = PASS 71 + FAIL 0 + SKIP 20 + NOT_RUN 9
+                        （2026-09-26 返修第二轮替代验证后；返修前 11/0/80/9）
+doc_file:               knowledge/drafts/DRAFT-E682-sc-im-0.8.5-headless-tty-test-drive.md
+last_updated:           2026-09-26
+source_event:           sc-im 0.8.5 适配（任务卡 10412「测试需 pty 模拟 tty」风险处置）

@@ -1,0 +1,206 @@
+diff --git a/cmake/abseil-cpp.cmake b/cmake/abseil-cpp.cmake
+index bc08ff3..80f0508 100644
+--- a/cmake/abseil-cpp.cmake
++++ b/cmake/abseil-cpp.cmake
+@@ -40,6 +40,31 @@ if (NOT TARGET absl::strings)
+   message(FATAL_ERROR "Cannot find abseil-cpp dependency that's needed to build protobuf.\n")
+ endif()
+ 
++# The published Conan Abseil package intentionally omits test-only targets.
++# Build only the helper required by Protobuf's upstream tests from the pinned
++# source fetched by the recipe, while continuing to use packaged Abseil libs.
++if (protobuf_BUILD_TESTS AND NOT TARGET absl::scoped_mock_log)
++  set(_protobuf_test_absl_source_dir "${protobuf_SOURCE_DIR}/host-abseil")
++  if (EXISTS "${_protobuf_test_absl_source_dir}/absl/log/scoped_mock_log.cc")
++    add_library(protobuf_absl_scoped_mock_log STATIC
++      "${_protobuf_test_absl_source_dir}/absl/log/scoped_mock_log.cc")
++    target_include_directories(protobuf_absl_scoped_mock_log PRIVATE
++      "${_protobuf_test_absl_source_dir}")
++    target_compile_features(protobuf_absl_scoped_mock_log PRIVATE cxx_std_17)
++    target_link_libraries(protobuf_absl_scoped_mock_log PRIVATE
++      absl::config
++      absl::log_entry
++      absl::log_severity
++      absl::log_sink
++      absl::log_sink_registry
++      absl::raw_logging_internal
++      absl::strings
++      GTest::gmock
++      GTest::gtest)
++    add_library(absl::scoped_mock_log ALIAS protobuf_absl_scoped_mock_log)
++  endif()
++endif()
++
+ set(_protobuf_FIND_ABSL "if(NOT TARGET absl::strings)\n  find_package(absl CONFIG)\nendif()")
+ 
+ if (BUILD_SHARED_LIBS AND MSVC)
+@@ -90,7 +115,11 @@ else()
+     absl::type_traits
+     absl::utility
+   )
+-  set(protobuf_ABSL_USED_TEST_TARGETS
+-    absl::scoped_mock_log
+-  )
++  if (TARGET absl::scoped_mock_log)
++    set(protobuf_ABSL_USED_TEST_TARGETS
++      absl::scoped_mock_log
++    )
++  else()
++    set(protobuf_ABSL_USED_TEST_TARGETS)
++  endif()
+ endif ()
+diff --git a/cmake/gtest.cmake b/cmake/gtest.cmake
+index 9a31734..5e3d6c5 100644
+--- a/cmake/gtest.cmake
++++ b/cmake/gtest.cmake
+@@ -3,6 +3,15 @@ if (NOT TARGET GTest::gmock)
+     find_package(GTest CONFIG)
+   endif()
+ 
++  # The Conan recipe supplies the pinned Googletest source so cross builds do
++  # not depend on a separate, unpublished Conan test-framework package.
++  if (NOT GTest_FOUND AND protobuf_GTEST_SOURCE_DIR AND
++      EXISTS "${protobuf_GTEST_SOURCE_DIR}/CMakeLists.txt")
++    include(FetchContent)
++    FetchContent_Declare(googletest SOURCE_DIR "${protobuf_GTEST_SOURCE_DIR}")
++    FetchContent_MakeAvailable(googletest)
++  endif()
++
+   # Fallback to fetching Googletest from github if it's not found locally.
+   if (NOT GTest_FOUND AND NOT protobuf_LOCAL_DEPENDENCIES_ONLY)
+     include(${protobuf_SOURCE_DIR}/cmake/dependencies.cmake)
+diff --git a/cmake/protobuf-generate.cmake b/cmake/protobuf-generate.cmake
+index abe195f..c8f8175 100644
+--- a/cmake/protobuf-generate.cmake
++++ b/cmake/protobuf-generate.cmake
+@@ -83,9 +83,21 @@ function(protobuf_generate)
+     endforeach()
+   endif()
+ 
++  set(_protobuf_generate_protoc_dep ${protobuf_PROTOC_EXE})
++  set(_protobuf_generate_depends_explicit_only)
++  if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.27")
++    list(APPEND _protobuf_generate_depends_explicit_only DEPENDS_EXPLICIT_ONLY)
++  endif()
+   if(NOT protobuf_generate_PROTOC_EXE)
+-    # Default to using the CMake executable
+-    set(protobuf_generate_PROTOC_EXE protobuf::protoc)
++    if (protobuf_HOST_PROTOC)
++      # Cross builds must run a host protoc while still building the target
++      # protoc binary for installation on HarmonyOS.
++      set(protobuf_generate_PROTOC_EXE "${protobuf_HOST_PROTOC}")
++      set(_protobuf_generate_protoc_dep "${protobuf_HOST_PROTOC}")
++    else()
++      # Default to using the CMake executable
++      set(protobuf_generate_PROTOC_EXE protobuf::protoc)
++    endif()
+   endif()
+ 
+   foreach(DIR ${protobuf_generate_IMPORT_DIRS})
+@@ -152,9 +164,10 @@ function(protobuf_generate)
+       OUTPUT ${_generated_srcs}
+       COMMAND ${protobuf_generate_PROTOC_EXE}
+       ARGS ${protobuf_generate_PROTOC_OPTIONS} --${protobuf_generate_LANGUAGE}_out ${_plugin_options}:${protobuf_generate_PROTOC_OUT_DIR} ${_plugin} ${_protobuf_include_path} ${_abs_file}
+-      DEPENDS ${_abs_file} ${protobuf_PROTOC_EXE} ${protobuf_generate_DEPENDENCIES}
++      DEPENDS ${_abs_file} ${_protobuf_generate_protoc_dep} ${protobuf_generate_DEPENDENCIES}
+       COMMENT ${_comment}
+-      VERBATIM )
++      VERBATIM
++      ${_protobuf_generate_depends_explicit_only} )
+   endforeach()
+ 
+   set_source_files_properties(${_generated_srcs_all} PROPERTIES GENERATED TRUE)
+diff --git a/cmake/tests.cmake b/cmake/tests.cmake
+index 00a069b..da0e166 100644
+--- a/cmake/tests.cmake
++++ b/cmake/tests.cmake
+@@ -60,7 +60,10 @@ set(tests_files
+   ${stubs_test_files}
+ )
+ 
+-if(protobuf_ABSOLUTE_TEST_PLUGIN_PATH)
++if(CMAKE_SYSTEM_NAME STREQUAL "OHOS" OR CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS")
++  add_compile_options("-DGOOGLE_PROTOBUF_FAKE_PLUGIN_PATH=ResolvePluginPathForTest(\"fake_plugin\")")
++  add_compile_options("-DGOOGLE_PROTOBUF_TEST_PLUGIN_PATH=ResolvePluginPathForTest(\"test_plugin\")")
++elseif(protobuf_ABSOLUTE_TEST_PLUGIN_PATH)
+   add_compile_options(-DGOOGLE_PROTOBUF_FAKE_PLUGIN_PATH="$<TARGET_FILE:fake_plugin>")
+   add_compile_options(-DGOOGLE_PROTOBUF_TEST_PLUGIN_PATH="$<TARGET_FILE:test_plugin>")
+ endif()
+@@ -199,6 +202,13 @@ if (protobuf_BUILD_LIBUPB)
+   set(upb_test_proto_genfiles)
+   foreach(proto_file ${upb_test_protos_files} ${descriptor_proto_proto_srcs})
+     foreach(generator upb upbdefs upb_minitable)
++      if (protobuf_HOST_PLUGIN_DIR)
++        set(_protobuf_upb_plugin
++          "${protobuf_HOST_PLUGIN_DIR}/protoc-gen-${generator}.exe")
++      else()
++        set(_protobuf_upb_plugin
++          "$<TARGET_FILE:protobuf::protoc-gen-${generator}>")
++      endif()
+       protobuf_generate(
+         PROTOS ${proto_file}
+         LANGUAGE ${generator}
+@@ -206,8 +216,8 @@ if (protobuf_BUILD_LIBUPB)
+         OUT_VAR pb_generated_files
+         IMPORT_DIRS ${protobuf_SOURCE_DIR}/src
+         IMPORT_DIRS ${protobuf_SOURCE_DIR}
+-        PLUGIN protoc-gen-${generator}=$<TARGET_FILE:protobuf::protoc-gen-${generator}>
+-        DEPENDENCIES $<TARGET_FILE:protobuf::protoc-gen-${generator}>
++        PLUGIN protoc-gen-${generator}=${_protobuf_upb_plugin}
++        DEPENDENCIES ${_protobuf_upb_plugin}
+       )
+       set(upb_test_proto_genfiles ${upb_test_proto_genfiles} ${pb_generated_files})
+     endforeach()
+diff --git a/googletest/googletest/src/gtest-port.cc b/googletest/googletest/src/gtest-port.cc
+index 1038ad7..5f9a895 100644
+--- a/googletest/googletest/src/gtest-port.cc
++++ b/googletest/googletest/src/gtest-port.cc
+@@ -1129,7 +1129,13 @@ class CapturedStream {
+     if (!EndsWithPathSeparator(name_template))
+       name_template.push_back(GTEST_PATH_SEP_[0]);
+ #else
+-    name_template = "/tmp/";
++    // POSIX user shells may not provide a writable /tmp. Reuse testing::TempDir()
++    // so TEST_TMPDIR/TMPDIR supplied by the recipe are honored.
++    name_template = TempDir();
++    if (name_template.empty() ||
++        name_template[name_template.size() - 1] != GTEST_PATH_SEP_[0]) {
++      name_template.push_back(GTEST_PATH_SEP_[0]);
++    }
+ #endif
+     name_template.append("gtest_captured_stream.XXXXXX");
+ 
+diff --git a/src/google/protobuf/compiler/command_line_interface_unittest.cc b/src/google/protobuf/compiler/command_line_interface_unittest.cc
+index 8be7ef9..863226d 100644
+--- a/src/google/protobuf/compiler/command_line_interface_unittest.cc
++++ b/src/google/protobuf/compiler/command_line_interface_unittest.cc
+@@ -91,6 +91,20 @@ using google::protobuf::io::win32::write;
+ 
+ namespace {
+ 
++std::string ResolvePluginPathForTest(const std::string& plugin_path) {
++  if (plugin_path.empty() || plugin_path.find('/') != std::string::npos) {
++    return plugin_path;
++  }
++  const char* const prefixes[] = {"./", "./build/Release/"};
++  for (const char* prefix : prefixes) {
++    std::string candidate = absl::StrCat(prefix, plugin_path);
++    if (File::Exists(candidate)) {
++      return candidate;
++    }
++  }
++  return plugin_path;
++}
++
+ std::string CreatePluginArg() {
+   std::string plugin_path;
+ #ifdef GOOGLE_PROTOBUF_TEST_PLUGIN_PATH
+@@ -124,6 +138,8 @@ std::string CreatePluginArg() {
+   }
+ #endif
+ 
++  plugin_path = ResolvePluginPathForTest(plugin_path);
++
+   if (plugin_path.empty() || !File::Exists(plugin_path)) {
+     ABSL_LOG(ERROR)
+         << "Plugin executable not found.  Plugin tests are likely to fail. "

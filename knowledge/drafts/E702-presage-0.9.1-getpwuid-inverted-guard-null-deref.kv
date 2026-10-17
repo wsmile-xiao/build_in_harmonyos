@@ -1,0 +1,91 @@
+# E702 — 上游 ProfileManager::get_user_home_dir() getpwuid 判空反写 → OHOS 无 passwd 库必崩（SIGSEGV 非确定性表象）
+# Software: presage 0.9.1（源码级上游 bug；凡移植到无 passwd 数据库平台的同类代码同风险）
+# Status: DRAFT — same-stem .md/.kv pair（待审核 promote 为 E 条目；取号 E702 经 knowledge_id --claim 全池重扫）
+---
+id: E702
+title: ProfileManager::get_user_home_dir 把 `if (!my_passwd)` 写反——getpwuid() 返回 NULL（OHOS 无 passwd 库）时反而去解引用 my_passwd->pw_dir → ProfileManager 构造即 SIGSEGV；常规 Linux 因 getpwuid 命中走 else 分支而长期掩盖，表现为“单测 14/17 点漂移”的非确定性崩溃
+trigger_tool: make check / testRunner
+phase: test
+error_signature: 'Signal 11 \(core dumped\)|Segmentation fault.*TestRunner|FAIL: \w+TestRunner'
+severity: 3
+category: upstream-bug|null-deref|passwd|ohos|cppunit
+match_keywords: getpwuid, get_user_home_dir, ProfileManager, my_passwd, pw_dir, Signal 11, Segmentation fault, coreTestRunner, profileManagerTest, passwd, HOME, 非确定性
+prescan_pattern: 'Signal 11 \(core dumped\)|Segmentation fault|FAIL: \w*TestRunner'
+
+root_cause: |
+  src/lib/core/profileManager.cpp get_user_home_dir()（HAVE_PWD_H 分支）：
+
+      my_passwd = getpwuid (me);
+      if (!my_passwd) {                 /* ← 条件写反 */
+          /* got passwd for user */
+          result = my_passwd->pw_dir;   /* ← getpwuid 失败（NULL）时执行，空指针解引用 */
+      } else {
+          /* 读 $HOME */
+      }
+
+  注释本意是“拿到 passwd 才读 pw_dir”，条件却写成 `!my_passwd`。
+  - OpenHarmony：无 passwd 数据库（设备连 `id` 命令都没有，getpwuid 返 NULL）
+    → ProfileManager 一构造就 SIGSEGV → coreTestRunner/profileManagerTest
+    在 setUp 内崩溃。
+  - 常规 Linux：getpwuid(uid) 命中 → 走 else 读 $HOME → 永远不触发，上游与
+    Debian 打包测试全部绿灯——平台差异把上游 bug 藏到移植才暴露。
+  - 表象迷惑性：完整 runner 套件里崩溃点看似 14/17 点“漂移”，实为静态注册序
+    （suggestion5+prediction4+selector4+configuration1=14 → profileTest 起点）
+    与手工环境缺 srcdir（ProfileTest::setUp 里 `getenv("srcdir")` 为 NULL 的
+    std::string(NULL) 另一处 UB，automake check-TESTS 会 export srcdir 所以
+    make check 下不出现）叠加，不是真正的非确定性。
+affected_scope: 一切移植到无 passwd 库平台（OHOS/HarmonyOS 容器类）且按
+  “getpwuid 优先、$HOME 兜底”取 home 的 C/C++ 代码；presage 所有 ProfileManager
+  构造点（单测 setUp、presage_new 运行时）。
+verification_cmd: |
+  # 源码层（命中即本条）
+  grep -n "if (!my_passwd)" <src>/src/lib/core/profileManager.cpp
+  # 平台层：getpwuid 是否必 NULL
+  python3 -c "import pwd,os;
+  try:
+      pwd.getpwuid(os.getuid()); print('passwd OK')
+  except KeyError:
+      print('NO PASSWD ENTRY -> getpwuid NULL (本条命中面)')"
+  # 现象层（presage 实例）
+  grep -n "Signal 11" "$HOME/tmp/presage-0.9.1/w0/native-build.log"
+
+rec_approach: fix-inverted-guard
+rec_priority: 1
+rec_description: |
+  源码补丁把条件纠正为 `if (my_passwd)`（删 `!`）：拿到 passwd 读 pw_dir，
+  NULL 时正确落到既有 $HOME 兜底分支（该分支本已存在且注释写明用途）。
+  一行补丁，无平台宏、无行为面扩大；presage 实测补丁后 coreTestRunner 31/31、
+  ProfileManagerTest 2/2、make check 9 单元全绿。
+rec_command: |
+  # presage 补丁面（refresh-patch 两面已登记）
+  sed -n '231,240p' "$HOME/ws/tmp/builds/presage-0.9.1.work/src/lib/core/profileManager.cpp"
+  grep -n "patch_file" "$HOME/ws/worktrees/presage-0.9.1/archives/p/presage/0.9.1/conandata.yml"
+rec_auto_fix: true
+rec_impl: source-patch
+
+fallback_priority: 2
+fallback_approach: ensure-passwd-branch-fallback
+fallback_description: 不可改源码时的兜底：保证进程环境里 HOME 一定有值且分支可达（仍无法绕开 `!my_passwd` 空指针——该分支必崩，兜底仅在能注入 passwd 模拟时可行，如 LD_PRELOAD/getpwuid shim；工程量大、仅作记录）。
+fallback_auto_fix: false
+fallback_impl: manual
+
+forbid_1_pattern: --host=|--build=
+forbid_1_reason: 用交叉编译参数跳过运行期检查不触碰 getpwuid 逻辑，崩溃照旧；且会连带跳过全部 AC_RUN_IFELSE 检测（E011 forbid 同款理由）。
+forbid_1_consequence: 假定位 + configure 检测面丢失，编译期级联错误。
+
+principles: P004, P006
+caused_by:
+similar_to: E011, E694
+conflicts_with:
+prerequisite_of:
+
+doc_file: drafts/E702-presage-0.9.1-getpwuid-inverted-guard-null-deref.md
+last_updated: 2026-09-24
+source_event: presage 0.9.1（任务卡 9711，feat/presage-0.9.1）
+
+authors: agent-session-de4f7e68 (presage-0.9.1)
+source_pr: pending
+metrics_success_count: 0
+metrics_fail_count: 0
+metrics_confidence: 0.0
+metrics_last_used:

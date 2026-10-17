@@ -1,0 +1,161 @@
+#====================================================================
+# DRAFT — Rust 老锁文件（2015–2019 era Cargo.lock）在 OHOS/modern rustc 上的
+#         组合修复，外加「未签名 libstd 在 loader 加载阶段被拒」盲区
+# 触发事件: wagyu 0.6.1（Rust workspace，2019 年锁文件）HarmonyOS PC 适配
+# 日期: 2026-09-23
+# Reserved entry id: E674（tools/knowledge_id.py --claim，任务私有登记）
+#
+# 与既有条目的关系（增量说明）:
+#   DRAFT-below-ohos-unsigned-rust-toolchain = 预编译工具链 bin 与
+#     librustc_driver 的 exec/dlopen 签名 + cargo 运行库/CA —— 本条**不重复**，
+#     本条增量是它的三个盲区：① rustlib 里的 **libstd-*.so**（host 侧 proc-macro
+#     测试 harness 动态链接它）未签名时 loader 报的不是 Permission denied，
+#     而是误导性的 "Error loading shared library"（文件明明在 LD_LIBRARY_PATH
+#     里且可读，会一路查错到路径配置）；② 2019 锁文件依赖族 × modern rustc ×
+#     ohos 目标的四连编译错（libc/getrandom/rustc-serialize/老 gcc crate）；
+#     ③ 同名 tag/branch 取源陷阱与 bottle revision 漂移 404。
+#   E105/E154 = rustup 不识别 HarmonyOS（工具链来源事实）
+#   E318/E509 = 其它未签名 ELF / harmonybrew OpenSSL 场景
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     wagyu-0.6.1-rust-legacy-lockfile-ohos-port
+trigger_tool:           cargo|rustc|conan|binary-sign-tool
+phase:                  compilation|testing
+error_signature:        'error\[E0425\].*cannot find type .c_char.|error\[E0573\].*__SIZEOF_PTHREAD|error\[E0310\].*may not live long enough|compile_error!. *target is not supported, for more information see: https://docs.rs/getrandom|docs\.rs/getrandom/#unsupported-targets|Failed to find tool\. Is `cc` installed\?|Error loading shared library libstd-[0-9a-f]+\.so|Permission denied.*bin/cargo'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               rust, cargo, lockfile, ohos, portability, toolchain, unsigned-elf, getrandom
+match_keywords:         Cargo.lock, libc 0.2.61, libc 0.2.189, cc 1.0.40, getrandom 0.1.9, rustc-serialize 0.3.24, rust-crypto, gcc-0.3.55, field_derive, proc-macro, libstd, rustlib, dynamic std, E0425, E0310, E0573, unsupported-targets, Failed to find tool, Error loading shared library, rust-toolchain/1.97.1, binary-sign-tool, harmonybrew bottle, archive/refs/tags, rsproxy
+title:                  Rust 老锁文件（2019）在 OHOS/modern rustc 上的组合修复：libc/cc 锁 bump + getrandom 0.1 registry 补丁 + rustc-serialize Cow 'static + 老 gcc crate 的通用 CC；未签名 libstd 让 host 侧 proc-macro 测试 harness 报误导性 "Error loading shared library"
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             四个互相独立、会依次暴露的编译期问题，全部源于「2019 年锁定的
+                        依赖族」遇上「modern rustc + aarch64-unknown-linux-ohos 目标」：
+                        (1) libc 0.2.61 没有 target_os=ohos 分支，类型/常量定义整段
+                        不参与编译，报 662 个 E0425/E0573（c_char/c_ulong 在 crate
+                        root 找不到）——必须在 Cargo.lock 内 bump（0.2.x semver 兼容，
+                        最低 0.2.13x 起支持 ohos）；同批把 cc 1.0.40→1.0.41。
+                        (2) getrandom 0.1.x（rand 0.7 传递依赖）cfg_if 目标分支没有
+                        ohos，直接 compile_error! "target is not supported"；
+                        **0.1 系列（最高 0.1.14）至今没有 ohos 支持，bump 无解**，
+                        升 rand 0.8 又牵动 API——正解是 cargo fetch 之后对
+                        registry 解包源加 target_os="ohos"（7 处目标门，走 linux 的
+                        syscall(SYS_getrandom) 路径），锚点缺失即硬失败。
+                        (3) rustc-serialize 0.3.24 的 `impl Decodable for Cow<'a, T>`
+                        在 modern rustc 下 E0310（0.3.25 仍未修，rust-crypto 0.2.36
+                        传递依赖无法绕开）——impl 头补 `+ 'static` 一行。
+                        (4) rust-crypto 的 build script 用老 gcc-0.3.55，**不认
+                        CC_<target> 环境命名**只找裸名 cc——host==target==ohos 时
+                        把通用 CC/CXX/AR/RANLIB 也指向 OHOS SDK clang 即可。
+                        测试期的第五个坑（与 above 正交）：官方 dist 的
+                        rustlib/*/lib/libstd-*.so 无 code signature，OHOS loader
+                        在 **dlopen 加载阶段**拒绝它——但报错是
+                        "Error loading shared library libstd-*.so" + 一串
+                        symbol not found，**文件明明在 LD_LIBRARY_PATH 里且可读**，
+                        极易误判成路径/权限问题。只有 host 侧 proc-macro crate
+                        （如 zcash 内嵌 field_derive）的测试 harness 动态链接
+                        libstd 才会踩到；目标侧产物（bin、各 crate harness）静态
+                        链接 std，NEEDED 只有 libc.so。
+affected_scope:         所有上游锁文件停留在 2015–2019 年的 Rust 项目在 OHOS 的移植
+                        （Cargo.lock v1 格式 + rand 0.3–0.7 混锁 + rust-crypto/
+                        rustc-serialize/failure 依赖族）；任何 workspace 内含
+                        in-tree proc-macro crate 且要跑 cargo test 的配方
+                        （外部 proc-macro 依赖不会被 --workspace 测到，故 below
+                        未踩到 libstd 盲区）；同名 tag/branch 仓库的 W0 取源。
+verification_cmd: |
+  # 1) 锁 bump 是否被 --locked 接受且不重写锁（保持 v1 格式最小 diff）
+  cargo build --release --target aarch64-unknown-linux-ohos --locked && head -3 Cargo.lock
+  # 2) registry 补丁锚点是否真打上（任一缺失必须失败、不许静默）
+  grep -c 'target_os = "ohos"' $CARGO_HOME/registry/src/*/getrandom-0.1.9/src/{lib.rs,util_libc.rs}
+  grep -n "for Cow<'a, T> where" $CARGO_HOME/registry/src/*/rustc-serialize-0.3.24/src/serialize.rs
+  grep -n "Decodable for Cow<'a, T> +\|+ 'static> Decodable for Cow" $CARGO_HOME/registry/src/*/rustc-serialize-0.3.24/src/serialize.rs
+  # 3) libstd 签名（loader 盲区定案判据）
+  grep -ac codesign <toolchain>/lib/rustlib/aarch64-unknown-linux-ohos/lib/libstd-*.so   # >0
+  # 4) 上游测试全量（608 = 源码宏数 = 框架注册数）
+  cargo test --release --target aarch64-unknown-linux-ohos --workspace --locked 2>&1 | grep -c "^test result: ok"
+  # 5) 取源必须走 tag archive（同名 branch 遮蔽）
+  git ls-remote https://github.com/howardwu/wagyu.git refs/tags/v0.6.1 refs/heads/v0.6.1
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           bump-lock-plus-registry-patches-plus-sign-rustlib-dylibs
+rec_description:        (1) patches/0001-Cargo.lock.patch：只 bump libc/cc 两个包，
+                        **保持原锁格式**手改（v1 锁 20 行改动、diff ±40 行；交给 cargo update 会
+                        把整文件重写成 v4 格式，diff 上千行且 --locked 行为要重新
+                        验证），metadata checksum 用 registry/cache 里 .crate 的
+                        sha256。(2) 配方 build() 在 cargo fetch（fetch 即解包进
+                        registry/src）之后、编译之前打 registry 补丁：getrandom
+                        0.1.9 七处目标门 + rustc-serialize Cow 一处，全部以「锚点
+                        找不到就抛错」实现，杜绝静默未生效；补丁落在**构建目录内
+                        的 CARGO_HOME**，不污染共享 ~/.cargo、不碰 .crate（其
+                        sha256 受锁文件校验）。(3) 老 gcc-0.3.55 系 build script：
+                        通用 CC/CXX/AR/RANLIB 与 CC_<target> 双保险都指 OHOS SDK
+                        clang。(4) 签名工具链除 cargo/rustc/librustc_driver 外，
+                        **镜像 rustlib：目录建实、非 .so 软链、`*.so` 复制自签**
+                        （本类 dist 通常只有 libstd 一个 .so），否则 host 侧
+                        proc-macro 测试 harness 第一个套件 exit 127。(5) 上游
+                        测试在 build() 内强制执行并逐套件解析 running N/test
+                        result，非 PASS 即失败；test_package A 组用「真实生成
+                        钱包」端到端压 getrandom 补丁，B 组断言 AArch64/musl
+                        loader/code signature/产物完整性。
+rec_command:            conan create archives/w/wagyu/0.6.1 -pr:h=./ci/conan/profiles/ohos-aarch64 -pr:b=./ci/conan/profiles/ohos-aarch64
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      use-presigned-harmonybrew-rust-bottle
+fallback_description:   若签名工具缺失或 rust-toolchain 包不可得：改用 harmonybrew
+                        预签名 rust bottle（解包即执行），但仍要处理其 bin/cargo 是
+                        指向 Cellar 绝对路径的 sh wrapper（本地 rc=127，用 cargo.real）
+                        与 openssl/zlib 运行库 LD_LIBRARY_PATH。**bottle pin 必须当日
+                        实测可达**——仓库历史 pin（rust-1.97.1、zlib-ng-compat-2.3.3_1、
+                        ca-certificates-2026-08-13、openssl@3-3.6.3）已随 revision
+                        漂移全线 404（2026-09-23 实测），照抄即断链。
+fallback_command:       curl -sS -L -r 0-99 -o /dev/null -w '%{http_code}\n' https://harmonybrew.atomgit.com/bottles/zlib-ng-compat-2.3.3_2.arm64_ohos.bottle.tar.gz
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+forbid_1_pattern:       cargo update -p getrandom|cargo update -p libc --precise 0\.2\.1[0-3][0-9]$|--breaking
+forbid_1_reason:        getrandom 0.1 系列没有 ohos 支持，update 到 0.1.14 也无效；
+                        整表 cargo update 会把 158 个 2019 依赖全拉到现代版，diff 面
+                        与回归风险失控。只 bump 实测需要的包、其余保持锁定。
+forbid_1_consequence:   要么问题依旧（getrandom），要么 lock 全量重写引入新的不兼容，
+                        W4 判改动面过大返修。
+
+forbid_2_pattern:       git clone --branch v?[0-9.]+ .*--depth
+forbid_2_reason:        上游可同时存在同名 tag 与 branch（wagyu：tags/v0.6.1=9d2bd3a
+                        发行内容 vs heads/v0.6.1=70250ad），clone --branch 优先命中
+                        branch，取到的树与发行内容逐文件不同且毫无告警。
+forbid_2_consequence:   配方 sha256、测试清点与发行物对不上，W0 版本实核形同虚设。
+
+forbid_3_pattern:       LD_LIBRARY_PATH.*toolchain.*lib\b.*# 只加 toolchain/lib 就完事|chmod \+x.*libstd
+forbid_3_reason:        loader 报的 "Error loading shared library libstd-*.so"
+                        （文件可读且在搜索路径里）的根因是**缺 code signature**，
+                        不是路径/mode；chmod 与重排 LD_LIBRARY_PATH 都无效。
+forbid_3_consequence:   在错误方向上反复调路径配置，每轮都换一种 symbol not found
+                        继续失败。
+
+principles:             P013,P014
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-below-ohos-unsigned-rust-toolchain,E105,E154,E318,E509
+conflicts_with:         []
+prerequisite_of:        []
+
+prescan_pattern:        name = "rustc-serialize"|#\[derive\(.*Fail\)\]
+doc_file:               drafts/wagyu-0.6.1-rust-legacy-lockfile-ohos-port.md
+last_updated:           2026-09-23
+source_event:           wagyu 0.6.1 HarmonyOS PC 适配（任务卡 11791，探索轮 4 次迭代 + conan create 试跑收敛）
+authors:                Awstme <noreply@gitcode.com>
+source_pr:              pending
+source_commit:          pending
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-23
+
+draft:                  true
+contributor_id:         4AE4

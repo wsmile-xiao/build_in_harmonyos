@@ -1,0 +1,134 @@
+#====================================================================
+# DRAFT-onednn-3.12.1-musl-sysconf-cache-keys-unavailable
+# OHOS musl 的 confname 表里没有 glibc 的任何一个 `_SC_LEVEL*` 缓存键，
+# 真机也没有 /sys/devices/system/cpu/cpuN/cache 拓扑目录：缓存容量/行大的
+# 两级数据源同时失效——探测代码在编译期就报 use of undeclared identifier，
+# 就算把宏名伪造出来，运行期 sysconf 也只返回 -1/EINVAL。
+# 触发事件: onednn 3.12.1 HarmonyOS PC 适配（分支 feat/onednn-3.12.1，
+#           third_party/xbyak_aarch64/src/util_impl_linux.h）
+#====================================================================
+id:                     DRAFT-onednn-3.12.1-musl-sysconf-cache-keys-unavailable
+draft:                  true
+contributor_id:         iKalous_OscarP
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+trigger_tool:           clang|cmake|make|runtime
+phase:                  compilation|runtime
+error_signature:        error: use of undeclared identifier '_SC_LEVEL[0-9_A-Z]*'|
+                         use of undeclared identifier '_SC_LEVEL1_ICACHE_SIZE'|
+                         use of undeclared identifier '_SC_LEVEL1_DCACHE_LINESIZE'|
+                         sysconf\(_SC_LEVEL.*returned -1|EINVAL.*sysconf
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               libc, musl, headers, portability, ohos
+match_keywords:         sysconf, _SC_LEVEL1_ICACHE_SIZE, _SC_LEVEL1_DCACHE_SIZE,
+                         _SC_LEVEL2_CACHE_SIZE, _SC_LEVEL3_CACHE_SIZE,
+                         _SC_LEVEL1_DCACHE_LINESIZE, confname, cache size,
+                         cache line size, cache topology, setCacheHierarchy,
+                         readCacheInfoFromSysDevice, /sys/devices/system/cpu,
+                         xbyak_aarch64, JIT tile blocking, tiling
+title:                  OHOS musl 既不定义任何 `_SC_LEVEL*` 缓存 sysconf 键、真机也没有
+                         sysfs cache 拓扑目录：缓存探测的两级数据源同时不存在，
+                         缺宏名是编译期错误而伪造宏值会静默变成 -1/EINVAL
+
+root_cause: >
+  glibc 在 <unistd.h> 的 confname 枚举里提供 `_SC_LEVEL1_ICACHE_SIZE` /
+  `_SC_LEVEL1_DCACHE_SIZE` / `_SC_LEVEL2_CACHE_SIZE` / `_SC_LEVEL3_CACHE_SIZE` /
+  `_SC_LEVEL1_DCACHE_LINESIZE` 等缓存键，OHOS 的 musl 只有 141 个 `_SC_*` 定义
+  （编号连续到 248），其中 0 个 `_SC_LEVEL*`。因此上游"读缓存层级"的代码在 OHOS
+  上是**编译期**失败（宏名不存在），而不是运行期返回 0/-1；同时真机 /sys 下没有
+  cpuN/cache 子目录，所以"先 sysfs 后 sysconf"的两级探测两级都拿不到数据，
+  只剩常量兜底这一条路。危险点在于"补 `#define _SC_LEVEL1_ICACHE_SIZE 190`"
+  这类看似最小改动的做法：musl 的 sysconf() 对未知键统一返回 -1 并置
+  errno=EINVAL，缓存容量于是变成 -1 并被下游当作 size_t/块大小参与运算，
+  从显式编译错误降级为隐式运行期错值。
+affected_scope: >
+  任何在 C/C++ 源码里用 glibc 专有 `_SC_LEVEL*` 键探测缓存容量或缓存行大的库：
+  本仓 main 里已有两个独立受害语料——oneDNN 的 third_party/xbyak_aarch64
+  （setCacheHierarchy 的 sysconf 兜底分支，archives/o/onednn/3.13 与 3.12.1）
+  与 USD 的 pxr/base/arch/assumptions.cpp（Arch_ObtainCacheLineSize，
+  archives/p/pxr-vt/26.08/patches/0001-arch-fixes-for-ohos.patch）。
+  同类风险面：JIT/数值库的分块与预取参数、内存分配器的行对齐、
+  以及任何 `sysconf(_SC_LEVEL*_CACHE_SIZE)` 的移植代码。
+verification_cmd: >
+  S=$HOME/.harmonybrew/opt/ohos-sdk@26.0.0.18/native/sysroot;
+  grep -c '_SC_LEVEL' $S/usr/include/unistd.h
+  grep -rc '_SC_LEVEL1_ICACHE_SIZE' $S/usr/include | grep -v ':0$' | wc -l
+  ls -d /sys/devices/system/cpu/cpu*/cache 2>/dev/null | wc -l
+  printf '#include <unistd.h>\nint main(void){return (int)sysconf(_SC_LEVEL1_ICACHE_SIZE);}\n' > /tmp/neg.c;
+  $HOME/.harmonybrew/opt/ohos-sdk@26.0.0.18/native/llvm/bin/clang
+  --target=aarch64-linux-ohos --sysroot=$S -c /tmp/neg.c -o /tmp/neg.o
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:         ifdef-presence-guard-constant
+rec_description: >
+  给探测点加**宏存在性**守卫而不是替换调用点：
+  `#ifdef _SC_LEVEL1_DCACHE_LINESIZE` 保留 glibc/Linux 原路径逐字不变，
+  `#else` 返回该平台实测常量（行大 64、L1i/L1d 32KiB、L2 256KiB、L3 交给
+  上层字典/sysfs 分支）。补丁是上游可提交形态，跨平台语义零退化；
+  pxr-vt 26.08 的 0001 补丁就是这个写法（实测通过上游套件）。
+rec_command: >
+  --- a/pxr/base/arch/assumptions.cpp
+  +++ b/pxr/base/arch/assumptions.cpp
+  +#ifdef _SC_LEVEL1_DCACHE_LINESIZE
+       return sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
+  +#else
+  +    return 64;
+  +#endif
+rec_auto_fix:           false
+rec_impl:               patch
+
+fallback_priority:      2
+fallback_approach:      recipe-replace-in-file
+fallback_description: >
+  无法（或不值得）往上游提补丁时，在 Conan 配方 source() 里用 replace_in_file
+  把 sysconf 兜底分支那 4 行整体换成常量（archives/o/onednn/3.13 已合入做法，
+  3.12.1 沿用同一份上下文，逐字命中）。代价：这段代码在非 OHOS 平台也不再读
+  真实缓存容量，属于"只在 OHOS 构建产物里成立"的降级，必须在 notes.md 与
+  manifest.yaml 的 knowledge_gained 里写明，且不要把它伪装成可上游化的修复。
+fallback_command: >
+  replace_in_file(self, "third_party/xbyak_aarch64/src/util_impl_linux.h",
+  "cacheInfo_.levelCache[0].size[0] = sysconf(_SC_LEVEL1_ICACHE_SIZE); ...",
+  "cacheInfo_.levelCache[0].size[0] = 32 * 1024; ...", strict=False)
+fallback_auto_fix:      false
+fallback_impl:          source-patch-in-recipe
+
+forbid_1_pattern:       #define\s+_SC_LEVEL[0-9_A-Z]*\s+[0-9]+
+forbid_1_reason:        宏补上后编译期错误消失，但 OHOS musl 的 sysconf() 不认识该键：
+                         实测返回 -1 且 errno=22(EINVAL)，缓存容量以 -1 进入分块运算。
+forbid_1_consequence:   从"编不过"退化为"跑得出但结果错/尺寸下溢"，最难排查的一类；
+                         CI 只会看到测试变慢或崩溃，看不到根因。
+forbid_2_pattern:       ONEDNN_JIT=OFF|DNNL_JIT=OFF|ONEDNN_BUILD_TESTS=OFF
+forbid_2_reason:        关掉 JIT 或关掉测试来绕开缓存探测分支。
+forbid_2_consequence:   探测分支所在的 aarch64 JIT 代码不再被编译/执行，rule4 少报、
+                         rule8/9 新增不足，同时掩盖了真实平台缺陷。
+forbid_3_pattern:       /sys/devices/system/cpu/cpu0/cache
+forbid_3_reason:        把 sysfs cache 拓扑当成 OHOS 上的替代数据源。
+forbid_3_consequence:   真机 cpu0..cpuN 下 0 个 cache 子目录（ls -d 计数 0），
+                         改读 sysfs 的补丁在本平台同样拿不到数据，白改一轮。
+
+principles:             P001
+causes:
+similar_to:             E036, E465
+conflicts_with:
+prerequisite_of:
+boundary_note: >
+  E036 是 Python sysconfig.get_platform() 把含空格的 HongMeng 内核串拼进路径，
+  E465 是 ctypes/dlopen 被 worker loader 拒载，两者都只在"平台不提供预期的
+  元数据接口"这一表层与本片类似；二者的 error_signature 与 root_cause 都不涉及
+  confname/_SC_* 宏的存在性（可执行反证见 .md 的查重段）。
+
+doc_file:               knowledge/drafts/DRAFT-onednn-3.12.1-musl-sysconf-cache-keys-unavailable.md
+last_updated:           2026-09-20
+source_event:           archives/o/onednn/3.12.1
+
+authors:                iKalous_OscarP
+source_pr:
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:

@@ -1,41 +1,56 @@
 # nghttp3 1.15.0 适配笔记
 
 ## 编译环境
-- 构建系统: {cmake|autotools|makefile|meson|custom}
-- 编译日期: {2026-04-30}
-- 编译器: clang/clang++
-- 状态: {published|built|failed}
+- 构建系统: cmake
+- 编译日期: 2026-08-07
+- 编译器: clang/clang++ (15.0.4)
+- 状态: published
 
 ## 编译步骤
 
-{用文字描述实际编译步骤，包括关键的 configure/cmake 命令}
+```bash
+cd $BUILD_SRC_DIR
+mkdir -p build && cd build
+cmake .. -DCMAKE_INSTALL_PREFIX=$DEFAULT_PREFIX -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON
+make -j2
+make install DESTDIR=$TEST_PREFIX  # staging
+ctest --output-on-failure  # tests
+make install  # actual install
+```
 
 ## 遇到的问题与解决方案
 
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
-{按需添加行}
+| 1 | CMake warnings "System is unknown to cmake" | HarmonyOS not recognized by CMake platform detection | Non-fatal warning, CMake still configures correctly using clang compiler |
+| 2 | Test target `main` not built by default | Tests use `EXCLUDE_FROM_ALL` in CMakeLists.txt | Explicitly build test target: `make main` then run `ctest` |
 
 ## 源码修改
 
-{如有补丁，列出文件名和修改内容；无则删除此节}
+- patches/0001-config.guess.patch: Add HarmonyOS/OpenHarmony platform detection to config.guess (for autotools compatibility; CMake build doesn't use config.guess)
 
 ## 依赖版本
 
-{列出本次编译依赖的具体软件版本}
+无依赖
 
 ## 验证结果
 
 ```bash
-{验证命令和结果}
+ctest --output-on-failure
+# 100% tests passed, 0 tests failed out of 1
+# Test #1: main .............................   Passed    0.18 sec
 ```
 
 ## 交付物
 
-| 文件 | 大小 | 说明 |
-|------|------|------|
-{有打包产物时添加；无则删除此节}
+| 文件 | 说明 |
+|------|------|
+| lib/libnghttp3.so | Shared library |
+| lib/libnghttp3.a | Static library |
+| include/nghttp3/nghttp3.h | Public header |
+| include/nghttp3/version.h | Version header |
+```
+---
 
-## 注意事项
-
-{需要特别注意的点；无则删除此节}
+**编译结束**: 2026-08-07 04:59
+**最终状态**: published

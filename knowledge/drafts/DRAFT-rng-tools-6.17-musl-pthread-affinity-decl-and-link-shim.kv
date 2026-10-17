@@ -1,0 +1,107 @@
+# ═══ 包草稿（rng-tools 6.17 / 路径 B）— OHOS musl 缺 pthread_(attr_)setaffinity_np 使 configure 硬中止；非侵入两层垫片（-include 声明 + -l 转发归档库）═══
+# 状态：设备实测已闭环（2026-09-23 分层对照 S1–S4），随 PR 提交。
+# 命名：DRAFT-rng-tools-6.17-musl-pthread-affinity-decl-and-link-shim.{kv,md}
+# 记法：本文件同时被 scripts/ohc/models.py:parse_kv_file 与 scripts/ohc/draft_review.py 的
+#       _parse_simple_fields 读取，且须让 yaml.safe_load 通过——故含「词+冒号+空格」的值
+#       一律整体加双引号，缩进续行里不得出现半角「冒号+空格」。
+
+id: DRAFT-rng-tools-6.17-musl-pthread-affinity-decl-and-link-shim
+title: OHOS musl 对 pthread_setaffinity_np 与 pthread_attr_setaffinity_np 声明层与符号层双缺，autotools 包若把两者写成「双探测皆失败即 AC_MSG_ERROR」，configure 会在构建开始前硬中止；不补丁上游的解法是配方生成两层垫片——头文件经 CPPFLAGS 前置 -include 注入让 AC_CHECK_DECL 的编译探测转绿，实现转发 sched_setaffinity(2) 后用 llvm-ar 打成 .a 经 LDFLAGS=-L 加 LIBS 进最终链接，两层缺一即失败
+trigger_tool: autoconf AC_CHECK_DECL / pthread.h / musl（OHOS）
+phase: configuration|linking|compilation
+error_signature:        Neither pthread_setaffinity_np nor pthread_attr_setaffinity_np found|checking whether pthread_setaffinity_np is declared... no|referenced by rngd_jitter.c
+severity: 2
+category: platform, compat, libc, musl, autotools
+match_keywords: pthread_setaffinity_np, pthread_attr_setaffinity_np, AC_CHECK_DECL, AC_MSG_ERROR, HAVE_PTHREAD_SETAFFINITY, musl 无 np 亲和接口, configure 硬中止, cpu_set_t, 垫片头 -include, LIBS 注入转发归档库
+keywords: 线程亲和 API 双缺, configure 期硬错, 声明与符号两层垫片, 非侵入替代补丁
+
+root_cause: 上游 rng-tools 6.17 的 configure.ac:117-121 做嵌套双探测——先
+  AC_CHECK_DECL(pthread_attr_setaffinity_np)，失败再 AC_CHECK_DECL(pthread_setaffinity_np)，
+  两者都缺即 AC_MSG_ERROR 硬中止。这两个 _np 函数是 glibc 扩展，OHOS 的 musl 既不提供
+  声明也不导出符号 ⇒ 探测必然双失败，且因为是硬错误而非可选特性，包在本平台连 configure
+  都过不去（区别于常见的「缺符号只在最后链接期才炸」）。设备实测把两层缺口的归因钉死——
+  把 -D_GNU_SOURCE 打开对声明**零效果**：同一次源码副本、同一套依赖与参数下，「全裸」与
+  「仅 -D_GNU_SOURCE」两份 configure 日志逐字节相同（sha256 一致、同为 3759 字节），
+  都在第 67 行同一处 AC_MSG_ERROR 中止，两条 AC_CHECK_DECL 读数都是 no。
+  使用点仅 rngd_jitter.c:79/86/290 三处，属可选 jitter 熵源的线程绑核，不是功能主干。
+  最小复现（设备实测 2026-09-23，不经 conan、不动配方）——tar 解包 tag 归档（sha256
+  4aa50994232da74499b60b3ebf79118e30a1943be375b7d931dcf18df5442fd3，归档不含预生成
+  configure）→ autoreconf -fi → 独立 build 目录执行 ../src/configure
+  --build=aarch64-unknown-linux-ohos --without-nistbeacon --without-qrypt
+  --without-pkcs11 --without-rtlsdr，即在第 67 行止步、make 一行未跑。
+
+affected_scope: 任何把「glibc-only _np 线程接口」写成 configure 硬错误的 autotools 包
+  （典型是绑核/亲和、线程名、barrier 一类 _np 扩展）；症状特征是止步于 configure、
+  报错串点名两个函数名且带 "Neither ... nor ..." 式措辞。
+  不适用——①musl 有该符号只是没声明（那只需补声明，不必造符号，且造了会引入假实现）；
+  ②缺的是头文件本身；③探测是 AC_CHECK_LIB 或软失败（那路本就有 fallback）；
+  ④绑核属功能正确性必需、空操作会让结果变错的包（本条前提是「少绑核只改性能不改正确性」）。
+
+verification_cmd: 判定两层垫片是否各就各位——①未加垫片时 configure 第 67 行
+  AC_MSG_ERROR 逐字（见 error_signature），make 一行未跑；②只给声明层时 configure 过，
+  但 rng-tools-config.h 里是 HAVE_PTHREAD_SETAFFINITY 1 而 attr 变体保持
+  「#undef HAVE_PTHREAD_ATTR_SETAFFINITY」（垫片故意只声明 plain 变体，这正是选中的分支），
+  随后 make 首错「ld.lld：error：undefined symbol：pthread_setaffinity_np」（半角原文记于
+  error_signature，此处内层冒号转全角以免破坏 .kv 的 YAML 解析）；
+  ③补上符号层（LDFLAGS 加 -L<compat 目录>、LIBS 加 -lrngnpcompat）后同一份
+  rng-tools-config.h 读数不变而 make rc=0，产物 rngd 与 rngtest 齐；
+  ④nm/链接行复核 -lrngnpcompat 落在 LIBS 末尾。
+
+prescan_pattern: AC_CHECK_DECL\(pthread_(attr_)?setaffinity_np|Neither pthread_setaffinity_np
+prescan_globs: '**/configure.ac, **/configure'
+
+rec_approach: recipe-level-declaration-and-symbol-shim
+rec_description: 两层都在 conanfile 内完成，上游源码零改动零补丁——①声明层，build() 生成
+  rngtools_np_affinity.h（内含「#define _GNU_SOURCE」+「#include pthread.h 与 sched.h」，
+  并且**只声明 plain 变体** pthread_setaffinity_np），经 CPPFLAGS 前置
+  「-include <绝对路径>」注入，使 AC_CHECK_DECL 的**编译**探测看到声明而转绿；
+  ②符号层，同目录生成 rngtools_np_affinity.c，实现转发
+  sched_setaffinity(0, cpusetsize, mask)，用 tools.build:compiler_executables 取到的
+  $CC 编成 .o，再用 llvm-ar rcs 打成 librngnpcompat.a，经 LDFLAGS=-L<该目录> 与
+  LIBS=-lrngnpcompat 进最终链接。注意「.o 绝对路径塞进 LDFLAGS」与「-L 目录 + -l 名字」
+  语义不同——只有后者能被 configure 的 conftest 与生成 Makefile 稳定解析，本案采后者。
+  故意不声明 attr 变体是关键技巧——若两层都声明，configure 会走
+  HAVE_PTHREAD_ATTR_SETAFFINITY 分支，而该分支需要的正是 musl 更不可能提供的另一个符号；
+  只声明 plain 变体让上游落进「HAVE_PTHREAD_SETAFFINITY 且调用点只有一处」的较易兜底面。
+  与 -D_GNU_SOURCE 的关系必须写清——该宏对本案两个 _np 接口零效果（见 root_cause 的
+  逐字节对照），把它当修复手段是错的，且会与上游自带「#define _GNU_SOURCE」冲突刷一片
+  -Wmacro-redefined 告警。
+
+fallback_command: 若上游愿意接受，改上游把 AC_MSG_ERROR 降级为「探测失败即不定义宏并
+  关闭该特性」更干净，但那属补丁，须按 R8 评估——本条价值恰在「不打补丁也能过 configure」。
+  若本平台连 sched_setaffinity(2) 都没有，符号层退化为返回 0 的 no-op，行为差异口径不变。
+
+safety_boundary: 申报前必须自己拿到未加垫片的 configure 首错原文，并确认绑核调用点属可选特性
+  （能指出源码里哪三行、去掉后功能主干不受影响）。转发/丢弃 thread 形参带来的行为差异必须在
+  PR 已知限制里写明，不得只字不提当「完全等价」。反例——绑核即被测语义本身
+  （如 CPU 拓扑探针类包），退化会让测试失去意义 ⇒ 不许套本条。
+
+safety_note: 设备实测已完成（2026-09-23，四态分层对照 S1 全裸 / S2 仅 -D_GNU_SOURCE /
+  S3 仅声明层 / S4 声明层+符号层），关键读数——S1 与 S2 的 configure 日志 sha256 相同、
+  同在第 67 行同一 AC_MSG_ERROR 中止；S3 config.h 为「#undef HAVE_PTHREAD_ATTR_SETAFFINITY」
+  加「#define HAVE_PTHREAD_SETAFFINITY 1」，且 make 首条真实错误为 undefined symbol
+  pthread_setaffinity_np（引用点 rngd_jitter.c 的 thread_entropy_task 与 rngd_notime_start）；
+  S4 configure rc=0 且 make rc=0，rngd 与 rngtest 双产物齐。sched_setaffinity(2) 在本平台
+  确实存在，故符号层走真转发而非 no-op，「本平台是否有该调用」的悬念已由 nm 与 S4 链接关闭。
+  行为差异实底——垫片丢弃 thread 形参，rngd_jitter.c:290 传 pthread_self() 语义不变，
+  但 :86 在 rngd_notime_start 里传的是 notime_thread_id（另一个线程），那一处退化为给
+  调用线程设亲和；因掩码是 CPU_SET 全核，只影响性能不影响正确性，仍须在 PR 写明。
+  查重已做（本窗独立复核，非沿用 SCT/DS-35 预判）——E211 同符号但不同 phase、不同解法
+  （sed 改源码换成 sched_*），draft-review 实测相似度 0.22（2026-09-23 复测，灰区阈值 0.30）；E094 是 attr 变体 + 平台宏源码补丁，
+  其 forbid_1 恰是本机制要规避的失败面（本条是它的安全版）；E147 不适用（sysroot
+  sched.h 的 cpu_set_t 与 CPU_* 全在，探针未见缺类型症状）；msquic 草稿依赖上游反向守卫
+  而本包无任何平台守卫；通用池 DRAFT-ohos-musl-glibc-specific-symbols 的 forbid_2 与本探针
+  互证、其 rec 含「配方侧编译 compat TU」是最近先例但签名不同族；本地 B草稿库 22 条 0 相关。
+  判 hit 的四条件不支持 hit——症状签名不重合（既有条目全在 compile/link 期，本包止于
+  configure 硬错误）。
+
+similar_to: E094, E147, E211
+
+source_event: rng-tools 6.17 适配轮。DS-35 轮（2026-09-22）落配方与两层垫片并通过
+  G0–G4；2026-09-23 主理-2/rngtools-build 轮在设备上补齐分层对照 S1–S4 与逐字首错，
+  并把草稿的符号层、验证判据、行为差异三处按实测改对。配方见
+  archives/r/rng-tools/6.17/conanfile.py（build() 内生成垫片处），探针日志
+  ~/tmp/uc2/主理-2-rng/no-shim/logs2/ 与 ~/tmp/uc2/主理-2-rng/evidence/。
+source_commit: 99f585c92728ac3dac6ea551f835577298b860c3（rng-tools 配方入库提交）；
+  分层对照为本窗设备实跑，复现命令与逐字读数记于 verification_cmd 与 safety_note
+authors: rngtools-build

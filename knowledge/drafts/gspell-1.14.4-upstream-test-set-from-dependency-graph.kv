@@ -1,0 +1,112 @@
+#====================================================================
+# DRAFT-gspell-1.14.4-upstream-test-set-from-dependency-graph
+# 上游测试集的可执行边界应由**依赖图在构建期推导**，而不是写死在配方里：
+# 依赖包缺 provider（enchant 无任何词典后端）时 23 个用例里有 15 个
+# 必然 abort；配方按 lib/enchant-2/*.so 个数判定并如实标注，
+# 且用 GLib 的 --tap 以**用例数**而非二进制数计量通过率
+#====================================================================
+
+id:                     DRAFT-gspell-1.14.4-upstream-test-set-from-dependency-graph
+trigger_tool:           conan|meson|gtk|enchant
+phase:                  testing|configuration
+error_signature:        g_assert_true.*lang != NULL.*abort|
+                         enchant_broker_list_dicts|\
+                         GLib-ERROR.*aborted|
+                         test-.*: ASSERTION FAILED
+
+severity:               2
+category:               testing, upstream-tests, dependency-resolution, ohos-platform
+match_keywords:         upstream tests, meson test, glib gtest, --tap, TAP,
+                         g_test_add_func, gtk_test_init, abort, skipped cases,
+                         enchant, provider, hunspell, aspell, dictionary,
+                         capability dependency, conditional test set,
+                         test_package, pass-rate accounting, broadwayd,
+                         GDK_BACKEND, headless display backend, rule4
+title:                  上游测试的可执行边界应按依赖图在构建期判定而非硬编码：依赖包缺 provider 时该跳过哪些用例由实测个数决定，并用 GLib `--tap` 以用例数（不是二进制数）计量
+
+root_cause:             gspell 的上游 unit-tests 是 6 个二进制 / 23 个 g_test_add_func
+                        用例，其中 test-checker(3) / test-entry(7) /
+                        test-inline-checker-text-buffer(5) 共 15 个用例在每个 case 开头
+                        都做 gspell_language_lookup("en_US") 并 g_assert_true(lang != NULL)。
+                        语言能否查出完全取决于 Enchant 有没有**词典 provider**：
+                        ohpcd 的 enchant/2.8.2 在 configure 阶段传了
+                        --without-aspell --without-hspell --without-hunspell
+                        --without-nuspell --without-voikko --without-zemberek，包内
+                        lib/enchant-2/ 下没有任何 .so provider，也没有词典数据，于是
+                        enchant_broker_list_dicts() 恒为空、lookup 恒 NULL，那 15 个用例
+                        在执行第一行断言时就 abort。这是**无词典环境下的确定结果**，
+                        不是偶发失败也不是本包缺陷。若配方把这 15 个用例当成失败，看
+                        似诚实，实则把"依赖包的能力缺口"记成了"本包适配失败"；若配方
+                        硬编码"只跑 8 个用例"，则 enchant 侧将来补齐 provider 后不会
+                        自动纳入，知识就腐化了。另一个独立问题是计量口径：GLib 的测试
+                        二进制接受 --tap 输出逐用例 TAP，比 meson test 的二进制级摘要
+                        粒度细，上游通过率应当按用例数而不是二进制数上报。
+affected_scope:         所有"上游测试依赖某个可选能力（词典/数据库/GPU/网络设备）
+                        而该能力由另一个 Conan 依赖提供"的包；以及所有用 GLib
+                        g_test 框架、需要按用例数计量通过率的包。实测：gspell 1.14.4
+                        （archives/g/gspell/1.14.4）。
+verification_cmd:       grep -n 'HMBS_UPSTREAM_TEST_RESULT' <build log>
+                        # 期望 discovered=23 executed=8 passed=8 skipped=15 enchant_providers=0
+                        grep -c 'lib/enchant-2/.*\.so' $(conan cache path enchant/2.8.2)/lib/enchant-2
+
+rec_priority:           1
+rec_approach:           derive-executable-test-set-from-dependency-graph-and-count-cases
+rec_description:        (1) **不 patch 上游测试**——上游用例的断言是对的，错的是运行环境。
+                        (2) 在配方里写一个能力探针：本包是 `_enchant_provider_count()`，
+                        数依赖包 package_folder 下 `lib/enchant-2/*.so`（排除软链）的个数；
+                        为 0 即"无任何词典后端"。(3) 用一张
+                        `UPSTREAM_CASES_PER_BINARY = {"test-checker": 3, "test-entry": 7,
+                        "test-icu": 2, "test-inline-checker-text-buffer": 5,
+                        "test-text-iter": 3, "test-utils": 3}` 表把"用例数"变成数据，
+                        `expected = sum(表[name] for name in 本次执行集)`，避免
+                        `expected = 8 if providers == 0 else 23` 这种双份硬编码。
+                        (4) 执行集分两组：ENVIRONMENT_INDEPENDENT（test-icu /
+                        test-text-iter / test-utils，8 例）恒跑；DICTIONARY_DEPENDENT
+                        仅当 provider 计数 > 0 时加入。一旦 enchant 侧补齐，同一份配方
+                        自动把 15 个用例纳入执行，无需改配方。(5) 每个二进制加 `--tap`
+                        运行，解析 `^ok` / `^not ok` / `1..N`，按**用例数**汇总。
+                        (6) 把 discovered/executed/passed/skipped/enchant_providers/
+                        skip_reason/per_binary 打成 `HMBS_UPSTREAM_TEST_RESULT=<json>`
+                        同时 print 到 stdout 和 output.info()，并在 MANIFEST.yml 里把
+                        未执行条目标 `excluded: true` 并写明技术原因——**不虚报分母，
+                        也不虚报分子**。
+rec_command:            conan create archives/g/gspell/1.14.4 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing -nr
+rec_auto_fix:           false
+
+# ═══ 反例 (Anti-patterns) ═══
+forbid_1_pattern:       patches/.*test-|gspell_language_lookup.*en_US.*patch|-Dtests=false
+forbid_1_reason:        用打补丁改掉上游断言、或直接关掉上游测试来"提高通过率"，等于删除质量证据；上游断言本身正确，缺的是运行环境的能力。
+forbid_1_consequence:   一旦 enchant 侧补齐 provider，被改过的测试无法回到上游版本，测试集与上游永久漂移；评审侧只能看到"全绿"而看不到真实覆盖。
+
+forbid_2_pattern:       expected\s*=\s*8\b|expected\s*=\s*23\b
+forbid_2_reason:        把用例数硬编码进判定逻辑，等于把"哪几个二进制跑"的决策与"每个二进制几个用例"的数据混在一起；依赖图变化时两处都要改，必然漏改一处。
+forbid_2_consequence:   enchant 补齐 provider 后 expected 仍留在 8，多跑出来的 15 个用例会被算成"超出计划"而误判；或反过来把未执行的分母记成全量，通过率虚高。
+
+# ═══ 决策层：显示后端 ═══
+fallback_priority:      1
+fallback_approach:      headless-broadway-backend-from-dep-bindir
+fallback_description:   GLib 测试框架的 6 个二进制全部调用 gtk_test_init()，需要 GDK 后端；
+                        ohpcd 没有 X/Wayland，gtk 是 broadway-only 构建但自带
+                        bin/broadwayd。配方 build() 内以子进程起 `<gtk_pkg>/bin/broadwayd :5`
+                        （最多等 20×0.5s，退出则降级为无后端并给出 warning），
+                        设 GDK_BACKEND=broadway + BROADWAY_DISPLAY=:5 后再逐个跑测试二进制。
+                        先例：archives/a/ayatana-ido/0.10.4-v2、archives/g/gtkspell3/3.0.10-r3。
+fallback_command:       <gtk_pkg>/bin/broadwayd :5 &  GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 ./test-icu --tap
+fallback_auto_fix:      false
+
+principles:             P005
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+source_pr:              11616
+source_commit:          0e5311685
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-21
+last_updated:           2026-09-21

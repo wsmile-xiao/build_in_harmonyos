@@ -1,0 +1,52 @@
+#====================================================================
+# DRAFT-conan-skipped-binaries-package-folder-null-guard.kv
+# Conan 2 消费图 Skipped binaries（dep.package_folder=None）
+# 配方依赖循环判空跳过的守卫模式
+# 完整叙事、自包含探针与证据见同目录 .md
+#====================================================================
+
+id:                     DRAFT（编号由知识库主编确认）
+trigger_tool:           conan
+phase:                  generate|build|testing
+error_signature:        TypeError: expected str, bytes or os.PathLike object, not NoneType|Skipped binaries
+severity:               2
+category:               conan, graph, recipe-guard
+match_keywords:         conan, Skipped binaries, package_folder, None, NoneType, TypeError, shared, static, libs, glib, pcre2, libffi, self.dependencies, generate, build, os.path.join, 守卫, 判空, continue, 消费图, 缓存
+title:                  Conan 2 消费图把 SHARED 库的 STATIC 子依赖标记为 Skipped binaries（dep.package_folder=None），配方依赖循环未判空即 TypeError 硬崩——每处循环应先判空跳过
+root_cause:             conan 2 图语义（conan 2.29.1 实测）：SHARED 库（shared=True，如 glib/2.84.0.1）把 STATIC 子依赖（pcre2/10.45、libffi/3.4.4，shared=False，静态链入自身）的 require 向下游传播时携带 libs=False——下游消费图不再需要这些 STATIC 子依赖的二进制；当该 SHARED 库的二进制来自 Cache/Download（不参与本次构建，Conan 不展开它）时，其 STATIC 子节点被标记 Skipped binaries：节点仍在图中（cpp_info 可见、self.dependencies 可遍历）但 binary=Skip、package_folder=None。配方在 generate()/build() 的 for dep in self.dependencies.values(): 循环体内直接 os.path.join(dep.package_folder, ...) 或解引用 dep.cpp_info 即抛 TypeError: expected str, bytes or os.PathLike object, not NoneType。本库实例进入路径：granite-6.2.0 消费图顶层 force 统一 glib/2.84.0→2.84.0.1，glib 二进制为 Cache，pcre2/libffi/xz/graphite2 被 Skip，libgee/0.20.8 配方三处循环均未判空即崩（glib 2.84.0.1 配方仍声明 requires pcre2/libffi，失效面与 vendor/force 本身无关；全新环境全链 Build 时 Build 节点展开其直接依赖、不产生 Skip，守卫为防御性执行）
+affected_scope:         任何配方在 generate()/build() 中遍历 self.dependencies 并解引用 dep.package_folder 或 cpp_info 的 Conan 2 项目——只要其消费图含 SHARED×STATIC 子依赖且中间 SHARED 库二进制来自缓存/远端（图日志出现 Skipped binaries），未判空循环即 TypeError 硬崩；自身 CI 绿不代表下游消费图安全（libgee 0.20.8 独立图全链 Build 一直通过，进入 granite 消费图即崩）
+verification_cmd:       定向复现探针（自包含，conan 2.x + python3 任意新 shell 可跑；完整脚本与实测输出见 doc_file）：临时目录写三个最小配方——skipleaf/1.0（shared=False）、skipmid/1.0（shared=True，requires skipleaf/1.0）、skipbad/1.0（shared=True，requires skipmid/1.0，generate() 遍历 self.dependencies.values() 逐个 os.path.join(dep.package_folder,'lib','pkgconfig') 不判空）；CONAN_HOME 指向空目录并手写最小 profile 后 conan create 前两者，然后：conan graph info bad --format=json 得 skipleaf 节点 binary=Skip 且 package_folder=None（skipmid=Cache）；conan create bad 输出 Skipped binaries/skipleaf/1.0 并在 generate() 抛 TypeError: expected str, bytes or os.PathLike object, not NoneType；同配方循环体首行加 if not dep.package_folder: continue 守卫即 GUARD-SKIP 且 create 成功（0 TypeError）；追加 --build=missing --build=skipmid/* 强制中间节点 Build 后 Skipped binaries 消失、未守卫循环存活（fallback 实证）。守卫落位核对：grep -n 'if not dep.package_folder' archives/l/libgee/0.20.8.1/conanfile.py → 57/69/112。跨 run 日志佐证：runs/granite-6.2.0/logs/ci-run2.log:241（Skipped binaries: graphite2/libffi/pcre2/xz）、:279（TypeError at line 62 pkg_dir=os.path.join(dep.package_folder,...)）、ci-run3.log:258；修复后 runs/libgee-0.20.8.1/logs/ci-run1.log:174（Building from source）、:418（make check -j1）、:1090（gtester PASS: tests）
+rec_priority:           1
+rec_approach:           guard-all-dependency-loops-on-package-folder
+rec_description:        配方中每一处 for dep in self.dependencies.values(): 循环体首行插入 if not dep.package_folder: continue——generate() 与 build() 的全部依赖循环逐一设防，漏一处即崩（0.20.8 三处循环均未设防即例证）；对正常依赖（package_folder 非空）零行为变化。定位：该模式已在配方树多个已发布配方实践（复验 10 文件，参照 cairo-gobject/1.18.4.2 conanfile.py:206），知识库首次知识化为问题类条目，非首创。同一 conan Skipped 语义的姊妹失效面（PkgConfigDeps 生成 .pc 的 Requires 链静默截断，生成器侧无告警）见 DRAFT-conan-shared-pkgconfig-requires-drop，互补不互替
+rec_command:            conanfile.py 每处 for dep in self.dependencies.values(): 的循环体首行插入 if not dep.package_folder: continue（0.20.8.1 落位 57/69/112：generate() cflags/ldflags、generate() PKG_CONFIG_PATH/PATH/LD_LIBRARY_PATH、build() .la 清理）；验证：探针 P3 崩/P4 守卫存活对照 + grep -n 'if not dep.package_folder' 三处命中
+rec_auto_fix:           false
+rec_impl:               manual-conan-recipe
+fallback_priority:      2
+fallback_approach:      force-rebuild-shared-mid-node
+fallback_description:   配方不可改时的退路：消费方构建命令强制失效面 SHARED 中间节点参与本次构建（追加 --build=missing --build='<该库>/*'）。Build 节点会展开其直接依赖，STATIC 子依赖被 require、不再被 Skipped，未守卫循环因此不崩（探针 P5 实测：--build=skipmid/* 后 Skipped binaries 消失、未守卫循环存活）。诚实权衡：治标不治本——仅消除本次图的 Skip 条件，不修复配方健壮性缺陷，任一后续图中该库二进制回到 Cache 即复发；全链重建显著拉长构建时间；仅作监控/应急退路，配方可改时必须用判空守卫。
+fallback_command:       conan create <consumer-dir> --build=missing --build='skipmid/*'  # 实测：Skipped binaries 消失，未守卫循环存活
+fallback_auto_fix:      false
+fallback_impl:          manual-conan-graph
+forbid_1_pattern:       os\.path\.join\(dep\.package_folder
+forbid_1_reason:        该模式命中全部 package_folder join 调用点，须逐点核对所在循环 for 行后是否已有 if not dep.package_folder: continue 判空；Skipped binaries 的 package_folder 为 None，任何一处未设防循环都会在含 Skip 节点的消费图崩溃
+forbid_1_consequence:   消费图含 Skipped 节点时 conan create 在 generate()/build() 阶段 TypeError 崩溃（granite-6.2.0 run ci-run2/ci-run3 实测；探针 P3 复现）
+forbid_2_pattern:       升级.*依赖.*pin.*回避|删除.*依赖遍历|去掉.*传递依赖.*遍历
+forbid_2_reason:        用改全图的版本 pin 或删掉传递依赖遍历来"回避"崩溃：前者引入新传递依赖、改变全图语义，后者丢功能；两者都不消除配方健壮性缺陷。
+forbid_2_consequence:   图语义漂移/功能缺失；下一个 STATIC 子依赖出现时原样复发。
+principles:             P-BUILD-001
+causes:                 []
+caused_by:              []
+similar_to:             [E396,E473]
+conflicts_with:         []
+prerequisite_of:        []
+doc_file:               DRAFT-conan-skipped-binaries-package-folder-null-guard.md
+last_updated:           2026-09-03
+source_event:           libgee 0.20.8.1 OHOS PC 适配修复（run libgee-0.20.8.1：0.20.8 配方三处依赖循环补守卫；崩溃证据为跨 run 证据，见 granite-6.2.0 run 日志；机理层由本轮自包含探针与 conan 2.29.1 源码/缓存配方实证修正）
+authors:                GoliWie
+source_pr:              未合并（分支 feat/libgee-0.20.8.1，run libgee-0.20.8.1）
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-03

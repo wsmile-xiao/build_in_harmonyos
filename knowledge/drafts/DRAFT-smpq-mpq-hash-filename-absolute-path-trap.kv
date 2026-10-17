@@ -1,0 +1,75 @@
+#====================================================================
+# DRAFT-smpq-mpq-hash-filename-absolute-path-trap
+# smpq/MPQ: 归档内文件名按哈希存储——--create 传绝对路径会把构建机前缀
+# 写入 listfile，且 --extract 重建该绝对路径导致莫名 "File exists"
+#====================================================================
+
+id:                     DRAFT-smpq-mpq-hash-filename-absolute-path-trap
+trigger_tool:           cmake|conan|smpq
+phase:                  test
+error_signature:        File exists|
+                        SFileAddFile failed|
+                        cannot open archive
+
+severity:               2
+category:               mpq, api-semantics, path-semantics, test-design,
+                        cmake, link-order
+
+match_keywords:         smpq, MPQ, StormLib, SFileAddFile, listfile,
+                        --create, --extract, --list, --info,
+                        absolute path, File exists,
+                        CMAKE_C_STANDARD_LIBRARIES, STORMLIB_LIBRARY,
+                        __gxx_personality_v0
+
+title:                  smpq 建归档必须用相对文件名（MPQ 按哈希存储文件名，绝对路径污染 listfile 且提取时重建绝对路径报 File exists）; 链接 StormLib 静态库需 CMAKE_C_STANDARD_LIBRARIES 保证 zlib/bzip2 排在 libstorm.a 之后
+
+root_cause:             (1) MPQ 归档内部以传入名字的哈希定位文件：smpq --create
+                         <archive> <path> 把 path 原样作为归档内文件名——
+                         用绝对路径会把构建机前缀（/home/xxx/...）写进
+                         listfile，且 --extract 按该"文件名"重建输出路径，
+                         表现为莫名其妙的 "File exists"（目录已存在）。
+                         正确做法：cd 到源目录、以裸相对名建归档，再在独立
+                         空目录里提取。
+                         (2) smpq 用 STORMLIB_INCLUDE_DIR/STORMLIB_LIBRARY
+                         原始 CMake 变量直链 libstorm.a，CMake 看不到
+                         StormLib 的传递依赖；StormLib 是 C++ 静态库，其
+                         对象需要 zlib/bzip2 符号与 C++ 运行期
+                         (__gxx_personality_v0)。CMAKE_EXE_LINKER_FLAGS
+                         会排在目标对象之前而仍报 undefined symbol——
+                         CMAKE_C_STANDARD_LIBRARIES 才会被 CMake 排在
+                         目标库之后。注意 flag 字符串内不能带引号。
+                         (3) 上游 try_compile(check.c) 拒绝 StormLib<9.14，
+                         传包内绝对路径即可满足。
+                         (4) 上游无任何测试套件（无 tests/、无 CTest），
+                         消费者验证需 test_package 自建完整 MPQ 生命周期。
+
+affected_scope:         smpq/1.7 及一切驱动 StormLib SFileAddFile/SFileExtract
+                         的 MPQ 工具（mpq-extract 类）；同为"直链静态库+
+                         传递依赖"的 CMake 消费者
+
+verification_cmd:       conan create archives/s/smpq/1.7 \
+                          -pr:h=ci/conan/profiles/ohos-aarch64 \
+                          -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+                        # 期望 test_package 输出
+                        # "smpq archive create/info/list/extract round trip OK"
+                        # （--version → 相对名 --create → --info/--list →
+                        #  独立空目录 --extract → 逐字节比对）
+
+rec_priority:           2
+rec_approach:           relative-filename-and-c-standard-libraries-link-order
+rec_description:        消费者/测试侧:
+                          subprocess.run([smpq, "--create", archive,
+                                          "payload.txt"], cwd=src_dir)
+                          # 绝不传绝对路径作为归档内文件名
+                        配方侧 (conanfile.py generate()):
+                          tc.variables["STORMLIB_INCLUDE_DIR"] = storm_include
+                          tc.variables["STORMLIB_LIBRARY"] = libstorm_path
+                          tc.variables["WITH_KDE"] = False
+                          # C++ 静态库传递依赖排在目标库之后:
+                          tc.variables["CMAKE_C_STANDARD_LIBRARIES"] = \
+                              "-lz;-lbz2;-lstdc++"   # 分号列表，不带引号
+
+related:
+  - archives/s/smpq/1.7/conanfile.py
+  - archives/s/smpq/1.7/test_package/test_smpq.py
+last_updated:           2026-09-26

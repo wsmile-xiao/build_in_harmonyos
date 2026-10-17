@@ -1,0 +1,82 @@
+# ═══ Draft knowledge entry — OHOS CMake 库配方：依赖 find_package 的两道闸 ═══
+# Timestamp: 2026-09-14
+# Software: zarchive 0.1.2（Exzap/ZArchive，CMake + zstd）
+# Gate: conan-verify G2（conan create）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the excerpts below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-ohos-cmake-recipe-dependency-find-package-gates
+trigger_tool:           conan|conan create|conan-verify|cmake|CMakeToolchain|CMakeDeps
+phase:                  generate|configure
+error_signature:        links to target ".*::.*" but the target was not found|
+                         Could not find a package configuration file provided by|
+                         find_package.*CONFIG.*QUIET|
+                         Target .* links to target .* but the target was not found
+
+severity:               2
+category:               conan|cmake|ohos|dependency|build-system
+match_keywords:         CMAKE_FIND_ROOT_PATH, MODE_PACKAGE=ONLY, find_package CONFIG, CMakeDeps,
+                         generators_folder, CMAKE_FIND_PACKAGE_PREFER_CONFIG, cmake_target_name,
+                         Find<dep>.cmake, target alias, zstd::libzstd, zstd::zstd,
+                         pkg-config fallback, cross mode find root
+title:                  OHOS CMake 库配方在"依赖上游用 find_package 找"时的两道闸：① find_package 被限制在 CMAKE_FIND_ROOT_PATH 且 MODE_PACKAGE=ONLY，CMakeDeps 的 config 文件必须指过去 ② conan 包的 cmake_target_name 常与上游 Find 模块的归一化名字对不上，需在该模块的名字链上补一支
+
+root_cause: >
+  1) OHOS 的 conan_toolchain.cmake 以交叉模式生成，find_package 默认只在
+     CMAKE_FIND_ROOT_PATH 内查找且 MODE_PACKAGE=ONLY。CMakeDeps 生成的
+     <dep>-config.cmake 位于 generators 目录，不在默认查找根里，于是上游的
+     `find_package(<dep> CONFIG QUIET)` **静默落空**并退到 pkg-config 分支——
+     而 OHOS 设备没有 pkg-config，整条依赖路径断掉（zarchive 的
+     cmake/Findzstd.cmake 正是这个结构：CONFIG 命中就走 CONFIG，未命中退
+     pkg_search_module）。
+  2) 即便 find_package 命中了，conan 包导出的目标名由该包 conanfile 的
+     `cmake_target_name` 决定（如 zstd 的 `zstd::libzstd`），而上游自带的
+     Find 模块按自己认得的名字归一化（如 Findzstd.cmake 只处理
+     zstd::zstd / zstd::libzstd_static / zstd::libzstd_shared）。两者对不上时，
+     `find_package` 报成功但依赖目标不存在，CMake 配置期报
+     `Target "<t>" links to target "<dep>::<name>" but the target was not found`。
+
+rec_approach: >
+  ① generate() 里显式指路（CMake 工程通用）：
+     tc.variables["CMAKE_FIND_ROOT_PATH"] = [self.generators_folder]
+     tc.variables["CMAKE_FIND_PACKAGE_PREFER_CONFIG"] = True
+     并确保 CMakeDeps(self).generate() 真的被调用（没有 generator 就没有 config 文件，
+     find_package 必然落空——plutosvg 首轮 G2 就死在这一点）。
+  ② 目标名对不上时，优先**在上游 Find 模块既有的名字归一化链条上补一支**
+     （这正是该文件存在的职责），而不是改 CMakeLists.txt 的
+     target_link_libraries：后者会把"包管理器细节"渗进业务构建文件，且非 conan
+     构建路径被破坏。补丁要写清 conan 包导出的是哪个名字、依据是其 conanfile 的
+     cmake_target_name。
+  ③ 依赖同时要能被消费者链接：静态库场景在 package_info 里
+     `self.cpp_info.requires = ["<dep>::<target>"]` 显式传播。
+
+verification: >
+  zarchive 0.1.2 设备实机：G0/G1/G2/G3 全部 PASS，`✅ 配方验证通过: zarchive 0.1.2`；
+  库级消费者测试 25/25（打包→读回→逐字节比对，含 256 字节全样本与内嵌 NUL 的 1 KiB
+  数据、带偏移量读取、目录项计数、缺失路径返回 ZARCHIVE_INVALID_NODE）；
+  CLI 级消费者测试 7/7（已安装 bin/zarchive 的打包/解包/三文件逐字节 cmp/失败码）。
+  归档全程经 zstd 压缩，往返成功同时证明依赖已正确传播。
+
+apply_boundary: >
+  适用于任何"上游构建文件自己 find_package 找依赖"的 CMake 工程（CONFIG 模式或
+  自带 Find<dep>.cmake）。若工程用 pkg_check_modules 找依赖，则 (1) 同样成立
+  （设备无 pkg-config，必须让 CONFIG 路径命中或显式给 <DEP>_CFLAGS/_LIBS）；
+  若工程直接把依赖源码 submodule 编进来，则本条目无关。
+
+counter_examples: >
+  plutosvg 0.0.8 的依赖 plutovg 用 find_package(plutovg 1.0.0 QUIET) 且**在源码树里
+  留了同名空目录**，缺 CMAKE_FIND_ROOT_PATH 时会静默编进那个空目录而不报错——
+  同一根因的另一种表现（宁可报错的那种反而好查）。
+  若 conan 包的 cmake_target_name 恰好与上游期望一致（如 librevenge 设
+  cmake_target_name="librevenge::librevenge" 且上游就找这个名字），则 (2) 不发生。
+
+limitations: >
+  CMAKE_FIND_ROOT_PATH 指 generators 目录是我仓既有做法（plutosvg / avogadrolibs
+  / siril 等）；本条目把"为什么必须"和"漏了会怎样"（静默退到 pkg-config 或编进
+  空目录）说清楚。与 DRAFT-libcaca-0.99.beta20-autotools-ohos-shell-and-deps-env
+  互补：那条讲 autotools 的 shell 与依赖 env，本条讲 CMake 的 find 路径与目标名。

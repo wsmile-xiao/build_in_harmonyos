@@ -1,0 +1,52 @@
+# ═══ Draft knowledge entry — pd-lib-builder 按 uname 推导 arch.c.flags，交叉编译 aarch64 时 x86 worker 注入 -march=core2 直接编译失败 ═══
+# Timestamp: 2026-10-01
+# Software: pd-libdir 1.11（以及所有用 pd-lib-builder / Makefile.pdlibbuilder 的 Pd externals）
+# Gate: conan create build()
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: draft-pd-libdir-1.11-pdlibbuilder-uname-arch-flags-cross
+title: pd-lib-builder 用 uname -m 推导 arch.c.flags，x86_64 CI worker 上给 aarch64 OHOS 交叉编译注入 -march=core2 -msse* 编译失败；make 命令行清空 arch.c.flags= 修复（PDLIBDIR 另有字符串直拼坑）
+trigger_tool: make / pd-lib-builder (Makefile.pdlibbuilder)
+phase: build
+error_signature: unsupported argument 'core2' to option '-march='|unknown FP unit 'sse'|unrecognized argument in option '-mfpmath=sse'
+severity: 3
+category: build|cross-compile
+match_keywords: pdlibbuilder, pd-lib-builder, arch.c.flags, -march=core2, -mfpmath=sse, -msse, uname -m,
+  PDINCLUDEDIR, PDLIBDIR, installpath, pd_linux, extension, Makefile.pdlibbuilder
+keywords: pdlibbuilder, pd-lib-builder, arch.c.flags, -march=core2, -mfpmath=sse, -msse, uname -m,
+  PDINCLUDEDIR, PDLIBDIR, installpath, pd_linux, extension, Makefile.pdlibbuilder, x86_64 worker
+approach: 不打平台补丁，改为在 make 命令行覆盖 7 个变量（5 处必需 + `lib.version`/`LDFLAGS`
+  两个可选设置；install 时再追加 DESTDIR），上游 Makefile 与 Makefile.pdlibbuilder 保持原样：
+  `make CC="<profile 的 tools.build:compiler_executables.c>" system=Linux arch.c.flags= PDINCLUDEDIR="<Pd 头文件目录>"
+   PDLIBDIR=/lib lib.version=<ver> LDFLAGS="-Wl,-soname,<plugin>" -j1`。
+  关键点：①**`system=Linux` 必需**——OHOS CI worker 的 `uname` 是 HarmonyOS，pd-lib-builder 无该分支，
+  `ifeq ($(system), Linux)` 整块被跳过，`extension` 为空 → 产物名退化成 `libdir.` 且链接缺 `-shared`，
+  报 `ld.lld: error: undefined symbol: main` + 15 个 Pd 符号（实测 PR #14157 CI #66208）；
+  ②`arch.c.flags=` 传空值清空（x86_64 构建机会注入 `-march=core2 -mfpmath=sse -msse*`，aarch64 clang 报
+  `unsupported argument 'core2' to option '-march='`）；③`PDLIBDIR` 必须写成 `/lib` 而不是 `lib`——
+  installpath 是 `$(DESTDIR)$(PDLIBDIR)/$(lib.name)` 的**字符串直拼**，写 `lib` 会得到
+  `/tmp/outlib/libdir` 这种畸形路径；④`PDINCLUDEDIR` 指向依赖包里的 Pd 头文件目录（默认探测
+  /usr/include/pd，在 worker 上不存在）。
+  ⚠️ **本地复现不出来**：`system` 那条只在真机 worker 暴露——WSL2 开发机 `uname` 就是 Linux，
+  会自动走 Linux 分支。本地要复现需伪造 `uname`（PATH 前置一个返回 HarmonyOS 的脚本）。
+root_cause: pd-lib-builder（Makefile.pdlibbuilder，0.4.4）用两个 `$(shell uname ...)` 推导构建配置，
+  而 conan 交叉编译场景下「构建机 ≠ 目标机」，且 OHOS worker 的 `uname` 是 HarmonyOS：
+  ①`:469 uname := $(shell uname)` + `ifeq ($(findstring $(uname), Linux GNU GNU/kFreeBSD), $(uname)) system = Linux`
+  —— HarmonyOS 全串不命中，`system` 为空，于是 `ifeq ($(system), Linux)` 整块（`:497-510`）被跳过：
+  `extension` 为空（产物名退化成 `libdir.`）、`c.ldflags` 的 `-rdynamic -shared -fPIC` 全丢
+  （链接按可执行文件走 → `undefined symbol: main` + 15 个 Pd 符号）、`c.ldlibs` 的 `-lc -lm` 也丢；
+  ②`:438 machine := $(shell uname -m)` + `:457 arch.c.flags = -march=core2 -mfpmath=sse -msse -msse2 -msse3`
+  —— x86_64 构建机必然命中，把 x86 专属 flag 塞给 aarch64 OHOS clang（这些是硬编码架构字符串而非
+  按目标推导，profile 的 arch=armv8 救不了它）；
+  ③`:607 PDINCLUDEDIR ?= $(pdincludepath)`（默认 wildcard /usr/include/pd，worker 上为空）；
+  ④`:617 installpath := $(DESTDIR)$(PDLIBDIR)/$(lib.name)` 是无分隔符的字符串直拼。
+  **最关键的一点**：①这条在 WSL2/Linux 开发机上**根本复现不了**（开发机 uname=Linux 会自动走对分支），
+  只有真机 worker 暴露——属典型「环境语义不可迁移」，本地全绿≠CI 全绿。
+rec_approach: make-command-line-clear-arch.c.flags + pdlibdir-leading-slash + pdincludedir-from-dep
+doc: 无（待 promote 后生成）
+
+verification: pd-libdir/1.11 conan create 全绿（OHOS aarch64 clang 15，产出 lib/libdir/libdir.pd_linux，
+  DT_SONAME=libdir.pd_linux，test_package 22/22 断言通过）；修复前同一命令行缺 `arch.c.flags=` 时
+  100% 复现 aarch64 clang 拒绝 -march=core2。CI L0/L1/L4/L5 全绿。
+related: R33（编译器只能来自 profile conf，不得裸用 ${CC}）；archives/p/puredata/0.54.1（Pd 本体的
+  OHOS 适配先例）；archives/c/cloog/0.21.1（同样从依赖 package_folder 解析外部头文件目录）

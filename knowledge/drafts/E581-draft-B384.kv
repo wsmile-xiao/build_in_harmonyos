@@ -1,0 +1,113 @@
+#====================================================================
+# E581（草稿）— Conan/OHOS 适配上游 C/C++ 库时的三类静默陷阱
+# 触发/来源: tlsh 5.0.0 首次适配（feat/tlsh-5.0.0, 2026-09-17）
+#   ① 上游 -split 未初始化槽位 → OHOS 段错误（patches/0001）
+#   ② 上游 shell 回归依赖 install 期才建的符号链接 → ctest rc=127
+#   ③ 上游库编译宏未导出 → 消费者头文件 API/常量缺失
+# 状态: DRAFT — 待主编复核后提升为正式条目
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E581
+trigger_tool:           conan|cmake|ctest|runtime|clang|clang++
+phase:                  compilation|testing|runtime|packaging
+error_signature:        Segmentation fault|SIGSEGV|core dumped|
+                        error: \(127\), you must compile|
+                        use of undeclared identifier.*TLSH_STRING_LEN_REQ|
+                        Conditional jump or move depends on uninitialised value
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               compat, cmake, testing, runtime, packaging
+match_keywords:         uninitialized, malloc, tptr, split, SIGSEGV, 段错误,
+                        ctest, add_test, install CODE, CREATE_LINK, symlink,
+                        cpp_info.defines, BUCKETS_128, TLSH_STRING_LEN_REQ,
+                        Conan, OHOS, glibc 零页, 测试入口
+title:                  Conan/OHOS 适配上游 C/C++ 库的三类静默陷阱：未初始化槽位靠零页侥幸、测试入口依赖 install 期产物、库编译宏未导出给消费者
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             (1) 数组槽位未初始化 + 分发循环被提前短路：代码先 malloc 一个指针数组，
+                        再在同一个分发循环里逐槽置 NULL，而某个分支在第一轮就把循环跳出
+                        （ti = n_file），于是"超出实际命中条数"的尾部槽位保持未初始化堆内容，
+                        后续按容量遍历时被解引用/释放。glibc 上新分配页常为 0 时侥幸通过，
+                        OHOS 上 malloc 复用非零内存 → 必现 SIGSEGV（tlsh -split 50,100,200：
+                        151 行文件只命中 2 个分隔点，第 4 槽未初始化）。
+                        (2) 上游把 CLI 交付形态（bin/tlsh -> tlsh_unittest 符号链接）放在
+                        CMake install(CODE file(CREATE_LINK ...)) 里，构建树没有；而
+                        Testing/test.sh 默认调用 ../bin/tlsh → 直接 ctest 必以 127 退出。
+                        另有 test_parts.sh / test_pattern.sh 未注册 add_test，ctest 覆盖不到。
+                        (3) 上游用 add_definitions(-DBUCKETS_128) 只编译库自身；该宏决定公共
+                        头文件里的 TLSH_STRING_LEN_REQ 与 getHash() 默认参数签名，未导出给
+                        消费者时，消费者拿到的是另一套声明（常量未定义/默认参数不同）。
+affected_scope:         Conan 2.x（本仓基线 2.29.1）+ OHOS/aarch64 交叉编译下，首次适配
+                        「库 + CLI + shell 回归」形态的上游 C/C++ 项目；同类先例：上游回归脚本
+                        依赖 make.sh 手工 ln -s 的包、用 BUCKETS_*/CHECKSUM_* 一类编译宏切换
+                        API 的包；带未初始化槽位缺陷的 C 代码在任何"零页侥幸"平台上都会被掩盖，
+                        交叉编译到 OHOS 才暴露。
+verification_cmd:       conan create archives/t/tlsh/5.0.0 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+                        （配方 build() 内 ctest + Testing/test_parts.sh + Testing/test_pattern.sh；
+                        干净轮日志应有 Calling build() / Apply patch / 1/1 Test Passed）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           upstream-bugfix-plus-harness-enablement
+rec_description:        (1) 用 refresh-patch --auto 生成最小 bugfix 补丁：malloc 之后显式把整段
+                        指针数组置 NULL（不要只改"看起来特殊"的那一槽）；补丁后上游 test 9
+                        由段错误恢复为与 exp 夹具逐字一致。
+                        (2) build() 内在 cmake.build() 之后按上游 make.sh 的同一动作补
+                        bin/<tool> -> <real> 符号链接（只落 conan 构建目录的生成目录 bin/，
+                        不进提交面），并显式执行未注册 add_test 的上游脚本。
+                        (3) package_info() 用 self.cpp_info.defines 导出上游实际使用的
+                        编译定义（本例 BUCKETS_128），保证消费者头文件 API 与库一致。
+rec_command:            python3 scripts/ohc-run.py refresh-patch <软件> <版本> --auto --project-dir $TARGET_REPO
+                        # 手工动作（脚本覆盖不到的缺口）：新补丁生成后必须人工把
+                        # patch_file/patch_description/patch_type 写进 conandata.yml
+rec_auto_fix:           false
+rec_impl:               conan2-cmake-upstream-harness
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:      document-as-not-run
+fallback_description:   确属上游缺陷且无法最小修复时，把该上游用例按 NOT_RUN 单列，写明技术原因与
+                        原始证据（崩溃退出码、复现命令、文件/行号），不得写成 PASS、不得删除用例或夹具。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       rm .*Testing/exp|skip.*test 9
+forbid_1_reason:        删夹具/跳过失败用例会把"上游真实缺陷"降级成"看不见"，正是 rule4/rule12 的返工源
+forbid_1_consequence:   外部审查判欺骗（P0/P1），并要求还原上游用例后重审
+forbid_2_pattern:       cpp_info\.defines.*__OHOS__
+forbid_2_reason:        平台宏注入属 PF5 禁止项，与"导出上游自身编译宏"是两回事，不可混用
+forbid_2_consequence:   preflight PF5 命中即拦，PR 不得创建
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E581.md
+last_updated: 2026-09-17
+source_event:           tlsh 5.0.0 适配：ctest 首次 rc=127（bin/tlsh 缺失）→ 补链接后 test 9 段错误
+                        （rc=139）→ 定位 input_desc.cpp tptr 未初始化 → 补丁 + 导出 BUCKETS_128
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: B384

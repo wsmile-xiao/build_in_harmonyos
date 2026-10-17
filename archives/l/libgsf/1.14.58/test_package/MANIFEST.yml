@@ -1,0 +1,82 @@
+# test_package/MANIFEST.yml — 上游官方测试声明（CI L0e 强制要求）
+package: libgsf/1.14.58
+homepage: https://gitlab.gnome.org/GNOME/libgsf
+
+# 上游测试命令 (make -n check 分析结果)
+upstream_check_command: "make -C tests test-ole test-compress test-csv test-xml test-msole-dup && cd tests && ./test-ole && ./test-compress && ./test-csv && ./test-xml && ./test-msole-dup"
+
+# R58: 上游测试的编译+执行已移入 test_package test() (每次 conan create 必跑)。
+# 原因: 主配方 RREV 不变时真机 `conan create --build=missing` 命中已缓存二进制
+# 跳过 build(), 原先只在 build() 输出的 HMBS_UPSTREAM_TEST_RESULT 从未出现
+# (R58 evidence 失败指纹: 上游发现/执行全为 0); test_package 阶段不受缓存影响。
+# 标记经 test_package self.output.info() 输出到 Conan 输出流 (hmbs 可靠捕获,
+# address-standardizer 周期 43-45 同款模式)。
+upstream_test_in_build: false
+upstream_test_command: "cd <test_package_build_folder> && ./test-ole && ./test-compress && ./test-csv && ./test-xml && ./test-msole-dup"
+
+# 上游测试审计：
+# 上游 tests/Makefile.am 声明两类测试：
+#   1) TESTS = 14 个 perl 脚本 (t1000-*.pl ... t9999-epilogue.pl) —— 驱动 LibGsfTest.pm,
+#      依赖 perl 的 XML::Parser 模块 + unzip/zipinfo 外部工具 + tools/gsf 二进制。
+#      OHOS 真机无 XML::Parser (cpan 安装依赖网络/编译),tools/gsf 因 glib 2.84
+#      gi18n.h gettext() 隐式声明 -Werror 编译失败被禁用(与 1.14.53 相同) → 不可运行。
+#   2) check_PROGRAMS = 34 个 C 测试程序 —— 直接链接 libgsf-1.la,可在真机构建运行。
+#      其中 5 个自包含程序 (无外部输入文件、含真实断言) 在本配方 build() 中构建并执行:
+#      test-ole(OLE2 写读回比对) test-compress(GZip 压缩解压比对+压缩率)
+#      test-csv(CSV 引用转义比对) test-xml(XML 缩进输出比对)
+#      test-msole-dup(MS-OLE 流 dup 回读)
+#      test-iconv (R53, 1.14.58 新增) 因平台 iconv 语义差异无法通过, 未纳入执行集,
+#      详见下方审计 (root cause 非 libgsf 缺陷)。
+#      其余 28 个 C 程序需要外部 fixture 输入文件 (如已有 .xls/.zip/.gz 样例) 或
+#      依赖 valgrind/网络,未纳入本配方执行集。
+upstream_tests_exist: true
+upstream_test_audit: |
+  审计结论: 上游存在测试 (tests/ 目录, 34 个 C check_PROGRAMS + 14 个 perl TESTS)。
+  make check 的 perl TESTS 依赖 XML::Parser perl 模块 + unzip/zipinfo + tools/gsf 二进制,
+  鸿蒙真机不可用 (与 1.14.53 评估一致), 未运行; 不计入通过率。
+  34 个 C 测试程序中 5 个自包含程序 (源码复制到本 test_package/, 链接安装后的
+  libgsf-1) 在 test_package test() 中编译并执行 (R58: 原在主配方 build() 执行,
+  但主配方 RREV 不变时真机 --build=missing 命中缓存跳过 build(), 上游标记从未
+  输出 → evidence 失败; 移入 test_package 后每次 conan create 必跑)。
+  数字来自 test 程序退出码 (exit 0 = pass), 见 HMBS_UPSTREAM_TEST_RESULT 标记。
+  R53: test-iconv (1.14.58 新增) 未纳入执行集。真机实测其断言失败:
+  "Size mismatch: expected 27, got 22" —— 测试期望 UTF-8→ISO-8859-1 转码时
+  欧元符 U+20AC 触发 EILSEQ, 由 glib g_convert_with_fallback 的 NULL fallback
+  输出 6 字节字面量 "\u20ac" (27 字节 = 14+1+6+6); 但 OHOS 平台 iconv
+  (musl 系) 将 U+20AC 直接映射/替换为单字节 (0x80 或替换符), 不返回 EILSEQ,
+  导致 fallback 分支不执行, 实得 22 字节 (14+1+6+1)。属平台 iconv 语义差异
+  (glibc 返回 EILSEQ, OHOS 不返回), 非 libgsf 缺陷, 配方侧无法低成本补齐
+  (无法替换系统 iconv, glib g_convert 内部使用系统 iconv), 按守则放弃并如实记录,
+  不计入通过率。其余 28 个 C 程序需要外部 fixture 输入文件, 未纳入执行集。
+
+# 上游实际运行的测试程序 (5 个自包含 C 测试; R53 移除 test-iconv, 原因见审计)
+upstream_tests:
+  - file: tests/test-ole.c
+    source: libgsf-1.14.58/tests/test-ole.c
+    description: "OLE2 容器写→读回→逐流内容比对 (test_write_streams/test_read_streams/test_read_by_index)"
+    command: "./test-ole"
+  - file: tests/test-compress.c
+    source: libgsf-1.14.58/tests/test-compress.c
+    description: "GZip 压缩→解压→内容比对 + 压缩率断言 (BZip2 分支在测试内自行跳过)"
+    command: "./test-compress"
+  - file: tests/test-csv.c
+    source: libgsf-1.14.58/tests/test-csv.c
+    description: "CSV 字段引用/转义输出字节级比对"
+    command: "./test-csv"
+  - file: tests/test-xml.c
+    source: libgsf-1.14.58/tests/test-xml.c
+    description: "GsfXMLOut 缩进输出字符串比对"
+    command: "./test-xml"
+  - file: tests/test-msole-dup.c
+    source: libgsf-1.14.58/tests/test-msole-dup.c
+    description: "MS-OLE 流写入→dup 读取→内容回读校验"
+    command: "./test-msole-dup"
+
+# test_package 自带测试（消费者视角：链接 libgsf-1 + 调用核心 API 验证返回值）
+test_package_tests:
+  - file: test.c
+    description: "链接 libgsf-1.so + 调用 gsf_init/gsf_doc_new/gsf_infile_msole_new/gsf_input_memory_new_clone/gsf_output_memory_new/gsf_shutdown 验证返回值 (5 项断言)"
+    command: "./test_libgsf"
+
+# 测试断言总数 (test_package 5 + 上游 5 个 C 测试程序)
+assertion_count: 10

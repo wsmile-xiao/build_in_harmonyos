@@ -1,0 +1,286 @@
+--- a/cmdline/cmdline_main.c
++++ b/cmdline/cmdline_main.c
+@@ -1,31 +1,57 @@
+-/* 
++/*
+ 	Copyright (C) 1987-2002 Free Software Foundation, Inc.
+ 	portions Copyright (C) 2007 Alex deVries
+-	
++
+ 	This is based on readline's filemap.c example, which is very useful.
+ 
+ */
+ 
+ #include <pthread.h>
+ #include <stdlib.h>
+ #include <stdio.h>
+ #include <string.h>
+-#include <termios.h>
+ #include <unistd.h>
+-#include <readline/readline.h>
+-#include <readline/history.h>
+ #include <getopt.h>
+ #include <ctype.h>
+ #include <signal.h>
+ #include "cmdline_afp.h"
+ #include "cmdline_testafp.h"
++
++/* readline and termios are not available on HarmonyOS - provide stubs */
++#define rl_completion_matches NULL
++static char *rl_readline_name = "afpfsd";
++static void *rl_attempted_completion_function = NULL;
++static int rl_catch_signals = 1;
++static int rl_catch_sigwinch = 1;
++static void rl_set_signals(void) {}
++static void initialize_readline(void) {}
++static void using_history(void) {}
++static void stifle_history(int n) {}
++static void add_history(const char *s) {}
++
++struct termios { int dummy; };
++#define TCSAFLUSH 0
++static struct termios save_termios;
++static int tcgetattr(int fd, struct termios *t) { return 0; }
++static int tcsetattr(int fd, int a, struct termios *t) { return 0; }
++
++static char *readline(const char *prompt)
++{
++    static char buf[4096];
++    fputs(prompt, stdout);
++    fflush(stdout);
++    if (fgets(buf, sizeof(buf), stdin) == NULL)
++        return NULL;
++    buf[strcspn(buf, "\n")] = '\0';
++    return buf;
++}
+ 
+ static int running=1;
+ static int loop_started=0;
+ 
+ static pthread_cond_t connected_condition;
+ static pthread_cond_t loop_started_condition;
+ 
+ extern int com_testafp(char * arg);
+ 
+ static struct termios save_termios;
+@@ -37,21 +63,21 @@
+ /* A structure which contains information on the commands this program
+  *  *    can understand. */
+ 
+ typedef struct {
+ 	char *name;          /* User printable name of the function. */
+ 	int (*func)(char * arg); /* Function to call to do the job. */
+ 	char *doc;           /* Documentation for this function.  */
+ 	int thread;          /* whether to launch as a new thread */
+ } COMMAND;
+ 
+-void trigger_connected(void) 
++void trigger_connected(void)
+ {
+ 	pthread_cond_signal(&connected_condition);
+ }
+ 
+ static int tty_reset(int fd)
+ {
+ 
+ 	if (tcsetattr(fd,TCSAFLUSH,&save_termios)<0)
+ 		return -1;
+ 	return 0;
+@@ -75,77 +101,33 @@
+ 	*++t = '\0';
+ 	return s;
+ }
+ 
+ /* **************************************************************** */
+ /*                                                                  */
+ /*                  Interface to Readline Completion                */
+ /*                                                                  */
+ /* **************************************************************** */
+ 
+-static char *command_generator (const char *, int);
+-
+ static int remote_entries_num=0;
+ 
+ static char * remote_generator (const char *text, int state)
+ {
+ 	char * foo = malloc(255);
+ 	remote_entries_num++;
+ 	sprintf(foo,"Foo");
+ 	if (remote_entries_num==5) return NULL;
+ 
+ 	return foo;
+ 
+ }
+ 
+-/* Attempt to complete on the contents of TEXT.  START and END bound the
+-   region of rl_line_buffer that contains the word to complete.  TEXT is
+-   the word to complete.  We can use the entire contents of rl_line_buffer
+-   in case we want to do some simple parsing.  Return the array of matches,
+-   or NULL if there aren't any. */
+-static char ** filename_completion (const char *text, 
+-	int start, int end)
+-{
+-	char **matches = NULL;
+-
+-	/* If this word is at the start of the line, then it is a command
+-	to complete.  Otherwise it is the name of a file in the current
+-	directory. */
+-#if (RL_VERSION_MAJOR>=5) 
+-	if (start == 0)
+-		matches = rl_completion_matches (text, command_generator);
+-	else {
+-		/* This is where we'd do remote filename completion */
+-	}
+-#endif
+-
+-	return (matches);
+-}
+-
+-/* Tell the GNU Readline library how to complete.  We want to try to complete
+-   on command names if this is the first word in the line, or on filenames
+-   if not. */
+-static void initialize_readline ()
+-{
+-	/* Allow conditional parsing of the ~/.inputrc file. */
+-	rl_readline_name = "afpfsd";
+-
+-	/* Tell the completer that we want a crack first. */
+-	rl_attempted_completion_function = filename_completion;
+-
+-#if (RL_VERSION_MAJOR>=5) 
+-	rl_catch_signals = 1 ;
+-	rl_catch_sigwinch = 1 ;
+-	rl_set_signals () ;
+-#endif
+-
+-}
+ 
+ /* The user wishes to quit using this program.  Just set DONE non-zero. */
+ static int com_quit (char *arg)
+ {
+ 	cmdline_afp_exit();
+ 	running=0;
+ 	return 0;
+ }
+ 
+ static int com_help (char *arg);
+@@ -176,54 +158,20 @@
+   { "passwd", com_passwd, "Change password to PASSWD",1 },
+   { "status", com_status, "Get some server status",1 },
+   { "df", com_statvfs, "Get volume space information",1 },
+   { "pass",com_pass,"Set the password",1},
+   { "user",com_user,"Set the user",1},
+   { "test",test_urls,"URL parsing test",1},
+   { "disconnect",com_disconnect,"Disconnect from the current server",1},
+   { (char *)NULL, NULL, (char *)NULL,0 }
+ };
+ 
+-/* Generator function for command completion.  STATE lets us know whether
+-   to start from scratch; without any state (i.e. STATE == 0), then we
+-   start at the top of the list. */
+-static char * command_generator (const char *text, int state)
+-{
+-	static int list_index, len;
+-	char *name;
+-
+-	/* If this is a new word to complete, initialize now.  This includes
+-	saving the length of TEXT for efficiency, and initializing the index
+-	variable to 0. */
+-	if (!state) {
+-		list_index = 0;
+-		len = strlen (text);
+-	}
+-
+-	/* Return the next name which partially matches from the command list. */
+-	while ((name = commands[list_index].name))
+-	{
+-		list_index++;
+-
+-		if (strncmp (name, text, len) == 0)
+-			{
+-			  char *r;
+-
+-			  r = malloc (strlen (name) + 1);
+-			  strcpy (r, name);
+-			  return (r);
+-			}
+-	}
+-
+-	/* If no names matched, then return NULL. */
+-	return ((char *)NULL);
+-}
+ 
+ /* Print out help for ARG, or for all of the commands if ARG is
+    not present. */
+ static int com_help (char *arg)
+ {
+   register int i;
+   int printed = 0;
+ 
+   for (i = 0; commands[i].name; i++)
+     {
+@@ -353,39 +301,39 @@
+ void cmdline_forced_ending_hook(void)
+ {
+ 	ending();
+ }
+ 
+ void earlyexit_handler(int signum)
+ {
+ 	ending();
+ }
+ 
+-void cmdline_loop_started(void) 
++void cmdline_loop_started(void)
+ {
+ 	loop_started=1;
+ 	pthread_cond_signal(&loop_started_condition);
+ }
+ 
+ static void usage(void)
+ {
+ 	printf(
+ "afpcmd [-r] [url]\n"
+ "     -r:   set the recursive flag\n"
+ "     url:  an AFP url, in the form of:\n"
+ "           afp://username;AUTH=authtype:password@server:548/volume/path\n"
+ "See afpcmd(1) for more information.\n"
+ );
+ }
+ 
+ 
+-int main(int argc, char *argv[]) 
++int main(int argc, char *argv[])
+ {
+ 	int option_index=0;
+ 	int c, optnum;
+ 	int recursive=0;
+ 	int show_usage=0;
+ 
+ 	struct option long_options[] = {
+ 		{"recursive",1,0,'r'},
+ 	};
+ 	char * url = argv[1];
+@@ -404,21 +352,21 @@
+ 			break;
+ 		}
+ 	}
+ 	if (show_usage) {
+ 		usage();
+ 		exit(1);
+ 	}
+ 
+ 	tcgetattr(STDIN_FILENO,&save_termios);
+ 
+-	initialize_readline ();	
++	initialize_readline ();
+ 
+ 	cmdline_afp_setup_client();
+ 
+ 	afp_main_quick_startup(NULL);
+ 
+ 	cmdline_afp_setup(recursive,url);
+ 
+ 	signal(SIGINT,earlyexit_handler);
+ 
+ 	cmdline_ui(NULL) ;

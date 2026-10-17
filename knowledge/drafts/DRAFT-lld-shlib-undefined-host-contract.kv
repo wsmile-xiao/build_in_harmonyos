@@ -1,0 +1,111 @@
+# ═══ Draft knowledge entry — 共享库按宿主契约保留 UND 导入时，lld 默认 --no-allow-shlib-undefined 使消费方链接期即失败，消费方必须提供定义块 ═══
+# Timestamp: 2026-09-10
+# Software: dieharder 3.31.1.4（案例库括号内；条目本身为问题类，无库名-版本事件式命名）
+# Gate: conan create test 阶段（test_package 链接）；任意消费方可执行文件链接期 / 加载期
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-lld-shlib-undefined-host-contract
+severity: 2
+category: link|toolchain
+trigger_tool: clang/lld（链接期）；musl-ld.so（加载期）
+phase: linkage|runtime
+error_signature: undefined reference due to --no-allow-shlib-undefined.*|Error relocating .*: .*: symbol not found
+match_keywords: no-allow-shlib-undefined, lld, UND, -fno-common, host contract, globals,
+  test_package, consumer, musl, relocating, 宿主契约, 定义块
+
+title: 共享库按宿主契约保留 UND 导入时，lld 默认 --no-allow-shlib-undefined 使消费方链接期即失败，消费方必须提供定义块
+
+approach: 消费方（test_package/宿主程序）按上游"唯一定义点"逐项补全局定义块，使自己成为与
+  上游 CLI 同等地位的真实宿主；不要用 -Wl,--allow-shlib-undefined 掩码（仅推迟检查），
+  更不要把定义块打进库本体（违反上游契约）。
+
+root_cause: 完整机理链（四步）：
+  1) 工具实现证据：OHOS 工具链 lld 对【可执行链接】默认 --no-allow-shlib-undefined——
+     共享库依赖（DT_NEEDED 闭包）内解析不了的 UND 导入直接报错；GNU ld 历史默认宽松，
+     同一代码在 glibc/GNU ld 平台常不显形。musl 动态链接器对数据符号立即绑定
+     （relocation 加载期完成），漏定义同样在加载期显形。
+  2) 宿主契约：上游按 gcc10 -fno-common 后的"唯一定义点"约定（上游 globals.c 头注释
+     自述 "defining globals _exactly once_"），共享库本体把 CLI 专属全局状态
+     （verbose/rng/dh_rng_types/dh_test_types/ks_pvalue 等）留为 UND 导入，
+     由主程序提供唯一定义；R 接口（embeddieharder 式）同款契约。
+  3) 触发与失败面：conan create test 阶段，test_package 作为真实消费方执行
+     `clang test.c … -l<lib> …` 链接即失败：
+     `ld.lld: error: undefined reference due to --no-allow-shlib-undefined: <符号>`
+     —— 数量口径分两层如实记录：链接日志逐符号展示 19 个（dh_rng_types/dh_test_types/
+     dh_num_* 系列、gsl_types、verbose/rng/ntuple/overlap/kspi/rmax_bits/rmax_mask）后
+     被 "too many errors emitted, stopping now (use --error-limit=0)" 截断；
+     制品级实测 llvm-nm -D --undefined-only 共 119 个 UND 导入，扣除 libc/libm/gsl 后
+     属宿主契约全局的约 50 个（按上游唯一定义点 globals.c 的 81 行定义、部分一行多符号推算）。
+  4) 归类：链接域工具链语义差异——复发面由平台默认值保证：任何"宿主应用提供全局状态"
+     契约的共享库，其每个消费方在 OHOS 上链接期必然命中。
+
+affected_scope: 任何提供「宿主应用提供全局状态」契约的共享库（统计/科学计算库、嵌入式
+  解释器接口、R/Python 扩展式宿主接口）的 Conan test_package 及一切消费方；判别方法：
+  llvm-nm -D --undefined-only libX.so 出现非 libc/libm/依赖库的"应用层全局"符号，
+  且上游源码存在 globals.c 式唯一定义点
+
+verification_cmd: 四步探针（全新 shell 可复跑，不依赖任何仓库/日志；clang 为 OHOS 构建
+  环境自带 LLVM clang）：
+  P=$(mktemp -d); cd $P
+  printf 'extern int host_global;\nint get(void){return host_global;}\n' > libu.c
+  printf 'int host_global=7;\nextern int get(void);\nint main(void){return get()==7?0:1;}\n' > consumer_ok.c
+  printf 'extern int get(void);\nint main(void){return get()==7?0:1;}\n' > consumer_missing.c
+  clang -shared -fPIC libu.c -o libu.so                                  # STEP1 库可带 UND 导出
+  clang consumer_missing.c -L. -lu -o probe_missing                      # STEP2 期望 rc!=0:
+                                                                         #  ld.lld: error: undefined reference due to --no-allow-shlib-undefined: host_global
+  clang consumer_ok.c -L. -lu -o probe_ok && LD_LIBRARY_PATH=. ./probe_ok  # STEP3 期望 rc=0
+  clang -Wl,--allow-shlib-undefined consumer_missing.c -L. -lu -o probe_masked
+  LD_LIBRARY_PATH=. ./probe_masked                                       # STEP4 期望 rc!=0:
+                                                                         #  Error relocating ./libu.so: host_global: symbol not found
+
+rec_priority: 1
+rec_approach: consumer-provides-definition-block
+rec_description: 消费方按上游唯一定义点逐项补全局定义块（类型以安装头文件 extern 声明为
+  准），使 test_package 成为与上游 CLI 同等地位的真实宿主；在制品上用
+  llvm-nm -D --undefined-only 核对引用集合，确保定义覆盖全部宿主契约符号
+rec_command: 见 verification_cmd 四步探针；案例实现见仓内
+  archives/d/dieharder/3.31.1.4/test_package/test.c 的"消费方全局符号"定义块
+rec_auto_fix: false
+rec_impl: 仅改消费方源码（test_package/宿主程序），零库本体改动
+
+fallback_priority: 2
+fallback_approach: -Wl,--allow-shlib-undefined 掩码链接
+fallback_description: 仅推迟检查：musl 立即绑定下失败移到加载期（探针 STEP4 实测 rc=127
+  "Error relocating …: symbol not found"），仅当真实宿主程序另行提供全部符号时成立，
+  属掩盖兼容性而非修复，只作诊断/退路
+fallback_command: clang -Wl,--allow-shlib-undefined consumer.c -L. -lX -o probe
+fallback_auto_fix: false
+fallback_impl: 不推荐长期存在；合入前必须删除或换成 rec_approach
+
+forbid_1_pattern: 在库本体/patch 中补全局定义以"修好"链接
+forbid_1_reason: 违反上游宿主契约（gcc10 -fno-common 唯一定义点约定）；R embeddieharder
+  等合法消费方将遇符号重复
+forbid_1_consequence: 行为偏离上游、符号冲突；升级上游版本时补丁冲突
+
+principles: 共享库按宿主契约保留的 UND 导入由消费方提供唯一定义；工具链对可执行文件的
+  --no-allow-shlib-undefined 默认值使该契约在链接期显形，掩码选项只把失败推迟到加载期。
+  【principle 提案】建议知识库新增 P-LINKAGE-002（"共享库 UND 导入需消费方提供定义"）：
+  现 principles.yaml 仅有 P-LINKAGE-001"静态库优先原则（系统库冲突防护）"（scope
+  [E042,E019,E067]，讲 --without-shared/系统库覆盖），与本机理无关，故本条不改挂既有
+  principle，以本内联陈述代挂钩并提案待主编采纳（写入边界禁止本 run 修改 principles.yaml）
+caused_by: 上游 gcc10 -fno-common 重构确立"唯一定义点"宿主契约；OHOS lld 对可执行链接的
+  默认值比 GNU ld 严格，且 musl 数据符号立即绑定
+causes: 消费方链接失败被误判为"库移植缺陷"（去改库本体）或被 --allow-shlib-undefined
+  掩码后转为加载期 rc=127
+similar_to: E004（musl BIND_NOW 符号族——同属 musl 立即绑定符号解析）；E013（动态链接
+  错误）；E015（dgettext undefined symbol）
+conflicts_with: casablanca/2.10.16、address-standardizer/3.7.0 配方内 --allow-shlib-undefined
+  的既有用法（其机理是依赖链缺符号的掩码场景，与本条宿主契约机理不同；本条 fallback 仅在
+  同为掩码语义时引用，不得互推）
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-lld-shlib-undefined-host-contract.md
+last_updated: 2026-09-10
+source_event: dieharder 3.31.1.4 OHOS 适配：test_package 链接失败（宿主契约全局 UND）→
+  消费方定义块修复 → CI PASS；四步探针真机实录全通过
+authors: ZCode Builder (glm-5.3)
+source_pr: (本 PR)
+source_commit:
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.9
+metrics_last_used: 2026-09-10

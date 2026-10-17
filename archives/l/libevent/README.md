@@ -4,17 +4,18 @@
 libevent 是事件通知库，提供快速非阻塞 I/O 支持，广泛用于网络服务程序。
 
 ## OHOS 适配
-- 推荐 CMake 构建，避免 autotools 临时目录权限问题
-- config.guess 需更新以识别 HarmonyOS
-- OpenSSL 支持可选，系统缺少开发文件时可用 `-DEVENT__DISABLE_OPENSSL=ON` 禁用
-- 测试套件在 HarmonyOS 上部分失败（epoll/mmap 差异），核心事件循环功能正常
+- 2.1.13 使用上游 CMake 构建，保留官方 regress 与外围测试。
+- HarmonyOS 共享库输出为真实无版本 `.so`，避免依赖 HMDFS 软链接。
+- OpenSSL 是可选功能；当前配方显式禁用，不引入未声明依赖。
+- `event_rpcgen.py` 随包安装到 `bin/`，可由 Conan 运行环境发现。
 
 ## 依赖
-- openssl（可选，可禁用）
+- zlib/1.3.1.1（仅用于构建阶段官方 regress 测试）
+- OpenSSL（可选，当前禁用）
 
 ## 功能验证
 ```bash
-ls -la $HOME/usr/local/lib/libevent*
+conan create archives/l/libevent/2.1.13
 ```
 
 ## 参考

@@ -1,0 +1,85 @@
+#====================================================================
+# DRAFT-autoreconf-bootstrap-intltool-prefix-and-gtk-lintl
+# GitHub git archive 无 configure 的 GTK 应用: autoreconf 引导需
+# tool_requires + conanbuild env(设备 automake 坏且遮蔽 PATH);
+# intltoolize 硬编码 prefix=/ 必须复制改写; glib 的 g_libintl_* 需补 -lintl
+#====================================================================
+
+id:                     DRAFT-autoreconf-bootstrap-intltool-prefix-and-gtk-lintl
+trigger_tool:           autoreconf|aclocal|intltoolize|make|ld.lld
+phase:                  build|link
+error_signature:        Can't locate Automake/Config\.pm in @INC|
+                         possibly undefined macro: AC_PROG_INTLTOOL|
+                         intltoolize: cannot copy '//share/intltool/Makefile\.in\.in'|
+                         configure: error: GNU gettext tools not found; required for intltool|
+                         undefined symbol: g_libintl_gettext|
+                         C compiler cannot create executables
+
+severity:               3
+category:               autotools, autoreconf, intltool, gettext, gtk, glib, ohos
+match_keywords:         autoreconf -fi, aclocal, Automake/Config.pm,
+                         ACLOCAL_PATH, intltoolize, prefix=/, intltool.m4,
+                         glib-gettext.m4, AM_GLIB_DEFINE_LOCALEDIR, gettext,
+                         msgfmt, g_libintl_, -lintl, LIBS, conanbuild,
+                         tool_requires, L3afpad, Cannot open display
+
+title:                  无 configure 的 GTK autotools 应用引导链四坑: 设备 automake 不可用需 tool_requires+conanbuild、intltoolize 硬编码 prefix=/ 必须复制改写、需 gettext 工具、glib 的 g_libintl_* 要单独补 -lintl(且不能进 configure 的 LIBS)
+
+root_cause:             (1) 设备自带 automake 1.17 驱动配 1.16 share 目录, 报
+                         "Can't locate Automake/Config.pm in @INC"; 且
+                         /usr/local/bin 在 PATH 中优先于 tool_requires 会遮蔽后者。
+                         必须 tool_requires("automake/1.18" + libtool + intltool
+                         + gettext) 并以 env="conanbuild" 运行 autoreconf —— 该
+                         虚拟环境导出 ACLOCAL/AUTOMAKE/LIBTOOLIZE/_lt_pkgdatadir,
+                         而 self.run(env=[...]) 的 PATH 是追加式, 竞争不过。
+                         (2) intltoolize 硬编码 `prefix=/`(仅 MINGW32 分支才从 $0
+                         推导), autoreconf 按裸名调用时 $0 无路径 → 去
+                         //share/intltool 找数据 → "cannot copy
+                         '//share/intltool/Makefile.in.in'"。PATH wrapper 与
+                         绝对路径 exec **均无效**, 唯一解法是复制脚本并把
+                         `prefix=/` 改写成 intltool 包路径。
+                         (3) configure.ac 的 AC_PROG_INTLTOOL(intltool.m4) 与
+                         AM_GLIB_DEFINE_LOCALEDIR(glib 的 glib-gettext.m4) 需经
+                         `autoreconf -fi -I<依赖 aclocal 目录>` 传入(autoconf 2.72
+                         只报 "possibly undefined macro" 警告, 但宏确实缺失),
+                         同时把宏暂存到源码树 m4/ 双保险。
+                         (4) intltool 的 configure 硬检查 GNU gettext 工具
+                         (msgfmt/msgmerge/xgettext)。
+                         (5) glib 的 gi18n.h 把 gettext() 映射到 g_libintl_* 别名,
+                         只有 glib 包内 libintl.a 导出, 其 .pc 不列 -lintl。
+                         补 -lintl 时**不能**放进 configure 的 LIBS: 无条件 -lintl
+                         会让 AC_PROG_CC 的 conftest 链接失败, 报
+                         "C compiler cannot create executables"; 应在 make 阶段以
+                         `LIBS="..."` 传入, 且整体加引号(不加引号 make 会把
+                         -L<dir> 当选项并打 usage)。
+
+affected_scope:         l3afpad/0.8.18.1.11(实测) 及所有 GitHub git archive 交付、
+                         需 autoreconf 引导的 GTK/autotools 应用; glib 静态链接的
+                         任何消费者(musl/OHOS)
+
+verification_cmd:       conan create archives/l/l3afpad/0.8.18.1.11 \
+                          -pr:h=ci/conan/profiles/ohos-aarch64 \
+                          -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+                        # 期望 test_package 输出
+                        # "aarch64 ELF verified" + "GTK+3 closure resolved; stopped at display init"
+
+rec_priority:           2
+rec_approach:           conanbuild-autoreconf-with-patcher-intltoolize-and-make-time-lintl
+rec_description:        build_requirements(): automake/1.18 + libtool/2.5.4 +
+                          intltool/0.51.0 + gettext/0.22.5.1
+                        _stage_m4_macros(): 遍历 self.dependencies(.build) 的
+                          */aclocal 与 */m4, 把 *.m4 copy 到 <source>/m4/
+                        _bootstrap_configure():
+                          (1) 复制 intltoolize 并把首处 `^prefix=/` 改写为
+                              intltool 的 package_folder, 放到 <build>/toolshim/
+                          (2) `PATH="<toolshim>:$PATH" autoreconf -fi -I<dirs...>`
+                              且 env="conanbuild"
+                        make 阶段: args=["-j1", 'LIBS="-lintl -L<glib libdir>"']
+                        package_info/消费者: 无特别要求; GUI 程序无显示时
+                          `Cannot open display` 属预期, 测试据此断言
+related:
+  - archives/l/l3afpad/0.8.18.1.11/conanfile.py
+  - archives/a/abiword-plugin-docbook/3.0.8/conanfile.py （tool_requires+VirtualBuildEnv 先例）
+  - archives/g/goffice/0.10.57.1/conanfile.py （intltool/PKG_CONFIG_PATH 先例）
+  - archives/a/acedb/4.9.39+dfsg.02/conanfile.py （g_libintl_* 代理先例）
+last_updated:           2026-09-26

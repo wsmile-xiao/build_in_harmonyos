@@ -1,0 +1,107 @@
+#====================================================================
+# E545-draft-3028 — 交付脚本自身把 ${TMPDIR:-/tmp} 当运行期临时目录默认值：
+#   鸿蒙 /tmp 只读 → 用户不设 TMPDIR 即工具全功能不可用（非构建期问题）
+# 触发事件: clitest 0.5.0 适配（单文件 POSIX shell 工具）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     E545-draft-3028
+trigger_tool:           runtime
+phase:                  runtime
+
+error_signature:        cannot create temporary dir: /tmp/|
+                        mkdir: cannot create directory .*/tmp/.*: Read-only file system|
+                        mktemp: failed to create directory via template .*/tmp/|
+                        \$\{TMPDIR:-/tmp\}
+
+severity:               3
+category:               ohos, runtime, portability, shell, hmdfs
+
+prescan_pattern:        \$\{TMPDIR:-/tmp\}|\$\{TMPDIR:=/tmp\}|TMPDIR=\$\{TMPDIR-/tmp\}
+prescan_globs:          *.sh, *.bash, *.in, Makefile*, *.mk, bin/*, *
+
+match_keywords:         TMPDIR, /tmp, read-only, 只读, cannot create temporary dir,
+                        mktemp, shell script, 脚本工具, runtime, 运行期,
+                        default temp dir, 临时目录默认值
+
+title:                  交付的 shell 脚本把 ${TMPDIR:-/tmp} 写死为临时目录基路径时，鸿蒙只读 /tmp 会让工具在「用户未设置 TMPDIR」的默认场景下完全不可用；修法是只替换「未设置」分支的默认值，绝不能把显式设置的无效 TMPDIR 也一并回退（那会改掉上游语义并打挂上游用例）
+
+root_cause:             E002 记录的是构建期 /tmp 只读（对策是给 configure/make 设
+                        TMPDIR）。本条是它的运行期镜像面：当**交付产物本身**是脚本，
+                        且脚本内部把 `${TMPDIR:-/tmp}` 作为临时目录基路径时，
+                        构建期设 TMPDIR 毫无作用——装到设备后由最终用户运行，
+                        而鸿蒙 /tmp 是只读挂载，$TMPDIR 未设置时 mktemp -d 与手工
+                        mkdir 双双失败，脚本在做任何实际工作之前就报
+                        "cannot create temporary dir" 退出，即 100% 功能不可用。
+                        该缺陷在构建/打包阶段完全不可见：conan create、产物结构检查、
+                        smoke test（--version/--help 通常不建临时目录）全部通过。
+
+affected_scope:         所有以 shell 脚本为交付产物的包（测试器/包装器/审计工具/
+                        构建辅助脚本等），只要脚本内出现 ${TMPDIR:-/tmp} 之类的
+                        硬编码回退；也适用于 Perl/Python 脚本里 tempfile 默认目录
+                        被写死为 /tmp 的同构写法。实测样本: clitest 0.5.0。
+
+verification_cmd:       # ① 静态定位（源码侧）
+                        grep -n '\${TMPDIR:-/tmp}' <script>
+                        # ② 复现（构造只读 /tmp，无需真机）
+                        unshare -rm sh -c 'mount -t tmpfs -o ro,size=1m tmpfs /tmp; \
+                          unset TMPDIR; <script> <args>'
+                        #   未修复 → "cannot create temporary dir: /tmp/..." 非零退出
+                        #   已修复 → 正常执行
+                        # ③ 语义回归（必须仍然失败）
+                        TMPDIR=/notfound <script> <args>   # 必须报错并非零退出
+
+rec_priority:           1
+rec_approach:           default-tmpdir-fallback
+rec_description:        只改「$TMPDIR 未设置」时的默认基路径：/tmp 可写则仍用 /tmp，否则回退 $HOME；显式设置的 $TMPDIR 原样透传不做任何可写性兜底
+rec_command:            # 在脚本的临时目录创建函数开头插入基路径选择，
+                        # 随后所有 ${TMPDIR:-/tmp} 引用改为该变量：
+                        #   if test -n "${TMPDIR:-}"; then
+                        #       tmp_base="$TMPDIR"
+                        #   elif test -d /tmp && test -w /tmp; then
+                        #       tmp_base='/tmp'
+                        #   else
+                        #       tmp_base="${HOME:-.}"
+                        #   fi
+rec_auto_fix:           false
+rec_impl:               patch-source-default
+
+fallback_priority:      2
+fallback_approach:      wrapper-export-tmpdir
+fallback_description:   不改上游源码，改为安装一个 wrapper：export TMPDIR=$HOME/tmp 后再 exec 真实脚本（上游脚本不可打补丁、或补丁面过大时用）
+fallback_command:       printf '#!/system/bin/sh\nTMPDIR="${TMPDIR:-$HOME/tmp}"; export TMPDIR\nmkdir -p "$TMPDIR"\nexec "$0.real" "$@"\n' > <pkg>/bin/<tool>
+fallback_auto_fix:      false
+fallback_impl:          install-wrapper
+
+forbid_1_pattern:       test -w "\$\{TMPDIR:-/tmp\}" \|\| TMPDIR=|
+                        显式 TMPDIR 无效时静默回退
+forbid_1_reason:        把「显式设置但无效的 $TMPDIR」也纳入回退，等于替用户吞掉配置错误，改变了上游契约；多数上游（clitest test.md:52 即是）有专门用例断言无效 TMPDIR 必须大声失败
+forbid_1_consequence:   上游测试套件出现真实回归（clitest 实测 286→285），PR 里将被迫「修改上游用例」来掩盖自己引入的语义变更，属高风险改动，真人评审会直接拒
+
+forbid_2_pattern:       仅在构建期 export TMPDIR 而不改脚本默认值
+forbid_2_reason:        构建期环境变量不会随产物进入设备，用户运行时依旧走 /tmp
+forbid_2_consequence:   构建、打包、CI 全绿，装到设备上功能却 100% 不可用，缺陷被推到最终用户侧
+
+principles:
+
+causes:                 []
+caused_by:              [E002]
+similar_to:             [E002]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/E545-draft-3028.md
+last_updated:           2026-09-21
+source_event:           clitest 0.5.0 适配：单文件 POSIX shell 工具，上游 tt_make_temp_dir() 用 ${TMPDIR:-/tmp}；只读 /tmp 对照实验中未打补丁版报 cannot create temporary dir 退出，收窄补丁（仅改未设置分支默认值）后同场景通过，且上游 286 用例仍 286/286
+
+authors:                nyaco3 <aqjCItYW1QmEJQuF.gcw_XDpqZ8sO@noreply.gitcode.com>
+source_pr:              0
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-21
+
+draft:                  true
+contributor_id:         3028

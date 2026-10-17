@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_optional CXX)
+find_package(tl-optional REQUIRED)
+add_executable(test_optional test.cpp)
+target_link_libraries(test_optional PRIVATE tl::optional)
+target_compile_features(test_optional PRIVATE cxx_std_14)
+enable_testing()
+add_test(NAME test_optional COMMAND test_optional)

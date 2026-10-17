@@ -2,35 +2,19 @@
 
 ## 编译环境
 - 构建系统: makefile（纯 Makefile 项目，无 autotools configure）
-- 编译日期: 2026-06-17
+- 编译日期: 2026-07-15
 - 编译器: clang 15.0.4 / clang++
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
-bossa 是纯 Makefile 项目，无 configure 步骤。Makefile 已内置 HarmonyOS 规则（`ifeq ($(OS),Harmony)`），只构建 CLI 工具 bossac 和 bossash。
+bossa 是纯 Makefile 项目，无 configure 步骤。Makefile 使用 `uname -s | cut -c -7` 检测 OS，OHOS 返回 `Harmony` 但无匹配规则，需通过 `OS=Linux` 覆盖。仅构建 CLI 工具 bossac（bossash 需要 readline 库，CI worker 上不可靠，不构建）。
 
 ```bash
-# Step 2: 编译（仅 CLI 工具）
-cd $BUILD_SRC_DIR
-make CXX=clang++ VERSION=1.9.1 PREFIX=$DEFAULT_PREFIX \
-    LDFLAGS="-L$DEFAULT_PREFIX/lib" CXXFLAGS="-fPIC -O2 -I$DEFAULT_PREFIX/include" \
-    bossac bossash
-
-# Step 2.5: staging 安装（DESTDIR 模式，R20）
-make -B install DESTDIR=$TEST_PREFIX PREFIX=$DEFAULT_PREFIX CXX=clang++ VERSION=1.9.1
-
-# Step 2.6: 预编译包制作
-python3 $SKILL_ROOT/scripts/ohc-run.py package bossa 1.9.1
-
-# Step 2.6a: 本地安装（模拟用户部署）
-make -B install PREFIX=$DEFAULT_PREFIX CXX=clang++ VERSION=1.9.1
-
-# Step 2.6b: 用户验证
-$DEFAULT_PREFIX/bin/bossac -h  # 输出: BOSSA Version 1.9.1
-
-# Step 3: 收尾
-python3 $SKILL_ROOT/scripts/ohc-run.py finish bossa 1.9.1 published
+# Conan 构建（conanfile.py 中的 build() 方法）
+make OS=Linux CXX=clang++ VERSION=1.9.1 \
+    CXXFLAGS="-fPIC -O2 -Wno-error" \
+    bin/bossac -j1
 ```
 
 ## 遇到的问题与解决方案
@@ -38,21 +22,21 @@ python3 $SKILL_ROOT/scripts/ohc-run.py finish bossa 1.9.1 published
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
 | 1 | VERSION 变量为空 | Makefile 使用 `git describe --tags --dirty` 获取版本（line 6），但源码目录不是 git 仓库 | 手动覆盖 `VERSION=1.9.1` 作为 make 参数 |
-| 2 | make all 包含 bossa GUI 导致编译失败 | Makefile generic `all` 目标（line 243: bossa+bossac+bossash）覆盖了 HarmonyOS `all` 目标（line 109: 仅 bossac+bossash），GNU Make 后定义优先 | 指定目标 `make bossac bossash` 而非 `make all`，避免触发 wxWidgets 依赖 |
-| 3 | make install 输出 "up to date" 不执行安装 | Makefile `install` 目标名与源码 `install/` 目录同名（`INSTALLDIR=install`），Make 误认为目标已完成 | 使用 `make -B install` 强制重新执行 |
-| 4 | arm-none-eabi-as/objcopy 不可用 | 源码 applet 编译规则（line 259-268）使用 `arm-none-eabi-as` 和 `arm-none-eabi-objcopy` 编译 WordCopyArm.asm ARM Thumb 汇编 | WordCopyArm.cpp/.h 预生成文件已存在于源码目录，当 .cpp 时间戳晚于 .asm 时 make 自动跳过 applet 生成步骤 |
-| 5 | bossash 需要 readline 库 | Makefile `BOSSASH_LIBS=-lreadline $(COMMON_LIBS)`（line 238） | readline 8.2 预编译包已安装于 ~/usr/local/lib，LDFLAGS 指向该路径 |
-| 6 | 二进制补丁误生成 | refresh-patch 基于 edit-tracker 检测到 bin/bossac、bin/bossash 变更并生成补丁，但这些是编译产物而非源码修改 | 删除二进制补丁（R6 规则：只改源文件不改生成文件），清理 edit-tracker 的 edited 列表 |
+| 2 | Makefile OS 检测失败 | `uname -s | cut -c -7` 在 OHOS 返回 `Harmony`，Makefile 无 HarmonyOS 规则 | 使用 `OS=Linux` 参数覆盖 OS 检测 |
+| 3 | -Werror 导致编译失败 | Makefile 硬编码 `-Werror`，源码 Samba.cpp 使用 `move()` 而非 `std::move()`，clang 15 触发 `-Wunqualified-std-cast-call` 警告变错误 | 添加 `-Wno-error` 到 CXXFLAGS 降级 |
+| 4 | PosixSerialPort.cpp 编译失败 | 缺少 `<sys/select.h>` 和 `<sys/time.h>` 头文件 | 添加补丁 `0001-src-PosixSerialPort-missing-includes.patch` |
+| 5 | Makefile 目标名不匹配 | Makefile 目标是路径形式 `bin/bossac`/`bin/bossash`，不是 `bossac`/`bossash` | make 目标使用路径形式 |
+| 6 | bossash 交互式 shell 卡住 CI | bossash 不识别 `--version` 会进入交互模式等待 stdin | 不构建 bossash |
+| 7 | basic_layout 构建目录错误 | 默认 `build_folder="build-release"` 但 Makefile 在源码根目录 | 设置 `build_folder="."` |
+| 8 | bossash 需要 readline 库 | Makefile `BOSSASH_LIBS=-lreadline $(COMMON_LIBS)`，CI worker 上 readline 不可靠 | 只构建 bossac，不构建 bossash |
 
 ## 源码修改
 
-**无补丁。** bossa Makefile 已有 HarmonyOS 规则（line 100-115），源码无需任何修改。仅需 make 参数覆盖（CXX、VERSION、PREFIX、LDFLAGS、CXXFLAGS）。
+**1 个补丁**: `patches/0001-src-PosixSerialPort-missing-includes.patch` — 为 `PosixSerialPort.cpp` 添加 `<sys/select.h>` 和 `<sys/time.h>` 头文件，修复 OHOS 编译缺失。其余适配通过 make 参数覆盖（OS=Linux、CXX、VERSION、CXXFLAGS、LDFLAGS）。
 
 ## 依赖版本
 
-| 依赖 | 版本 | 来源 |
-|------|------|------|
-| readline | 8.2 | 预编译包（~/usr/local/lib） |
+无外部依赖。
 
 ## 验证结果
 
@@ -64,53 +48,20 @@ Usage: bossac [OPTION...] [FILE]
 Basic Open Source SAM-BA Application (BOSSA) Version 1.9.1
 Flash programmer for Atmel SAM devices.
 Copyright (c) 2011-2018 ShumaTech (http://www.shumatech.com)
-
-$ bossac -i
-No device found on /dev/ttyACM0
-```
-
-### bossash 交互式 Shell
-
-```bash
-$ bossash
-Press Ctrl-D or enter "exit" to end session.
-Enter "help" to display a command list.
-bossa>
 ```
 
 ### 二进制格式
 
 ```bash
-$ file bossac bossash
+$ file bossac
 bossac: ELF shared object, 64-bit LSB arm64, dynamic (/lib/ld-musl-aarch64.so.1)
-bossash: ELF shared object, 64-bit LSB arm64, dynamic (/lib/ld-musl-aarch64.so.1)
-
-$ readelf -d bossac | grep NEEDED
-  NEEDED: libc++_shared.so
-  NEEDED: libc.so
-
-$ readelf -d bossash | grep NEEDED
-  NEEDED: libreadline.so.8
-  NEEDED: libc++_shared.so
-  NEEDED: libc.so
 ```
-
-## 交付物
-
-| 文件 | 大小 | SHA256 | 说明 |
-|------|------|--------|------|
-| bossa-1.9.1-ohos-aarch64.tar.gz | 841KB (841876B) | 2a6cb4363a8759589af91bd08b50138385f0a0ef8246357563ffe92e2f29b234 | 预编译包（bossac + bossash + libreadline） |
-| bossa-1.9.1-ohos-aarch64-debug.tar.gz | 1.4MB (1469683B) | 50a7ebb6ab2d32aca6d1c6b0c82b31a0eec05c1d4cda6146a1f57e85650a1d31 | 调试符号包 |
 
 ## 注意事项
 
 1. bossa GUI（bossa）不可编译——需要 wxWidgets，HarmonyOS 平台不提供
 2. arm-none-eabi 工具链不可用时，需确保 WordCopyArm.cpp/.h 预生成文件存在于源码目录
-3. Makefile 的 HarmonyOS `all` 目标（line 109）被通用 `all` 目标（line 243）覆盖，这是 Makefile 设计缺陷，需指定显式目标
-4. Makefile `install` 目标名与 `install/` 目录同名冲突，需 `make -B` 强制执行
-5. R6 规则：bin/bossac 和 bin/bossash 是编译产物，不应作为补丁追踪
+3. bossash（交互式 shell）不构建——需要 readline 库，CI worker 上 readline 不可靠
 
----
-
-**编译结束**: 2026-06-17 01:19
-**最终状态**: published
+**编译结束**: 2026-07-15 02:24
+**最终状态**: built

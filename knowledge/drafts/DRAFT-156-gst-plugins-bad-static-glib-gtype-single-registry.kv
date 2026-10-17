@@ -1,0 +1,60 @@
+draft: DRAFT-156-gst-plugins-bad-static-glib-gtype-single-registry
+status: pending-editor-review
+title: "静态 glib 生态测试树 GType 多副本运行期冲突：PIC .a 合成单一共享库收敛注册表副本"
+category: ohos, testing, conan, linking
+match_keywords: >
+  glib, gobject, GType, GType registry, static glib, double copy, multiple copies,
+  g_param_spec_boxed, G_TYPE_IS_BOXED, type id '0' is invalid, gst_check,
+  gstreamer test, test binary crash, SIGSEGV, type registration, single shared library,
+  libglib-all-2.0.so, merged shared library, PIC archive, testing tree, vendored subproject,
+  check framework, gst_check assertion, test framework crash
+
+error_signature: >
+  g_param_spec_boxed: assertion .*G_TYPE_IS_BOXED.* failed|type id '0' is invalid|CRITICAL .*g_type_register_static|SIGSEGV.*g_type_test_flags|gst_check.*crashed.*while testing|GType.*duplicate.*registration
+
+root_cause: >
+  OHOS 制品仓的 glib2/gobject 仅有静态形态（PIC .a，动态 glib2 共享构建实测失败）。
+  测试树三方（单测框架 gst_check 二进制 / 被测主件库 / vendored 子项目库）各自静态链
+  glib，同一测试进程内出现 N 份独立的 GType 注册表副本：类型 A 在副本 1 注册，
+  g_param_spec_boxed 在副本 2 查 type id 得 0 → 断言崩溃。与 E457 的链接期双副本
+  （.so 内嵌+可执行文件外链）不同，本场景是测试运行期多副本——无法用"消费者改静态链"
+  回避（测试框架与被测库都要链 glib，且 vendored 子项目深度耦合），必须把副本收敛为 1。
+
+solution: |
+  把 conan 静态 glib2/gobject 的 PIC .a 合成为单一共享库，测试树全模块只链这一个 .so，
+  进程内 GType 注册表收敛为单副本（gst-plugins-bad 1.28.5 #11202 实证）：
+  ```bash
+  # 1) 从 conan 缓存收集 glib 系 PIC 静态库（glib-2.0/gobject/gio/gmodule 等按依赖顺序）
+  CONAN_LIBS=$(conan cache path glib2/2.88.0#<rrev>)/lib
+  # 2) 合成单一共享库（ld -shared，注意 .a 均为 PIC 构建，直接 relocatable 链接）
+  $TOOLCHAIN/bin/clang -shared -o libglib-all-2.0.so \
+    -Wl,--whole-archive \
+    $CONAN_LIBS/libglib-2.0.a $CONAN_LIBS/libgobject-2.0.a \
+    $CONAN_LIBS/libgio-2.0.a $CONAN_LIBS/libgmodule-2.0.a \
+    -Wl,--no-whole-archive -lpthread -ldl
+  # 3) 测试树构建把 -lglib-2.0/-lgobject-2.0 全部替换为 -l:libglib-all-2.0.so
+  #    （meson: 依赖 discovery 后 pkg-config 覆写 or LDFLAGS 注入）
+  # 4) 运行测试：GST_REGISTRY 指向测试树隔离路径，LD_LIBRARY_PATH 前置合成库目录
+  LD_LIBRARY_PATH=$SYNTH_DIR:$LD_LIBRARY_PATH GST_REGISTRY=$PWD/test-registry.bin \
+    ./tests/check/libs_analyticsmeta
+  ```
+  实证效果：原"跨副本 GType 分裂 100% 崩溃"（g_param_spec_boxed: G_TYPE_IS_BOXED
+  failed / type id '0' is invalid）不再复现，86/86 测试二进制全部运行至 gst_check
+  判定完成、无进程崩溃，其中 26/86 二进制 100% 全过（149 用例零失败）。
+  同法可扩展 gstreamer core 共享化（libgstcore-all-1.0.so，插件静态链 core 的
+  dlopen 路径类问题同根因）。
+
+fallback: >
+  合成共享库不可行时（非 PIC .a / 依赖循环无法排序）：test_package 回避式降级——
+  消费端测试不调用 gst_init()，仅做 dlopen/dlsym 符号级验证+SONAME 结构校验
+  （E457 回避思路在测试侧的等价物）；并在 PR 正文如实申报测试运行的结构性限制。
+  另一条路径：推动制品仓发布动态 glib2（conan install -o glib2/*:shared=True），
+  实测 2.88.0 动态构建失败（Error 1），故当前唯一可行解是合成方案。
+
+verify_builds: "#61125, #61015, #61009"
+reference_impl: >
+  PR #11202 gst-plugins-bad1.0 1.28.5（知识草稿随 PR）；相关判例 E457（avahi-glib
+  链接期双副本，回避式修法）；E539（zlib PIC probe）、E541（static-only PIC archive
+  系统同名库）为 PIC .a 处理先例。
+id: E###-draft
+doc_file: doc/E###.md

@@ -1,0 +1,132 @@
+#====================================================================
+# DRAFT-ohos-dependency-library-missing-own-symbols —— 依赖库制品自身不实现其
+#   API 符号（空壳/桩库），-l 链接即失败，且被 configure 包装成误导性报错
+# 对应文档: knowledge/drafts/DRAFT-ohos-dependency-library-missing-own-symbols.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-ohos-dependency-library-missing-own-symbols
+trigger_tool:           conan|autotools|configure|ld.lld|clang
+phase:                  build|link
+error_signature:        undefined reference due to --no-allow-shlib-undefined: (gettext|dgettext|bindtextdomain)|
+                         C compiler cannot create executables|
+                         ld\.lld: error: undefined reference due to --no-allow-shlib-undefined
+
+severity:               3
+category:               conan, dependency, linking, gettext, autotools, false-error
+match_keywords:         libintl, gettext, dgettext, bindtextdomain, undefined reference,
+                         no-allow-shlib-undefined, C compiler cannot create executables,
+                         空壳库, 桩库, stub library, 未定义符号, nm -D -u, libintl.so.8,
+                         AM_GNU_GETTEXT, --disable-nls, config.log, 误导性报错
+title:                  制品仓里的依赖库**自身不实现其 API 符号**（空壳 libintl）
+                        —— `-l` 链接即报 undefined reference，而 configure 会把它
+                        包装成误导性的 "C compiler cannot create executables"
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             ohpcd 发布的 ``libintl/0.26.1`` 内 ``libintl.so.8`` 把
+                        ``gettext`` / ``dgettext`` / ``dcgettext`` / ``ngettext`` /
+                        ``dngettext`` / ``dcngettext`` / ``bindtextdomain`` /
+                        ``textdomain`` / ``bind_textdomain_codeset`` **全部列为未定义
+                        符号**（实测 ``nm -D -u libintl.so.8`` 可见），即该库自身
+                        不提供这些实现——典型的"空壳/桩库"制品。
+                        当 autotools 项目经 AutotoolsDeps 注入 ``-lintl`` 后，lld 以
+                        ``--no-allow-shlib-undefined`` 语义链接时直接报：
+                          ``ld.lld: error: undefined reference due to
+                            --no-allow-shlib-undefined: gettext``
+                        而 configure 的编译探测只关心"这个程序能否生成"，于是把链接期
+                        失败**包装成误导性的**：
+                          ``configure: error: C compiler cannot create executables``
+                        该报错**指向 C 编译器**，极易误诊为工具链/环境问题，实际根因在
+                        依赖制品的符号完整性上。判据在 ``config.log`` 里——真实错误是
+                        ``undefined reference``，而非 conftest 本身的编译错误。
+                        与「依赖缺失」不同：库**存在**、头也**存在**，只是其符号未实现，
+                        所以"装了依赖"这一步是成功的，问题延后到链接期才暴露。
+affected_scope:         所有链接"空壳/桩库"的 autotools/CMake 项目；典型是 NLS 相关
+                        （libintl/gettext）与任何只导出桩符号的兼容库制品。
+                        在 OHOS 上被 ``--no-allow-shlib-undefined``（lld 默认）放大：
+                        glibc 生态因默认允许未定义符号而可能"链得上、运行才炸"，
+                        lld 则直接在链接期拒绝。
+                        与 E524（SYS_PREFIX 注入污染导致同类报错）不同层：E524 的
+                        报错源是环境污染，本条是**依赖制品自身符号缺失**（E524 全文
+                        gettext=0 / libintl=0 / undefined reference=0 实测）。
+verification_cmd:       ① 判定依赖库是否为空壳（决定性）：
+                          nm -D -u <dep>/lib/libintl.so.8 | grep gettext
+                          # 有输出 → 该库不实现这些符号（空壳）
+                          # 关键 API 是否被【定义】：
+                          nm -D --defined-only <dep>/lib/libintl.so.8 | grep gettext
+                          # 无输出 → 确认未实现
+                        # ② 看真实报错（勿只看 configure 的包装报错）：
+                        grep -nE "undefined reference|no-allow-shlib|conftest" <build>/config.log
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           drop-unusable-dep-or-disable-its-feature
+rec_description:        先判断该依赖是否**真的需要**：
+                          · 若项目本可用开关关掉该功能（如 NLS：``--disable-nls``），
+                            则**直接移除该依赖**——不要为了"凑齐依赖表"引入一个
+                            链接即失败的库。实测 pwquality 即如此：本就
+                            ``--disable-nls``，移除 ``libintl`` 后 configure 立即通过。
+                          · 若功能确为必需，则须先修复该依赖制品（补实现或换上游），
+                            并把修复后的版本发布到制品仓，再引入。
+                        无论哪条路，都**必须**：① 用 ``nm -D`` 验证依赖库确实**定义**
+                        其声称提供的符号；② 遇到 ``C compiler cannot create
+                        executables`` 时**先查 config.log**，不要盲调工具链。
+rec_command:            # 关掉 NLS 并移除依赖：
+                        #   tc.configure_args.append("--disable-nls")
+                        #   # 不写 self.requires("libintl/...")
+                        # 验证依赖符号完整性：
+                        #   nm -D --defined-only <dep>/lib/libX.so | grep <symbol>
+rec_auto_fix:           false
+rec_impl:               drop-unusable-dep-or-disable-its-feature
+
+fallback_priority:      2
+fallback_approach:      supply-missing-symbols-via-a-real-provider
+fallback_description:   若功能不可关闭且确实需要这些符号，则必须换一个**真正实现**
+                        它们的提供者（例如系统内自带实现的 gettext 版本，或该库的
+                        完整发行版），并把 ``-L`` 指向该提供者。禁止靠
+                        ``-Wl,--allow-shlib-undefined`` 之类的链接期放宽来"绕过"——
+                        那只会把错误推到运行期（dlopen/调用时符号找不到），
+                        在 OHOS 上表现为难以定位的运行时崩溃。
+fallback_command:       # 换提供者：-L<real_provider_lib> -lintl（并用 nm -D 复核已定义）
+fallback_auto_fix:      false
+fallback_impl:          supply-missing-symbols-via-a-real-provider
+
+forbid_1_pattern:       见.*C compiler cannot create executables.*(便|就).*(换编译器|调工具链|改 SDK|怀疑环境)|
+                         为.*cannot create executables.*重装/降级.*(clang|工具链)
+forbid_1_reason:        该报错来自 configure 的编译探测，未区分"编译失败"与"链接失败"；
+                        根因常在 config.log 里的 ``undefined reference``，与编译器无关。
+                        按编译器方向试错会全盘落空。
+forbid_1_consequence:   在错误方向消耗大量轮次（换工具链、重装 SDK），真因未解。
+
+forbid_2_pattern:       用.*--allow-shlib-undefined.*(解决|绕过).*undefined reference|
+                         放宽.*未定义符号.*(以|来).*通过链接
+forbid_2_reason:        放宽只是把"链接期可见的缺符号"推迟成"运行期不可见的崩溃"，
+                        且会在消费方 dlopen 时才暴露，定位成本远高于链接期。
+forbid_2_consequence:   病灶被掩盖到运行期，可能在 CI 全绿后于真机运行才炸。
+
+principles:             measure-not-assume, upstream-compat-evidence
+
+causes:                 []
+caused_by:              []
+similar_to:             [E524]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-dependency-library-missing-own-symbols.md
+last_updated:           2026-09-16
+source_event:           pwquality 1.4.5 适配（AutotoolsDeps 注入 -lintl 后 lld 报
+                        gettext/bindtextdomain undefined；实测 ohpcd 的 libintl.so.8
+                        内这些符号全为未定义；移除依赖后 configure 通过）
+
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     2
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:        7F2B

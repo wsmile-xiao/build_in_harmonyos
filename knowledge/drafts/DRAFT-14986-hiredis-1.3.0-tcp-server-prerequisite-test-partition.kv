@@ -1,0 +1,151 @@
+#====================================================================
+# DRAFT-14986-hiredis-1.3.0-tcp-server-prerequisite-test-partition
+#   上游测试套件硬前置外部 TCP 服务（redis-server）时的
+#   分层如实申报法——纯函数子集实跑 + 消费者兜底 + 阻断项定性
+# 来源: PR #14986 feat(hiredis): 1.3.0 适配 HarmonyOS PC
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-14986-hiredis-1.3.0-tcp-server-prerequisite-test-partition
+trigger_tool:           cmake|conan|test.sh|ctest
+phase:                  testing
+error_signature:        Connection error: Connection refused|
+                         REDIS_SERVER:-redis-server|
+                         redis-server: command not found|
+                         which redis-server.*not found|
+                         test\.sh.*redis-server|
+                         Can't connect to (localhost|127\.0\.0\.1)
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               testing, cmake, daemon-prerequisite, client-library,
+                        honest-reporting, ohos, upstream-tests
+match_keywords:         上游测试, 通过率, redis-server, Connection refused,
+                        客户端库, daemon 前置, test.sh, add_test, server 依赖,
+                        环境限制, 分层申报, 纯函数, 消费者测试, rule4, R51
+title:                  客户端库上游测试硬前置外部 TCP 服务（redis-server 等）时按「server 依赖」二分：纯函数子集交叉编译实跑 + 消费者测试兜底 + 阻断项逐项定性
+prescan_pattern:        redis-server|REDIS_SERVER|
+                         ADD_TEST\(NAME.*test\.sh|
+                         test\.sh.*\$\{.*SERVER
+prescan_globs:          CMakeLists.txt, test.sh, Makefile, tests/*.sh
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             客户端-服务器架构的上游测试套件第一步就是与「活的
+                        服务端实例」建立连接：CMake 的 add_test(NAME x-test
+                        COMMAND test.sh) 把测试二进制包在 shell 包装脚本里，
+                        test.sh 先拉起 redis-server（TCP 56379 + unix socket
+                        + 可选 TLS）再跑全套。OHOS CI worker 与本机均无该
+                        服务二进制（which redis-server → not found）也无
+                        redis docker 镜像，包装脚本在第一步即失败。
+                        机制性质：测试「存在且真实」但环境硬前置不可满足——
+                        与「configure 静默排除测试」（DRAFT-10251）和「上游
+                        无测试做 ABI 钉死」（E530）均不同构；直接整包跳过会
+                        被审查判 rule4 少报，直接全跑会在第一个 connect 处
+                        卡死/失败。
+affected_scope:         所有客户端库（redis/hiredis、memcached/libmemcached、
+                        amqp/rabbitmq-c、mqtt/paho、postgresql/libpq、
+                        mysql/libmysqlclient 等）的 OHOS 适配测试申报；
+                        同构场景：任何 add_test 的 COMMAND 是「先起 daemon
+                        再跑」的包装脚本。本题实证：hiredis 1.3.0（上游
+                        test.c 118 个 test() 用例，test.sh 拉起 redis-server）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           partition-by-server-dependence-then-honest-report
+rec_description:        【第一步 清点（rule4 口径）】grep 计数 test() 断言宏/
+                        测试函数（本题：118 个 test() 用例、22 个 test_ 函数；
+                        注意 #define test(_s) 宏定义本身会混入 grep，需剔除）。
+
+                        【第二步 按 server 依赖二分】读 test.c 的 main()：
+                        无条件段先跑的纯函数用例（allocator 注入/命令格式化/
+                        回复解析/连接错误路径）在进入 connect 测试段之前
+                        全部执行——这一段就是「无 server 可跑子集」。
+
+                        【第三步 纯函数子集真跑】用 OHOS SDK clang 直编
+                        上游 test.c 链接 conan 产物（按上游 Makefile 的
+                        -I 顺序：clang test.c -I. -I<pkg>/include
+                        -L<pkg>/lib -lhiredis -lm），本机 aarch64 直跑。
+                        本题实测：#01–#67 连续编号全 PASSED（0 FAILED）；
+                        注意 NXDOMAIN 子用例会被本机 DNS 劫持跳过（上游
+                        自身打印 "Skipping NXDOMAIN test. Found evil ISP!"）
+                        ——跳过是上游行为，如实记录。
+
+                        【第四步 消费者测试兜底（test_package）】无 server
+                        环境下验证库可用性的最小集：连接失败 errno 语义
+                        （connect 到无监听端口 → err 置位 + errstr 非空，
+                        与上游连接错误用例同源）+ 协议格式化/解析字节级
+                        memcmp 断言（RESP2/RESP3 全类型）。
+
+                        【第五步 阻断项逐项定性】51 个 server 依赖用例逐类
+                        列出（blocking_connection/pubsub/monitor/async 等），
+                        统一根因 + 实测报错（Connection error: Connection
+                        refused）+ 环境限制关键词，写进 PR 正文统计表与
+                        MANIFEST.yml，禁编造通过率。
+rec_command:            cd <源码树> && grep -oE '\btest\(' test.c | wc -l
+                        # 纯函数子集实跑：
+                        # /data/service/hnp/bin/clang test.c -I. -I<pkg>/include \
+                        #   -L<pkg>/lib -lhiredis -lm -o hiredis-test && ./hiredis-test
+                        # 期望: #01–#67 全 PASSED 后停在第一个 connect（预期失败点）
+rec_auto_fix:           false
+rec_impl:               conan-test-package
+
+fallback_priority:      2
+fallback_approach:      docker-or-remote-server
+fallback_description:   CI 环境有 docker 时按上游 CI 形态起 redis:alpine
+                        容器跑全套（REDIS_DOCKER=redis:alpine sh test.sh）；
+                        或 REDIS_SERVER 环境变量指向可达的远端实例。OHOS
+                        CI worker 无 docker，本题不可用，仅作为有服务环境
+                        的完备跑法。
+fallback_command:       REDIS_SERVER=redis-server sh test.sh
+fallback_auto_fix:      false
+fallback_impl:          upstream-script
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       全部跳过.*不跑|118.*全部环境限制
+forbid_1_reason:         纯函数子集（连接建立之前的无 server 段）本可实跑，
+                        整包套"环境限制"帽子 = rule4 少报（67 个可跑用例
+                        一个不报）
+forbid_1_consequence:   审查判少报/谎报，VERDICT=FAIL
+forbid_2_pattern:       mock.*redis-server|stub.*server.*让测试通过
+forbid_2_reason:         手写假 server 让 server 段用例"通过"破坏上游测试
+                        原始性且掩盖真实协议差异；消费者测试已覆盖无 server
+                        契约，无需造假
+forbid_2_consequence:   审查拒收 + 后续消费者踩坑
+forbid_3_pattern:       通过率.*100%.*（含 server 段）
+forbid_3_reason:         server 段 51 用例未跑却计入通过 = 虚报通过率
+forbid_3_consequence:   rule4 FAIL
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             DRAFT-10251-libnfc-tools-1.8.0-autotools-test-framework-guard（互补：测试被静默排除 vs 测试存在但服务硬前置）、
+                        E530（X11 无 X server 消费者测试——上游无测试 vs 上游有测试）
+caused_by:              CI worker 环境边界（无 daemon 二进制/无 docker）
+conflicts_with:
+prerequisite_of:        R51 上游测试三步法 / 审查 rule4 分层申报的前置判别能力
+
+# ═══ 元数据 ═══
+verification_cmd:       cd archives/h/hiredis/1.3.0 && conan create . \
+                          -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing
+                        # 期望: RC=0，test_package 19 项消费者测试全 PASS；
+                        # 纯函数子集: 上游 test.c 实跑 #01–#67 全 PASSED
+doc_file:               knowledge/drafts/DRAFT-14986-hiredis-1.3.0-tcp-server-prerequisite-test-partition.md
+last_updated:           2026-10-08
+source_event:           PR #14986 feat(hiredis): 1.3.0 适配 HarmonyOS PC（任务 #14960）；
+                        上游 test.c 118 用例：67 纯函数用例本机实测 67/67 PASS、
+                        51 server 依赖用例环境限制阻断（test.sh 第一步拉起
+                        redis-server，which redis-server → not found）；
+                        消费者测试 19 项全 PASS（conan create RC=0，
+                        L0-L5 本地门禁 100%）
+authors:                j669539
+source_pr:              14986
+source_commit:          1f20a1bac1
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-10-08

@@ -1,0 +1,229 @@
+--- a/Rendering/OpenGL2/vtkValuePass.cxx
++++ b/Rendering/OpenGL2/vtkValuePass.cxx
+@@ -10,20 +10,21 @@
+ #include "vtkLookupTable.h"
+ #include "vtkMapper.h"
+ #include "vtkMath.h"
+ #include "vtkNew.h"
+ #include "vtkObjectFactory.h"
+ #include "vtkOpenGLBufferObject.h"
+ #include "vtkOpenGLCellToVTKCellMap.h"
+ #include "vtkOpenGLError.h"
+ #include "vtkOpenGLFramebufferObject.h"
+ #include "vtkOpenGLPolyDataMapper.h"
++#include "vtkOpenGLES30PolyDataMapper.h"
+ #include "vtkOpenGLRenderWindow.h"
+ #include "vtkOpenGLRenderer.h"
+ #include "vtkOpenGLState.h"
+ #include "vtkOpenGLVertexArrayObject.h"
+ #include "vtkPolyData.h"
+ #include "vtkProp.h"
+ #include "vtkProperty.h"
+ #include "vtkRenderState.h"
+ #include "vtkRenderWindow.h"
+ #include "vtkRenderbuffer.h"
+@@ -694,21 +695,46 @@
+   ostate->PushReadFramebufferBinding();
+   this->ImplFloat->ValueFBO->Bind(GL_READ_FRAMEBUFFER);
+   this->ImplFloat->ValueFBO->ActivateReadBuffer(0);
+ 
+   // Calling pack alignment ensures any window size can be grabbed.
+   ostate->vtkglPixelStorei(GL_PACK_ALIGNMENT, 1);
+ #ifndef GL_ES_VERSION_3_0
+   glClampColor(GL_CLAMP_READ_COLOR, GL_FALSE);
+ #endif
+ 
++#ifdef GL_ES_VERSION_3_0
++  // RGBA32F readback supports RGBA/FLOAT on ES; individual channels are
++  // extracted on the CPU because RED/FLOAT is not a required read pair.
++  std::vector<float> pixels(static_cast<size_t>(width) * height * 4);
++  glReadPixels(0, 0, width, height, GL_RGBA, GL_FLOAT, pixels.data());
++  const GLenum readError = glGetError();
++  if (readError != GL_NO_ERROR)
++  {
++    vtkErrorMacro("Floating-point value readback failed: " << readError);
++  }
++  else
++  {
++    const int components = format == GL_RGBA ? 4 : format == GL_RGB ? 3 : format == GL_RG ? 2 : 1;
++    const int first = format == GL_GREEN ? 1 : format == GL_BLUE ? 2 : 0;
++    float* output = static_cast<float*>(data);
++    for (size_t i = 0; i < static_cast<size_t>(width) * height; ++i)
++    {
++      for (int c = 0; c < components; ++c)
++      {
++        output[i * components + c] = pixels[4 * i + first + c];
++      }
++    }
++  }
++#else
+   glReadPixels(0, 0, width, height, format, GL_FLOAT, data);
++#endif
+ 
+   ostate->PopReadFramebufferBinding();
+ 
+   vtkOpenGLCheckErrorMacro("Failed to read pixels from OpenGL buffer!");
+ }
+ 
+ //------------------------------------------------------------------------------
+ int* vtkValuePass::GetFloatImageExtents()
+ {
+   int* size = this->ImplFloat->ValueFBO->GetLastSize();
+@@ -719,26 +745,39 @@
+   this->ImplFloat->FloatImageExt[3] = size[1] - 1;
+   this->ImplFloat->FloatImageExt[4] = 0;
+   this->ImplFloat->FloatImageExt[5] = 0;
+ 
+   return this->ImplFloat->FloatImageExt;
+ }
+ 
+ //------------------------------------------------------------------------------
+ bool vtkValuePass::PostReplaceShaderValues(std::string& vertexShader,
+   std::string& vtkNotUsed(geometryShader), std::string& fragmentShader,
+-  vtkAbstractMapper* vtkNotUsed(mapper), vtkProp* vtkNotUsed(prop))
++  vtkAbstractMapper* mapper, vtkProp* vtkNotUsed(prop))
+ {
+   bool success = true;
+   if (this->RenderingMode == vtkValuePass::FLOATING_POINT)
+   {
+     success = this->UpdateShaders(vertexShader, fragmentShader);
++#ifdef GL_ES_VERSION_3_0
++    if (this->PassState->ArrayMode == VTK_SCALAR_MODE_USE_POINT_FIELD_DATA)
++    {
++      const bool expanded = vtkOpenGLES30PolyDataMapper::SafeDownCast(mapper) != nullptr;
++      vtkShaderProgram::Substitute(vertexShader, "in float dataAttribute;",
++        expanded ? "in float vtkVertexID;" : "");
++      const std::string index = expanded ? "int(vtkVertexID)" : "gl_VertexID";
++      vtkShaderProgram::Substitute(vertexShader, "dataValue = dataAttribute;",
++        "dataValue = texelFetch(textureF, Get2DIndexFrom1DIndex(" + index +
++          ", textureSize(textureF, 0)), 0).r;");
++    }
++#endif
++
+   }
+ 
+   return success;
+ }
+ 
+ //------------------------------------------------------------------------------
+ bool vtkValuePass::SetShaderParameters(vtkShaderProgram* program,
+   vtkAbstractMapper* vtkNotUsed(mapper), vtkProp* vtkNotUsed(prop), vtkOpenGLVertexArrayObject* VAO)
+ {
+   if (this->RenderingMode == vtkValuePass::FLOATING_POINT)
+@@ -781,21 +820,25 @@
+     this->ImplFloat->PointBuffer = nullptr;
+   }
+   this->ImplFloat->BuffersAllocated = false;
+ 
+   this->ReleaseFBO(win);
+ }
+ 
+ //------------------------------------------------------------------------------
+ void vtkValuePass::RenderPieceFinish()
+ {
+-  if (this->PassState->ArrayMode == VTK_SCALAR_MODE_USE_CELL_FIELD_DATA)
++  if (this->PassState->ArrayMode == VTK_SCALAR_MODE_USE_CELL_FIELD_DATA
++#ifdef GL_ES_VERSION_3_0
++    || this->PassState->ArrayMode == VTK_SCALAR_MODE_USE_POINT_FIELD_DATA
++#endif
++  )
+   {
+     if (this->ImplFloat->CellFloatTexture)
+     {
+       this->ImplFloat->CellFloatTexture->Deactivate();
+     }
+   }
+ }
+ 
+ //------------------------------------------------------------------------------
+ void vtkValuePass::RenderPieceStart(vtkDataArray* dataArr, vtkMapper* mapper)
+@@ -823,48 +866,56 @@
+     this->ImplFloat->ComponentBuffer->SetNumberOfTuples(numTuples);
+     this->ImplFloat->ComponentBuffer->CopyComponent(0, dataArr, comp);
+     this->ImplFloat->ComponentBuffer->Modified();
+     float const* data = static_cast<float*>(this->ImplFloat->ComponentBuffer->GetVoidPointer(0));
+ 
+     // Upload array data
+     if (this->PassState->ArrayMode == VTK_SCALAR_MODE_USE_POINT_FIELD_DATA)
+     {
+       this->ImplFloat->PointBuffer->Upload(
+         data, static_cast<size_t>(numTuples), vtkOpenGLBufferObject::ArrayBuffer);
++#ifdef GL_ES_VERSION_3_0
++      this->ImplFloat->CellFloatTexture->CreateTextureBuffer(
++        static_cast<unsigned int>(numTuples), 1, VTK_FLOAT, this->ImplFloat->PointBuffer);
++#endif
+     }
+     else if (this->PassState->ArrayMode == VTK_SCALAR_MODE_USE_CELL_FIELD_DATA)
+     {
+       // unroll the cell values such that every drawn triangle
+       // gets a copy of the value from its parent cell
+       // todo: cache and reuse if are stuck with uploading always
+       size_t len = this->ImplFloat->CellCellMap.size();
+       float* unrolled_data = new float[len];
+       for (size_t i = 0; i < len; ++i)
+       {
+         unrolled_data[i] = data[this->ImplFloat->CellCellMap[i]];
+       }
+       this->ImplFloat->CellFloatBuffer->Upload(
+         unrolled_data, len, vtkOpenGLBufferObject::TextureBuffer);
+       delete[] unrolled_data;
+ 
+       this->ImplFloat->CellFloatTexture->CreateTextureBuffer(
+-        static_cast<unsigned int>(numTuples), 1, VTK_FLOAT, this->ImplFloat->CellFloatBuffer);
++        static_cast<unsigned int>(len), 1, VTK_FLOAT, this->ImplFloat->CellFloatBuffer);
+     }
+     else
+     {
+       vtkErrorMacro("Scalar mode " << this->PassState->ArrayMode << " is not supported!");
+     }
+     this->ImplFloat->DataUploadTime.Modified();
+   }
+ 
+   // Bind textures
+-  if (this->PassState->ArrayMode == VTK_SCALAR_MODE_USE_CELL_FIELD_DATA)
++  if (this->PassState->ArrayMode == VTK_SCALAR_MODE_USE_CELL_FIELD_DATA
++#ifdef GL_ES_VERSION_3_0
++    || this->PassState->ArrayMode == VTK_SCALAR_MODE_USE_POINT_FIELD_DATA
++#endif
++  )
+   {
+     this->ImplFloat->CellFloatTexture->Activate();
+   }
+ }
+ 
+ //------------------------------------------------------------------------------
+ void vtkValuePass::BeginMapperRender(
+   vtkMapper* mapper, vtkDataArray* dataArray, vtkProperty* property)
+ {
+   switch (this->RenderingMode)
+@@ -975,23 +1026,27 @@
+       {
+         vtkErrorMacro(<< "Error setting 'dataAttribute' in shader VAO.");
+       }
+     }
+   }
+ }
+ 
+ //------------------------------------------------------------------------------
+ void vtkValuePass::BindUniforms(vtkShaderProgram* prog)
+ {
+-  if (this->PassState->ArrayMode == VTK_SCALAR_MODE_USE_CELL_FIELD_DATA)
+-  {
+-    if (prog->IsAttributeUsed("textureF"))
++  if (this->PassState->ArrayMode == VTK_SCALAR_MODE_USE_CELL_FIELD_DATA
++#ifdef GL_ES_VERSION_3_0
++    || this->PassState->ArrayMode == VTK_SCALAR_MODE_USE_POINT_FIELD_DATA
++#endif
++  )
++  {
++    if (prog->IsUniformUsed("textureF"))
+     {
+       int tunit = this->ImplFloat->CellFloatTexture->GetTextureUnit();
+       prog->SetUniformi("textureF", tunit);
+     }
+   }
+ }
+ 
+ //-------------------------------------------------------------------
+ vtkDataArray* vtkValuePass::GetCurrentArray(vtkMapper* mapper, Parameters* arrayPar)
+ {

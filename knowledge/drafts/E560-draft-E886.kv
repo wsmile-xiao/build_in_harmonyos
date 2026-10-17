@@ -1,0 +1,98 @@
+#====================================================================
+# E560 — OHOS libc++15 无 std::pmr 实现：pmr 后备分配器必须在库内等价降级
+# 来源: taskflow 4.1.0 OHOS 适配（2026-09-10，设备实测）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E560
+trigger_tool:           clang
+phase:                  compilation
+error_signature:        "'memory_resource' file not found|no type named 'synchronized_pool_resource' in namespace 'std::.*pmr'|no member named 'pool_options' in namespace 'std::.*pmr'"
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 2
+category: platform, portability, ohos, libcxx, pmr, headers
+prescan_pattern:        '#include\s*[<"]memory_resource[>"]|std::pmr::|std::pmr\s*::\s*(synchronized_pool_resource|pool_options|unsynchronized_pool_resource|monotonic_buffer_resource)'
+prescan_globs:          "*.h, *.hpp, *.c, *.cc, *.cpp, *.cxx"
+match_keywords:         memory_resource, std::pmr, synchronized_pool_resource, pool_options, libcxx-ohos, OHOS, missing header, file not found, libc++ 15, experimental/memory_resource
+title: OHOS libc++15 无 std::pmr 实现：pmr 后备分配器必须在库内等价降级
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  OHOS SDK（实测 ohos-sdk_26.0.0.18）的 libc++ 15 是裁剪变体：公共头目录
+  libcxx-ohos/include/c++/v1 根本没有 <memory_resource>（全 SDK 只有
+  experimental/memory_resource），且 libc++.so 不导出任何 std::pmr 符号
+  （nm -D --defined-only libc++.so | grep -c pmr = 0；pmr 实现只存在于
+  libc++experimental.a），experimental/memory_resource 又只提供 Library
+  Fundamentals v1 的 memory_resource/polymorphic_allocator，没有 C++17 的
+  synchronized_pool_resource/pool_options。因此“用 __has_include 守卫包含”
+  只对不使用 pmr 类型的库有效；真实使用 pmr 类型的库无法靠包含守卫或
+  换命名空间解决。
+affected_scope: >
+  任何在 OHOS aarch64 上编译、且头文件真实使用 std::pmr 类型的 C++17/20 库。
+  taskflow 4.1.0 实测：tf::ObjectPool（tf::Graph 的节点池，所有消费者必经）
+  成员使用 std::pmr::synchronized_pool_resource + std::pmr::pool_options，
+  连 <taskflow/taskflow.hpp> 的最小消费者都无法编译；同名“缺失头”模式
+  （jsonifier 实测）只覆盖未使用 pmr 类型的情形，不覆盖本模式。
+verification_cmd: >
+  SDK=${OHOS_SDK:-/data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/llvm};
+  find "$SDK" -name memory_resource;              # 只应看到 experimental/memory_resource
+  nm -D --defined-only "$SDK/lib/aarch64-linux-ohos/libc++.so" | grep -c pmr;   # 期望 0
+  printf '#include <experimental/memory_resource>\nnamespace p = std::experimental::pmr;\nint main(){ p::synchronized_pool_resource r; }\n' > /tmp/pmr-probe.cpp;
+  clang++ -std=c++20 -c /tmp/pmr-probe.cpp       # 期望 no type named 'synchronized_pool_resource'
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           feature-detect-inline-equivalent
+rec_description: >
+  用 #if __has_include(<memory_resource>) 做特性探测（不是平台宏）：具备 pmr 时
+  保持原生 std::pmr 路径；不具备时在同一位置提供一个接口子集等价、行为等价的
+  库内实现（互斥保护的固定块空闲链表 + 按上游同样粒度分块增长；超尺寸或更严格
+  对齐的请求直接走 ::operator new，与 polymorphic_allocator 的上游回退一致），
+  调用点不改。taskflow 实测：tf::SynchronizedBlockPool 替代
+  std::pmr::synchronized_pool_resource，allocate/deallocate/release 三接口对齐，
+  上游 2909 用例全通过、消费者 ObjectPool churn 40000 次无异常。
+rec_command:            printf '#if defined(__has_include)\n#  if __has_include(<memory_resource>)\n#    define TF_HAS_STD_PMR 1\n#  endif\n#endif\n#ifndef TF_HAS_STD_PMR\n#  define TF_HAS_STD_PMR 0\n#endif\n'
+rec_auto_fix:           false
+
+fallback_priority:      2
+fallback_description: >
+  库自身只做包含（不使用 pmr 类型）时，仅用 __has_include 守卫包含即可（jsonifier
+  实测口径）；但这不适用于真实使用 pmr 类型的情况，不能作为本模式的主要修复。
+fallback_auto_fix:      false
+
+forbid_1_pattern:       return\s+nullptr;\s*//|TODO.*pmr|FIXME.*pmr
+forbid_1_reason:        用空 stub / 固定 success / 直接返回 nullptr 掩盖缺失的 pmr 实现，会让冷路径内存分配在运行时错误，属伪修复
+forbid_1_consequence:   假绿：包能编译、测试看似通过，实际 ObjectPool 冷路径行为未定义
+forbid_2_pattern:       -I.*libc\+\+experimental|-lc\+\+experimental
+forbid_2_reason:        libc++experimental.a 只含 experimental::pmr（无 pool resource），强行链接并不能提供 std::pmr，且引入未声明的 ABI 依赖
+forbid_2_consequence:   链接期或运行期出现未定义符号/ABI 不匹配
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             R8, R34
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E130]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E560-draft-E886.md
+last_updated:           2026-09-10
+source_event:           taskflow 4.1.0 OHOS 适配：object_pool.hpp 'memory_resource' file not found
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                Awstme <awstme@qq.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-10
+
+draft: true
+contributor_id: E886

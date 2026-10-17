@@ -1,0 +1,95 @@
+#====================================================================
+# DRAFT-gcem-1.16.0-ohos-libm-long-double-boundary
+# 触发事件: gcem 1.16.0 HarmonyOS PC 适配（R02 上游测试）
+#          上游 log/log10/log2 三个入口在 1e-500L 用例 SIGABRT
+#====================================================================
+
+id:                     DRAFT-gcem-1.16.0-ohos-libm-long-double-boundary
+trigger_tool:           gcem|clang|libm|test|log|log10|log2
+phase:                  testing|verification|porting
+error_signature: 'std::log\(1e-500L\).* -inf|log\(1e-500\).*Expected value: -inf|Actual value: -1151|libc\+\+abi: terminating due to uncaught exception.*test fail|gcem::log.*SIGABRT|gcem::log\(1e-500\)'
+
+severity:               3
+category:               ohos|libm|long-double|reference-oracle|upstream-test|underflow
+match_keywords:         OHOS, long double, libm, std::log, reference oracle,
+                         underflow, 1e-500, -inf, finite, gcem, clang-15,
+                         aarch64, SIGABRT, upstream test, 平台边界
+
+title: 'OHOS long double libm reference boundary: std::log(1e-500L)=-inf vs library finite value'
+
+root_cause: >
+  On OHOS aarch64 with the clang-15 toolchain, long double is IEEE-754 quad (sizeof 16,
+  LDBL_MIN 0x1p-16382), so 1e-500L is a perfectly normal, representable value (about
+  0x1.0675b44007b734ff1d9a8873b40ap-1661). The platform reference implementation
+  std::log(long double) returns -inf for such a normal quad value (probe: std::log(0x1p-1600L)
+  = -inf, while std::log(2.0L)=0.693147 and std::log(1e5L)=11.5129 work), i.e. the OHOS
+  libm long-double path mis-reports underflow/infinity in the extreme-small normal range.
+  A constexpr math library such as gcem computing log by its own continued-fraction /
+  mantissa-expansion returns the mathematically correct finite value (-1151.29 for 1e-500).
+  Upstream tests that compare library result against the platform reference oracle then
+  fail (expected -inf, actual -1151.29) and abort via std::runtime_error (SIGABRT).
+  The mismatch is therefore a platform libm boundary behavior, not a defect of the library.
+
+affected_scope: >
+  Any OHOS aarch64/clang-15 adaptation whose upstream test suite compares a constexpr or
+  self-implemented math result against std::/libm long-double reference values in the
+  extreme-small normal range (roughly < 1e-300 in long double). Readily hit by header-only
+  compile-time math libraries (gcem, and similar constexpr math code) on their log/log10/
+  log2/exp-family boundary tests.
+
+verification_cmd: |
+  LD_PROBE=/storage/Users/currentUser/tmp/ld_probe
+  /data/service/hnp/bin/clang++ -std=c++17 -xc++ - -o "$LD_PROBE" <<'EOF'
+  #include <cstdio>
+  #include <cmath>
+  int main(){ long double x = 1e-500L;
+    std::printf("sizeof(long double)=%zu\n", sizeof(long double));
+    std::printf("x=%La std::log(x)=%Lg gcem_expected≈-1151.29\n", x, std::log(x));
+    std::printf("std::log(0x1p-1600L)=%Lg\n", std::log(0x1p-1600L)); return 0; }
+  EOF
+  "$LD_PROBE"
+
+rec_priority:           2
+rec_approach:           reference-oracle-boundary-separation
+rec_description: >
+  Do NOT downgrade the upstream assertion, delete the case, or fake a pass, and do NOT claim
+  the library is fixed when the platform libm is the abnormal side. Before judging a
+  library-vs-reference math mismatch in the extreme-small long double domain, validate the
+  reference oracle itself:
+    1) Confirm the type semantics: sizeof(long double) and LDBL_MIN on the target
+       (OHOS: quad, 0x1p-16382 — so 1e-500L is normal, not subnormal).
+    2) Probe the reference implementation at the failing point, e.g. std::log(0x1p-1600L)
+       == -inf, plus nearby finite controls std::log(2.0L)/std::log(1e5L).
+    3) Verify the library value is mathematically finite and correct independently
+       (for gcem: -1151.29 = ln(1e-500)).
+    4) If the reference is abnormal and the library value is correct, record the case as a
+       platform libm long-double boundary record: keep the test entry runnable, document
+       expected-vs-actual, attribute to OHOS libm, and do not block the library quality
+       conclusion on it.
+  Reuse this comparison strategy wherever a constexpr/self-implemented math library hits a
+  std:: reference oracle mismatch in the extreme-small long double domain.
+
+rec_command: |
+  clang++ -std=c++17 -O2 -I<lib>/include <test>.cpp -o <test>.test
+  && <test>.test;
+  LD_PROBE=/storage/Users/currentUser/tmp/ld_probe
+  /data/service/hnp/bin/clang++ -std=c++17 -xc++ - -o "$LD_PROBE" <<'EOF'
+  #include <cstdio>
+  #include <cmath>
+  int main(){ printf("sz=%zu log(1e-500L)=%Lg\n", sizeof(long double), std::log(1e-500L)); }
+  EOF
+  && "$LD_PROBE"
+
+rec_auto_fix:           false
+status:                 draft
+
+validation: >
+  gcem 1.16.0 R02 on OHOS aarch64 clang-15: upstream tests/ 43 entries compiled and run;
+  40 passed; log, log10, log2 fail at gcem::log(1e-500L) vs std::log(1e-500L) with
+  "Expected value: -inf / Actual value: -1151.29" then std::runtime_error (SIGABRT).
+  Probe confirmed sizeof(long double)=16, 1e-500L normal (0x1.0675b44007b734ff1d9a8873b40ap-1661),
+  std::log(0x1p-1600L)=-inf while std::log(2.0L) and std::log(1e5L) are correct, and gcem's
+  -1151.29 equals ln(1e-500) mathematically. Original run log sha256:
+  e1ddfc022fcb065d623489f60fb6bd338b63f68f16cee54314ec04e1a35202e8.
+  Conclusion: platform libm long-double boundary; gcem behavior is correct; no source change
+  to gcem made; ledger archived at archives/g/gcem/1.16.0/reports/upstream-test-ledger.md.

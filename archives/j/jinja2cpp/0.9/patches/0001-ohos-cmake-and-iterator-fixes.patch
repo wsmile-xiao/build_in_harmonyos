@@ -1,0 +1,132 @@
+From: j669539 <j669539@users.noreply.gitcode.com>
+Subject: [PATCH] OHOS aarch64 适配：CMake 现代化 + 迭代器类别 + stable_sort + gtest 集成
+
+1. cmake_minimum_required 3.0 → 3.5...4.1（主 CMakeLists 与 thirdparty/
+   CMakeLists 两处）：CMake 4.x 移除 <3.5 兼容，上游 thirdparty 子构建
+   （execute_process 内嵌 cmake）与新 CMake 不兼容，configure 直接失败。
+2. 非 Windows 分支判定 NOT UNIX → WIN32：CMAKE_SYSTEM_NAME=HarmonyOS 时
+   CMake 的 UNIX 变量为 FALSE，误入 MinGW 分支注入 -Wa,-mbig-obj
+   （clang-15 不支持该汇编器参数，全部 TU 编译失败）；改为仅 WIN32 注入，
+   HarmonyOS/Linux 走 Threads::Threads 分支。
+3. Boost::boost → boost::boost：Conan CMakeDeps 提供的 Boost 目标命名空间
+   为小写 boost::，上游 FindBoost 模块模式的 Boost::boost 找不到。
+4. unique 过滤器 std::sort → std::stable_sort：对完全相等元素（如布尔值）
+   std::sort 顺序未定义，aarch64 libc++ 实现下 unique 保留项与 x86 不同
+   （上游测试 Unique/ListIteratorTest.Test/9 期望值依赖稳定排序语义）；
+   stable_sort 保证确定性与测试期望一致。
+5. CMAKE_CXX_STANDARD 14 → 可覆盖（NOT DEFINED 守卫）：上游硬编码 C++14，
+   gtest 1.17 要求 C++17（测试 TU 编译期报 "C++ versions less than C++17
+   are not supported"）；库本体仍默认 C++14，消费者不受影响。
+6. gtest 集成改造（JINJA2CPP_USE_CONAN_GTEST=ON 开关）：上游 GTEST_ROOT
+   为空时内嵌构建 vendored gtest 子模块（tarball 缺失必失败）；开关打开时
+   改用 find_package(gtest CONFIG)（conan CMakeDeps 目标 gtest::gtest），
+   gtest_main 以包内绝对路径链接（conan gtest-config 仅声明单组件目标），
+   并剥离 INTERFACE_INCLUDE_DIRECTORIES 的 $<CONFIG:Release> 生成器表达式。
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 96df6f6..f793d10 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,4 +1,4 @@
+-cmake_minimum_required(VERSION 3.0)
++cmake_minimum_required(VERSION 3.5...4.1)
+ project(Jinja2Cpp VERSION 0.5.0)
+ 
+ list (APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+@@ -24,10 +24,12 @@ if (NOT DEFINED WITH_TESTS)
+ endif ()
+ 
+ set (EXTRA_TEST_LIBS "")
+-set (CMAKE_CXX_STANDARD 14)
++if (NOT DEFINED CMAKE_CXX_STANDARD)
++    set (CMAKE_CXX_STANDARD 14)
++endif ()
+ set (CMAKE_CXX_STANDARD_REQUIRED ON)
+ if (${CMAKE_CXX_COMPILER_ID} MATCHES "Clang" OR ${CMAKE_CXX_COMPILER_ID} MATCHES "GNU")
+-    if (NOT UNIX)
++    if (WIN32)
+         set (EXTRA_TEST_LIBS "stdc++")
+         set (CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS} "-Wa,-mbig-obj")
+     else ()
+@@ -55,7 +57,7 @@ else ()
+     endif ()
+ endif()
+ 
+-if("${GTEST_ROOT}" STREQUAL "" AND WITH_TESTS)
++if("${GTEST_ROOT}" STREQUAL "" AND WITH_TESTS AND NOT JINJA2CPP_USE_CONAN_GTEST)
+     set (THIRDPARTY_TARGETS ${THIRDPARTY_TARGETS} gtest)
+ endif()
+ 
+@@ -83,11 +85,26 @@ if (NOT THIRDPARTY_BUILD_RESULT EQUAL 0)
+     message (FATAL_ERROR "Can't build thirdparty libraries")
+ endif ()
+ 
+-if("${GTEST_ROOT}" STREQUAL "" AND WITH_TESTS)
++if("${GTEST_ROOT}" STREQUAL "" AND WITH_TESTS AND NOT JINJA2CPP_USE_CONAN_GTEST)
+     set (GTEST_ROOT ${CMAKE_CURRENT_BINARY_DIR}/thirdparty/gtest/install)
+     set (GTEST_SELF_BUILD ON)
+ endif ()
+ 
++if (WITH_TESTS AND JINJA2CPP_USE_CONAN_GTEST)
++    # Conan CMakeDeps 提供目标 gtest::gtest；gtest_main 以包内绝对路径链接
++    #（conan gtest-config 仅声明 gtest::gtest 单组件目标）
++    find_package(gtest REQUIRED CONFIG)
++    get_target_property(_gtest_inc gtest::gtest INTERFACE_INCLUDE_DIRECTORIES)
++    # gtest conan 包布局：<pkg>/include + <pkg>/lib/libgtest_main.a；
++    # INTERFACE_INCLUDE_DIRECTORIES 带 $<CONFIG:Release> 生成器表达式，取 <...>: 后路径
++    string(REGEX REPLACE "^[$]<[$]<CONFIG:[^>]*>:" "" _gtest_inc "${_gtest_inc}")
++    string(REGEX REPLACE ">$" "" _gtest_inc "${_gtest_inc}")
++    get_filename_component(_gtest_root "${_gtest_inc}" DIRECTORY)
++    set (GTEST_BOTH_LIBRARIES gtest::gtest "${_gtest_root}/lib/libgtest_main.a")
++    set (GTEST_INCLUDE_DIRS "")
++    message(STATUS "Conan gtest root: ${_gtest_root}")
++endif ()
++
+ if(NOT "${GTEST_ROOT}" STREQUAL "" AND WITH_TESTS)
+     list (APPEND CMAKE_PREFIX_PATH ${GTEST_ROOT})
+     set (Gtest_DIR ${GTEST_ROOT})
+@@ -138,7 +155,7 @@ add_library(${LIB_TARGET_NAME} STATIC
+     ${PublicHeaders}
+     )
+ 
+-target_link_libraries(${LIB_TARGET_NAME} PUBLIC ThirdParty::nonstd Boost::boost) # Boost::system Boost::filesystem)
++target_link_libraries(${LIB_TARGET_NAME} PUBLIC ThirdParty::nonstd boost::boost) # Boost::system Boost::filesystem)
+ 
+ target_include_directories(${LIB_TARGET_NAME}
+     INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+diff --git a/src/filters.cpp b/src/filters.cpp
+index 1db7c57..45eaed2 100644
+--- a/src/filters.cpp
++++ b/src/filters.cpp
+@@ -617,7 +617,7 @@ InternalValue SequenceAccessor::Filter(const InternalValue& baseVal, RenderConte
+         for (auto& v : list)
+             items.push_back(std::move(Item{IsEmpty(attrName) ? v : Subscript(v, attrName), idx ++}));
+ 
+-        std::sort(items.begin(), items.end(), [&compType](auto& i1, auto& i2) {
++        std::stable_sort(items.begin(), items.end(), [&compType](auto& i1, auto& i2) {
+             auto cmpRes = Apply2<visitors::BinaryMathOperation>(i1.val, i2.val, BinaryExpression::LogicalLt, compType);
+ 
+             return ConvertToBool(cmpRes);
+diff --git a/src/internal_value.h b/src/internal_value.h
+index 25fabf4..35e1837 100644
+--- a/src/internal_value.h
++++ b/src/internal_value.h
+@@ -172,7 +172,7 @@ class ListAdapter::Iterator
+         : public boost::iterator_facade<
+             Iterator,
+             const InternalValue,
+-            boost::single_pass_traversal_tag>
++            boost::forward_traversal_tag>
+ {
+ public:
+     Iterator()
+diff --git a/thirdparty/CMakeLists.txt b/thirdparty/CMakeLists.txt
+index 0e349e2..63e560c 100644
+--- a/thirdparty/CMakeLists.txt
++++ b/thirdparty/CMakeLists.txt
+@@ -1,4 +1,4 @@
+-cmake_minimum_required(VERSION 3.0)
++cmake_minimum_required(VERSION 3.5...4.1)
+ 
+ project (thirdparty)
+ list (APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/../cmake)

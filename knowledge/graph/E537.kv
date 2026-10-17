@@ -1,0 +1,76 @@
+#====================================================================
+# DRAFT: Conan cache absolute DT_NEEDED leakage -> relocatable SONAME/link repair
+#====================================================================
+
+id:                     E537
+trigger_tool:           conan|cmake|ld|clang|patchelf|readelf|hmdfs
+phase:                  linking|packaging|runtime
+error_signature:        DT_NEEDED|NEEDED|\.cache/conan2|\.conan2/p/|unable to find library|
+                         Error loading shared library|Permission denied|mmap PROT_EXEC|
+                         IMPORTED_SONAME|target_link_directories|SONAME
+
+severity:               2
+category:               hmdfs, linking, conan, packaging, relocatable
+match_keywords:         Conan, cache, DT_NEEDED, absolute path, SONAME, RPATH,
+                         RUNPATH, libKF6Package.so, IMPORTED_NO_SONAME,
+                         target_link_directories, -l, relocatable, HMDFS,
+                         patchelf, mmap, PROT_EXEC, consumer, isolated cache
+title:                  Conan cache absolute DT_NEEDED leakage and relocatable SONAME/link repair
+
+root_cause: >
+  A KDE Frameworks (KF6) dependency library (e.g. kcoreaddons/karchive/ki18n) is
+  published without a DT_SONAME. When the dependent library (e.g. libKF6Package.so)
+  is linked against that dependency, CMake passes the dependency's absolute Conan
+  cache path (IMPORTED_LOCATION) to the linker. Because the dependency has no
+  SONAME, ld records the machine-private absolute path (e.g.
+  /storage/Users/currentUser/.conan2/p/... or an older .cache/conan2 layout) into
+  the produced DT_NEEDED. On a consumer machine with a different Conan cache
+  layout that absolute path does not exist, so the loader cannot resolve the
+  dependency and the published artifact is not consumable. A post-build ELF
+  rewrite with patchelf can remove the paths, but on the OHOS HMDFS cache
+  filesystem the patchelf-rewritten file is refused at runtime with
+  "Permission denied" (mmap PROT_EXEC), so the repair must happen at link time.
+
+affected_scope: >
+  Any Conan package that links an imported shared library which itself lacks a
+  DT_SONAME and whose IMPORTED_LOCATION is an absolute cache path; reproducible
+  across KF6 (kpackage, and any library linking kcoreaddons/karchive/ki18n) and
+  similar Conan ecosystems.
+verification_cmd:       readelf -d bin/libKF6Package.so | grep NEEDED
+
+rec_priority:           1
+rec_approach:           link-time-SONAME-basename
+rec_description: >
+  Do not rewrite the ELF after build. Instead make the linker record the
+  dependency by its SONAME-style basename at link time: (1) stamp an
+  IMPORTED_SONAME on each KF6 dependency target and clear both generic and
+  per-config IMPORTED_NO_SONAME (IMPORTED_NO_SONAME_RELEASE) so CMake passes
+  "-L<dir> -l:libKF6CoreAddons.so"; or, more robustly, (2) add
+  target_link_directories(KF6Package PUBLIC ${KPACKAGE_DEP_LIB_DIRS}) and link
+  the deps by bare "-lKF6CoreAddons" / "-lKF6Archive" / "-lKF6I18n", explicitly
+  re-adding Qt6::Core (which keeps its own SONAME) so the Qt runtime link is
+  preserved, and copy the deps' INTERFACE_INCLUDE_DIRECTORIES back onto the
+  target so headers (QStringList/KJob/QLoggingCategory) remain available. Give
+  the produced library a stable SONAME with -Wl,-soname,libKF6Package.so.
+rec_command:            target_link_directories(KF6Package PUBLIC ${KPACKAGE_DEP_LIB_DIRS})
+rec_auto_fix:           false
+rec_impl:               patches/0004-ohos-relocatable-soname-link.patch + conanfile generate() KPACKAGE_DEP_LIB_DIRS
+
+fallback_priority:      2
+fallback_approach:      post-build-elf-rewrite
+fallback_description:   patchelf --set-soname + --replace-needed on a writable copy then rm -f && cp back; removes the leak but the rewritten file is rejected by HMDFS at runtime (Permission denied / mmap PROT_EXEC), so it is NOT acceptable as the primary fix on OHOS.
+fallback_command:       patchelf --set-soname libKF6Package.so --replace-needed <abs> <basename>
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       publish a .so whose DT_NEEDED contains an absolute .conan2/.cache path|use patchelf-rewritten .so on HMDFS as the shipped artifact|link deps by absolute path without SONAME
+forbid_1_reason:        The absolute path is machine-private and non-relocatable; a patchelf-rewritten file is not loadable on HMDFS.
+forbid_1_consequence:   Consumer on a different cache layout fails to resolve; or the artifact is refused by the HMDFS loader at runtime.
+
+
+causes:                 []
+caused_by:              []
+doc_file: doc/E537.md
+source_pr: !6997
+last_updated:               2026-08-31
+authors: junshi_liu <liujsh2023@lzu.edu.cn>

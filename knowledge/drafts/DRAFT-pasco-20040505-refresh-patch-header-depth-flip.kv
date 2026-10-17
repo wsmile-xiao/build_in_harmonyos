@@ -1,0 +1,64 @@
+#====================================================================
+# Draft: ohc refresh-patch 重生成时补丁头路径深度会翻转（a/Makefile ↔
+#        a/src/Makefile），并覆盖上一轮已正确的补丁 —— 成立与否取决于
+#        git 之外的探索目录布局；交付前必须复验头 + 让探索目录与目标树同构
+# Trigger instance: pasco 20040505 (任务 9321, 构建机 B, 2026-09-27)
+#====================================================================
+
+id:                     DRAFT-PASCO-20040505-REFRESH-PATCH-HEADER-DEPTH-FLIP
+trigger_tool:           refresh-patch|finish|conan|patch
+phase:                  patch-generation|build
+error_signature:        'Apply patch.*Hunk FAILED|source/target file does not exist:|cannot find the file .*Makefile'
+
+severity:               2
+category:               tooling, conan, patch, harness
+match_keywords:         refresh-patch, patch header, --- a/, +++ b/, src/Makefile,
+                        path depth, self-overwrite, patch-backup, non-idempotent,
+                        探索目录, 补丁头, 自我覆盖, 同构布局
+
+title:                  'ohc refresh-patch 重生成的补丁头路径深度随盘外探索目录布局在 a/Makefile 与 a/src/Makefile 之间翻转，且会把上一轮已正确的补丁覆盖成错的那一枚 ⇒ 探索目录须与目标树同构、让渡前须复验 head -2'
+
+root_cause:             refresh-patch 以「探索目录(工作副本) vs .orig」两棵树做 diff 来生成
+                        补丁，补丁头的路径前缀取自**探索目录当时的相对布局**，而不是取自
+                        conandata 里目标 tarball 的真实布局。pasco 上游只带
+                        `src/Makefile`（无 configure/CMake），当探索目录被压平
+                        （Makefile 放在根）时生成的头就是 `--- a/Makefile`，
+                        `-p1` 应用时打不到 `src/Makefile`；探索目录同构时生成的才是
+                        `--- a/src/Makefile`。两种布局在同一次任务里来回切换过，
+                        ⇒ 同一份补丁被反复覆盖，最后一次决定交付态。
+
+affected_scope:         任何用 scripts/ohc-run.py refresh-patch（含 finish 内部的自动重生成）
+                        且目标文件不在解包根目录（有子目录层级，如 src/、lib/、po/）的适配任务；
+                        尤其"配方已在盘上、只回头改补丁"的续做场景。
+
+verification_cmd:       'head -2 archives/<l>/<pkg>/<ver>/patches/*.patch   # 两行路径深度须与目标树一致'
+
+rec_priority:           1
+rec_approach:           keep-explore-tree-isomorphic-and-recheck-header-before-handoff
+rec_description:        ①探索目录必须与目标 tarball 解包后的布局**同构**（目标在 `src/Makefile`
+                        就在探索目录里也建 `src/` 层），⛔ 把文件压平放在探索目录根；
+                        ②每次 `finish`（内部会 refresh-patch 重生成）之后，把
+                        `head -2 patches/*.patch` 与目标树实际路径逐字对一遍，作为**让渡前硬动作**；
+                        ③发现头错时按同构布局**重新生成**，⛔ 只手改两头了事（手改的那一枚会在
+                        下一次 finish 被再次覆盖）；④`patches/` 下的 `.patch-backup-<ts>` 备份**目录**
+                        不被 .gitignore 覆盖 ⇒ 收口前 `git ls-files -o --exclude-standard -- <归档目录>`
+                        必须为 0，非 0 一律把备份**移出 worktree**（⛔ 就地删除）。
+rec_command:            'python3 scripts/ohc-run.py finish <pkg> <ver> built && head -2 archives/<l>/<pkg>/<ver>/patches/*.patch && git ls-files -o --exclude-standard -- archives/<l>/<pkg> | wc -l'
+rec_auto_fix:           false
+rec_impl:               pasco 20040505 采用②+③：探索目录补出 src/ 层后重生成，交付态
+                        `--- a/src/Makefile` / `+++ b/src/Makefile`；三枚备份留在
+                        ~/tmp/uc2/z74-pasco-w4/backups/（已移出 worktree）
+
+fallback_priority:      2
+fallback_approach:      hand-fix-header-only-as-last-resort-with-disclosure
+fallback_description:   若已无法重跑 finish（会作废 W3 锚），才允许手工把两行头改回正确深度，
+                        并必须在 notes 写明"本次修复未由 refresh-patch 重生成验证、下一次
+                        finish 会复现"，⛔ 把这种状态当已修复交给评审。
+fallback_command:       'sed -i ''1,2s|^--- a/Makefile|--- a/src/Makefile|;1,2s|^+++ b/Makefile|+++ b/src/Makefile|'' patches/0001-Makefile.patch'
+
+forbid_1_pattern:       把 .patch-backup-* 留在归档目录内随 git add 目录一起提交
+forbid_1_reason:        它们是工具副作用生成的运行时备份件，点前缀件会被 JC1/JC5 判为
+                        运行时状态文件入库（同一枚文件算两条违规），CI 在编译前就被挡。
+forbid_1_consequence:   PR 的 CI 恒红且报错与本包配方无关，白耗一轮判决。
+
+principles:             real-evidence-over-assumption, minimal-patch

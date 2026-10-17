@@ -32,7 +32,7 @@
 
 ## 源码修改
 
-### 0001-Makefile.patch
+### 0001-ssl-cert-check.patch
 - **修改文件**：Makefile
 - **修改内容**：
   - 添加 `DESTDIR` 变量支持（R20 铁律）
@@ -77,5 +77,16 @@ $ ls -l ~/usr/local/bin/ssl-cert-check
 4. **源码来源**：使用 Alpine Linux APKBUILD 中的 commit hash 版本
 ---
 
-**编译结束**: 2026-05-21 19:57
+**编译结束**: 2026-08-23 00:37
 **最终状态**: built
+
+## Conan 适配（2026-08-22）
+
+- 添加 conanfile.py（application 类型，纯 shell 脚本工具）
+- 添加 conandata.yml（源码 URL + SHA256）
+- 添加 test_package/（conanfile.py + test_ssl_cert_check.sh + MANIFEST.yml）
+- 修复 0001-Makefile.patch（正确创建 Makefile 而非修改不存在的文件）
+- 添加 software-level manifest.yaml、README.md、commands.json
+- conan-verify 全部通过（G1-G4 + L2/L4/L5）
+- W3 本地 CI 模拟通过
+- W4 Pre-PR 审计通过（verdict: pass）

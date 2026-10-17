@@ -1,0 +1,124 @@
+#====================================================================
+# DRAFT-yasw-0.6-qmake-probe-fork-pressure-empty-output
+#   "Cannot run target compiler 'clang++'. Output:" 的**第二种根因**
+#   （Output 段为空 + .qmake.stash 停在 513 B）——宿主 fork 压力导致
+#   qmake 内部 QProcess 未能启动子进程，而非 PATH 解析失败
+# 来源: yasw 0.6 适配（Qt5 qmake GUI 应用，qt/5.15.19.1）
+#       本地 conan-verify G2 间歇性失败（6 次中 2 次失败），定位见
+#       archives/y/yasw/0.6/reports/yasw-0.6-g2-qmake-probe-finding.md
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-yasw-0.6-qmake-probe-fork-pressure-empty-output
+trigger_tool:           qmake|conan|make
+phase:                  configuration
+error_signature:        Cannot run target compiler 'clang\+\+'\.\s*Output:|Maybe you forgot to setup the environment\?|\.qmake\.stash
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               build-system, qmake, toolchain, env, resource
+match_keywords:         qmake, Cannot run target compiler, Output 为空, 空输出, .qmake.stash, 513, 1440,
+                        fork, QProcess, waitForStarted, EAGAIN, 宿主过载, load average, Committed_AS,
+                        toolchain.prf, COMPILER_MACROS, INCDIRS
+title:                  qmake 报 "Cannot run target compiler" 且 **Output 段为空** 的第二根因：宿主 fork 压力使 QProcess 未能启动子进程（区别于 PATH 缺失）
+prescan_pattern:        Cannot run target compiler[\s\S]{0,80}Output:\s*\n\s*={3,}
+prescan_globs:          conanfile.py
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             qmake 的 mkspecs/features/toolchain.prf 用 $$system()（内部 QProcess）分两步探测目标
+                        编译器：① line 38  <cxx> -E <data/macros.cpp> → QMAKE_CXX.COMPILER_MACROS；
+                        ② line 210  LC_ALL=C <cxx> <cxxflags> -E -v -xc++ - 2>&1 → QMAKE_CXX.INCDIRS /
+                        LIBDIRS。若宿主把内存/进程表压到极限（实测 load average 38 / 20 CPU，
+                        Committed_AS 129 GiB vs 物理 31 GiB，swap 已换出 8.7 GiB），第二步的
+                        QProcess::waitForStarted() 因 fork()/exec() 失败而返回 false —— 子进程**从未启动**，
+                        因此没有 stderr 可捕获，报错文本的 Output 段**完全为空**。失败现场留下半写的
+                        .qmake.stash：只有 COMPILER_MACROS（513 B），缺 INCDIRS/LIBDIRS。
+                        E540 / DRAFT-11153 记录的「PATH 不含 clang++」是**另一种**根因（受限 PATH 下同样
+                        报这句话），两者症状高度相似，必须用以下指纹区分。
+affected_scope:         所有依赖 qt 包并用 qmake 的工程在**资源过载宿主**上构建时（CI 容器超卖、
+                        并行构建机、开发机同时跑多任务）；具象实证 yasw 0.6（qt/5.15.19.1）。
+
+# ═══ Layer 2b: 判别指纹（与 PATH 型根因区分）★ ═══
+discriminator_1:        Output 段**为空** ⇒ fork/exec 失败（PATH 型会有一行 `clang++: command not found`
+                        或 shell 的 127）；为空时**不要**再去改 PATH——PATH 是对的。
+discriminator_2:        src/.qmake.stash 大小：513 B（仅 COMPILER_MACROS，死在 line 210）
+                        vs 1440 B（含 INCDIRS/LIBDIRS，探测完成）。513 B 是决定性指纹。
+discriminator_3:        同一命令、同一环境、同一源码目录**重复执行时而通过时而失败**（实测冷启动
+                        20/20 通过 vs conan 上下文内 2/6 失败）⇒ 资源性瞬时失败，非配置缺陷。
+discriminator_4:        `command -v clang++` 正常、`ls /proc/<pid>/limits` 无进程数限制（本机
+                        Max processes=unlimited）⇒ 排除 PATH 与 ulimit。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           bounded-retry-on-signature
+rec_description:        **只对该指纹**做有限次重试：匹配 error_signature 才重试，重试前删除半写的
+                        .qmake.stash（否则下次会走「从 stash 缓存加载」分支而跳过冷探测），重试间
+                        隔 2 s 等宿主压力回落；重试额度用尽或**非该指纹**的失败一律原样上抛
+                        （绝不宽化为「qmake 失败就重试」，否则会掩盖真实的配置/源码错误）。
+rec_command:            for attempt in range(1, 4):
+                            if attempt > 1 and os.path.isfile(stash): os.remove(stash)
+                            ret = self.run(cmd, cwd=src_dir, ignore_errors=True, stdout=fh, stderr=fh)
+                            detail = open(log, errors="replace").read()
+                            if ret == 0: return
+                            if not any(sig in detail for sig in SIGS): break   # 非瞬时 → 上抛
+                            time.sleep(2)
+                        raise ConanException(f"Error {ret} while executing\n{cmd}\n完整日志: {log}")
+rec_auto_fix:           false
+rec_impl:               conanfile-bounded-retry
+
+fallback_priority:      2
+fallback_approach:      reduce-host-parallelism
+fallback_description:   若重试仍间歇失败，说明宿主持续过载 —— 降低并发（本仓已用另类手段：环境变量
+                        限流 / 串行化构建）或换构建机；**不**把 qmake 调用改为忽略退出码。
+fallback_command:       # 观察面：uptime; grep -E 'Committed_AS|MemAvailable' /proc/meminfo
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       ignore_errors=True[\s\S]{0,200}continue\s*\n\s*self\.run\(f?'make
+forbid_1_reason:        把 qmake 失败一律忽略后继续 make —— 掩盖真实配置错误
+forbid_1_consequence:   Makefile 未生成时 make 报无关错误，误导定位方向
+forbid_2_pattern:       该失败.*(瞬态|flaky).*(与|和).*(管道|重定向|调用方式).*有关
+forbid_2_reason:        本包早期曾把该失败误判为「与管道 vs 重定向调用方式有关」并写进笔记，事后被
+                        冷启动失败率实验（20/20 通过）与变体排除实验推翻；不得沿用该错误结论
+forbid_2_consequence:   归因到错误的维度（调用形式），真实变量（宿主资源）不被观测，反复复现浪费轮次
+forbid_3_pattern:       重试.*(所有|任意).*(失败|错误)|ret\s*!=\s*0[\s\S]{0,80}continue
+forbid_3_reason:        无条件重试会掩盖真实缺陷（源码错误、缺头文件、spec 不匹配）
+forbid_3_consequence:   构建时间被浪费在重试上，且真实错误被吞掉
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P017
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             DRAFT-11153-knowthelist-qmake-path-compiler-probe（**同一句报错、不同根因**：
+                        knowthelist 是受限 PATH 下找不到 clang++，本条是 PATH 正常但 fork 失败；
+                        判别指纹见 Layer 2b，尤其「Output 段是否为空」与 stash 513/1440 B）、
+                        E540（runner-path-prepend，PATH 型处方）、
+                        E478（conan-verify package ID 解析族，同为验证链路过早退出）
+caused_by:              宿主机资源超卖（fork/exec 失败）
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       # 复现失败现场（在过载宿主上循环 N 次，统计失败率与 stash 大小）
+                        for i in $(seq 1 20); do rm -f src/.qmake.stash; \
+                          PATH="<qt>/bin:/data/service/hnp/bin:$PATH" <qt>/bin/qmake src/yasw.pro \
+                            QMAKE_CXX=/data/service/hnp/bin/clang++ >/dev/null 2>&1; \
+                          echo "$i rc=$? stash=$(stat -c%s src/.qmake.stash 2>/dev/null)"; done
+                        # 期望：全部 rc=0 且 stash=1440；若出现 rc!=0 且 stash=513 → 命中本条
+                        # 观测宿主压力：uptime; grep -E 'Committed_AS|MemAvailable|SwapFree' /proc/meminfo
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                ohc-worker <ohc-worker@local>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  0
+metrics_fail_count:     1
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-21
+
+draft: true
+contributor_id:         yasw-0.6

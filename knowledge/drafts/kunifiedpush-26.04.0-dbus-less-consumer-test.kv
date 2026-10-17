@@ -1,0 +1,50 @@
+#====================================================================
+# Draft: kunifiedpush 26.04.0 on OHOS -- two reusable patterns:
+#  (1) consumer-side Qt base variant selection when the KF6-baseline
+#      qtbase is a reduced-surface build (FEATURE_dbus=OFF)
+#  (2) bus-less D-Bus consumer testing: non-empty service names reach
+#      QDBusConnection::sessionBus().interface()->registeredServiceNames()
+#      which is a null dereference without a session dbus-daemon
+#====================================================================
+
+id:                     DRAFT-KUNIFIEDPUSH-2604-DBUS-LESS-CONSUMER
+trigger_tool:           conan|cmake|ctest
+phase:                  configuration|runtime
+error_signature:        Target ".*" links to:.*but the target was not found.*Qt6::DBus|Could NOT find DBus|Test #.*\(.*\) .*SEGFAULT|feature_dbus.*OFF|qtbase.*reduced.*surface
+
+severity:               2
+category:               ohos-platform|testing|build-system
+match_keywords:         kunifiedpush, Qt6::DBus, qtbase-sql-dbus, FEATURE_dbus, sessionBus, QDBusConnectionInterface, registeredServiceNames, dbus-daemon, SEGFAULT, bus-less, KUNIFIEDPUSH_CLIENT_ONLY, qdbusxml2cpp, Qt6DBusMacros, most-vexing-parse
+
+title:                  D-Bus 依赖的 Qt/KDE 库适配 OHOS 双要点：KF6 基线 qtbase/6.11.1 是 DBus/openssl 关闭的缩减包需换 qtbase-sql-dbus 变体；无 dbus-daemon 环境消费者测试必须避开 sessionBus().interface() 空指针路径
+
+root_cause:             (1) 制品仓的 qtbase/6.11.1（KF6 6.26 基线所用）是缩减面包：configure 显式 FEATURE_dbus=OFF、FEATURE_openssl=OFF、testlib off，并且 cmake_find_mode=none 下 find_package(Qt6 COMPONENTS DBus) 直接找不到目标（"Target links to ... but the target was not found"）。任何非 ANDROID 平台硬依赖 Qt6::DBus/Qt6::Test 的 KDE 件（kunifiedpush 客户端库经 qt_add_dbus_adaptor/interface 生成 DBus 代码 + QtTest 上游套件）都不能沿用 KF6 基线的 qtbase 版本号。(2) OHOS 无会话 dbus-daemon：QDBusConnection::sessionBus() 返回的连接上 interface() 返回 nullptr，上游构造函数里 ConnectorUtils::selectDistributor() 无条件调用 registeredServiceNames() 直接段错误——这类"库正常但测试二进制崩"的根因是总线上线探测在 bus-less 主机不可用，不是库缺陷。
+affected_scope:         所有在非 ANDROID 平台 require Qt6::DBus 或 Qt6::Test 的 Qt/KDE 库（如 kunifiedpush、akonadi 系、任何经 qt_add_dbus_adaptor 生成代码的件）；以及所有 test_package/上游测试会触发 QDBusConnection::sessionBus().interface()->... 的 D-Bus 消费者验证场景。
+verification_cmd:       conan create . -pr:h=<ohos-aarch64-profile> --build=missing && grep -c "tests passed" $(find . -name 'conan-create.log')
+rec_priority:           1
+rec_approach:           qtbase-variant-selection-plus-busless-safe-consumer-test
+rec_description:        (1) W0 阶段先 grep qtbase 各版本配方的 FEATURE_dbus/FEATURE_testlib 开关再定 requires：需要 Qt6::DBus/Test/Sql 的件选 qtbase-sql-dbus/6.11.1（含 qdbusxml2cpp host 工具 + lib/cmake/Qt6DBus 的 Qt6DBusMacros.cmake，akonadi 25.12.3 / alligator 26.04.0 先例），纯 Core/Gui 件才用 qtbase/6.11.1；(2) ECM 件沿用 kcrash 6.26.0 模式：ECM_MODULE_PATH 手动指向 ecm 包 share/ECM 的 modules/find-modules/kde-modules，qtbase 系 cmake_find_mode=none 时手写 conan_cmakedeps_paths.cmake 把每个依赖的 lib/cmake、包根、include 前缀进 CMAKE_PREFIX_PATH/CMAKE_MODULE_PATH 并 set(CMAKE_FIND_PACKAGE_PREFER_CONFIG ON)；(3) 无 dbus-daemon 环境的消费者测试读上游源码找提前返回分支：kunifiedpush Connector 对空 serviceName 在 loadState()/selectDistributor() 之前 return（仅 qCWarning），既保住 D-Bus adaptor 注册路径（总线缺失降级 warning）又能真调全部属性 API；(4) 注意 C++ most-vexing-parse：Connector connector(QString()) 是函数声明不是对象，用命名变量 const QString s; Connector c(s); 规避。
+rec_command:            conan create . -pr:h=/storage/Users/currentUser/.conan2/profiles/ohos-aarch64 --build=missing -c tools.build:jobs=2
+rec_auto_fix:           false
+solution: |
+  # (1) W0 阶段先核 qtbase 变体能力面再定 requires
+  #     需 Qt6::DBus/Qt6::Test/Qt6::Sql 的 KDE 件：
+  self.requires("qtbase-sql-dbus/6.11.1")   # 含 qdbusxml2cpp + Qt6DBusMacros
+  self.requires("openssl/3.5.6.1")          # akonadi 25.12.3 同款钉版
+  # (2) ECM 件接线（kcrash 6.26.0 模式）：ECM_MODULE_PATH 手动指向 ecm 包
+  #     share/ECM 的 modules/find-modules/kde-modules；qtbase 系
+  #     cmake_find_mode=none 时手写 conan_cmakedeps_paths.cmake：
+  #     for dep in dependencies: list(PREPEND CMAKE_PREFIX_PATH <pkg>/lib/cmake)
+  #     set(CMAKE_FIND_PACKAGE_PREFER_CONFIG ON)
+  # (3) bus-less 安全消费者测试——读上游源码找提前返回分支：
+  #     kunifiedpush Connector 对空 serviceName 在 loadState() 之前 return：
+  const QString serviceName;                        # 命名变量（规避 most-vexing-parse）
+  KUnifiedPush::Connector connector(serviceName);   # 只触发 adaptor 注册（总线缺失降级 warning）
+  connector.setVapidPublicKey(QStringLiteral("BNH1..."));
+  QVERIFY(connector.vapidPublicKey().startsWith(QLatin1String("BNH1")));  # 属性 API 真调用
+fallback:               无法换 qtbase 变体（版本钉死在缩减包）时，给被适配库打 patch 按 ANDROID 分支裁掉 DBus 路径（上游通常有 Q_OS_ANDROID 守卫的替代实现），或在本机起 dbus-daemon --session --fork 供测试运行期连接；测试侧还可以 LD_PRELOAD/打桩拦截 interface()，但优先选上游已有的提前返回分支。
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              14214
+source_commit:          b173497f80
+verify_builds:          #66384

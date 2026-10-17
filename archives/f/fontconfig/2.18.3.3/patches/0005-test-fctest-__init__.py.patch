@@ -1,0 +1,202 @@
+--- a/test/fctest/__init__.py
++++ b/test/fctest/__init__.py
+@@ -1,24 +1,25 @@
+ # Copyright (C) 2025 fontconfig Authors
+ # SPDX-License-Identifier: HPND
+ 
+-from contextlib import contextmanager
++from contextlib import contextmanager, nullcontext
+ from itertools import chain
+ from pathlib import Path, PureWindowsPath
+ from tempfile import TemporaryDirectory, NamedTemporaryFile
+ from typing import Iterator, Self
+ import logging
+ import os
+ import re
+ import shutil
+ import subprocess
+ import sys
++import uuid
+ import pytest
+ from _pytest.mark.expression import Expression
+ 
+ 
+ logging.basicConfig(level=logging.DEBUG)
+ 
+ 
+ def pytest_generate_tests(metafunc):
+     markexpr = metafunc.config.getoption("-m")
+     if not markexpr:
+@@ -204,20 +205,27 @@
+             if time:
+                 os.utime(str(dname), (time, time))
+             if time:
+                 os.utime(str(dpath), (time, time))
+ 
+         if time:
+             os.utime(self.fontdir.name, (time, time))
+ 
+     @contextmanager
+     def sandboxed(self, remapped_basedir, bind=None) -> Self:
++        if self._env.get('FC_TEST_DIRECTORY_VIEW') == '1':
++            # This backend verifies fontconfig's directory-remapping/cache
++            # semantics, not OS namespace or security isolation. Linux keeps
++            # the original bubblewrap backend and all test assertions.
++            with self.directory_view(remapped_basedir, bind) as view:
++                yield view
++            return
+         if not self._bwrap:
+             raise RuntimeError("No bwrap installed")
+         self._remapped_fontdir = TemporaryDirectory(
+             prefix="fontconfig.", suffix=".fontdir", dir=remapped_basedir, delete=False
+         )
+         self._remapped_cachedir = TemporaryDirectory(
+             prefix="fontconfig.", suffix=".cachedir", dir=remapped_basedir, delete=False
+         )
+         self._remapped_builddir = TemporaryDirectory(
+             prefix="fontconfig.", suffix=".build", dir=remapped_basedir, delete=False
+@@ -264,20 +272,114 @@
+             self._sandboxed = False
+             self._remapped_builddir = None
+             self._remapped_cachedir = None
+             self._remapped_conffile = None
+             self._remapped_fontdir = None
+             self._orig_cachedir = None
+             self.remapdir = None
+             self._basedir = None
+             self.__bind = None
+             self._env["FONTCONFIG_FILE"] = self._conffile.name
++
++    @contextmanager
++    def directory_view(self, remapped_basedir, bind=None) -> Self:
++        root = Path(self._env['TMPDIR']).resolve()
++        build = Path(self._builddir).resolve()
++        base = Path(remapped_basedir).resolve()
++        if not base.is_relative_to(root):
++            raise RuntimeError('Directory view must be task-private')
++        self._remapped_fontdir = TemporaryDirectory(dir=base, delete=False)
++        self._remapped_cachedir = TemporaryDirectory(dir=base, delete=False)
++        self._remapped_builddir = TemporaryDirectory(dir=base, delete=False)
++        self._remapped_conffile = NamedTemporaryFile(
++            dir=build / 'test', mode='w', delete_on_close=False)
++        original_cachedir = self._cachedir
++        original_fontdir = self._fontdir
++        original_file = self._env.get('FONTCONFIG_FILE')
++        original_extra = self._extra[:]
++        mapping = {
++            original_cachedir.name: self._remapped_cachedir.name,
++            str(build): self._remapped_builddir.name,
++        }
++        mapping.update(bind or {original_fontdir.name: self._remapped_fontdir.name})
++        # Require all source/destination paths to be inside the task's private
++        # tmp/build roots. No mounts, privilege changes or foreign paths.
++        for source, destination in mapping.items():
++            for name in (source, destination):
++                p = Path(name)
++                resolved = p.resolve()
++                if (p.is_symlink() or not p.is_dir() or
++                    not (resolved.is_relative_to(root) or resolved == build)):
++                    raise RuntimeError('Unsafe directory-view path: ' + name)
++        try:
++            self._cachedir = self._remapped_cachedir
++            self.remapdir = self._remapped_fontdir.name
++            # Preserve the upstream absent dummy-dir semantics: bubblewrap
++            # hides it behind a fresh tmpfs. A duplicate <dir> for the remapped
++            # path would overwrite the preceding <remap-dir> map in fcxml.
++            dummy = TemporaryDirectory(dir=root)
++            Path(dummy.name).rmdir()
++            self._fontdir = dummy
++            self._remapped_conffile.write(self.config())
++            self._remapped_conffile.close()
++            self._fontdir = original_fontdir
++            self._env['FONTCONFIG_FILE'] = self._remapped_conffile.name
++            self._directory_view_mapping = mapping
++            yield self
++        finally:
++            self._directory_view_mapping = None
++            self._fontdir = original_fontdir
++            self._cachedir = original_cachedir
++            self._extra = original_extra
++            if original_file is None:
++                self._env.pop('FONTCONFIG_FILE', None)
++            else:
++                self._env['FONTCONFIG_FILE'] = original_file
++            self._remapped_fontdir = self._remapped_cachedir = None
++            self._remapped_builddir = self._remapped_conffile = None
++
++    @contextmanager
++    def mapped_directories(self):
++        mapping = self._directory_view_mapping
++        renamed = {}; links = []
++        try:
++            # An explicit source can also be another mapping's destination.
++            # Move only that exact owned directory, preserving its metadata.
++            for source in mapping:
++                if source in mapping.values():
++                    p = Path(source)
++                    backup = p.with_name(p.name + '.view-' + uuid.uuid4().hex)
++                    if backup.exists() or backup.is_symlink():
++                        raise RuntimeError('Directory-view backup collision')
++                    p.rename(backup)
++                    renamed[source] = backup
++            for source, destination in mapping.items():
++                p = Path(destination)
++                if p.exists():
++                    p.rmdir()  # only the proven empty owned placeholder
++                target = renamed.get(source, Path(source))
++                p.symlink_to(target, target_is_directory=True)
++                if p.resolve() != target.resolve():
++                    raise RuntimeError('Directory-view link readback mismatch')
++                links.append((p, target))
++            yield
++        finally:
++            for path, target in reversed(links):
++                if not path.is_symlink() or path.resolve() != target.resolve():
++                    raise RuntimeError('Directory-view cleanup ownership drift')
++                path.unlink()
++                if str(path) not in renamed:
++                    path.mkdir()
++            for name, backup in renamed.items():
++                if Path(name).exists() or Path(name).is_symlink():
++                    raise RuntimeError('Directory-view restore collision')
++                backup.rename(name)
+ 
+     def run(self, binary, args=[], debug=False) -> Iterator[[int, str, str]]:
+         cmd = []
+         if self._exewrapper:
+             cmd += [self._exewrapper]
+         cmd += [str(binary)]
+         cmd += args
+         if self._sandboxed:
+             boxed = [
+                 self._bwrap,
+@@ -310,21 +412,28 @@
+             self.logger.info(boxed)
+             res = subprocess.run(boxed, capture_output=True, env=self._env)
+         else:
+             origdebug = self._env.get("FC_DEBUG")
+             if debug:
+                 self._env["FC_DEBUG"] = str(debug)
+             origfontations = self._env.get("FC_FONTATIONS")
+             if self.with_fontations:
+                 self._env["FC_FONTATIONS"] = "1"
+             self.logger.info(cmd)
+-            res = subprocess.run(cmd, capture_output=True, env=self._env)
++            # Keep the parent fixture's original view for expected-result
++            # enumeration; only the actual native invocation consumes the
++            # remapped view. Restore it before returning any results.
++            view = (self.mapped_directories()
++                    if getattr(self, '_directory_view_mapping', None)
++                    else nullcontext())
++            with view:
++                res = subprocess.run(cmd, capture_output=True, env=self._env)
+             if debug:
+                 if origdebug:
+                     self._env["FC_DEBUG"] = origdebug
+                 else:
+                     del self._env["FC_DEBUG"]
+             if self.with_fontations:
+                 if origfontations:
+                     self._env["FC_FONTATIONS"] = origfontations
+                 else:
+                     del self._env["FC_FONTATIONS"]

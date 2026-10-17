@@ -1,73 +1,58 @@
 # lua-mimetypes 1.0 适配笔记
 
 ## 编译环境
-- 构建系统: custom（纯 Lua 库，手动创建 Makefile）
-- 编译日期: 2026-06-15
+- 构建系统: custom（纯 Lua 库，无需编译）
+- 编译日期: 2026-08-27
 - 编译器: 无需编译器（纯 Lua 代码）
 - 状态: built
 
-## 编译步骤
+## 源码信息
+- 上游仓库: https://github.com/lunarmodules/lua-mimetypes
+- 源码 URL: https://github.com/lunarmodules/lua-mimetypes/archive/refs/tags/v1.0.0.tar.gz
+- SHA256: f387475765ff3bcc7abf0f8ad67654bbb8d745569a70623b478f11bebfa585e5
+- 版本: v1.0.0 (tag)
 
-1. **源码准备**：
-   - 从已下载目录获取 mimetypes.lua 主文件
-   - 手动创建 mimetypes/extensions.lua 和 mimetypes/filenames.lua 模块
-   - 创建 Makefile 实现简单的 install 目标
+## 适配步骤
 
-2. **安装流程**：
-   ```bash
-   cd /storage/Users/currentUser/builds/lua-mimetypes-1.0.work
-   make install PREFIX=/storage/Users/currentUser/usr/local DESTDIR=/storage/Users/currentUser/test-install-lua-mimetypes-1.0
-   ```
-
-3. **本地安装**：
-   ```bash
-   make install PREFIX=/storage/Users/currentUser/usr/local
-   ```
+1. **源码获取**：从 GitHub lunarmodules/lua-mimetypes v1.0.0 tag 下载 tarball
+2. **源码分析**：纯 Lua 库，仅含 mimetypes.lua 主文件 + test.lua 测试
+3. **Conan 配方生成**：参考 lua-struct 0.9.2 的纯 Lua 库适配模式
+   - no_copy_source = True（无编译）
+   - build() 为空（纯 Lua 文件无需构建）
+   - package() 复制 mimetypes.lua 到 share/lua/5.4/
+   - package_info() 设置 LUA_PATH 环境变量
+   - package_id() 调用 self.info.clear()（架构无关）
+4. **测试包**：C 程序嵌入 Lua 解释器，设置 LUA_PATH，require('mimetypes') 并运行上游 test.lua 的全部测试用例
 
 ## 遇到的问题与解决方案
 
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
-| 1 | 源码下载失败（Savannah URL SSL 证书问题） | SSL 证书验证失败 | 使用已下载的源码文件，手动补全缺失模块 |
-| 2 | 缺少 mimetypes/extensions.lua 和 filenames.lua 模块 | 源码不完整 | 手动创建标准 MIME 类型映射表 |
-| 3 | filenames.lua Lua 语法错误 | 包含点号的键名未用方括号括起来 | 使用 ["key"] 格式修正语法 |
-| 4 | Lua 模块路径硬编码为 /usr/local | Lua 编译时硬编码路径 | 设置 LUA_PATH 环境变量解决 |
-| 5 | 无 configure/makefile（纯 Lua 库） | 纯 Lua 库无构建系统 | 手动创建 Makefile 实现安装 |
+| 1 | GitHub 下载超时 | 鸿蒙设备网络限制 | 使用 ghfast 代理下载 |
+| 2 | /tmp 只读 | 鸿蒙平台限制 (E002) | 使用 $HOME/tmp 替代 |
+| 3 | 纯 Lua 库无构建系统 | 无 Makefile/configure | Conan recipe 直接复制 .lua 文件 |
 
 ## 源码修改
 
-- 创建 Makefile（实现 install 目标）
-- 创建 mimetypes/extensions.lua（标准 MIME 类型扩展映射）
-- 创建 mimetypes/filenames.lua（特殊文件名 MIME 类型映射）
+无（不修改源码，直接打包）
 
-## 依赖版本
+## 依赖
 
-- Lua 5.4（已安装在 ~/usr/local）
+- Lua 5.4（运行时依赖，Conan 包 lua/5.4.8.1 在测试包中声明）
+
+## 参考配方
+
+- lua-struct/0.9.2: 纯 Lua 库 Conan 适配模式参考
+- lua-socket/3.1.0: Lua C 扩展库适配模式参考
 
 ## 验证结果
 
 ```bash
-LUA_PATH="/storage/Users/currentUser/usr/local/share/lua/5.4/?.lua;/storage/Users/currentUser/usr/local/share/lua/5.4/?/init.lua" /storage/Users/currentUser/usr/local/bin/lua -e "local mime = require('mimetypes'); print('Version:', mime.version); print('Test jpg:', mime.guess('photo.jpg'))"
-# 输出：
-# Version: 1.1.0
-# Test jpg: image/jpeg
+# conan create 验证通过后，测试输出：
+# lua-mimetypes smoke ok
 ```
-
-## 交付物
-
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| lua-mimetypes-1.0-ohos-aarch64.tar.gz | 11KB | 预编译包（纯 Lua 文件） |
-
-## 注意事项
-
-1. **LUA_PATH 必须设置**：Lua 模块路径硬编码为 /usr/local，用户需设置 LUA_PATH 环境变量
-2. **纯 Lua 库无需签名**：不包含二进制文件，无需 ELF 签名
-3. **G0 门禁不适用**：纯 Lua 库无 configure 脚本，G0 干净构建验证不适用
-
+**质量门禁**: G1 PASS, G2 PASS (conan create), G4 PASS (产物检查)
 ---
 
-**编译结束**: 2026-06-15 11:47
+**编译结束**: 2026-08-27 01:19
 **最终状态**: built
-**产物**: lua-mimetypes-1.0-ohos-aarch64.tar.gz (11KB)
-**质量门禁**: G0 SKIP (纯 Lua 库), G1-G4 PASS (手动验证)

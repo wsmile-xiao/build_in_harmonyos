@@ -1,0 +1,82 @@
+# ═══ Draft knowledge entry — 自带 glad 运行时 dlopen 桌面 GL 的库在 OHOS 的适配（find_package(OpenGL REQUIRED) + libGLv4.so + libEGL） ═══
+# Software: opencsg 1.8.2
+# Gate: device shadow CI L0-L5 pass + local cross-build
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: opencsg-1.8.2-ohos-glad-desktop-gl-loader
+severity: 3
+category: opengl|ohos|build-system
+trigger_tool: cmake|conan|ld
+phase: configure|linking|runtime
+
+keywords: find_package OpenGL REQUIRED, OPENGL_opengl_LIBRARY, OPENGL_glx_LIBRARY, glad, dlopen, libGL.so, libGLv4.so, libEGL.so, eglGetProcAddress, desktop OpenGL, GLES, HarmonyOS
+
+error_signature: Could NOT find OpenGL \(missing: OPENGL_opengl_LIBRARY OPENGL_glx_LIBRARY\)|glad.*libGL\.so\.1|glad gl_dlopen_handle.*NAMES
+
+match_keywords: find_package(OpenGL, OPENGL_opengl_LIBRARY, OPENGL_glx_LIBRARY, glad, libGLv4, libEGL, eglGetProcAddress, dlopen, desktop OpenGL, GLES, OHOS
+
+root_cause: |
+  (1) 有些库自带 GL 加载器（glad 私有拷贝 / glew）并在运行时 dlopen 解析全部 GL 入口点，
+      其 library 目标根本不链接 GL，但 CMakeLists 仍写 find_package(OpenGL REQUIRED)。
+      HarmonyOS 无桌面 GL 开发包（sysroot 无 libGL.so / libGLX），该 REQUIRED 查找必然失败，
+      尽管实际上不需要链接 GL。
+  (2) glad 的 dlopen 候选名硬编码为 libGL.so.1 / libGL.so（非 Win32/Apple 分支），
+      而 HarmonyOS 提供的是 libGLv4.so（桌面 GL 入口，导出 glBegin/glGetString/FBO/遮挡查询等
+      约 840 个 GL 符号）；且 OHOS 的 eglGetProcAddress 来自 libEGL.so，不是 libGL.so。
+
+rec_approach: relax-required-opengl-lookup + add-desktop-gl-name-and-egl-procaddr-fallback
+rec_description: |
+  (1) 把 find_package(OpenGL REQUIRED) 降为 find_package(OpenGL)（可选）。目标不链接 GL 时
+      查找本无必要；其他平台仍会正常查找，行为向后兼容，补丁因此无需引入 #ifdef __OHOS__。
+  (2) 在 glad 加载器候选列表末尾追加 libGLv4.so（保留原 libGL.so.1/libGL.so 在前），
+      并把过程地址助手 gl_get_proc_address_ptr 改为 GLX 优先、EGL 兜底：先取
+      glXGetProcAddressARB，取不到再取 libEGL.so 的 eglGetProcAddress；未命中的入口点由
+      glad_gl_get_proc 的 dlsym 兜底。EGL handle 需进程内常驻，避免承载入口点的库被提前卸载。
+      关键：用 POSIX 通用写法，不引入 __OHOS__ 等平台宏（R8/PF5 禁止 patches/ 新增平台宏）；
+      编译期守卫只用 glad 自带的 GLAD_PLATFORM_APPLE / GLAD_PLATFORM_WIN32。
+  另注：库若只用桌面 GL 固定管线/ARB 扩展（glBegin/glEnd、ARB FBO、ARB/NV 遮挡查询），
+  OHOS 上依赖 libGLv4.so；纯 GLES 设备需额外的 GLES→桌面 GL 兼容路径，不在本方案范围。
+rec_command: |
+  # (1) src/CMakeLists.txt
+  #   find_package(OpenGL REQUIRED)  ->  find_package(OpenGL)
+  # (2) src/glad/src/gl.cpp
+  #   NAMES[] 末尾追加: "libGLv4.so"
+  #   glad_gl_build_userptr() 既有 #else 分支内，GLX 之后追加 EGL 兜底:
+  #         userptr.gl_get_proc_address_ptr =
+  #             glad_dlsym_handle(handle, "glXGetProcAddressARB");
+  #         if (userptr.gl_get_proc_address_ptr == NULL) {
+  #             userptr.gl_get_proc_address_ptr =
+  #                 glad_dlsym_handle(glad_gl_egl_dlopen_handle(), "eglGetProcAddress");
+  #         }
+  #   新增 glad_gl_egl_dlopen_handle()，用 #if !GLAD_PLATFORM_APPLE && !GLAD_PLATFORM_WIN32 守卫
+rec_auto_fix: false
+
+affected_scope: |
+  自带 glad/glew 私有拷贝、在运行时 dlopen 解析 GL 入口点的库，且其 CMake 使用
+  find_package(OpenGL REQUIRED) 构建；或加载器只认 libGL.so 的库，需要在 HarmonyOS 上
+  用 libGLv4.so + libEGL.so 定位桌面 GL 入口点。典型为 CAD/建模/可视化类渲染库。
+  成品验证另见同目录 `opencsg-1.8.2-dt-needed-verification-for-runtime-dlopen-libs`。
+
+verification_cmd: |
+  # 交叉编译后：不得出现 GL 链接依赖，且补丁字符串应进入产物
+  llvm-readelf -d libopencsg.so | grep NEEDED      # 期望只有 libc++_shared.so/libc.so
+  llvm-strings libopencsg.so | grep -E 'libGLv4|libEGL|eglGetProcAddress'
+  # 设备侧（需 libGLv4.so/libEGL.so 存在）
+  llvm-nm -D /usr/lib*/libGLv4.so | grep -E ' glGetString$| glGenFramebuffers$'
+  llvm-nm -D /usr/lib*/libEGL.so  | grep -E ' eglGetProcAddress$'
+  # 运行期：加载器名字已编译进产物（真正 dlopen 发生在 render() 里）
+  # 无头 CI 只验证到符号级别；真实渲染需应用侧 GL context
+
+evidence: |
+  opencsg 1.8.2：
+  - 本机 OHOS SDK 交叉编译（aarch64-linux-ohos）：0002 生效后 configure 不再因 OpenGL 缺失失败；
+    libopencsg.so.1.8.2 链接成功，DT_NEEDED=[libc++_shared.so, libc.so]，含 libGLv4.so/libEGL.so 字符串。
+  - 设备 shadow CI：conan create 通过，L0-L5 全通过；test_package 在设备上确认
+    libGLv4.so 导出 glGetString、libEGL.so 导出 eglGetProcAddress（两项 [ok]）。
+  - 设备产物 libopencsg.so 346560 bytes，DT_NEEDED=[libc++_shared.so, libc.so]，885 个 OpenCSG 导出符号。
+
+authors:
+  - codex
+source_pr:
+source_commit:
+draft_date: 2026-09-11

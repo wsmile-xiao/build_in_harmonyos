@@ -1,0 +1,42 @@
+software: memcacheq
+version: "0.2.1"
+status: built
+build_date: "2026-09-29"
+build_system: autotools
+
+source:
+  url: "https://distfiles.macports.org/memcacheq/memcacheq-0.2.1.tar.gz"
+  sha256: "ace33313568959b5a301dda491f63af09793987b73fd15abd3fb613829eda07e"
+  tar_format: tar.gz
+
+build:
+  system: autotools
+  configure_options:
+    - "--with-libevent=<pkg>  (configure's own AC_SEARCH_LIBS loop, not pkg-config)"
+    - "--with-bdb=<pkg>       (AC_CACHE_CHECK probe for db_create in libdb)"
+    - "--enable-static --disable-shared (application: installs bin/memcacheq only)"
+    - "--enable-threads"
+  dependencies:
+    - libevent/2.1.12@ohpcd/stable
+    - db/6.2.32@ohpcd/stable
+  cc: clang (aarch64-unknown-linux-ohos)
+  cxx: n/a (C only)
+
+patches_applied: []   # no conandata patches; build-time fixes are inlined in the recipe (see notes)
+
+knowledge_gained:
+  - "memcacheq 0.2.1 (2008) is a memcache-protocol FIFO queue daemon: bin_PROGRAMS=memcacheq only, autotools, libevent + BerkeleyDB, no config.guess/config.sub in the tarball (no AC_CANONICAL_HOST), so there is no platform triplet step to patch - the conan/ohos-aarch64 profile flows in purely through CC/CFLAGS."
+  - "The tarball's configure and the config.status it generates bootstrap their conftest temp dir with `umask 077 && mktemp -d ./confXXXXXX`; on HMDFS that yields drwx--S--- group file_manager which is not writable even by its owner (E012), killing configure and config.status with 'Permission denied'. Fix in-recipe: umask 077 -> 022 and redirect mktemp into a private confstat/ dir under the build folder (same class of fix as memcached 1.6.42's $TMPDIR issue)."
+  - "conanbuildenv-*.sh hardcodes SHELL=/data/service/hnp/bin/bash (a CI-worker-only path). configure honours $CONFIG_SHELL/$SHELL and writes `#! /data/service/hnp/bin/bash` into config.status, so on a dev box every later config.status invocation dies with 'inaccessible or not found'. The recipe re-exports SHELL/CONFIG_SHELL to a bash it has probed for existence first."
+  - "hashtable.h declares iterator helpers as `extern inline` (GNU89 inline semantics); with the profile's cppstd=gnu20 clang rejects the out-of-line definition in hashtable.c ('redefinition of extern inline not supported in C99 mode'). One flag, -fgnu89-inline via CFLAGS, fixes the whole build - no source patch needed."
+  - "Under basic_layout the build folder sits INSIDE the source export (b/build-release vs b/), so a 'copy the source to a work dir' approach must shutil.ignore_patterns the build folder name or copytree recurses into its own output until it fills the disk."
+  - "In Conan 2 the transitive dependencies of a test_package (libevent, db below memcacheq) carry package_folder=None in the consumer graph, so a test_package cannot locate their lib/ dirs to build LD_LIBRARY_PATH. The application recipe exports runenv_info (LD_LIBRARY_PATH) in package_info AND the test_package re-requires the exact dependency versions so their nodes are first-class with real package folders."
+  - "The OHOS musl loader finds libevent-2.1.so.7 / libdb-6.2.so only via LD_LIBRARY_PATH: the binary has no RPATH (by design, A5), and package folders are not in the loader's default search path. self.run(env='conanrun') starts from the conanrun env, so a var set on os.environ is dropped - prepend it on the command line itself."
+  - "Upstream has NO test suite: tools/ holds memcache.py (a copy of the memcached client lib) plus mqpush.py/mqpop.py interactive demos; Makefile.am has no check/test target and configure.ac binds no test framework. Test coverage below is therefore entirely supplied by test_package."
+
+verification:
+  local_native_host: "conan create . --user=ohpcd --channel=stable --build=missing -pr ~/.conan2/profiles/ohos-local -c tools.build.cross_building:can_run=True (host is itself HarmonyOS aarch64; the -c override is needed because -pr alone sets build_os=Linux != host_os=OHOS)"
+  local_cross: "n/a - the dev box IS the target architecture; no cross run performed"
+  consumer_test: "test_package/test_memcacheq.sh <bin-dir>: 15/15 protocol cases (F1-F13b) against the packaged daemon over TCP"
+  ohos_specific_test: "test_package/ohos_abi_check.py --binary <pkg>/bin/memcacheq: 7/7 checks (A1-A7) - ELF64/AArch64, OHOS musl interp, .note.ohos.ident, exact DT_NEEDED set, no RPATH/RUNPATH, NX+PIE+RELRO+BIND_NOW, no glibc symbol versioning"
+  debug_build: "blocked locally, not by memcacheq: db/6.2.32 Debug builds from source and its configure shebang requires /data/service/hnp/bin/bash (CI-worker path). Release binary came from ohpcd. memcacheq itself has no build_type-conditional logic; CI runs both configurations."

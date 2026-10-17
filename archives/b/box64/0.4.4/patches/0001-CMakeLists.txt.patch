@@ -1,0 +1,146 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1353,20 +1353,86 @@
+     else()
+ 	    set_property(TARGET ${BOX64} APPEND_STRING PROPERTY LINK_FLAGS "-Wl,--no-as-needed -lc -lm -ldl -lrt -lpthread -lresolv -lutil -Wl,--as-needed -pthread ")
+ 		target_link_libraries(${BOX64} c m dl pthread resolv util c)
+     endif()
+ endif()
+ if(DYNAREC)
+     target_link_libraries(${BOX64} dynarec)
+ endif()
+ target_link_libraries(${BOX64} interpreter)
+ 
++# OHOS/musl: detect the HarmonyOS/musl target.  Conan maps os=OHOS to
++# CMAKE_SYSTEM_NAME=HarmonyOS; a plain native CMake run is recognised through
++# the __OHOS__ macro the OHOS clang driver always defines.
++if(NOT DEFINED BOX64_OHOS)
++    if(CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS")
++        set(BOX64_OHOS TRUE)
++    else()
++        include(CheckCSourceCompiles)
++        check_c_source_compiles("#ifndef __OHOS__\n#error not OHOS\n#endif\nint main(void){return 0;}" BOX64_CC_IS_OHOS)
++        set(BOX64_OHOS ${BOX64_CC_IS_OHOS})
++    endif()
++endif()
++if(BOX64_OHOS)
++    message(STATUS "OHOS/musl target: enabling musl-compat link flags")
++endif()
++
++# OHOS/musl: fts.h and fts_* are not provided by musl libc.  Conan injects
++# BOX64_FTS_LIBRARY/BOX64_FTS_INCLUDE_DIR with exact dependency paths; a plain
++# build can also resolve them through find_library/find_path.
++if(NOT BOX64_FTS_LIBRARY)
++    find_library(BOX64_FTS_LIBRARY NAMES fts)
++endif()
++if(BOX64_FTS_LIBRARY)
++    target_link_libraries(${BOX64} "${BOX64_FTS_LIBRARY}")
++endif()
++if(NOT BOX64_FTS_INCLUDE_DIR)
++    find_path(BOX64_FTS_INCLUDE_DIR NAMES fts.h)
++endif()
++if(BOX64_FTS_INCLUDE_DIR)
++    target_include_directories(mainobj PRIVATE "${BOX64_FTS_INCLUDE_DIR}")
++endif()
++
++# OHOS/musl: GNU obstack is not part of musl libc.
++if(NOT BOX64_OBSTACK_LIBRARY)
++    find_library(BOX64_OBSTACK_LIBRARY NAMES obstack)
++endif()
++if(BOX64_OBSTACK_LIBRARY)
++    target_link_libraries(${BOX64} "${BOX64_OBSTACK_LIBRARY}")
++endif()
++if(NOT BOX64_OBSTACK_INCLUDE_DIR)
++    find_path(BOX64_OBSTACK_INCLUDE_DIR NAMES obstack.h)
++endif()
++if(BOX64_OBSTACK_INCLUDE_DIR)
++    target_include_directories(mainobj PRIVATE "${BOX64_OBSTACK_INCLUDE_DIR}")
++endif()
++
++if(BOX64_OHOS)
++    # box64's malloc/mmap/dlopen wrappers must not be visible in .dynsym:
++    # OHOS musl libc resolves its own PLT through the executable and would call
++    # the not-yet-initialised wrappers, crashing the loader before main().
++    # glibc avoids this with symbol versioning, musl has no symbol versions.
++    set(BOX64_OHOS_HIDE_MAP "${CMAKE_CURRENT_BINARY_DIR}/box64-ohos-hide.map")
++    file(WRITE "${BOX64_OHOS_HIDE_MAP}" "{\n  local: *;\n};\n")
++    # -no-pie (ET_EXEC) is required for a stable start on this toolchain: the
++    # OHOS clang links PIE by default and the PIE build was not startable.
++    target_link_options(${BOX64} PRIVATE
++        -no-pie
++        "-Wl,--version-script=${BOX64_OHOS_HIDE_MAP}")
++    # Keep packages self-contained: resolve the musl-compat libraries
++    # (musl-fts / musl-obstack) from <prefix>/lib next to bin/box64.
++    # CMake has no Platform/HarmonyOS module, so CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG
++    # is empty and the INSTALL_RPATH machinery is silently a no-op; pass the
++    # runtime path to the linker explicitly instead.
++    target_link_options(${BOX64} PRIVATE "LINKER:-rpath,\$ORIGIN/../lib")
++endif()
++
+ if(${CMAKE_VERSION} VERSION_LESS "3.13")
+     if(NOT NOLOADADDR)
+         if(CMAKE_C_COMPILER_ID STREQUAL "Clang" OR WITH_MOLD)
+             set_property(TARGET ${BOX64} APPEND_STRING PROPERTY LINK_FLAGS "-no-pie -Wl,--image-base=${BOX64_ELF_ADDRESS} ")
+         else()
+             set_property(TARGET ${BOX64} APPEND_STRING PROPERTY LINK_FLAGS "-Wl,-Ttext-segment,${BOX64_ELF_ADDRESS} ")
+         endif()
+     endif()
+ else()
+     # If symbols are missing, try this: target_link_options(${BOX64} PUBLIC -rdynamic)
+@@ -1508,37 +1574,50 @@
+      install(PROGRAMS ${CMAKE_SOURCE_DIR}/system/box64-python DESTINATION ${TERMUX_PATH}/usr/bin)
+      install(FILES ${CMAKE_SOURCE_DIR}/system/sitecustomize.py DESTINATION ${TERMUX_PATH}/usr/share/box64)
+     endif()
+   endif()
+   if (GDBJIT)
+     install(TARGETS box64gdbjitreader RUNTIME DESTINATION lib)
+   endif()
+   if(NOT NO_CONF_INSTALL)
+     configure_file(system/box64.conf.cmake system/box64.conf)
+ 	  if(NOT TERMUX)
+-        install(FILES ${CMAKE_BINARY_DIR}/system/box64.conf DESTINATION /etc/binfmt.d/)
+-        install(FILES ${CMAKE_SOURCE_DIR}/system/box64.box64rc DESTINATION /etc/)
+-        if(BOX32_BINFMT)
+-            configure_file(system/box32.conf.cmake system/box32.conf)
+-            install(FILES ${CMAKE_BINARY_DIR}/system/box32.conf DESTINATION /etc/binfmt.d/)
++        if(BOX64_OHOS)
++            # /etc is not writable inside a Conan package; ship the
++            # configuration files under share/box64 instead.
++            install(FILES ${CMAKE_BINARY_DIR}/system/box64.conf DESTINATION share/box64)
++            install(FILES ${CMAKE_SOURCE_DIR}/system/box64.box64rc DESTINATION share/box64)
++        else()
++            install(FILES ${CMAKE_BINARY_DIR}/system/box64.conf DESTINATION /etc/binfmt.d/)
++            install(FILES ${CMAKE_SOURCE_DIR}/system/box64.box64rc DESTINATION /etc/)
++            if(BOX32_BINFMT)
++                configure_file(system/box32.conf.cmake system/box32.conf)
++                install(FILES ${CMAKE_BINARY_DIR}/system/box32.conf DESTINATION /etc/binfmt.d/)
++            endif()
+         endif()
+       else()
+         install(FILES ${CMAKE_BINARY_DIR}/system/box64.conf DESTINATION ${TERMUX_PATH}/usr/etc/binfmt.d/)
+         install(FILES ${CMAKE_SOURCE_DIR}/system/box64.box64rc DESTINATION ${TERMUX_PATH}/usr/etc/)
+         if(BOX32_BINFMT)
+             configure_file(system/box32.conf.cmake system/box32.conf)
+             install(FILES ${CMAKE_BINARY_DIR}/system/box32.conf DESTINATION ${TERMUX_PATH}/usr/etc/binfmt.d/)
+         endif()
+ 	  endif()
+ 
+   endif()
+-  set(INSTALL_PATH "/usr/lib/box64-x86_64-linux-gnu")
++  if(BOX64_OHOS)
++    # /usr is not writable inside a Conan package (absolute destinations
++    # are not affected by --prefix); keep x64lib under the install prefix.
++    set(INSTALL_PATH "lib/box64-x86_64-linux-gnu")
++  else()
++    set(INSTALL_PATH "/usr/lib/box64-x86_64-linux-gnu")
++  endif()
+   if(NOT NO_LIB_INSTALL)
+ 	if(NOT TERMUX AND NOT ANDROID)
+         install(FILES ${CMAKE_SOURCE_DIR}/x64lib/libstdc++.so.5 DESTINATION ${INSTALL_PATH})
+         install(FILES ${CMAKE_SOURCE_DIR}/x64lib/libstdc++.so.6 DESTINATION ${INSTALL_PATH})
+         install(FILES ${CMAKE_SOURCE_DIR}/x64lib/libgcc_s.so.1 DESTINATION ${INSTALL_PATH})
+         install(FILES ${CMAKE_SOURCE_DIR}/x64lib/libpng12.so.0 DESTINATION ${INSTALL_PATH})
+         install(FILES ${CMAKE_SOURCE_DIR}/x64lib/libcrypto.so.1.1 DESTINATION ${INSTALL_PATH})
+         install(FILES ${CMAKE_SOURCE_DIR}/x64lib/libcrypto.so.1.0.0 DESTINATION ${INSTALL_PATH})
+         install(FILES ${CMAKE_SOURCE_DIR}/x64lib/libssl.so.1.1 DESTINATION ${INSTALL_PATH})
+         install(FILES ${CMAKE_SOURCE_DIR}/x64lib/libssl.so.1.0.0 DESTINATION ${INSTALL_PATH})

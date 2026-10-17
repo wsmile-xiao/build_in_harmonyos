@@ -1,0 +1,100 @@
+diff --git a/deps/http-get/http-get.c b/deps/http-get/http-get.c
+index 0aeaaff..ab9a146 100644
+--- a/deps/http-get/http-get.c
++++ b/deps/http-get/http-get.c
+@@ -9,8 +9,78 @@
+ #include <curl/curl.h>
+ #include <string.h>
+ #include <stdlib.h>
++#include <stdio.h>
++#include <unistd.h>
+ #include "http-get.h"
+ 
++/**
++ * Runtime SSL CA store discovery.
++ *
++ * Some platforms (e.g. OpenHarmony) ship no CA bundle at the paths
++ * curl was configured with, and libcurl ignores SSL_CERT_FILE /
++ * SSL_CERT_DIR when its compiled-in CURLOPT_CAINFO default is set.
++ * Probe common locations once and apply the first readable one:
++ *
++ *   1. $CURL_CA_BUNDLE and $SSL_CERT_FILE (CA file)
++ *   2. common Linux CA files
++ *   3. $SSL_CERT_DIR and common CA directories (hash-style CApath)
++ *
++ * When nothing is found the libcurl default is left untouched.
++ */
++static void http_get_apply_ca_store(CURL *req) {
++  static int probed = -1;
++  static char ca_store[1024];
++
++  if (-1 == probed) {
++    static const char *ca_files[] = {
++      "/etc/ssl/certs/ca-certificates.crt",
++      "/etc/ssl/cert.pem",
++      "/etc/pki/tls/certs/ca-bundle.crt",
++    };
++    static const char *ca_dirs[] = {
++      "/etc/ssl/certs",
++      "/system/etc/security/certificates",
++    };
++    const char *env = NULL;
++    size_t i = 0;
++
++    probed = 0;
++    env = getenv("CURL_CA_BUNDLE");
++    if (!probed && env && 0 == access(env, R_OK)) {
++      snprintf(ca_store, sizeof(ca_store), "%s", env);
++      probed = 1;
++    }
++    env = getenv("SSL_CERT_FILE");
++    if (!probed && env && 0 == access(env, R_OK)) {
++      snprintf(ca_store, sizeof(ca_store), "%s", env);
++      probed = 1;
++    }
++    for (i = 0; !probed && i < sizeof(ca_files) / sizeof(ca_files[0]); i++) {
++      if (0 == access(ca_files[i], R_OK)) {
++        snprintf(ca_store, sizeof(ca_store), "%s", ca_files[i]);
++        probed = 1;
++      }
++    }
++    env = getenv("SSL_CERT_DIR");
++    if (!probed && env && 0 == access(env, R_OK)) {
++      snprintf(ca_store, sizeof(ca_store), "%s", env);
++      probed = 2;
++    }
++    for (i = 0; !probed && i < sizeof(ca_dirs) / sizeof(ca_dirs[0]); i++) {
++      if (0 == access(ca_dirs[i], R_OK)) {
++        snprintf(ca_store, sizeof(ca_store), "%s", ca_dirs[i]);
++        probed = 2;
++      }
++    }
++  }
++
++  if (1 == probed) {
++    curl_easy_setopt(req, CURLOPT_CAINFO, ca_store);
++  } else if (2 == probed) {
++    curl_easy_setopt(req, CURLOPT_CAPATH, ca_store);
++  }
++}
++
+ /**
+  * HTTP GET write callback
+  */
+@@ -57,6 +127,8 @@ http_get_response_t *http_get_shared(const char *url, CURLSH *share) {
+   curl_easy_setopt(req, CURLOPT_WRITEDATA, (void *) res);
+   curl_easy_setopt(req, CURLOPT_USERAGENT, "http-get.c/"HTTP_GET_VERSION);
+ 
++  http_get_apply_ca_store(req);
++
+   int c = curl_easy_perform(req);
+ 
+   curl_easy_getinfo(req, CURLINFO_RESPONSE_CODE, &res->status);
+@@ -104,6 +176,7 @@ int http_get_file_shared(const char *url, const char *file, CURLSH *share) {
+   curl_easy_setopt(req, CURLOPT_FOLLOWLOCATION, 1);
+   curl_easy_setopt(req, CURLOPT_WRITEFUNCTION, http_get_file_cb);
+   curl_easy_setopt(req, CURLOPT_WRITEDATA, fp);
++  http_get_apply_ca_store(req);
+   int res = curl_easy_perform(req);
+ 
+   long status;

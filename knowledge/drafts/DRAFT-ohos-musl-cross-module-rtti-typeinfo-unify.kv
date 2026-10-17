@@ -1,0 +1,94 @@
+#====================================================================
+# DRAFT-ohos-musl-cross-module-rtti-typeinfo-unify.kv
+# OHOS/musl 下 C++ dlopen 插件架构跨模块 RTTI typeinfo 统一
+# 触发事件: bali-phy 4.1 HarmonyOS PC 适配（archives/b/bali-phy/4.1，patch 0003，用户决策 A）
+#====================================================================
+
+id:                     DRAFT-ohos-musl-cross-module-rtti-typeinfo-unify
+trigger_tool:           runtime|test|conan|clang
+phase:                  runtime|testing|linking
+error_signature:        Cannot convert '[^']*' from type .* to type .*|
+                         cannot be converted to type|
+                         dynamic_cast failed|
+                         std::bad_cast
+
+severity:               3
+category:               rtti|typeinfo|dlopen|compat|platform|architecture|musl|plugin
+match_keywords:         RTTI, typeinfo, dynamic_cast, dlopen, export_dynamic,
+                         _ZTI, weak symbol, cross-module, builtins, plugin,
+                         Box, typeid, type_info, -rdynamic, --export-dynamic
+title:                  OHOS/musl 跨 dlopen 边界 RTTI typeinfo 不统一：显式实例化 TU + export_dynamic 弱符号插桩统一主程序与插件 .so 的 Box<T> typeinfo
+
+root_cause: >
+  OHOS/musl 动态链接语义下，主程序与 dlopen 加载的插件共享库各自按需定义
+  WEAK _ZTI 前缀的 C++ typeinfo 符号。当主程序没有定义（或未 export_dynamic
+  导出）某 Box<T> typeinfo、而插件 .so 自带同名 weak 定义时，跨模块
+  dynamic_cast 比较的是两个不同的 typeinfo 指针，即使类型文本完全相同也失败，
+  运行期报 "Cannot convert '...' from type Box<T> to type Box<T>"。真机最小
+  探针（rtti-probe3）证明：主程序一旦定义并导出 weak _ZTI 符号，musl 会把
+  dlopen 模块的引用插桩到主程序定义，dynamic_cast 成功——因此正确修复是把
+  缺失的 typeinfo 补进主程序导出集合，而非绕过。
+affected_scope: >
+  所有 "主程序 + dlopen 插件 .so + 跨模块 dynamic_cast/typeid" 的 C++ 库在
+  OHOS/musl 下的适配：bali-phy 的 29 个 builtins .so 之外，GStreamer 类插件
+  框架、语言运行时插件（mono/llvm 插件）、Haskell 运行时等均属同类。
+verification_cmd: >
+  readelf --dyn-syms <exe> | grep -c _ZTI3Box    # export_dynamic 后 .dynsym 可见
+  readelf -Ws <exe> | grep -c _ZTI3Box           # 含全部所需 typeinfo
+  rtti-probe3: exe 定义+导出 weak _ZTI 后 dlopen 模块引用被插桩，dynamic_cast 返回 OK
+
+rec_priority:           1
+rec_approach:           rtti-typeinfo-weak-symbol-inject
+rec_description: >
+  新增专用 TU（如 src/bali-phy/rtti-inject.cc）对 builtins 需要而主程序缺省的
+  Box<T> 类型做显式实例化（template class Box<T>;），并把该 TU 注册进主程序
+  目标 sources；主程序以 export_dynamic:true 构建（等效 -rdynamic/-Wl,--export-dynamic）
+  使这些 weak typeinfo 进入 .dynsym 导出集合；dlopen 模块的 weak 引用在 musl
+  下被插桩到主程序定义，跨模块 dynamic_cast 统一。
+rec_command:            >
+  # rtti-inject.cc: include 与 builtins 相同的头，逐行显式实例化（bali-phy 0003 共 14 个）
+  #   template class Box<Genetic_Code>; template class Box<sequence>; ...
+  # src/bali-phy/meson.build: baliphy_sources 追加 'rtti-inject.cc'
+  # 主可执行文件 target 保持 export_dynamic: true
+  # 验证: meson test 全量 218/218 + readelf --dyn-syms 导出计数
+rec_auto_fix:           false
+rec_impl:               recipe-rtti-inject-tu
+
+fallback_priority:      2
+fallback_approach:      consume-upstream-4.2-ecall-refactor
+fallback_description: >
+  若允许大版本回溯，可移植上游 4.2 的修复方向（把 builtins 内部动态类型分派
+  改为 ecall 调用约定、移除部分 dynamic_cast）到本版本；风险是重构级 diff、
+  跨版本漂移大，且上游 4.2 未采用 typeinfo 注入方案（src/bali-phy/meson.build
+  在 4.1 与 4.2 逐字节相同，均无 rtti-inject TU）。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       ignore_errors=True.*meson test|meson test.*\|\| true
+forbid_1_reason:        用失败吞掉掩盖 RTTI 缺陷会让跨模块 dynamic_cast 缺陷不可见
+forbid_1_consequence:   CI 绿但 --test/MCMC 运行期仍失败，consumer 功能残缺
+forbid_2_pattern:       setarch.*-R|--addr-no-randomize
+forbid_2_reason:        试图用地址随机化关闭回避 typeinfo 指针比较，属绕过而非修复
+forbid_2_consequence:   治标不治本，且在加固环境中不可用
+
+principles:             P005, P011
+similar_to:             E004, E078, E085, E019, E088, E131, E212, E218, E219, E286, E295
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-ohos-musl-cross-module-rtti-typeinfo-unify.md
+last_updated:           2026-08-29
+source_event:           archives/b/bali-phy/4.1 (patch 0003, user decision A)
+
+authors:                sea_crab
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-08-29
+
+draft: true
+contributor_id:         sea_crab

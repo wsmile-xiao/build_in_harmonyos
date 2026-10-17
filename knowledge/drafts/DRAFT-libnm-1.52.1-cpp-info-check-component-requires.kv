@@ -1,0 +1,90 @@
+# DRAFT: Conan 2 package_info() 强制要求列全"可见且非 override"的直接依赖
+id: DRAFT-libnm-1.52.1-cpp-info-check-component-requires
+status: draft
+contributor: libnm 1.52.1 适配任务（openharmony-compile-agent）
+created: 2026-09-20
+
+# Layer 0: 错误面
+trigger_tool:           conan|package_info
+phase:                  installation
+error_signature:        package_info\(\): The direct dependency '[^']+' is not used by any '\(cpp_info/components\)\.requires'|The direct dependency .* is not used by any
+
+# Layer 1: 识别层
+severity:               2
+category:               conan, packaging, dependency, configuration
+title:                  显式设置 cpp_info.requires 后，Conan 2 要求每个"可见且非 override"直接依赖都必须列入，否则 package_info() 抛异常
+match_keywords:         check_component_requires, cpp_info.requires, direct dependency, not used by any,
+  components, package_info, visible, override, ConanException, Conan 2, transitive_headers
+
+# Layer 2: 诊断层
+root_cause:             Conan 2 在 `cpp_info.check_component_requires()` 里做一致性校验：一旦配方**显式**
+  设置了 `self.cpp_info.requires`，那么 `requires()` 声明的每一个直接依赖，只要它是
+  **visible=True 且不是 override=True**，就必须出现在 `cpp_info.requires`（或某个组件的 requires）里，
+  否则直接 `ConanException`。这是为了强迫配方作者声明"包装后的真实传递依赖"，防止
+  `cpp_info.requires` 写成残集导致消费端漏链接。
+  容易踩中的形态：上游元数据（如 libnm.pc 只写 `Requires: gio-2.0`）比实际链接依赖窄得多——libnm.so
+  内部用 `--no-undefined` 链进 libudev/libuuid/gnutls，但 .pc 只暴露 gio-2.0。照抄 .pc 写
+  `cpp_info.requires = ["glib::gio-2.0"]` 就会在每次 conan create 的 package_info 阶段炸。
+  豁免项：`visible=False`（纯配置期依赖）与 `override=True`（冲突仲裁）**不需要**列入。
+affected_scope:         所有 Conan 2 配方显式设置 cpp_info.requires 的包；尤其是上游 .pc / CMake config
+  暴露的传递依赖比实际链接依赖窄的场景。
+verification_cmd: |
+  # 看 Conan 源码里的判定（Conan 2.29）
+  sed -n '813,850p' $(python3 -c "import conan,os;print(os.path.dirname(conan.__file__))")/internal/model/cpp_info.py
+  # 组件名是否存在（决定该写 pkg::component 还是 pkg::pkg）
+  grep -rn "cpp_info.components" <dep>/conanfile.py 2>/dev/null || echo "无 components -> 用 pkg::pkg"
+
+# Layer 3: 方案层
+rec_priority:           1
+rec_approach:           list-all-visible-non-override-direct-deps
+rec_description:        把每个"可见且非 override"的直接依赖都列进 cpp_info.requires；组件名先核验依赖包
+  是否真的定义了 cpp_info.components，没有则用 `pkgname::pkgname`。逐个核对报错信息里的名字（报错
+  一次只点一个，但通常会连着冒出来，一次性补齐更省一轮构建）。
+rec_command: |
+  self.cpp_info.requires = [
+      "glib::glib-2.0", "glib::gobject-2.0", "glib::gio-2.0",
+      "libudev-zero::libudev-zero", "uuid::uuid", "gnutls::gnutls",
+  ]
+  # 组件名核验：
+  conan cache path <dep>/<ver> && grep -n "components" <pkgdir>/conanfile.py
+rec_auto_fix:           false
+rec_impl:               recipe-package-info
+
+fallback_priority:      2
+fallback_approach:      narrow-visibility-of-config-only-deps
+fallback_description:   对"只在配置期用、确实不该传递给消费端"的依赖（典型：dbus / libndp / libpsl 这类
+  只用于探测头文件或生成配置的），在 requires() 里声明 `visible=False()`，从校验集合中合法豁免。
+fallback_command:       self.requires("dbus/1.14.10", visible=False)
+fallback_auto_fix:      false
+fallback_impl:          recipe-requires
+
+forbid_1_pattern:       cpp_info\.requires\s*=\s*\[[^\]]*\][\s\S]{0,200}requires\(.*"(?!(.*visible=False))
+forbid_1_reason:        抄上游 .pc（如只写 Requires: gio-2.0）作为 cpp_info.requires 的唯一样本，
+                        与 Conan 2 的一致性校验口径不一致。
+forbid_1_consequence:   conan create 在 package_info() 阶段抛 ConanException，且报错会逐个依赖地
+                        反复出现（一次一个），不一次性补齐就要多跑几轮构建。
+
+# Layer 4: 原则引用
+principles:
+
+# 关系图
+causes:                 []
+caused_by:              []
+similar_to:             E221
+conflicts_with:         []
+prerequisite_of:        []
+
+# 元数据
+doc_file:               drafts/DRAFT-libnm-1.52.1-cpp-info-check-component-requires.md
+last_updated:           2026-09-20
+source_event:           libnm 1.52.1 attempt 15：package_info() ConanException（The direct dependency 'libudev-zero' is not used by any '(cpp_info/components).requires'）
+
+authors:
+source_pr:
+source_commit:
+
+# 质量度量
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-20

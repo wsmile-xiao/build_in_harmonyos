@@ -1,30 +1,29 @@
 #!/bin/sh
 # pre-build.sh for unixodbc 2.3.12
-# E011 workaround: autoreconf + umask fix for HMDFS
-#
-# Problem: GitHub API tarball has no configure script, and autoreconf generates
-# configure with umask 077 which fails on HMDFS due to UID mapping.
-#
-# Solution: 
-# 1. Run autoreconf to generate configure
-# 2. Fix umask 077 → 022 in both configure and libltdl/configure
+# Manual helper matching the current Conan recipe. The preferred source is the
+# release tarball, which already contains configure; this script only applies
+# the checked-in OHOS temporary-directory patch.
 
 set -e
 
-echo "=== pre-build.sh: Generating configure with autoreconf ==="
+SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
+PATCH_FILE=${1:-"$SCRIPT_DIR/../patches/0007-ohos-umask-tmpdir.patch"}
 
-# Step 1: Generate configure script
-autoreconf -fi
+echo "=== pre-build.sh: unixODBC 2.3.12 release-tarball preparation ==="
 
-# Step 2: Fix umask 077 → 022 (E011 workaround)
-# This allows group write permissions, which HMDFS UID mapping requires
-echo "=== Fixing umask 077 → 022 in configure ==="
-sed -i 's/umask 077/umask 022/g' configure
+if [ ! -f configure ] || [ ! -f libltdl/configure ]; then
+    echo "ERROR: configure files are missing. Use the unixODBC 2.3.12 release tarball." >&2
+    exit 1
+fi
 
-# Step 3: Fix umask in libltdl/configure if it exists
-if [ -f libltdl/configure ]; then
-    echo "=== Fixing umask 077 → 022 in libltdl/configure ==="
-    sed -i 's/umask 077/umask 022/g' libltdl/configure
+if git apply --reverse --check "$PATCH_FILE" >/dev/null 2>&1; then
+    echo "=== OHOS umask patch is already applied ==="
+elif git apply --check "$PATCH_FILE"; then
+    echo "=== Applying OHOS umask patch ==="
+    git apply "$PATCH_FILE"
+else
+    echo "ERROR: OHOS umask patch cannot be applied cleanly: $PATCH_FILE" >&2
+    exit 1
 fi
 
 echo "=== pre-build.sh completed ==="

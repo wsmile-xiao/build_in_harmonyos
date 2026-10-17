@@ -18,6 +18,9 @@ Checks (each maps to a CI L0 gate):
   L0g: GitHub URL mirror check (warn, not block)
   L0h: shell 环境变量依赖检测 (R33: 禁止 ${CC}/${CFLAGS} 等裸用)
   L0i: Go/Rust 语言检测 (warn, not block)
+  L0m: 目录结构校验 (R39: archives/<首字母>/<包名>/<版本>/ 三重一致性
+       + R41: conanfile.name == 包名目录 + R42: 目录段必须是 conan slug 全小写, + 可用)
+  L0n: 分支名校验 (R40 两档：完全包含=错误, 包含不精确=告警, 精确=通过; CI 侧 PR>6000 强制精确)
 """
 from __future__ import annotations
 import os
@@ -193,7 +196,222 @@ def check_go_rust(ver_dir: Path) -> None:
         warnings.append(f"  L0i ⚠️ {ver_dir.name}: Rust 项目，鸿蒙 PC 原生环境无 Rust 工具链")
 
 
-def run_all_checks(ver_dir: Path) -> None:
+def check_directory_structure(ver_dir: Path, project_root: Path) -> None:
+    """L0m: directory structure validation (R39 + R41 + R42).
+
+    Validates that ver_dir follows archives/<首字母>/<包名>/<版本>/ structure:
+    1. Path depth is exactly 4 segments under archives/
+    2. First segment is a single character matching package name's first letter
+    3. Version directory name matches conanfile.py version field
+    4. R41: conanfile.py name field must equal the package directory name
+    5. R42: pkg_name/pkg_ver must be conan slugs (lowercase + [a-z0-9._+-],
+       '+' allowed for C++ naming like vera++; version may contain '+')
+    """
+    conanfile = ver_dir / "conanfile.py"
+    try:
+        rel = ver_dir.relative_to(project_root)
+    except ValueError:
+        return  # Not under project_root, skip
+    parts = rel.parts
+    if "archives" not in parts:
+        return  # Not in archives/, skip (e.g. test recipe)
+    idx = parts.index("archives")
+    sub = parts[idx + 1:]  # segments after archives/
+    if len(sub) < 3:
+        return  # Not deep enough to validate (may be incomplete path)
+    letter, pkg_name, pkg_ver = sub[0], sub[1], sub[2]
+    # Rule 1: letter must be single alphanumeric character
+    if len(letter) != 1 or not letter.isalnum():
+        errors.append(
+            f"  L0m ❌ {pkg_name}/{pkg_ver}: 首字母目录 '{letter}' 不是单字符"
+            f"（应为 {pkg_name[0].lower() if pkg_name else '?'}）"
+        )
+        return
+    # Rule 2: letter must match first letter of package name (case-insensitive)
+    if letter.lower() != pkg_name[0].lower():
+        errors.append(
+            f"  L0m ❌ {pkg_name}/{pkg_ver}: 首字母目录 '{letter}' 与包名 '{pkg_name}'"
+            f" 首字母 '{pkg_name[0].lower()}' 不一致"
+        )
+    # Rule 5 (R42): conan slug charset — 提前拦截 conan create 的
+    # "must be all lowercase" 与分支/目录名不一致问题（+ 允许，对齐 conan 官方）
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._+-]*", pkg_name):
+        errors.append(
+            f"  L0m ❌ {pkg_name}/{pkg_ver}: 包名目录 '{pkg_name}' 不是 conan slug"
+            f"（R42：必须全小写且仅含 [a-z0-9._+-]，+ 可用如 vera++）"
+        )
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._+-]*", pkg_ver):
+        errors.append(
+            f"  L0m ❌ {pkg_name}/{pkg_ver}: 版本目录 '{pkg_ver}' 不是 conan slug"
+            f"（R42：必须全小写且仅含 [a-z0-9._+-]，大写字母会让 conan create 失败）"
+        )
+    if conanfile.exists():
+        try:
+            text = conanfile.read_text(encoding="utf-8", errors="replace")
+            m = re.search(r'^\s*version\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
+            if m and pkg_ver != m.group(1):
+                errors.append(
+                    f"  L0m ❌ {pkg_name}/{pkg_ver}: 版本目录 '{pkg_ver}'"
+                    f" 与 conanfile.py version='{m.group(1)}' 不一致"
+                )
+            # Rule 4 (R41): conanfile.name == 包名目录
+            mn = re.search(r'^\s*name\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
+            if mn and mn.group(1) != pkg_name:
+                errors.append(
+                    f"  L0m ❌ {pkg_name}/{pkg_ver}: conanfile.py name='{mn.group(1)}'"
+                    f" 与包名目录 '{pkg_name}' 不一致 (R41)"
+                )
+        except Exception:
+            pass  # Read errors handled by L0a
+
+
+def check_branch_name(ver_dir: Path, project_root: Path) -> None:
+    """L0n: branch name matches pkg_name-pkg_ver exactly (R40).
+
+    The branch name, after stripping an optional prefix (the part before
+    the last '/'), must equal '{pkg_name}-{pkg_ver}' exactly.
+    Pass: abc-1.0.0 / feat/abc-1.0.0; Fail: abc-1.0.0-ASDH (suffix).
+    Skipped on main/master/server branches.
+    """
+    import subprocess
+
+    try:
+        rel = ver_dir.relative_to(project_root)
+    except ValueError:
+        return
+    parts = rel.parts
+    if "archives" not in parts:
+        return
+    idx = parts.index("archives")
+    sub = parts[idx + 1:]
+    if len(sub) < 3:
+        return
+    pkg_name, pkg_ver = sub[1], sub[2]
+
+    # Get current git branch
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True, text=True, cwd=str(project_root)
+        )
+        branch = result.stdout.strip()
+    except Exception:
+        return  # Not in a git repo or git not available
+    if not branch or branch in ("main", "master", "server"):
+        return
+
+    # Normalize '+' → '-' on both sides (Debian-style versions like 1.4+dfsg.1)
+    expected_tag = f"{pkg_name}-{pkg_ver}"
+    expected_norm = expected_tag.replace("+", "-")
+    branch_norm = branch.replace("+", "-")
+    # Strip optional prefix (anything before the last '/')
+    branch_base = branch_norm.rsplit("/", 1)[-1]
+
+    if branch_base == expected_norm:
+        return  # Exact match (R40): always OK
+    if expected_norm in branch_norm:
+        # Contains but not exact (historical suffix style, e.g. abc-1.0.0-ASDH).
+        # CI enforces exact match for PR > 6000; warn here so old branches
+        # being rebased locally are not blocked.
+        warnings.append(
+            f"  L0n ⚠ {pkg_name}/{pkg_ver}: 分支名 '{branch}' 包含但不精确等于 '{expected_tag}'"
+            f"（去前缀后 '{branch_base}'）"
+        )
+        warnings.append(
+            f"  💡 PR > 6000 要求去掉前缀后精确等于 包名-版本号（禁止任何后缀），"
+            f"例如：feat/{expected_tag}；带后缀会导致平台任务无法关联"
+        )
+        return
+    errors.append(
+        f"  L0n ❌ {pkg_name}/{pkg_ver}: 分支名 '{branch}'"
+        f"（去前缀后 '{branch_base}'）完全不包含 '{expected_tag}'"
+    )
+    warnings.append(
+        f"  💡 分支名必须以 包名-版本号 结尾，例如：feat/{expected_tag} 或 {expected_tag}；"
+        f" 平台按 分支名完全一致+作者 匹配任务，分支与包名无关会导致任务无法关联"
+    )
+
+
+def check_commands_json(ver_dir: Path, project_root: Path) -> None:
+    """L0k: CLI tool packages must declare commands.json (R38).
+
+    If the recipe looks like a CLI tool (bindirs / bin install target /
+    package_type="application"), the software-level commands.json must
+    exist with type=tool, matching name and current version.
+    Only enforced under archives/ layout.
+    """
+    import json
+    import re
+
+    try:
+        rel = ver_dir.relative_to(project_root)
+    except ValueError:
+        return
+    parts = rel.parts
+    if "archives" not in parts:
+        return
+    idx = parts.index("archives")
+    sub = parts[idx + 1:]
+    if len(sub) < 3:
+        return
+    pkg_name, pkg_ver = sub[1], sub[2]
+    commands_json = ver_dir.parent / "commands.json"
+
+    conanfile = ver_dir / "conanfile.py"
+    if not conanfile.exists():
+        return
+    try:
+        src = conanfile.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return
+
+    bin_install_re = re.compile(
+        r'RUNTIME\s+DESTINATION\s+bin\b|dst\s*=\s*["\']bin["\']'
+    )
+    is_cli = (
+        "bindirs" in src
+        or bin_install_re.search(src) is not None
+        or re.search(r'package_type\s*=\s*["\']application', src) is not None
+    )
+    if not is_cli:
+        return
+
+    if not commands_json.exists():
+        errors.append(
+            f"  L0k ❌ {pkg_name}/{pkg_ver}: CLI 工具缺少 commands.json"
+        )
+        warnings.append(
+            f"  💡 参考 templates/commands.json.template 在"
+            f" {commands_json.parent.name}/ 下创建 commands.json"
+        )
+        return
+
+    try:
+        data = json.loads(commands_json.read_text(encoding="utf-8"))
+    except Exception:
+        errors.append(
+            f"  L0k ❌ {pkg_name}/{pkg_ver}: commands.json 不是合法 JSON"
+        )
+        return
+    if data.get("type") != "tool":
+        errors.append(
+            f"  L0k ❌ {pkg_name}/{pkg_ver}: commands.json type 应为 \"tool\""
+        )
+    elif pkg_name not in str(data.get("name", "")):
+        errors.append(
+            f"  L0k ❌ {pkg_name}/{pkg_ver}: commands.json name 不匹配"
+            f"（期望含 {pkg_name}）"
+        )
+    elif pkg_ver not in (data.get("versions") or {}):
+        errors.append(
+            f"  L0k ❌ {pkg_name}/{pkg_ver}: commands.json 缺少版本 {pkg_ver}"
+        )
+        warnings.append(
+            f"  💡 递增版本号时须同步在 commands.json 的 versions 中补 {pkg_ver}"
+        )
+
+
+def run_all_checks(ver_dir: Path, project_root: Path) -> None:
     """Run all L0 checks on a recipe directory."""
     check_conanfile_syntax(ver_dir)
     check_sha256(ver_dir)
@@ -204,6 +422,9 @@ def run_all_checks(ver_dir: Path) -> None:
     check_github_url(ver_dir)
     check_shell_env_vars(ver_dir)
     check_go_rust(ver_dir)
+    check_directory_structure(ver_dir, project_root)
+    check_branch_name(ver_dir, project_root)
+    check_commands_json(ver_dir, project_root)
 
 
 def main() -> int:
@@ -250,7 +471,7 @@ def main() -> int:
     print(f"{'='*60}\n")
 
     for ver_dir in recipe_dirs:
-        run_all_checks(ver_dir)
+        run_all_checks(ver_dir, project_root)
 
     # Print results
     if warnings:

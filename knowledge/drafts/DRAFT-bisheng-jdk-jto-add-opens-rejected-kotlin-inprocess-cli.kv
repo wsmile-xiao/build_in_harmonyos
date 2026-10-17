@@ -1,0 +1,155 @@
+#====================================================================
+# DRAFT-bisheng-jdk-jto-add-opens-rejected-kotlin-inprocess-cli
+#   BiSheng JDK 拒经 JAVA_TOOL_OPTIONS 注入 --add-opens（直接拒启），
+#   且 Kotlin ≤1.4 忽略 gradle.properties 的编译策略属性——
+#   强封装豁免须 jvmargs+命令行双保险，in-process 须命令行 -D 强制
+# 来源: PR feat(leakcanary-shark): 2.14 适配 HarmonyOS PC
+#       （Gradle 7.4.2 + Kotlin 1.4.21 + bishengjdk17 源码构建 JVM 库）
+# 路径: Path B（知识库扩展，次条）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-bisheng-jdk-jto-add-opens-rejected-kotlin-inprocess-cli
+trigger_tool:           java|gradle|kotlin
+phase:                  configuration|compilation
+error_signature:        Unrecognized option: --add-opens|Could not create the Java Virtual Machine|InaccessibleObjectException|Unable to make protected void java\.util\.ResourceBundle\.setParent|kotlin.*daemon.*(crash|exit)
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               toolchain, jdk, kotlin, gradle, jvm
+match_keywords:         JAVA_TOOL_OPTIONS, --add-opens, ALL-UNNAMED, Unrecognized option,
+                        BiSheng, bishengjdk17, InaccessibleObjectException,
+                        ResourceBundle.setParent, DynamicBundle, kotlin daemon,
+                        kotlin.compiler.execution.strategy, in-process,
+                        org.gradle.jvmargs, gradle.properties, JDK17, 强封装
+title:                  BiSheng JDK 经 JAVA_TOOL_OPTIONS 注入 --add-opens 会直接拒启（Unrecognized option），JDK17 强封装豁免须写入 org.gradle.jvmargs 并同时放启动命令行；Kotlin ≤1.4 忽略 gradle.properties 的编译策略属性，in-process 须用命令行 -D 强制
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             两条独立工具链语义在"旧工具链 + 新 JDK"组合下叠加成障（真机
+                        bishengjdk17 17.0.13+6 + Gradle 7.4.2 + Kotlin 1.4.21 逐项
+                        探针核实）：
+                        ①【注入路径拒绝】BiSheng 构建的 JDK 把经 JAVA_TOOL_OPTIONS
+                        环境变量进入的 --add-opens 当作不可识别选项，JVM 直接拒绝
+                        启动（Unrecognized option: --add-opens / Error: Could not
+                        create the Java Virtual Machine）；同一 flag 放命令行则正常
+                        接受（对照探针见 verification_cmd）。即 JAVA_TOOL_OPTIONS
+                        在 BiSheng JDK 上不能承载 --add-opens。
+                        ②【作用域错配】设置了 org.gradle.jvmargs 时 Gradle 会 fork
+                        single-use daemon 执行构建，命令行 --add-opens 只保护
+                        launcher 进程，不进 daemon；Kotlin 1.4.21 内嵌编译器
+                        （IntelliJ 平台代码 DynamicBundle）启动时反射
+                        ResourceBundle.setParent，JDK17 强封装下无 opens 即抛
+                        InaccessibleObjectException → Internal compiler error
+                        （compileKotlin 失败，NoClassDefFoundError: LanguageLevel
+                        为静态初始化失败的次生错误）。
+                        ③【策略属性失效】Kotlin ≤1.4 忽略 gradle.properties 形式的
+                        kotlin.compiler.execution.strategy（实测设置 in-process 后
+                        仍拉起 RMI Kotlin daemon），daemon JVM 不带 opens 必崩；
+                        必须在 Gradle 启动命令行以系统属性
+                        -Dkotlin.compiler.execution.strategy=in-process 强制
+                        in-process，使编译发生在已带 opens 的 daemon JVM 内。
+
+affected_scope:         任何在 BiSheng JDK 17 上构建需要 --add-opens 的旧工具链
+                        （Kotlin ≤1.4 内嵌编译器、旧版本静态检查/字节码工具等）
+                        JVM 项目的场景：①JAVA_TOOL_OPTIONS 一律不能承载
+                        --add-opens；②凡 Gradle fork daemon 的构建，opens 只在
+                        org.gradle.jvmargs（daemon）+ 命令行（launcher）双处生效；
+                        ③Kotlin ≤1.4 的编译策略只能命令行 -D 强制。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           jvmargs-and-cmdline-dual-add-opens + kotlin-inprocess-cli-d
+rec_description:        双保险布局：
+                        ① gradle.properties：org.gradle.jvmargs 追加
+                        --add-opens java.base/{java.lang,java.util,java.io,java.net,
+                        java.nio,java.lang.reflect}=ALL-UNNAMED（fork 出的 daemon
+                        生效，Kotlin 内嵌编译器在此运行）；
+                        ② Gradle 启动 java 命令行同时带上同样一组 --add-opens
+                        （覆盖 launcher 自身进程）；
+                        ③ 启动命令行追加
+                        -Dkotlin.compiler.execution.strategy=in-process，
+                        使 Kotlin ≤1.4 编译留在 daemon JVM 内（带 opens），
+                        不拉起裸奔的 Kotlin daemon。
+                        实证：leakcanary-shark/2.14 三处组合落地
+                        （patches/0003 + conanfile.py gradle_cmd），上游 172 用例
+                        真机全过。
+rec_command:            java --add-opens java.base/java.util=ALL-UNNAMED ... -Dkotlin.compiler.execution.strategy=in-process -classpath "$GRADLE_HOME/lib/*" org.gradle.launcher.GradleMain ...
+                        # 且 gradle.properties: org.gradle.jvmargs=-Xmx2g ... --add-opens java.base/java.util=ALL-UNNAMED ...
+rec_auto_fix:           false
+rec_impl:               gradle-properties-plus-cmdline
+
+fallback_priority:      2
+fallback_approach:      jvmargs-add-opens-only
+fallback_description:   仅在 org.gradle.jvmargs 一处放 --add-opens。权衡：依赖
+                        Gradle 的 daemon fork 行为（jvmargs 非空时必然 fork），
+                        launcher 自身进程不受保护；若未来 Gradle/调用方式变化使
+                        构建不再 fork，opens 即丢失。作为最小改动退路可用。
+fallback_command:       gradle.properties: org.gradle.jvmargs=... --add-opens java.base/java.util=ALL-UNNAMED ...
+fallback_auto_fix:      false
+fallback_impl:          gradle-properties-only
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       JAVA_TOOL_OPTIONS.*--add-opens|export JAVA_TOOL_OPTIONS=.*add-opens
+forbid_1_reason:        BiSheng JDK 的 JAVA_TOOL_OPTIONS 注入路径不接受 --add-opens，
+                        JVM 直接拒启（Unrecognized option / Could not create the
+                        Java Virtual Machine），比原问题更糟——所有 java 进程都
+                        起不来。
+forbid_1_consequence:   构建环境全灭：launcher、daemon、测试 JVM 全部无法启动。
+forbid_2_pattern:       gradle\.properties.*kotlin\.compiler\.execution\.strategy.*in-process.*仅此而已
+forbid_2_reason:        Kotlin ≤1.4 忽略该属性的 gradle.properties 形式（实测仍拉起
+                        RMI Kotlin daemon），误以为已生效会让 in-process 假设落空，
+                        Kotlin daemon 在无 opens 的 JVM 里必崩。
+forbid_2_consequence:   配置看似齐全，compileKotlin 仍报 Internal compiler error。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P-ENV-001, P-BUILD-001
+
+# ═══ 关系图 (Relations) ═══
+# ⚠️ E083 同属 BiSheng JDK 特性族（ELF 签名机制影响 JNI System.load），
+# 本条是同一 JDK 构建的另一个独立侧面：JVM 选项注入路径的接受域。
+# knowledge/ 全树 'add-opens'/'JAVA_TOOL_OPTIONS' 0 命中（Curator 检索证实），
+# 无覆盖关系。E184 是 Java 构建工具缺失（命令不存在），与本条"工具在但
+# 选项进不去"互补。
+similar_to:             E083（BiSheng JDK 特性族：签名机制；本条：选项注入路径，不同侧面）、
+                        E184（Java 构建工具链缺失，手动安装；同为 Java 工具链环境域）
+caused_by:
+conflicts_with:
+prerequisite_of:        DRAFT-gradle-launcher-toybox-xargs-quote-strip（同 run 姊妹条：
+                        Gradle 直启 GradleMain 的 java 命令行正是本条 --add-opens 与
+                        -D 策略的承载点）
+
+# ═══ 元数据 ═══
+verification_cmd:       # ① 注入路径拒绝（自包含，新 shell 可跑）
+                        JAVA_TOOL_OPTIONS='--add-opens java.base/java.lang=ALL-UNNAMED' /storage/Users/currentUser/bishengjdk17/bin/java -version
+                        # 期望：Picked up JAVA_TOOL_OPTIONS: --add-opens ... 后
+                        #       Unrecognized option: --add-opens
+                        #       Error: Could not create the Java Virtual Machine.
+                        # ② 命令行接受（对照）
+                        /storage/Users/currentUser/bishengjdk17/bin/java --add-opens java.base/java.lang=ALL-UNNAMED -version
+                        # 期望：openjdk version "17.0.13"（BiSheng，正常启动）
+                        # ③ Kotlin 1.4.x 属性失效复现：gradle.properties 设
+                        #    kotlin.compiler.execution.strategy=in-process 后跑
+                        #    compileKotlin，日志仍出现 RMI 线程栈的
+                        #    InaccessibleObjectException: ResourceBundle.setParent
+                        #    （Kotlin daemon 被拉起）；改命令行 -D 后消失。
+doc_file:               knowledge/drafts/DRAFT-bisheng-jdk-jto-add-opens-rejected-kotlin-inprocess-cli.md
+last_updated:           2026-09-26
+source_event:           PR feat(leakcanary-shark): 2.14 适配 HarmonyOS PC；
+                        Gradle 7.4.2 + Kotlin 1.4.21 源码构建 shark 四模块时
+                        compileKotlin 报 Internal compiler error（
+                        InaccessibleObjectException: ResourceBundle.setParent）；
+                        依次排除 JAVA_TOOL_OPTIONS 注入（BiSheng 拒启）、gradle
+                        jvmargs 单点、gradle.properties 策略属性失效后，以
+                        jvmargs+命令行双保险 + 命令行 -D in-process 收敛，
+                        上游 172 用例真机全过（notes 环境要点 4/5 原始记录，
+                        Curator 当日对照探针复核）。
+authors:                why6666666
+source_pr:              合并后回填
+source_commit:          合并后回填
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-26

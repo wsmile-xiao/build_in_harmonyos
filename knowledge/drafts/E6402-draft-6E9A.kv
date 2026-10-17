@@ -1,0 +1,73 @@
+#====================================================================
+# E6402 (draft) — OHOS 上 shell 时区工具失效：无 Olson 目录 + musl 按名字只查打包 tzdata
+#                 + toybox date 无 --date 长选项且 -d 拒收 ISO 'T'
+# 触发事件: tzdiff/1.2.1 HarmonyOS PC 适配
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E6402
+trigger_tool:           runtime|test
+phase:                  runtime
+error_signature:        Unknown option 'date=|date: bad date [0-9]{4}-[0-9]{2}-[0-9]{2}T|can't cd to /usr/share/zoneinfo|cd: /usr/share/zoneinfo: No such file or directory
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               ohos, musl, shell, portability, runtime
+match_keywords:         toybox date, date --date, date -d @, Unknown option 'date=, bad date, /usr/share/zoneinfo, TZDIR, TZ absolute path, TZif, /etc/zoneinfo/tzdata, tzdata_distro, persist.time.timezone, tzdata/2026.3
+title:                  OHOS shell time-zone tools break: no Olson tree (musl resolves TZ names only from packed tzdata, accepts absolute TZ path) and toybox date lacks --date / rejects ISO 'T'
+prescan_pattern:        date --date|cd /usr/share/zoneinfo|TZ=\$\{?[a-z_]+\}? date
+prescan_globs:          *.sh, *.bash, bin/*, scripts/*
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             三处运行期假设在鸿蒙 PC 上同时失效。①无展开的 Olson 目录：OHOS NDK libc.a 字符串只含 /etc/tzdata_distro/tzdata、/etc/zoneinfo/tzdata、/usr/share/zoneinfo/tzdata（打包格式）与 persist.time.timezone，脚本里 cd /usr/share/zoneinfo 或按目录遍历时区名直接失败（与 E315 设备调查一致）。②OHOS musl 对 TZ=Area/City 只查上述打包库、不认 TZDIR；但 TZ=<绝对路径 TZif 文件> 可用（NDK clang 静态探针 qemu-aarch64 实测：绝对路径 → JST，按名字 → 回落 UTC 且缩写变成 "Asia"）。③用户态 date 是 toybox：date --version 返回 0（GNU 探测误判成立），但没有 --date 长选项（Unknown option 'date=@0'），且 -d 不接受 ISO 'T' 分隔（bad date 2024-07-01T09:00），接受空格形式与 @epoch。
+affected_scope:         所有依赖 /usr/share/zoneinfo 目录、TZ=<名字> 或 GNU date 长选项的 shell/脚本类工具（tzdiff、各类 world-clock/cron 辅助脚本、测试脚本里的 date --date）；C 程序经 musl localtime 同样受 ② 影响。
+verification_cmd:       env -i PATH=<toybox applets> TZDIR=<pkg>/share/zoneinfo sh <pkg>/libexec/tzdiff/tzdiff -HH -N -n 1 -t 2024-07-01T09:00Z Asia/Tokyo   # 期望 2024-07-01 18:00 JST
+
+# ═══ Layer 3: 方案层 (Solution Space) ═══
+rec_priority:           1
+rec_approach:           tzdir-override-absolute-tz-plus-bundled-tzdata
+rec_description:        补丁三点且不含平台宏：cd "${TZDIR:-/usr/share/zoneinfo}" 保留 Linux 缺省；TZ=${zoneinfo}/${name} 传绝对路径（参数本身已是绝对路径时原样使用：case ${2} in /*) _tz=${2} ;; *) _tz=${zoneinfo}/${2} ;; esac）；date --date=X 改为 GNU/toybox 共同子集 date -d X，并把 ISO 'T' 分隔替换为空格。配方 requires("tzdata/2026.3", visible=False)，package() 从其 lib/python*/site-packages/tzdata/zoneinfo 复制 TZif 文件到 share/zoneinfo（排除 *.py/__pycache__）；bin/ 下 #!/bin/sh wrapper（E037：鸿蒙可能无 /usr/bin/env） 用 readlink -f 定位前缀，TZDIR 未设置时指向随包 share/zoneinfo 后 exec sh 主脚本。
+rec_command:            sed -i 's#cd /usr/share/zoneinfo#cd "${TZDIR:-/usr/share/zoneinfo}"#; s#date --date=#date -d #' <script>; 按名字的 TZ=${2} 改为 case ${2} in /*) _tz=${2};; *) _tz=${zoneinfo}/${2};; esac; TZ=${_tz}; 然后 refresh-patch --auto
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      require-coreutils-date
+fallback_description:   若脚本大量使用 GNU date 专有语法（-d 'next monday' 等自然语言），改为依赖制品仓的 GNU coreutils 并在 wrapper 中前置其 bin 到 PATH；时区数据仍需随包提供并用绝对路径 TZ。
+fallback_command:       self.requires("coreutils/<ver>")  # 先 conan download 确认已发布
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+forbid_1_pattern:       TZ=UTC|export TZ=Asia/Shanghai
+forbid_1_reason:        硬编码时区只会让命令不报错，但所有换算结果错误（同 E315 forbid）。
+forbid_1_consequence:   输出看似正常，时差、DST 全错，测试若只查退出码会假通过。
+forbid_2_pattern:       ln -s .* /usr/share/zoneinfo|mkdir -p /usr/share/zoneinfo
+forbid_2_reason:        往系统路径写时区目录属于构建机/设备污染，配方不可复现且鸿蒙系统分区只读。
+forbid_2_consequence:   CI 与用户设备上不存在该目录，包在真实环境仍失败。
+forbid_3_pattern:       -D__OHOS__|__OHOS__
+forbid_3_reason:        TZDIR 覆盖 + 绝对路径 TZ + date -d 在 GNU/toybox/musl/glibc 上行为一致，不需要平台分支（R8/PF5）。
+forbid_3_consequence:   PF5 平台宏闸拦截，且让 Linux 路径与鸿蒙路径分叉、无法同一测试覆盖。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E315, E010, E402, DRAFT-ohos-toybox-ln-long-option
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E6402-draft-6E9A.md
+last_updated: 2026-09-25
+source_event:           tzdiff/1.2.1 HarmonyOS PC adaptation (archives/t/tzdiff/1.2.1)
+patches_referenced:     archives/t/tzdiff/1.2.1/patches/0001-tzdiff.patch, archives/t/tzdiff/1.2.1/conanfile.py
+verification_exit:      0
+verification_evidence:  conan-verify G2 test_package 8/8；toybox 0.8.14 用户态 8/8；toybox + /usr/share/zoneinfo 遮空 8/8（上游原脚本 rc=2）；上游原脚本在 toybox 下 "date: Unknown option 'date=2024-07-01T09:00Z'" rc=1
+limits:                 探针与 toybox 为本机 x86 runner 模拟（aarch64 musl 探针经 qemu-aarch64），鸿蒙真机结果以 CI 为准；toybox -d 支持的格式集合随版本可能变化
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                nyaco3 <aqjCItYW1QmEJQuF.gcw_XDpqZ8sO@noreply.gitcode.com>
+source_pr:
+source_commit:

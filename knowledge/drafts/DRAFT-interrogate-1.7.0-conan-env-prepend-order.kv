@@ -1,0 +1,84 @@
+# ═══ Draft knowledge entry — Conan Environment.prepend_path 栈式组合次序与宿主环境遮蔽 ═══
+# Timestamp: 2026-10-06
+# Software: interrogate 1.7.0（任何用 conan.tools.env.Environment 组 PYTHONPATH 或在 package_info 导出多级导入路径的 Python 件）
+# Gate: conan create 的 build() 上游套件收集期 / test_package 消费者导入
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-interrogate-1.7.0-conan-env-prepend-order
+title:                  Environment.prepend_path 后调用者占最前位（栈式组合）；append_path 会把宿主 PYTHONPATH 留在前面遮蔽打包依赖
+trigger_tool:           conan|python
+phase:                  packaging
+error_signature:        ImportError: cannot import name 'io' from 'py' |
+                        cannot import name '<\w+>' from '<pkg>' |
+                        was imported from outside its package folder |
+                        ModuleNotFoundError: No module named '<dep>'
+
+severity:               2
+category:               conan|python|packaging|environment
+match_keywords:         prepend_path, append_path, Environment, PYTHONPATH,
+                        shadowing, py.py shim, staged tree, package_info
+keywords:               conan.tools.env.Environment, prepend_path stack order,
+                        composition order, host PYTHONPATH shadows conan deps,
+                        pip-global, user site, provenance check fails,
+                        vendored package shadowed by test-deps
+
+approach:               ①构建期套件环境（Environment.vars().apply()）：
+                        多个 prepend_path 按"后调用者占最前位"组合（实测：
+                        先 prepend staged 树、后 prepend test-deps 时，
+                        `import py` 解析到 test-deps 里 pytest 自带的模块级
+                        py.py shim，staged 树里 vendor 的 py/ 包整目录被遮蔽，
+                        收集期 ImportError）。正确写法是反着排：依赖路径先
+                        prepend、test-deps 其次、staged 树最后（最前）。
+                        ②package_info 导出依赖路径：必须全部 prepend_path，
+                        不能 append_path——宿主解释器自带 PYTHONPATH（本机为
+                        pip-global 树，含 colorama 等）会留在前面抢答 import，
+                        消费者来源校验（provenance）实测失败。包自身 site 最后
+                        prepend 占最前位，形成 <包site>:<依赖...>:<宿主环境>。
+                        ③来源校验断言（test_package 里逐依赖 import 并检查
+                        __file__ 前缀）是发现遮蔽的探针；没有它，遮蔽只表现
+                        为"本机绿、CI 红"或"负向测试假通过"。
+
+root_cause:             Conan 的 Environment.prepend_path 语义是把路径加到
+                        变量头部；对同一变量多次 prepend 时叠加为栈——最后
+                        prepend 的值最终排在最前。而 append_path 加到尾部，
+                        继承的宿主 PYTHONPATH（ci worker 与本机各异）留在
+                        前面。两条合起来：直觉顺序（"先写主要的"）恰好写反。
+                        叠加态：pytest 从 9.x 起自带模块级 py.py shim，
+                        任何把 pytest 的 test-deps 目录排在 vendored py/ 包
+                        之前的 PYTHONPATH 都会让 `from py import io` 落到
+                        shim 上（shim 无 io 子模块）而非 vendored 包。
+
+verification_cmd:       复现（构建期）：在 _run_upstream_tests 里先 prepend
+                        staged、后 prepend test-deps → 套件收集期
+                        `ImportError: cannot import name 'io' from 'py'
+                        (.../test-deps/py.py)`。
+                        修复验证：反序后同命令 228 passed / 13 skipped。
+                        复现（消费者）：package_info 用 append_path →
+                        test_package 报 `colorama was imported from outside
+                        its package folder: .../pip-global/colorama/__init__.py`。
+                        修复验证：全改 prepend_path 后
+                        INTERROGATE_CONSUMER=PASS。
+
+repro_command:          conan create <pkg> -pr <profile>（观察 test_package 的 provenance 断言与套件收集错误）
+
+rec_impl:               recipe-prepend-order-and-provenance
+fallback_priority:      1
+fallback_approach:      probe-and-report
+fallback_description:   若依赖布局无法统一探测（平铺/嵌套混合），退化为对每个
+                        依赖显式探路径并 output.warning 具名告警，绝不静默漏项
+                        或改用 append。
+fallback_command:       conan create <pkg> 2>&1 | grep -E "PASS assertions=|imported from outside|ImportError"
+fallback_auto_fix:      false
+fallback_impl:          recipe-guard
+
+forbid_1_pattern:       environment\.prepend_path\("PYTHONPATH", site\)\s*\n.*prepend_path\("PYTHONPATH", test_deps\)
+forbid_1_reason:        把 staged 树排在 test-deps 之前的直觉写法在栈式组合下
+                        恰好让 test-deps 抢占最前位，pytest 的 py.py shim 会
+                        遮蔽任何名为 py 的 vendored 包。
+forbid_1_consequence:   套件收集期 ImportError，报错指向 shim 文件路径，
+                        极易误判为"vendored 包没铺上"。
+
+forbid_2_pattern:       env\.append_path\("PYTHONPATH"
+forbid_2_reason:        append 把路径放在宿主 PYTHONPATH 之后，宿主副本抢答
+                        import；本机与 CI 的宿主树不同，表现不可复现。
+forbid_2_consequence:   本机绿 CI 红，或负向测试假通过。

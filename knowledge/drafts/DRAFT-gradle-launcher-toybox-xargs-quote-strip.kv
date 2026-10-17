@@ -1,0 +1,137 @@
+#====================================================================
+# DRAFT-gradle-launcher-toybox-xargs-quote-strip
+#   toybox xargs 不按 POSIX 剥离参数引号，Gradle 官方 bin/gradle
+#   启动脚本在 OHOS 上必然把 "-Xmx64m" 当主类名而无法启动
+# 来源: PR feat(leakcanary-shark): 2.14 适配 HarmonyOS PC
+#       （Gradle 7.4.2 源码构建 JVM 库构建期阻塞）
+# 路径: Path B（知识库扩展，主条）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-gradle-launcher-toybox-xargs-quote-strip
+trigger_tool:           gradle|sh|bash
+phase:                  configuration
+error_signature:        Could not find or load main class.*"-Xmx|ClassNotFoundException: "
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               platform, toolchain, gradle, toybox, jvm
+match_keywords:         Could not find or load main class, -Xmx64m, DEFAULT_JVM_OPTS,
+                        bin/gradle, xargs, toybox, quote, 引号, GradleMain,
+                        gradle-wrapper, eval set --, ClassNotFoundException
+title:                  OHOS toybox xargs 不按 POSIX 剥离参数引号，Gradle 官方 bin/gradle 启动脚本必然把 "-Xmx64m" 当主类名而无法启动——应绕过 shell 包装，直接 java -classpath <GRADLE_HOME>/lib/* org.gradle.launcher.GradleMain 启动
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             Gradle 官方发行版 bin/gradle 的 JVM 参数重组管道在 OHOS 上被
+                        toybox xargs 的引号语义破坏，四步机理链（Gradle 7.4.2 逐行核实）：
+                        ① bin/gradle 第 89 行 DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'——
+                        值内含字面双引号；
+                        ② 第 208-233 行用 `printf | xargs -n1 | sed | tr` + `eval set --`
+                        重组 JVM 参数，其正确性显式依赖 POSIX xargs 语义——脚本注释自述
+                        "with -n1 it outputs one arg per line, with the quotes and
+                        backslashes removed"（剥引号是设计前提）；
+                        ③ 设备 toybox xargs 不做引号剥离（探针：echo '"-Xmx64m" "-Xms16m"'
+                        | xargs -n1 echo 输出仍带引号；GNU xargs 会剥掉）；
+                        ④ 结果 set -- '"-Xmx64m"' ... → java 把带引号的 "-Xmx64m" 当主类名
+                        → Error: Could not find or load main class "-Xmx64m" → 构建无法
+                        启动。
+                        【归因勘误，勿复制旧记录】本条坏点在外部工具 xargs 而非 shell：
+                        /data/service/hnp/bin/bash 解释同一脚本同样失败（探针可证），
+                        早期记录"toybox sh"归因不成立。换 shell、改 PATH 指向均无效，
+                        因为坏点在被调用的 xargs 二进制的引号处理语义上。
+
+affected_scope:         任何在 OHOS 设备上用官方 Gradle 发行版（bin/gradle，6.x-8.x 的
+                        启动脚本实现均含该 xargs 管道）构建 JVM 项目的场景——源码构建
+                        Gradle 系库（依赖 Gradle 构建的 JVM 库配方 build()）或在设备上
+                        直接运行 gradle 命令均命中。与具体库无关，由平台工具链保证复发。
+                        已实证：leakcanary-shark 2.14（Gradle 7.4.2）、gradle 8.12 包。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           java-classpath-gradlemain-direct-launch
+rec_description:        绕过 shell 包装，直接以 java 启动 GradleMain：
+                        $JAVA_HOME/bin/java -Dorg.gradle.appname=gradle \
+                          -classpath "$GRADLE_HOME/lib/*" \
+                          org.gradle.launcher.GradleMain <args...>
+                        完全不经过 xargs 管道；lib/* 通配由 java 自身展开（传参不落
+                        shell）。已两处独立实践：leakcanary-shark/2.14 conanfile.py
+                        build()（Gradle 7.4.2 源码构建 + 上游 172 用例真机全过）、
+                        gradle/8.12 包 wrapper（发行包分发）。
+                        注意配套：JAVA_TOOL_OPTIONS 需 -Dos.name=Linux（Gradle
+                        OperatingSystem 类不识别 HarmonyOS，见 gradle 8.12 包先例）。
+rec_command:            $JAVA_HOME/bin/java -Dorg.gradle.appname=gradle -classpath "$GRADLE_HOME/lib/*" org.gradle.launcher.GradleMain --no-daemon <tasks...>
+rec_auto_fix:           false
+rec_impl:               conanfile-gradle-cmdline
+
+fallback_priority:      2
+fallback_approach:      package-time-wrapper-rewrite
+fallback_description:   打包期整体重写 bin/gradle 为直启 GradleMain 的 wrapper 脚本
+                        （gradle/8.12 conanfile._create_wrapper 同款）。同样绕开 xargs，
+                        诚实权衡：包装层多一份维护面（JAVA_HOME 探测、os.name 规避、
+                        classpath 拼接都要 wrapper 自带），仅适合"分发 Gradle 本身"
+                        的包；构建单库时主方案更轻。
+fallback_command:       参考 archives/g/gradle/8.12/conanfile.py _create_wrapper()
+fallback_auto_fix:      false
+fallback_impl:          conanfile-wrapper-rewrite
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       修改.*bin/gradle.*转义|patch.*DEFAULT_JVM_OPTS|patch.*gradle-wrapper\.properties
+forbid_1_reason:        修补启动脚本的引号转义是治标——每个 Gradle 版本都要重做一遍，
+                        且 patch 面大、与上游启动脚本实现强耦合；wrapper.properties 与
+                        引号问题无关（那是分发 URL）。
+forbid_1_consequence:   升级 Gradle 版本即复发，维护面无意义扩散。
+forbid_2_pattern:       换.*(/bin/sh|bash).*修复|ln -s.*bash.*/bin/sh|改 PATH.*shell
+forbid_2_reason:        坏点在被调用的 xargs 二进制引号语义，与解释器无关——探针实测
+                        /data/service/hnp/bin/bash 解释同一脚本同样失败。替换 shell
+                        是被反证的方向，只会浪费时间。
+forbid_2_consequence:   诊断方向错误，构建依旧失败，且改动系统 shell 有全局风险。
+forbid_3_pattern:       安装.*GNU.*(findutils|xargs)|为.*单库.*装.*xargs
+forbid_3_reason:        为单个库在设备上安装 GNU findutils 扩大构建工具依赖面，官方 CI
+                        环境不保证提供（同 E402 对 GNU gzip 的禁令逻辑）。
+forbid_3_consequence:   依赖面扩散，CI 可移植性下降。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P-BUILD-001
+
+# ═══ 关系图 (Relations) ═══
+# ⚠️ 同族为 toybox 工具语义差异（E402 gzip 长选项、E010 toybox sed/expr、E098 缺
+# install），但本条坏点在 xargs 引号剥离语义，是新的独立工具差异点；
+# E043 属 shell 运行时族（BASH_SOURCE/$0 等），坏点位置不同（shell vs xargs），
+# 症状都是"脚本在 OHOS 上跑不起来"，易误诊——本条的辨别性指纹是引号残留在
+# 报错主类名里（"-Xmx64m" 带引号）。
+similar_to:             E402（toybox gzip 长选项不支持，同族 toybox 工具语义差异）、
+                        E010（toybox sed/expr 能力差异，同族）、
+                        E098（toybox 缺 install，同族）、
+                        E043（shell 运行时族；症状重叠但坏点在 xargs 而非 shell）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       # ① 症状复现（自包含，新 shell 可跑）
+                        JAVA_HOME=/storage/Users/currentUser/bishengjdk17 sh /storage/Users/currentUser/gradle-dist/gradle-7.4.2/bin/gradle --version
+                        # 期望：Error: Could not find or load main class "-Xmx64m"
+                        # ② 机理探针（最小复现，不依赖任何构建物）
+                        echo '"-Xmx64m" "-Xms16m"' | xargs -n1 echo
+                        # 期望（toybox）：输出带引号；GNU xargs：输出 "-Xmx64m" 已剥引号
+                        # ③ 反事实探针（坐实坏点在 xargs 而非 shell）
+                        /data/service/hnp/bin/bash /storage/Users/currentUser/gradle-dist/gradle-7.4.2/bin/gradle --version
+                        # 期望：与 sh 同样报 Could not find or load main class "-Xmx64m"
+doc_file:               knowledge/drafts/DRAFT-gradle-launcher-toybox-xargs-quote-strip.md
+last_updated:           2026-09-26
+source_event:           PR feat(leakcanary-shark): 2.14 适配 HarmonyOS PC；
+                        Gradle 7.4.2 源码构建 shark 四模块时 bin/gradle 必然报
+                        Could not find or load main class "-Xmx64m"（notes 环境要点 1
+                        原始记录，归因勘误见 root_cause）；Curator 当日探针复现并定位
+                        xargs 引号语义；改 GradleMain 直启后上游 172 用例真机全过、
+                        权威 CI 全绿。
+authors:                why6666666
+source_pr:              合并后回填
+source_commit:          合并后回填
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-26

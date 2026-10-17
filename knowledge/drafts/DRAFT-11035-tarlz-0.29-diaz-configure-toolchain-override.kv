@@ -1,0 +1,124 @@
+#====================================================================
+# DRAFT-11035-tarlz-0.29-diaz-configure-toolchain-override
+#   Diaz 手写 configure 系三连坑：.tar.lz 官方独家包 + Makefile 硬编码
+#   CXX=c++ + 生成 Makefile 丢弃环境 CPPFLAGS
+#   —— make 命令行覆盖三件套闭环
+# 来源: PR feat(tarlz): 0.29 适配 HarmonyOS PC（ohpcd id=11035）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-11035-tarlz-0.29-diaz-configure-toolchain-override
+trigger_tool:           configure|make|conan|unzip_and_get
+phase:                  source|build
+error_signature:        make:\\s*c\\+\\+: No such file or directory|
+                         fatal error: 'lzlib\\.h' file not found|
+                         Unknown archive type|\\.tar\\.lz.*not.*support|
+                         umask contract changed.*no 'umask 077' found
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               diaz-configure, toolchain-override, tarlz,
+                        tar-dot-lz, makefile-flags, ohos, conan
+match_keywords:         Diaz, 手写configure, tarlz, lzip, tar.lz,
+                        CXX=c++, 硬编码编译器, CPPFLAGS丢失, lzlib.h找不到,
+                        umask 077找不到, tool_requires lzip, make命令行覆盖,
+                        Antonio Diaz, lzlib, multimember
+title:                  Diaz 手写 configure 系（tarlz/lzip/lzlib 同构）：官方独家 .tar.lz 包 + Makefile 硬编码 CXX=c++ + 生成 Makefile 丢弃环境 CPPFLAGS，make 命令行覆盖三件套闭环
+prescan_pattern:        ^CXX\\s*=\\s*c\\+\\+|^CC\\s*=\\s*cc|\\.tar\\.lz|
+                        Antonio Diaz|tarlz|lzip
+prescan_globs:          configure, Makefile.in, Makefile, conandata.yml
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             Antonio Diaz 系工具（tarlz/lzip/lzlib/xlunzip…）不用
+                        autoconf，用一套手写 configure + Makefile.in 模板，
+                        与 autoconf 生成物有三处行为差，逐个踩中即失败：
+                        ① 官方只发 .tar.lz 包（releases/lzip/tarlz/ 目录，
+                        releases/tarlz/ 不存在，404）。conan 2.32 的
+                        unzip_and_get 只认 .tar.gz/.tgz/.tbz2/.tar.bz2/
+                        .tar/.tar.xz/.txz/.tar.zst/.tzst，.tar.lz 不在
+                        名单——调 get() 直接报错。
+                        ② 生成的 Makefile 写死 CXX=c++（CC=cc），完全无视
+                        环境变量：conan profile 给的 clang++ 根本不用，
+                        设备上 c++ 不存在 → Error 127。
+                        ③ 同一 Makefile 只保留自己的 -O2，configure 阶段
+                        生效的 CPPFLAGS（-I…lzlib…）不进编译行 →
+                        lzlib.h file not found（configure 的 lzlib 探针
+                        反而是过的，极具迷惑性）。
+                        另：该 configure 内无 umask 077（autoconf 系的
+                        hmdfs 改写契约在此不适用，硬 fail-fast 会误杀）。
+
+affected_scope:         Diaz 全系（tarlz、lzip、lzlib、lunzip、xlunzip、
+                        ztake 同构模板）。凡官方源为 .tar.lz 且构建链走
+                        raw subprocess（非 conan Autotools helper）的配方。
+                        涉及 R33（工具链声明来源）与 R51（上游测试口径：
+                        testsuite/check.sh 的 "Mode differs" 全系为 hmdfs
+                        mode 位语义，非逻辑失败，见本包 notes.md）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           diaz-makefile-command-line-override-trio
+rec_description:        【解包】source() 只下载+验 sha256（CA 兜底同通用
+                        模板），不解包；build() 内经 tool_requires
+                        的 lzip 手动 `lzip -d -k -f … -o ….tar` 再
+                        `tar -xf --strip-components=1`。tool_requires 的
+                        bindirs 不在 raw subprocess PATH 上——必须经
+                        Environment.prepend_path("PATH", bindir) 显式注入
+                        （R33：声明来源非环境碰运气）。
+                        【编译器+标志】make 命令行一次性覆盖四项：
+                        make -j1 CC=<profile cc> CXX=<profile c++>
+                        CXXFLAGS="-O2 <lzlib -I…>" LDFLAGS="<lzlib -L…>"。
+                        make 命令行变量赋值覆盖文件内赋值（无 override
+                        指令时），Diaz 模板无 override，故有效。
+                        【umask】Diaz configure 无 umask 077 时改写步骤改为
+                        warning 跳过（已设备实测 count=0 为真值），不得沿用
+                        autoconf 系的 fail-fast 契约。
+                        【版本路径】conandata URL 必须 pin
+                        releases/lzip/tarlz/（releases/tarlz/ 404）。
+rec_command:            make -j1 CC=<cc> CXX=<cxx> CXXFLAGS="-O2 <deps -I>" LDFLAGS="<deps -L>"
+rec_auto_fix:           false
+rec_impl:               conan-recipe-makefile-override
+
+fallback_priority:      2
+fallback_approach:      patch-makefile-in-exports
+fallback_description:   若上游改模板加了 override 指令，命令行覆盖失效时，
+                        改用 conandata patches 在 export 阶段改 Makefile.in
+                        的 CXX/CXXFLAGS 默认值；本包 0.29 实测不需要。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          conandata-patch
+
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       get\\(.*\\.tar\\.lz|unzip.*tar\\.lz
+forbid_1_reason:         conan 2.32 unzip_and_get 不支持 .tar.lz，调 get()
+                        直接抛 Unknown archive；必须下载+tool_requires 手解
+forbid_1_consequence:   source() 直接失败，CREATE_RC=1
+forbid_2_pattern:       export.*CXX=.*clang|env.*CXX.*configure
+forbid_2_reason:         Diaz Makefile 无视环境 CXX，配环境变量是无用功；
+                        必须走 make 命令行覆盖
+forbid_2_consequence:   c++: No such file or directory（Error 127），浪费一轮设备构建
+forbid_3_pattern:       umask.*fail-fast|umask contract changed.*raise
+forbid_3_reason:         Diaz configure 无 umask 077 是真值不是契约漂移，
+                        沿用 autoconf 系 fail-fast 会把正常包误杀
+forbid_3_consequence:   构建在无实际问题处终止，误报 hmdfs 风险
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             DRAFT-libnfc-tools类autotools测试框架条目（互补：测试框架 vs 工具链覆盖）
+caused_by:
+conflicts_with:
+prerequisite_of:        R33 工具链声明来源 / R51 Diaz 系上游测试口径
+
+# ═══ 元数据 ═══
+verification_cmd:       conan create archives/t/tarlz/0.29 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+                        # 期望: TARLZ_TEST PASS, CREATE_RC=0
+doc_file:               knowledge/drafts/DRAFT-11035-tarlz-0.29-diaz-configure-toolchain-override.md
+last_updated:           2026-09-28
+source_event:           tarlz 0.29 适配（ohpcd id=11035，feat/tarlz-0.29）；设备 5 轮迭代实锤三连坑；上游 make check 8 组全过（mode-differs 归因 hmdfs）
+authors:                Ember5843
+source_pr:
+source_commit:

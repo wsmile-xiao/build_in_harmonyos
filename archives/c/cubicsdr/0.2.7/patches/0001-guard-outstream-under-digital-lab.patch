@@ -1,0 +1,88 @@
+From: OHOS adaptation <build@ohpcd>
+Subject: [PATCH] Guard outStream references in ModemFSK/ModemGMSK under ENABLE_DIGITAL_LAB
+
+Upstream CubicSDR 0.2.7 references the ModemDigital::outStream member in
+ModemFSK.cpp and ModemGMSK.cpp unconditionally, but the member is only
+declared when ENABLE_DIGITAL_LAB is set (ModemDigital.h, `#if
+ENABLE_DIGITAL_LAB`).  Building with ENABLE_DIGITAL_LAB=0 -- the upstream
+CMakeLists.txt default -- therefore fails to compile these two files:
+
+  src/modules/modem/digital/ModemFSK.cpp:12:5: error: use of undeclared identifier 'outStream'
+  src/modules/modem/digital/ModemGMSK.cpp:11:5: error: use of undeclared identifier 'outStream'
+
+(The upstream travis-ci configuration builds with -DENABLE_DIGITAL_LAB=1,
+which masks this defect.)
+
+The HarmonyOS PC core-library cut compiles with ENABLE_DIGITAL_LAB=0:
+
+  1. the Digital Lab console GUI that consumes the outStream bytes is a
+     wxWidgets window (src/forms/DigitalConsole) -- out of scope on a
+     platform without wxCore GUI, so the stream has no consumer;
+  2. the std::stringstream member instantiated inside the static library
+     triggers an OHOS toolchain weak-symbol duplication issue at process
+     exit (inline-namespace weak copy in the .a vs the libc++_shared.so
+     copy -> invalid free in ios_base::~ios_base at static destruction;
+     verified with AddressSanitizer on a minimal digital-modem
+     construct/destroy probe: analog modems exit cleanly, digital modems
+     crash 100% reproducibly).
+
+Guarding the two references keeps upstream behaviour identical for every
+configuration that compiles today (LAB=1 still streams; LAB=0 previously
+did not build these translation units at all) while making the LAB=0
+core cut compile and run cleanly.  The demodulator state-machine calls
+(fskdem_demodulate / gmskdem_demodulate) are preserved on the LAB=0 path
+so symbol timing and buffer progression stay upstream-identical.
+
+---
+diff --git a/src/modules/modem/digital/ModemFSK.cpp b/src/modules/modem/digital/ModemFSK.cpp
+index 7bec57d..9503752 100644
+--- a/src/modules/modem/digital/ModemFSK.cpp
++++ b/src/modules/modem/digital/ModemFSK.cpp
+@@ -9,7 +9,9 @@ ModemFSK::ModemFSK() : ModemDigital()  {
+     bps = 1;
+     sps = 9600;
+     bw = 0.45f;
++#if ENABLE_DIGITAL_LAB
+     outStream << std::hex;
++#endif
+ }
+ 
+ ModemBase *ModemFSK::factory() {
+@@ -134,7 +136,11 @@ void ModemFSK::demodulate(ModemKit *kit, ModemIQData *input, AudioThreadInput *
+     dkit->inputBuffer.insert(dkit->inputBuffer.end(),input->data.begin(),input->data.end());
+ 
+     while (dkit->inputBuffer.size() >= dkit->k) {
++#if ENABLE_DIGITAL_LAB
+         outStream << fskdem_demodulate(dkit->demodFSK, &dkit->inputBuffer[0]);
++#else
++        (void)fskdem_demodulate(dkit->demodFSK, &dkit->inputBuffer[0]);
++#endif
+         
+ //        float err = fskdem_get_frequency_error(dkit->demodFSK);
+         dkit->inputBuffer.erase(dkit->inputBuffer.begin(),dkit->inputBuffer.begin()+dkit->k);
+diff --git a/src/modules/modem/digital/ModemGMSK.cpp b/src/modules/modem/digital/ModemGMSK.cpp
+index 3aaff85..8e75a85 100644
+--- a/src/modules/modem/digital/ModemGMSK.cpp
++++ b/src/modules/modem/digital/ModemGMSK.cpp
+@@ -8,7 +8,9 @@ ModemGMSK::ModemGMSK() : ModemDigital()  {
+     _sps = 4;
+     _fdelay = 3;
+     _ebf = 0.3f;
++#if ENABLE_DIGITAL_LAB
+     outStream << std::hex;
++#endif
+ }
+ 
+ ModemGMSK::~ModemGMSK() = default;
+@@ -124,7 +126,11 @@ void ModemGMSK::demodulate(ModemKit *kit, ModemIQData *input, AudioThreadInput *
+     int numProcessed = 0;
+     for (size_t i = 0, iMax = dkit->inputBuffer.size()/dkit->sps; i < iMax; i+= dkit->sps) {
+         gmskdem_demodulate(dkit->demodGMSK, &input->data[i],&sym_out);
++#if ENABLE_DIGITAL_LAB
+         outStream << sym_out;
++#else
++        (void)sym_out;
++#endif
+         numProcessed += dkit->sps;
+     }
+     

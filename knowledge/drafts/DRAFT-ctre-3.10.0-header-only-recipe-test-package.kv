@@ -1,0 +1,90 @@
+#====================================================================
+# DRAFT-ctre-3.10.0-header-only-recipe-test-package - 编译期正则模板库 CTRE 的
+# Conan 配方与 test_package 落地要点（header-only 完整模板）
+#
+# 场景: CTRE 3.10.0 (hanickadot/compile-time-regular-expressions) 在 OHOS armv8
+#       Conan 2.x 适配。header-only 纯模板库, 四类错误全部与库本体无关:
+#       (1) codeload 无扩展名 URL BadZipFile (与 E321 重复, 不新建);
+#       (2) 默认 profile libstdc++11 不被 OHOS clang15 接受;
+#       (3) test_package CMakeToolchain 双重声明;
+#       (4) test_package 缺 include(CTest)/add_test() 导致 cmake.test() 无目标。
+# 适用: 所有 C++17/20 header-only 模板库在 OHOS/CI clean 环境下落地 Conan 配方。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-ctre-3.10.0-header-only-recipe-test-package
+source_lib:             ctre 3.10.0
+trigger_tool:           conan|conan create|cmake|make
+phase:                  source|configuration|build|test
+error_signature:        BadZipFile.*File is not a zip file|invalid library name in argument.*-stdlib=libstdc\+\+|CMakeToolchain is declared in the generators attribute.*instantiated in the generate\(\) method|No rule to make target 'test'|reference to string literal is not allowed in a template argument|static assertion failed.*character<char32_t\{0x80|static assertion failed.*character<char32_t\{0xff|no matching literal operator for call to 'operator""_pcre'|_pcre_test.*no matching literal operator|generating\.cpp|re2/re2\.h.*file not found|boost/regex\.hpp.*file not found|max_char = \(std::numeric_limits<char>::max\)\(\)|__CHAR_UNSIGNED__|numeric_limits<char>::max\(\).*0x80|hexdec.*0x80.*char32_t
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan|packaging|header-only|test_package|ohos-profile|cmake|ctest|codeload
+match_keywords:         header-only, header library, CTRE, fixed_string, BadZipFile, codeload, filename, tar.gz, libstdc++, libc++, ohos-aarch64, compiler.libcxx, CMakeToolchain, generators, generate(), cmake.test, add_test, include(CTest), No rule to make target 'test', test_package, package_type, header-library, cmake_target_name
+title:                  header-only 模板库 Conan 配方落地四要点：profile 选 libc++、codeload filename 声明、CMakeToolchain 单次实例化、test_package 注册 CTest
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  header-only 模板库无编译产物, 出错几乎都发生在配方/测试装配层：
+  (1) codeload URL 末段是 tag 名无扩展名, get() 误按 zip 解压 -> BadZipFile
+      (E321 已覆盖, 采用 filename 声明修复, 不重复建条目);
+  (2) 默认 profile compiler.libcxx=libstdc++11 与 OHOS NDK clang15(libc++) 不兼容,
+      CMake 探测报 invalid library name in argument '-stdlib=libstdc++';
+  (3) test_package generators 与 generate() 重复声明 CMakeToolchain 被 Conan 拒绝;
+  (4) cmake.test() 等价于 --target test, CMakeLists 未 include(CTest)+add_test()
+      则无 test 目标; 另有 CTRE 特有: fixed_string 作 NTTP 需 static constexpr。
+  R04 深挖 generating.cpp:56-58 失败的确定性根因: hexdec.inc.hpp 的 finish_hexdec
+  用 (std::numeric_limits<char>::max)() 决定 hexdec 值类型, aarch64/OHOS char 为
+  unsigned (__CHAR_UNSIGNED__=1, max=255), 使 0x80..0xFF 误入 character<char>
+  而非 character<char32_t>, 与上游断言期望不符; 属平台 char 符号性相关的上游
+  实现缺陷, 非本库配方/工具链缺项。
+affected_scope:         OHOS armv8 clang15 下所有 header-only C++ 模板库的 Conan 2.x 配方与 test_package; R04 另覆盖 unsigned-char 平台 (aarch64/AAPCS64) 消费 CTRE hexdec>=0x80 的工程
+verification_cmd:       conan create archives/c/ctre/3.10.0 --profile:host=ohos-aarch64 --profile:build=default --build=missing
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           header-only-recipe-plus-ohos-profile-plus-test-package-ctest
+rec_description: >
+  (1) profile: 一律 --profile:host=ohos-aarch64 (libc++/clang15/显式 compiler_executables);
+  (2) recipe: package_type="header-library", package() 只 copy include/*.hpp + LICENSE,
+      package_info() 设 cmake_file_name="ctre"/cmake_target_name="ctre::ctre", 清空 bindirs/libdirs;
+  (3) test_package conanfile: generators="CMakeDeps" 仅在 generate() 实例化一次 CMakeToolchain;
+  (4) test_package CMakeLists: include(CTest) + add_test(); test() 用 cmake.test();
+  (5) CTRE 特有: ctll::fixed_string 作模板实参须 static constexpr; 无 regex_options::multiline;
+  (6) R04 hexdec 修复: hexdec.inc.hpp finish_hexdec 的 max_char 由
+      std::numeric_limits<char>::max() 固定为 0x7F (patches/0001-hexdec-char32-threshold-0x7f.patch),
+      使 >=0x80 一律 character<char32_t>, 与平台 char 符号性解耦 (aarch64/OHOS unsigned char);
+      conandata.yml patches 声明 + apply_conandata_patches; 不改上游断言、不排除测试。
+rec_command:            >
+  conan create archives/c/ctre/3.10.0 --profile:host=ohos-aarch64 --profile:build=default --build=missing
+rec_auto_fix:           false
+rec_impl:               conanfile-edit|cmake-edit|profile-select
+
+# 回退方案
+fallback_priority:      2
+fallback_approach:      query-existing-knowledge-first
+fallback_description:   BadZipFile 类问题先查 E321 草稿复用修复, 不重复建条目; header-only 纯编译期场景可参考 E307/E229 compile-only 模式
+fallback_auto_fix:      false
+fallback_impl:          knowledge-lookup
+
+# ═══ Layer 4: 证据层 (Evidence) ═══
+evidence: >
+  archives/c/ctre/3.10.0/ (conanfile.py+conandata.yml+test_package/+patches/0001-hexdec-char32-threshold-0x7f.patch) 
+  R04 官方聚合 25/25 三入口通过 (make C++17/20 + CMake ctre-test, 含 generating.cpp):
+  .build-cache/ctre/w3/r04-src/make-cxx17.log (2a42205d...), make-cxx20.log (1796fe40...),
+  cmake-ctre-test.log (cef1932b...);
+  conan create exit 0 test_package 1/1: r04-conan-create.log (5c291aac...),
+  Full reference ctre/3.10.0#46a08f08...:6b129b06...;
+  消费者验证 consumer5.cpp 编译 exit 0 (打包制品 include 中 \x80->character<char32_t>);
+  官方 tag v3.10.0 commit e34c26ba149b9fd9c34aa0f678e39739641a0d1e,
+  tarball SHA-256 b17e6c9a6cc0cea65132f62a6c699cefed952721063569d6339eb3ca471045e6
+
+# 查重结论 (Path B 必需)
+dedup_conclusion: >
+  BadZipFile/codeload 无扩展名 -> E321 草稿 (emojify/endlessh) 已覆盖, 仅采用其修复不新建;
+  libc++ profile 选择 / CMakeToolchain 双重声明 / CTest test 目标注册 /
+  header-only 完整配方模板 -> index.tsv 与 doc/ 无对应条目, 新建本条草案沉淀可复用要点;
+  R04 hexdec (numeric_limits<char>::max)+0x80+unsigned-char 模式 -> 知识库无既有条目
+  (grep index.tsv/doc 无命中), 在既有同 stem 草稿内追加, 未创建正式 E### 条目/索引。
+related_entries:        E321, E035, E229, E307, E225

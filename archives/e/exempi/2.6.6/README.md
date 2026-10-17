@@ -1,80 +1,47 @@
-# exempi 2.6.6 - OpenHarmony 预编译包
+# exempi 2.6.6 — 鸿蒙 PC conan 制品
 
-## 简介
+`os=OHOS, arch=armv8`(= aarch64)的 conan 包，支持两种消费形态。
 
-exempi 是 XMP (Extensible Metadata Platform) 元数据的 C/C++ 库和命令行工具，基于 Adobe XMP SDK 开发。本包为 OpenHarmony (aarch64-unknown-linux-ohos) 平台的预编译版本。
-
-## 版本信息
-
-- **软件版本**: 2.6.6
-- **构建日期**: 2026-05-28
-- **目标平台**: aarch64-unknown-linux-ohos (OpenHarmony ARM64)
-- **构建系统**: autotools
-- **编译器**: clang/clang++ (OHOS SDK 26.0.0.18)
-
-## 依赖
-
-- expat >= 2.7.1 (XML 解析库)
-- musl libc (OHOS 系统标准 C 库)
-
-## 安装内容
-
-| 文件 | 说明 |
-|------|------|
-| `bin/exempi` | XMP 元数据命令行工具 |
-| `lib/libexempi.so.8.1.6` | 共享库 (soname: libexempi.so.8) |
-| `lib/libexempi.a` | 静态库 |
-| `include/exempi-2.0/exempi/xmp.h` | C API 头文件 |
-| `include/exempi-2.0/exempi/xmp++.hpp` | C++ API 头文件 |
-| `include/exempi-2.0/exempi/xmpconsts.h` | 常量定义 |
-| `include/exempi-2.0/exempi/xmperrors.h` | 错误码定义 |
-| `lib/pkgconfig/exempi-2.0.pc` | pkg-config 文件 |
-
-## 使用方法
-
-### 命令行
+## 出包（鸿蒙 PC CI）
 
 ```bash
-# 查看 XMP 元数据
-exempi -x photo.jpg
-
-# 获取特定属性
-exempi -g dc:title photo.jpg
-
-# 设置属性
-exempi -w -s dc:title -v "新标题" photo.jpg
+# 鸿蒙 PC 设备原生编译
+conan create . -pr ohos-native
 ```
 
-### C 语言 API
+> 源码由 `conandata.yml` 的 url 在 `conan create` 时下载并 sha256 校验（`source()` 用 `get()`）。
 
-```c
-#include <exempi/xmp.h>
+## 前提
 
-xmp_init();
-XmpPtr xmp = xmp_new_empty();
-xmp_set_property(xmp, "http://purl.org/dc/elements/1.1/", "title", "标题", 0);
-// ... 使用 XMP API ...
-xmp_free(xmp);
-xmp_terminate();
-```
+> 所用 conan 的 settings 须含 `os=OHOS`（大写）及 `compiler.version=15`；stock conan 2 默认不含 OHOS。推荐在 `~/.conan2/settings_user.yml` 的 `os:` 下加一行 `    OHOS:`（非侵入扩展，不改 settings.yml），或使用 OpenHarmonyPCDeveloper 分发的 conan。
 
-### pkg-config
+## .so 签名
+
+**签名默认关**：本 recipe 的 `package()` 不自签 `.so`，靠链接器自签（构建时 clang 直接产出有效自签 ELF，无需事后重签）。见 ML-0043。
+
+若构建过程有步骤在链接后改动 `.so` 二进制，需用 `--sign-so` 生成显式重签 recipe，或改用不改动 `.so` 的构建选项（推荐后者）。
+
+## 消费 A：conan 工程（CMake/pkg-config 消费本库）
 
 ```bash
-pkg-config --cflags exempi-2.0   # 编译选项
-pkg-config --libs exempi-2.0     # 链接选项
+# 鸿蒙 PC：显式给 profile
+conan install --requires=exempi/2.6.6 -pr ohos-native
 ```
 
-## 已知限制
+生成 `exempi-config.cmake` / `exempi.pc`（指向 cache）；`find_package(exempi)` 消费，运行期 `source conanrun.sh`。
 
-1. 不支持 `--version` 标志（使用无参数运行查看版本号）
-2. 单元测试已禁用（boost 库在 OHOS 平台不可用）
-3. HMDFS 文件系统需要修补 configure 脚本才能正常编译
+## 消费 B：裸程序（设备 ~/usr/local + dlopen）
 
-## 补丁说明
+```bash
+conan install --requires=exempi/2.6.6 -pr ohos-native \
+    --deployer=usr_local --deployer-folder=$HOME/usr/local
+```
 
-本包使用了 3 个平台适配补丁：
+头文件/库/.pc 展开到 `~/usr/local/{include,lib,bin}`；裸 `dlopen` 全路径即可命中。
 
-1. **config.guess**: 添加 __OHOS__ libc 检测和 HarmonyOS 系统标识
-2. **config.sub**: 修复 ohos-linux 三元组支持
-3. **configure**: 将 mktemp -d 替换为 mkdir -p (HMDFS 文件系统兼容性)
+## 点对点搬运预编译包（免 remote）
+
+```bash
+conan cache save "exempi/2.6.6:*" --file exempi.tgz   # 出包机导出（recipe + 二进制）
+conan cache restore exempi.tgz                               # 目标机导入
+```

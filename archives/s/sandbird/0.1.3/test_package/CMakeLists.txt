@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_sandbird C)
+find_package(sandbird CONFIG REQUIRED)
+add_executable(test_sandbird test.c)
+target_link_libraries(test_sandbird PRIVATE sandbird::sandbird)
+enable_testing()
+add_test(NAME sandbird_lifecycle COMMAND test_sandbird)

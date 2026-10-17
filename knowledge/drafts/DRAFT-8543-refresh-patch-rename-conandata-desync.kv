@@ -1,0 +1,66 @@
+#====================================================================
+# DRAFT — finish 的 refresh-patch 步骤会重命名补丁并重置分类，
+#         与手工命名的 conandata.yml 失配 → export_conandata_patches 抛
+#         "Patch file does not exist"，W3 被跳过
+# Draft only: do not promote without reviewer assignment.
+# Trigger event: looktxt/1.4.1 adaptation (task #8543)
+#====================================================================
+
+id:                     DRAFT-8543-refresh-patch-rename-conandata-desync
+trigger_tool:           python|conan|make
+phase:                  compilation
+error_signature:        ConanException: Patch file does not exist:.*patches/0[0-9]{3}-|ERROR: .*: Error in (export_sources|source)\(\) method.*Patch file does not exist|\[hint\] patch 文件路径或格式错误
+
+severity:               3
+category:               conan, patch, build-system, testing
+match_keywords:         refresh-patch, finish, export_conandata_patches, apply_conandata_patches, conandata.yml, patch_file, patches/, .edit-tracker.json, patch_classification, guard pending, platform_only, Patch file does not exist, W3 跳过
+title:                  refresh-patch --auto 会按变更文件路径重命名补丁并回填 manifest，使手工命名的 conandata.yml 与 patch_classification 失配
+
+root_cause:             finish 的 Step 1（refresh_patch.auto_mode）不读取 conandata.yml 的 patch_file，而是以 work 目录的编辑追踪器（.edit-tracker.json 的 edited 列表，基线永不刷新，一次编辑永久累积）或排除规则扫描出变更文件，按 `{序号}-{相对路径中的/换成-}.patch` 生成补丁，随后把旧补丁整体移入 patches/.patch-backup-<ts>/ 并用新名字替换。因此：(1) 手工命名的补丁（如 0001-fix-eof-<语义>.patch）会被改名成 0001-<源文件名>.patch，conandata.yml 仍指向旧名 → conan 的 export_conandata_patches 在 export_sources() 抛 "Patch file does not exist"，conan-verify 的 G2 与 W3 门禁同时失败；(2) 工具同时把 manifest.yaml 尾部的 patch_generation（source_work_hash/generated_at）和 patch_classification 重写为默认值（type: auto、platform_only: True、guard: pending），覆盖人工分类。因为补丁内容与手工命名版逐字节相同，症状看起来像“补丁丢了”，实际是名字与元数据被工具接管。
+affected_scope:         所有在 work 目录留有 .edit-tracker.json 变更记录（或走排除规则能扫出差异）的包，特别是补丁先手工命名、后跑 finish 的配方；以及任何需要多次重跑 finish 的场景。
+verification_cmd:       ls archives/<l>/<pkg>/<ver>/patches/ && grep -n "patch_file" archives/<l>/<pkg>/<ver>/conandata.yml   # 两者文件名必须逐字一致；再 tail -15 archives/<l>/<pkg>/<ver>/manifest.yaml 检查 patch_classification 是否被重置为 auto/pending
+
+rec_priority:           1
+rec_approach:           adopt-generated-patch-name-then-refill-classification-last
+rec_description:        接受工具生成的规范补丁名（0001-<源文件路径>.patch）作为 conandata.yml/manifest.yaml/报告中的唯一名字，使 finish 幂等可重跑；所有文档、patch_description、patches_applied、test-report、PR 正文统一用该名字，并在 notes.md 记录改名事实与补丁来源。manifest.yaml 的 patch_classification（type/platform_only/guard）必须在**最后一次** finish 之后人工回填，之后再不重跑 finish；补丁名一致时重跑只会改时间戳与 work 哈希，不会再次改名。
+rec_command:            python3 scripts/ohc-run.py finish <pkg> <ver> built; sed -i 's|^  - file: .*|  - file: 0001-<source>.patch|' archives/<l>/<pkg>/<ver>/manifest.yaml   # 然后手工把 type/platform_only/guard 改回真实分类
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:       keep-manual-name-and-disable-patch-regeneration
+fallback_description:    「保留描述性补丁名」这条路在当前工具版本下**不可实施**：refresh-patch 只在编辑追踪器有变更时改名，要让扫不到变更就得重置 work 目录基线快照，而实测 `ohc-run.py track-edit` 只暴露 `scan|add|list` 三个动作（`snapshot` 不是合法子命令，直接报 invalid choice），没有官方基线重置入口。手工编辑 `.edit-tracker.json` 反而更糟：它会掩盖真实编辑记录、破坏 R6 的可追溯性。列出此条只是为了说明为什么必须走首选方案，不要尝试。
+fallback_command:       python3 scripts/ohc-run.py track-edit list <pkg> <ver>   # 只读：确认追踪器里有哪些 edited 条目（无重置基线的子命令，勿手工改 .edit-tracker.json）
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       conandata\.yml.*(patch_file).*(手工|描述性)名|只改 conandata 不改 patches/ 目录|rm -rf patches/\.patch-backup
+forbid_1_reason:        工具的命名规则由 work 目录内容决定，手工名会在下一次 finish 时被再次改掉；直接删备份目录还会丢掉可核对的历史补丁。
+forbid_1_consequence:   每次重跑 finish 都在 Step 4 之后失败（G2/W3），且失败信息指向“补丁格式错误”，把排查引向 conanfile.py 而不是命名一致性。
+forbid_2_pattern:       guard: '?pending'?|type: auto.*platform_only: True
+forbid_2_reason:        工具写的是占位值，不是事实；分类必须反映补丁真实语义：`patch_type` 按 code_style §12 固定为 `portability`（即便症状是一个上游 bug，根因是实现定义行为/平台差异时也不写 bugfix），manifest 的 `platform_only`/`guard` 按补丁实际内容回填（工具写入的占位值 auto/True/pending 不可提交）。
+forbid_2_consequence:   审计与 L4 扫描看到“平台特判补丁”占位分类，与 R8/PF5 结论冲突，评审要求返工。
+forbid_3_pattern:       重跑 finish 后再提交（未回填分类）|finish .* 之后直接 submit
+forbid_3_reason:        finish 会再次重写 manifest 尾部的补丁元数据块。
+forbid_3_consequence:   PR 中的分类与补丁内容不一致，评审误判为未做平台宏审查。
+
+principles:             P003, P005, P011
+causes:                 []
+caused_by:              []
+similar_to:             [E282, E515, E484, E066]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-8543-refresh-patch-rename-conandata-desync.md
+last_updated:           2026-09-19
+source_event:           looktxt/1.4.1 HarmonyOS PC adaptation (task #8543): 首次 finish 在 Step 4 抛 ConanException: Patch file does not exist: .../patches/0001-fix-eof-infinite-loop-int-c.patch（补丁已被改名为 0001-looktxt.c.patch，内容逐字节相同），W3 未执行、.ci-result.json 缺失；改用工具名并统一引用后重跑，G2 PASS、W3 通过、.ci-result.json exit_code=0，manifest 分类被重置为 auto/True/pending 需在最后回填
+
+authors:                kasumizawa-miyuu <241250031@smail.nju.edu.cn>
+source_pr:
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-19
+draft:                  true
+contributor_id:         8543

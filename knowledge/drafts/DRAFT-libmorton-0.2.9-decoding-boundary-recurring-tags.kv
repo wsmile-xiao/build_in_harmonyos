@@ -1,0 +1,104 @@
+# ═══ Draft knowledge entry — libmorton 2D 32-bit decode loop-bound defect recurs across tags v0.2.9 / v0.2.12 ═══
+# Timestamp: 2026-09-08
+# Software: libmorton 0.2.9
+# Gate: G2 (conan create) / 上游正确性测试 / 跨 tag 源码核验
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the defect evidence below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+
+id:                     DRAFT-libmorton-0.2.9-decoding-boundary-recurring-tags
+trigger_tool:           conan|cmake|clang++|patch|tar
+phase:                  build|test|decode|version-bump
+error_signature:        m2D_d_for|shift.*32|decode.*wrong|round.trip.*failed|
+                         for.*checkbits|i\s*<=\s*checkbits|tag.*recur
+
+severity:               2
+category:               portability|bit-manipulation|loop-bound|header-only|
+                         version-bump|tag-recurrence
+match_keywords:         libmorton, m2D_d_for, loop bound, shift-by-width,
+                         tag recurrence, v0.2.9, v0.2.12, header-only,
+                         uint_fast32_t, decode corrupt, version bump
+title:                  libmorton 2D 32-bit 解码循环 off-by-one 缺陷在 v0.2.9 与 v0.2.12
+                         两个发布 tag 中逐字复现（升级 tag 不携带修复，补丁须逐 tag 重派）
+
+root_cause: >
+  下载官方 tag v0.2.9（2022-02-17）与 v0.2.12（2023-05-24）两份 tarball 逐行比对
+  include/libmorton/morton2D.h，m2D_d_for 的解码循环在两 tag 中逐字相同：
+  unsigned int checkbits = sizeof(morton) * 4;
+  for (unsigned int i = 0; i <= checkbits; ++i) {
+      morton selector = 1;
+      unsigned int shift_selector = 2 * i;
+      x |= (m & (selector << shift_selector)) >> i;
+      y |= (m & (selector << (shift_selector + 1))) >> (i + 1);
+  }
+  当 morton 实例化为 32 位类型（uint_fast32_t，在 OHOS aarch64 与 Windows LLP64 上
+  均为 4 字节）时 checkbits=16，末次迭代 i=16 令 shift_selector=32，对 32 位
+  selector 做 1<<32 —— shift-by-width 未定义行为，污染 y 坐标。
+  关键观察：上游在两 tag 之间从未修复该循环（0.2.12 的可用修复来自适配侧补丁，
+  不在上游源码）；因此 header-only 位运算库的 tag 升级天然不携带此类修复，
+  沿用旧配方 + 只换 tag 的迁移方式会把缺陷原样带进新版本。
+affected_scope: >
+  任何以 32 位 morton 类型实例化 m2D_d_for 的消费者，在
+  uint_fast32_t 为 4 字节的平台（OHOS aarch64、Windows LLP64）上解码往返产生
+  错误 y 坐标。缺陷位于公开头 include/libmorton/morton2D.h，header-only 即源码。
+  版本层面：libmorton 的后续 tag（v0.2.9→v0.2.12）均受影响，需配方补丁延续。
+verification_cmd: >
+  tar -xzOf <tag>.tar.gz <tag>/include/libmorton/morton2D.h | grep -n
+  'i <= checkbits'        # 两 tag 均命中（源码级证据）
+  patch -p1 --dry-run -i patches/0001-fix-m2d-d-for-loop-bound.patch
+  # 在 v0.2.9 官方 tarball 上干净应用
+  conan create ...        # 内嵌上游 libmorton-test 在 OHOS aarch64 实跑 12/12
+
+rec_priority:           1
+rec_approach:           fix-inclusive-loop-bound-to-exclusive
+rec_description: >
+  将 m2D_d_for 循环上界改不含端点：i <= checkbits → i < checkbits，跳过触发
+  shift-by-width UB 的末次迭代。该修复已在 v0.2.9 官方 tarball 上以补丁方式
+  应用并随 conandata.yml patches 段声明；仅改循环边界，不动坐标提取与断言。
+rec_command: >
+  patch（conandata.yml 声明）：
+    for (unsigned int i = 0; i <= checkbits; ++i) {
+  → for (unsigned int i = 0; i < checkbits; ++i) {
+  随后 conan create 实跑上游 libmorton-test。
+rec_auto_fix:           true
+rec_impl:               portability-patch
+
+fallback_priority:      2
+fallback_approach:      guard-by-morton-width
+fallback_description:   >
+  不改公开头时，调用侧仅用 64 位解码路径或显式传更大 morton 类型避开
+  shift-by-width。
+fallback_command:       （消费 64 位编解码 API 替代 32 位）
+fallback_auto_fix:      false
+fallback_impl:          consumer-side-workaround
+
+forbid_1_pattern:       skip.*correctness.*test|return\s+0.*without.*decode
+forbid_1_reason:        不得靠跳过上游正确性测试规避缺陷。
+forbid_1_consequence:   覆盖削弱，缺陷回归无法被检测。
+forbid_2_pattern:       copy.*0\.2\.12.*conanfile.*without.*tag.*verify
+forbid_2_reason:        换 tag 必须重下 tarball/重核 sha/重跑测试，禁止机械拷贝旧版本配方。
+forbid_2_consequence:   sha 或上游内容变化被静默带入，产物不可复现。
+forbid_3_pattern:       .*morton3D.*<=\s*checkbits.*unchanged
+forbid_3_reason:        修复聚焦 m2D_d_for；对未实证的对称变体不擅自扩大改动。
+forbid_3_consequence:   无关变更进入补丁，违反最小可逆原则。
+
+principles:             P001
+similar_to:             DRAFT-libmorton-0.2.12-m2d-32bit-decoding-boundary
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-libmorton-0.2.9-decoding-boundary-recurring-tags.md
+last_updated:           2026-09-08
+source_event:           archives/l/libmorton/0.2.9
+
+authors:                2301_76770579
+source_pr:              8999
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-08

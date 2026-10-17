@@ -1,0 +1,70 @@
+#====================================================================
+# Draft: clib 风格 Makefile 用 -D 宏替换分配器标识符时，extern 声明
+#        守卫必须匹配被替换的宏名（b64_malloc/b64_realloc）而非
+#        独立开关（b64_USE_CUSTOM_MALLOC）——现代 clang 隐式声明报错
+# 库: b64.c 0.1.0 (jwerle/b64.c)
+# 适配轮次: R01 (2026-09-20)
+# 关联: E063 (implicit-function-declaration + clang + Makefile,
+#        但方案是禁 -Werror；本条根因是宏替换与守卫名不一致)
+#====================================================================
+
+id:                     DRAFT-B64C-0.1.0-CUSTOM-ALLOC-MACRO-GUARD
+trigger_tool:           clang|make
+phase:                  compilation
+error_signature:        call to undeclared function 'custom_malloc'|
+                         call to undeclared function 'custom_realloc'|
+                         incompatible integer to pointer conversion assigning|
+                         implicit declaration of function 'custom_malloc'
+
+severity:               2
+category:               compat, makefile, macro, clang, portability
+match_keywords:         b64_malloc, b64_realloc, custom_malloc, custom_realloc,
+                         USE_CUSTOM_MALLOC, -D, macro substitution, identifier,
+                         extern guard, #ifdef, implicit function declaration,
+                         clib, Makefile, b64.c
+
+title:                  Makefile 通过 -D b64_malloc=custom_malloc 做标识符替换时，
+                        .c 文件内 extern 声明用独立开关 #ifdef b64_USE_CUSTOM_MALLOC
+                        守卫（与替换宏名不一致）→ 现代 clang 隐式声明报错；最小修复
+                        是把守卫条件改成 defined(b64_malloc) || defined(b64_USE_CUSTOM_MALLOC)
+
+root_cause:             clib 风格项目（如 b64.c）支持自定义分配器：Makefile 用
+                        '-Db64_malloc=custom_malloc -Db64_realloc=custom_realloc'
+                        直接替换标识符，但源文件（buffer.c）中的前向声明却用
+                        '#ifdef b64_USE_CUSTOM_MALLOC' 这种"独立开关"守卫。
+                        二者命名不一致：-D 定义的是 b64_malloc（宏替换标记），
+                        而 b64_USE_CUSTOM_MALLOC 从未被定义 → extern 声明被跳过，
+                        调用处 custom_malloc/custom_realloc 变为隐式声明；
+                        老 GCC 仅警告，clang 15+（-Wint-conversion 为 error）直接编译失败：
+                        "incompatible integer to pointer conversion assigning to 'char *' from 'int'"。
+
+affected_scope:         任何用 clib 风格 Makefile + -D 宏替换自定义分配器/函数标识符的 C 库；
+                        以及任何"宏替换标记"与"条件编译开关"命名不一的代码库。
+
+verification_cmd:       make test USE_CUSTOM_MALLOC=true && ./test   (b64.c 0.1.0, clang 15)
+
+rec_priority:           1
+rec_approach:           sync-extern-guard-with-substituted-macro
+rec_description:        把 .c 里的 extern 声明守卫从独立的 #ifdef b64_USE_CUSTOM_MALLOC
+                        改为 #if defined(b64_USE_CUSTOM_MALLOC) || defined(b64_malloc)
+                        （b64_realloc 同理）。这样无论上游用哪种约定（-D 宏替换 或
+                        显式定义开关宏）都能正确声明；对默认构建（无 -D 无开关）零影响。
+rec_command:            grep -n "defined(b64_malloc)" archives/b/b64.c/0.1.0/patches/0001-buffer.c.patch
+rec_auto_fix:           true
+rec_impl:               patches/0001-buffer.c.patch（buffer.c 两处守卫条件扩展）
+
+fallback_priority:      2
+fallback_approach:      disable-werror
+fallback_description:   若无法改源码（非本库维护），可给该变体编译加 -Wno-implicit-function-declaration，
+                        但会掩盖潜在真缺陷，不推荐（E063 方案仅适用 -Werror 误伤场景）。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       直接把 -D 宏替换改成定义 b64_USE_CUSTOM_MALLOC 开关并改动调用点语法
+forbid_1_reason:        改动调用点（b64_malloc(x) → custom_malloc(x)）会破坏默认构建路径，
+                        且与上游 Makefile 的 -D 约定冲突，补丁面过大。
+forbid_2_pattern:       为掩盖隐式声明而全局禁用 -Werror 或 -Wimplicit-function-declaration
+forbid_2_reason:        掩盖真实类型错误，隐患转嫁到后续维护。
+
+principles:             minimal-patch, real-evidence-over-assumption, fix-root-cause-not-symptom

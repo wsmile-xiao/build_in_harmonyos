@@ -1,0 +1,77 @@
+#====================================================================
+# DRAFT-cmakedeps-interface-defines-lost
+# Conan CMakeDeps 重建依赖配置不携带上游 INTERFACE_COMPILE_DEFINITIONS
+# 完整叙事、探针源码与日志证据见同目录 .md
+#====================================================================
+
+# ═══ Layer 0: Error Surface ═══
+id:                     DRAFT-cmakedeps-interface-defines-lost
+trigger_tool:           conan|cmake|clang++|make
+phase:                  build|testing
+error_signature:        no member named 'keyClick' in namespace 'QTest'|no member named 'qWaitForWindowExposed' in namespace 'QTest'|variable has incomplete type 'QWindow'|unknown type name 'usize_t'|mpl::non_sequence_tag.*no member named 'apply'|using declaration refers into 'Base::'.*which is not a base class
+
+# ═══ Layer 1: Recognition ═══
+severity:               2
+category:               conan, cmake, build-system, compile-definition
+match_keywords:         CMakeDeps, INTERFACE_COMPILE_DEFINITIONS, cpp_info.defines, QT_CORE_LIB, QT_GUI_LIB, QT_WIDGETS_LIB, QT_TESTLIB_LIB, QTEST_MAIN, qtest_gui.h, qtest_widgets.h, QCoreApplication, QApplication, qt_wrap_ui, Qt5WidgetsMacros, conan_toolchain.cmake, add_compile_definitions, SIZEOF_SIZE_T, XD3_USE_LARGESIZET, BOOST_MPL_LIMIT_LIST_SIZE, PINOCCHIO_ENABLE_TEMPLATE_INSTANTIATION, Qt5Config, cmake_file_name
+title:                  Conan CMakeDeps 重建依赖配置不携带上游 INTERFACE_COMPILE_DEFINITIONS，消费方应显式补齐模块编译定义（Qt5 QT_*_LIB 家族 / xdelta3 SIZEOF_* / pinocchio BOOST_MPL_LIMIT_*）
+
+# ═══ Layer 2: Diagnosis ═══
+root_cause:             Conan CMakeDeps 以依赖配方的 cpp_info 为唯一真源再生 CMake 配置，不继承该包安装树内原生配置的接口属性。机理链（Qt5 案例，一手核实）：(1) 工具实现证据——qt5-qtbase 原生配置硬编码模块定义，lib/cmake/Qt5Core/Qt5CoreConfig.cmake:149 置 INTERFACE_COMPILE_DEFINITIONS QT_CORE_LIB，Qt5GuiConfig.cmake:149=QT_GUI_LIB，Qt5WidgetsConfig.cmake:149=QT_WIDGETS_LIB，Qt5TestConfig.cmake:149=QT_TESTLIB_LIB；(2) 生成器行为——CMakeDeps 再生的 generators/Qt5-Target-release.cmake 中同名属性取值来自 cpp_info：set_property(TARGET Qt5::Gui APPEND PROPERTY INTERFACE_COMPILE_DEFINITIONS $<$<CONFIG:Release>:${qt5-qtbase_Qt5_Gui_COMPILE_DEFINITIONS_RELEASE}>)，而 qt5-qtbase 配方未声明 defines → 变量为空，对生成文件 grep QT_GUI_LIB 为 0 命中；(3) 失败点——QtTest 头按宏分派（qt5-qtbase src/testlib/qtest.h:460-504）：#if defined(QT_WIDGETS_LIB) → 含 qtest_widgets.h 且 QTEST_MAIN_IMPL 用 QApplication，#elif defined(QT_GUI_LIB) → qtest_gui.h + QGuiApplication，#else → 仅 QCoreApplication 且不含任何 GUI 测试 API；宏缺失 → QTEST_MAIN 退化 QCoreApplication、qtest.h 不含 qtest_gui.h → QTest::keyClick/qWaitForWindowExposed 不存在 → autotests 整类目标编译失败（触发：conan create BUILD_TESTING=ON）；(4) 归类——构建系统语义（Conan 生成器契约 vs 上游安装配置契约），非库内 quirk。同族先例（树内，跨库同根因）：xdelta3 3.2.0 上游 xdelta3lib 的 INTERFACE_COMPILE_DEFINITIONS（SIZEOF_SIZE_T=8/SIZEOF_UNSIGNED_LONG=8/XD3_USE_LARGESIZET=1 等）不被传播，缺则 xdelta3.h 无法 typedef usize_t/xoff_t（SIZEOF_* 全按 0 求值）；pinocchio 4.1.0/4.1.0.2 上游 pinocchioTargets.cmake 的 BOOST_MPL_LIMIT_LIST_SIZE=30/BOOST_MPL_LIMIT_VECTOR_SIZE=30/BOOST_MPL_CFG_NO_PREPROCESSED_HEADERS/PINOCCHIO_ENABLE_TEMPLATE_INSTANTIATION 不被传播，缺则报 mpl::non_sequence_tag 无 'apply'、"using declaration refers into 'Base::', which is not a base class"。合计树内 4 处同模式实践（含本 run 消费端修复）。
+affected_scope:         任何以 Conan CMakeDeps 重建/遮蔽上游 CMake 配置、且上游配置以 INTERFACE_COMPILE_DEFINITIONS 表达 ABI/API 契约（Qt5 QT_*_LIB 家族、xdelta3 SIZEOF_*、pinocchio BOOST_MPL_LIMIT_* 等）的项目：宏门控 API 在消费者翻译单元整体消失，错误签名集中在"no member named/unknown type name"的头文件编译失败，而非链接或运行期。
+verification_cmd:       三段自包含（Qt5 案例，设备端任一新 shell 可复现）：(a) qt5p=$(ls -d ~/.conan2/p/qt5-*/p | head -1); for m in Core Gui Widgets Test; do grep -n INTERFACE_COMPILE_DEFINITIONS $qt5p/lib/cmake/Qt5$m/Qt5${m}Config.cmake | head -1; done → 四个文件各 :149 命中 QT_CORE_LIB/QT_GUI_LIB/QT_WIDGETS_LIB/QT_TESTLIB_LIB（原生配置硬编码证据）；(b) 任一 CMakeDeps 消费构建：grep -c QT_GUI_LIB <build>/<BT>/generators/Qt5-Target-*.cmake → 0，且 grep -A1 "APPEND PROPERTY INTERFACE_COMPILE_DEFINITIONS" Qt5-Target-release.cmake 显示取值为 cpp_info 变量（qt5-qtbase 未声明 → 空）；(c) 定向复现（探针源码与实录见 .md §Verification）：最小 conan 消费者（conanfile.py requires qt5-qtbase/5.15.2.2 + CMakeToolchain/CMakeDeps + set_property cmake_file_name=Qt5；CMakeLists find_package(Qt5 COMPONENTS Core Gui Widgets Test)；qtestmain_probe.cpp 用 QTEST_MAIN + QTest::qWaitForWindowExposed/QTest::keyClick）→ conan install . -pr:h ci/conan/profiles/ohos-aarch64 -pr:b 同 --build=missing && cmake --preset conan-release && cmake --build --preset conan-release → 失败：error: no member named 'qWaitForWindowExposed'/'keyClick' in namespace 'QTest'（RC=2）；向 build/<BT>/generators/conan_toolchain.cmake 追加一行 add_compile_definitions(QT_CORE_LIB QT_GUI_LIB QT_WIDGETS_LIB QT_TESTLIB_LIB) 后重配重编 → Built target（RC=0），QT_QPA_PLATFORM=offscreen 运行 → 3 passed, 0 failed（QTEST_MAIN 走 QApplication 分支）。同族复现对照：xdelta3.h 在无 SIZEOF_* 定义时 usize_t/xoff_t typedef 失败。
+
+# ═══ Layer 3: Solution Space ═══
+rec_priority:           1
+rec_approach:           consumer-toolchain-append-compile-definitions
+rec_description:        消费端配方 generate() 在 CMakeToolchain.generate() 之后向生成的 conan_toolchain.cmake 追加 add_compile_definitions(<上游原生宏集>)（本 run 先例：kwidgetsaddons5 5.116.0）。不动共享基础包（如 qt5-qtbase），作用域=整个 build（该项目所有目标本就链接对应 Qt5 模块，与原生 INTERFACE 传播语义等价）。宏名必须用上游原生名（Qt5Test 是 QT_TESTLIB_LIB；本 run 配方误写 QT_TEST_LIB 无害——QTEST 分派只检查 QT_WIDGETS_LIB/QT_GUI_LIB——但知识沿用原生名）。探针实测：原生宏集追加后编译通过且测试真实执行（QApplication 分支）。
+rec_command:            toolchain_file = os.path.join(self.generators_folder, "conan_toolchain.cmake"); with open(toolchain_file, "a", encoding="utf-8") as f: f.write("add_compile_definitions(QT_CORE_LIB QT_GUI_LIB QT_WIDGETS_LIB QT_TESTLIB_LIB)\n")
+rec_auto_fix:           true
+rec_impl:               conan-recipe-generate-append
+
+fallback_priority:      2
+fallback_approach:      producer-recipe-cpp-info-defines
+fallback_description:   依赖配方 package_info() 用 cpp_info.defines 从上游安装配置实测抄录接口定义（pinocchio 4.1.0 conanfile.py:190、4.1.0.2:254、xdelta3 3.2.0:142 先例；注释明言"conan 的 CMakeDeps 是按本 cpp_info 生成 config 的，不会自动继承上游那份 CMake config"）。结构性正确、所有 CMakeDeps 消费者受益；权衡：改 qt5-qtbase 这类共享基础包需评估全生态重建影响面，且组件化包须把 defines 挂到正确组件（Qt5::Test 的 QT_TESTLIB_LIB 不能挂全局），否则修复面过宽。
+fallback_command:        self.cpp_info.components["qt5core"].defines = ["QT_CORE_LIB"]  # 取值抄自上游 lib/cmake/Qt5*/Qt5*Config.cmake 的 INTERFACE_COMPILE_DEFINITIONS，实测抄录非臆造
+fallback_auto_fix:      false
+fallback_impl:          dependency-recipe-package-info
+
+# 更窄退路（无独立 kv 槽位，全文记录）：fallback_target_scope——仅对测试目标
+# target_compile_definitions(qtest_widgets_defs)。比全局 toolchain 注入更窄，
+# 但需侵入上游 CMakeLists（改 autotests 目标属性）且掩盖配置契约缺口，
+# 仅当消费端 toolchain 与依赖配方两侧都不可改时使用，勿作首选。
+
+forbid_1_pattern:       cp .*Qt5.*Config\.cmake.*generators|拷贝原生 config.*generators|copy native.*config
+forbid_1_reason:        把 qt5-qtbase 原生 Qt5*Config.cmake 拷进 CMakeDeps generators 目录会与再生的聚合 Qt5Config 冲突：同一 imported target 双重定义、原生 config 的 _PREFIX/路径计算脱离 Conan 接线环境、find_package 解析到不可控的混合配置。
+forbid_1_consequence:   错误从编译期转移到 configure 期（target 重定义/路径错接），更难诊断，且随 Conan 版本再生布局变化而漂移。
+
+forbid_2_pattern:       CMAKE_CXX_FLAGS.*-DQT_.*_LIB|set\(CMAKE_CXX_FLAGS.*-D.*_LIB
+forbid_2_reason:        用全局 CMAKE_CXX_FLAGS 注 -D 宏掩盖 cpp_info 契约缺口：-D 串无去重与顺序保证、与工具链其它 flags 拼接不可控、生成器换 CMakeToolchain 变量注入路径后即失效。
+forbid_2_consequence:   表面修复跨 profile/generator 不可复现，下游换接入方式后同一症状复发。
+
+# ═══ Layer 4: Principles ═══
+principles:             P-ENV-001（弱关联：同属"构建系统语义冲突"族——此处是生成器契约与上游配置契约不一致，非环境变量冲突本体）
+
+# ═══ Relations ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E216,E221]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ Metadata ═══
+doc_file:               knowledge/drafts/DRAFT-cmakedeps-interface-defines-lost.md
+last_updated:           2026-09-19
+source_event:           kwidgetsaddons5 5.116.0 OHOS PC 适配：BUILD_TESTING=ON 下 autotests 大面积编译失败（no member named 'keyClick'/'qWaitForWindowExposed'、incomplete type 'QWindow'，29 处 error，ConanException Error 2 → CONAN_RC=1，日志 local-create-1.log）；generate() 追加 add_compile_definitions 后 local-create-2.log 全 PASS、权威 CI PASS（RC=0 全门禁）。(c) 段定向复现：设备独立 scratch 探针（qtestmain-probe）实测失败/通过两态。
+
+notes:                  (1) 同族现象 qt_wrap_ui：CMakeDeps 再生 Qt5 配置同样不含上游 macros——消费端需 include qt5-qtbase 的 lib/cmake/Qt5Widgets/Qt5WidgetsMacros.cmake 并 set(Qt5Widgets_UIC_EXECUTABLE <pkg>/bin/uic)（追加进 conan_toolchain.cmake；勿另建手写 conan_cmakedeps_paths.cmake——conan 工具链检测到该文件存在会跳过自身依赖路径接线，paths 位于工具链 find_paths 块的 else 分支）。(2) Qt5Test 原生宏名是 QT_TESTLIB_LIB（Qt5TestConfig.cmake:149），非 QT_TEST_LIB；kwidgetsaddons5 5.116.0 配方注入名写作 QT_TEST_LIB，与原生名不一致但无害（QTEST 宏分派只检查 QT_WIDGETS_LIB/QT_GUI_LIB），不改工程文本，如实记载。(3) 配额：本 run（kwidgetsaddons5 5.116.0）B 路径申报 1/2（仅本主条）。(4) 提议未来新增原则「依赖配置契约完整性：依赖经生成器再生时，接口属性（编译定义/宏/include 目录）必须与上游安装配置等价，缺项须在依赖配方 cpp_info 或消费端 toolchain 显式补齐」——编号由知识库主编确认，此处不自行编号。(5) 相关在树草稿：DRAFT-sophus-1.22.10-fmt-basic-logging-macro（生产端 cpp_info.defines 传播可选依赖降级宏，头文件缺失签名）、DRAFT-conan2-cmakedeps-transitive-include-strip（传递依赖 include 置空）——同属 CMakeDeps 接口属性丢失族，差异见 .md §Dedup。
+
+draft:                  true
+authors:                oh-device-porting-v2 builder (kwidgetsaddons5-5.116.0 run)
+source_pr:              (本 PR 提交后回填)
+source_commit:          (本 PR 合并后回填)
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-19

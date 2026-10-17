@@ -1,0 +1,87 @@
+#====================================================================
+# DRAFT-cmrc-2.0.1-cmake-module-distribution - 纯 CMake 模块分发包
+# （无库无头）的 Conan 配方模式（cmrc/CMakeRC 实测）
+#
+# 场景: cmrc 2.0.1 (vector-of-bool/cmrc) 在 OHOS aarch64 + Conan 2.x 适配。
+#       上游只发布 CMakeRC.cmake 单 CMake 模块，无库、无头、无 install 规则，
+#       传统「库+头」打包模型无法表达；模块命令须在 consumer configure 期注入。
+# 适用: 上游仅发布 .cmake 模块的三方库（CMakeRC/ecbuild/extra-cmake-modules 型）
+#      在 OHOS/aarch64 + Conan 2 + CMakeDeps 下的配包装插。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-cmrc-2.0.1-cmake-module-distribution
+source_lib:             cmrc 2.0.1
+trigger_tool:           conan|conan create|conan-verify|cmake
+phase:                  packaging|configuration|testing
+error_signature:        Package type is 'library', but no 'shared' option declared|
+                         cmrc_add_resource_library.*Unknown CMake command|
+                         including build module.*(include could not find|cmake_minimum_required)|
+                         No rule to make target '.*/FILES'|
+                         include could not find requested file.*CMakeRC\.cmake
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               cmake, conan, packaging, module, headeronly, ohos
+match_keywords:         CMake module, CMakeRC, cmrc, cmake_build_modules, builddirs,
+                         package_type, library, shared option, find_package, include,
+                         resource library, ecbuild, extra-cmake-modules, no install rules,
+                         package_id, self.info.clear, export_sources, conandata patches
+title:                  纯 CMake 模块分发（无头无库无 install）的 Conan 配方四要素：
+                        lib/cmake 落位 + cmake_build_modules + builddirs + package_id clear
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  Conan 的标准打包模型围绕「库+头」设计（lib/bin/include）；纯 CMake 模块分发
+  （上游只有 .cmake 模块文件，消费者 include(CMakeRC.cmake) 获得命令）没有原生表达：
+  (1) conan-init 按 URL 后缀猜构建系统会误判 autotools，生成不适用模板；
+  (2) package_type=library 在 Conan 2 强制声明 shared 选项，否则 conan create 拒绝；
+  (3) copy() 相对 dst 会解析到 build 目录而非 package_folder，导致包目录为空；
+  (4) find_package 成功后模块命令（cmrc_add_resource_library）仍不可用——
+      CMakeDeps 生成的 config 默认不 include 上游模块，命令必须在 configure 期注入。
+affected_scope:         上游仅发布 .cmake 模块、无头无库无 install 规则的库（CMakeRC、
+                        ecbuild、extra-cmake-modules 型）在 OHOS/aarch64 + Conan 2 +
+                        CMakeDeps 下的配包装插；与 E473（消费侧依赖缺 target 注入）、
+                        E321/E322（header-only INTERFACE + 上游自带 install/export）场景互异。
+verification_cmd:       python3 scripts/ohc-run.py conan-verify cmrc 2.0.1
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           module-distribution-cmake-build-modules
+rec_description: >
+  package_type=library + options shared（default False）；package() 把 .cmake 模块显式
+  copy 到 lib/cmake/<name>/（绝对 dst）；package_info() 三目录（includedirs/libdirs/
+  bindirs）置空 + builddirs=["lib/cmake/<name>"] + set_property("cmake_build_modules",
+  ["lib/cmake/<name>/<module>.cmake"]) + cmake_file_name；package_id 里
+  self.info.clear()（纯模块 → 单一 package_id）；同时具备 export_sources()
+  (export_conandata_patches) 与 build() (apply_conandata_patches) 满足 G1 门禁；
+  上游模块内 cmake_minimum_required(<3.5) 需补丁 bump 3.5（E103）。
+rec_command: |
+  def package(self):
+      copy(self, "CMakeRC.cmake", src=self.source_folder,
+           dst=os.path.join(self.package_folder, "lib", "cmake", "cmrc"))
+  def package_info(self):
+      self.cpp_info.includedirs = []; self.cpp_info.libdirs = []; self.cpp_info.bindirs = []
+      self.cpp_info.builddirs = ["lib/cmake/cmrc"]
+      self.cpp_info.set_property("cmake_build_modules",
+                                 ["lib/cmake/cmrc/CMakeRC.cmake"])
+      self.cpp_info.set_property("cmake_file_name", "cmrc")
+  def package_id(self):
+      self.info.clear()
+
+# ═══ Layer 4: 验证证据 (Evidence) ═══
+evidence: >
+  conan-verify G1/G2/G3/G4 + L2/L4/L5 全 PASS (OHOS aarch64, clang 15, Conan 2.32)；
+  test_package 真实消费：find_package(cmrc) → cmrc_add_resource_library 嵌入 hello.txt →
+  编译运行断言（test_cmrc + test_ohos，CTest 2/2 通过）；
+  日志 reports/conan-verify-report.md + reports/conan-create.log；
+  上游 7 用例全量 7/7 通过（reports/test-ledger.md）。
+
+# 查重结论 (Path B 必需)
+dedup_conclusion: >
+  E473=消费侧为依赖注入缺失 imported target（WebP::webpdemux），与输出侧模块分发场景
+  不同 → 部分覆盖, 非精确重复; E321/E322=header-only INTERFACE（上游自带 install/export
+  CONFIG target），本条上游无任何 install 规则 → 不同; index.tsv/doc/drafts 四处均无
+  「CMake 模块分发包打包模式」条目; ecbuild 归档有同类实体但 notes 未沉淀 →
+  新建本条草稿（Path B new_draft，与 cmrc 归档同 PR 交付）。
+related_entries:        E473, E321, E322, E103

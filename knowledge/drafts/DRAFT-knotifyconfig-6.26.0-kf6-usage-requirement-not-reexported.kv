@@ -1,0 +1,160 @@
+# ══════════════════════════════════════════════════════════════════════
+# Draft knowledge entry — find_package 说 found，编译却说 'KConfig' file not
+# found：KF6 转发头的 include 目录只跟着**那个** imported target 走
+# Software: knotifyconfig 6.26.0 (KDE Frameworks 6)
+# Gate: conan create 全绿（configure 成功、编译期报转发头缺失）
+# Status: DRAFT — same-stem .md/.kv pair
+# ══════════════════════════════════════════════════════════════════════
+
+id:                     DRAFT-knotifyconfig-6.26.0-kf6-usage-requirement-not-reexported
+trigger_tool:           conan|cmake|clang
+phase:                  compilation
+
+severity:               3
+category:               build-system, cmake, kde, portability, dependency-graph
+match_keywords:         KConfig, KConfigGroup, file not found, 转发头 forwarding header,
+                        ecm_generate_headers, KF6ConfigCore, KF6::ConfigCore,
+                        INTERFACE_INCLUDE_DIRECTORIES, usage requirement,
+                        include/KF6/KConfigCore, KF6::KIOWidgets, KF6::KIOCore,
+                        KIOCORE_ONLY, KDE Frameworks 6, find_package found, ohpcd
+
+error_signature:        fatal error: 'KConfig' file not found|fatal error: 'KConfigGroup' file not found|
+                        同一次 configure 里 KF6Config 报 found|
+                        KF6::ConfigCore 未出现在 target_link_libraries 里
+
+title:                  `find_package(KF6Config)` 报 found，编译期却 `'KConfig' file not found`：
+                        `<KConfig>/<KConfigGroup>` 的 include 目录（include/KF6/KConfigCore）
+                        只由 `KF6::ConfigCore` 这一个 imported target 带；上游靠
+                        `KF6::KIOWidgets → … → KF6::ConfigCore` 的**传递** usage requirement
+                        拿到，ohpcd 的 kio 是 KIOCORE_ONLY、不重新导出 ConfigCore，链就断了
+
+root_cause: |
+  KF6 的转发头（无扩展名、无子目录的那种）装在
+  <prefix>/include/KF6/<Module>/ 下。kconfig 上游 src/core/CMakeLists.txt：
+
+      target_include_directories(KF6ConfigCore
+          INTERFACE "$<INSTALL_INTERFACE:${KDE_INSTALL_INCLUDEDIR_KF}/KConfig;${KDE_INSTALL_INCLUDEDIR_KF}/KConfigCore>"
+      )
+      ecm_generate_headers(KConfigCore_HEADERS HEADER_NAMES KAuthorized KConfig KConfigBase KConfigGroup ...)
+      install(FILES ${KConfigCore_HEADERS} DESTINATION ${KDE_INSTALL_INCLUDEDIR_KF}/KConfigCore)
+
+  即：KConfig/KConfigGroup 落在 include/KF6/KConfigCore/，而把这个目录写进
+  INTERFACE_INCLUDE_DIRECTORIES 的**只有 KF6::ConfigCore 一个 target**。
+
+  上游 knotifyconfig 的 src/CMakeLists.txt **没有**链接 KF6::ConfigCore：
+
+      target_link_libraries(KF6NotifyConfig
+              PUBLIC  Qt6::Widgets
+              PRIVATE KF6::I18n
+                      KF6::KIOWidgets     # KUrlRequester
+      )
+
+  它在 KDE CI 上能编过，是因为 KF6::KIOWidgets 公开链着 KF6::ConfigCore，
+  usage requirement 一路传到 KF6NotifyConfig 的编译命令行——**上游并没有
+  显式声明"我需要 ConfigCore"**。
+
+  ohpcd 上 kio 以 KIOCORE_ONLY 发布，KF6::KIOCore 的导出**没有**重新导出
+  KF6::ConfigCore，这条隐式链断掉。于是顶层 find_package(KF6Config REQUIRED)
+  确实成功（日志里 "KF6Config (required version >= 6.26.0)" 是 found），
+  KF6::ConfigCore 也确实被定义、也确实带着正确的 include 目录，但它**不在**
+  KF6NotifyConfig 的链接接口里 ⇒ 编译命令行上没有 include/KF6/KConfigCore。
+
+  本包的触发路径更具体：同一个 PR 的另一半适配把 KF6::KIOWidgets 换成了
+  KF6::KIOCore（KIOWidgets 在 KIOCORE_ONLY 下不存在），而"顺带捎来
+  ConfigCore"的隐式路径正好挂在被换掉的那个目标上——
+  "换掉缺失的目标"和"丢掉它顺带提供的 usage requirement"是同一个动作的两面。
+
+  最小反例在同包里：kconfig 自己的 test_package 写着
+  find_package(KF6Config REQUIRED) + target_link_libraries(... KF6::ConfigCore)，
+  同一个 find_package，链了 ConfigCore 就过、没链就不过。
+
+affected_scope:         一切"上游把某个 KF6 模块当**传递**依赖用、而 ohpcd 上那条
+  传递链被裁掉"的 KDE 适配。它比"target 不存在"隐蔽得多：configure 全绿，
+  make 到一半才炸。同族的显式链接受损写法见
+  archives/b/baloo/6.28.0/patches/0001-CMakeLists.txt.patch
+  （显式写全 KF6::CoreAddons KF6::ConfigCore KF6::DBusAddons KF6::I18n）。
+
+verification_cmd:        conan create archives/k/knotifyconfig/6.26.0 \
+                           -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+                         # 补丁落位自检（0002 先改同一 hunk，0005 必须在其后）：
+                         patch -p1 --dry-run < archives/k/knotifyconfig/6.26.0/patches/0005-src-CMakeLists.txt-link-KF6-ConfigCore.patch
+
+rec_priority:           1
+rec_approach:           link-the-target-that-owns-the-header
+rec_description: |
+  `#include <X>` 就必须链接**提供 X 的 target**，不要依赖上游的隐式传递。
+  本包补丁 0005-src-CMakeLists.txt-link-KF6-ConfigCore.patch：
+
+      target_link_libraries(KF6NotifyConfig
+              PUBLIC  Qt6::Widgets
+              PRIVATE KF6::ConfigCore     # <KConfig>/<KConfigGroup> 的 include 目录只由它带
+                      KF6::I18n
+                      KF6::KIOCore
+      )
+
+  判据：编译命令行里出现 <kconfig>/include/KF6/KConfigCore。
+rec_command:            >
+  # 配方侧：conandata.yml 追加补丁 0005（必须排在 0002/0004 之后）
+  # 源码侧：见 patches/0005-src-CMakeLists.txt-link-KF6-ConfigCore.patch
+  # 自检：patch -p1 --dry-run < .../0005-*.patch  （在已应用 0002 的树上必须无 offset 失败）
+rec_auto_fix:           false
+rec_impl:               explicit-target-link-in-src-cmakelists
+
+fallback_priority:      3
+fallback_approach:      global-include-injection-r05
+fallback_description: >
+  把每个依赖的 include 与 include/KF6/<Module> 灌进
+  CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES（archives/a/alkimia/8.2.1、
+  archives/k/knewstuff/6.26.0 的 R05 include/link fallback）。**只在消费者已经
+  退化成裸 -l、usage requirement 本来就不存在时**才用；对 target-based 的工程
+  这么干会把"这个目标用了哪个模块"的语义抹平，多版本共存/审计全部失真。
+fallback_command:       grep -n "CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES" <recipe>
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       看见 file not found 就翻 CMAKE_PREFIX_PATH / 怀疑包没发布 / 换依赖版本|
+                        用 ldd 或 conan list 去证"包在不在"
+forbid_1_reason:        find_package 已经在同一份日志里报了 found——包、版本、路径
+                        全部成立，缺的只是 usage requirement 的传播。查包只会空转，
+                        而且很容易"顺手"改掉正确的依赖声明，把图改坏。
+forbid_1_consequence:   空烧一轮 CI（configure 全绿、编译同样的两行报错），
+                        并把一个本来只差一行的修法拖成"依赖问题"。
+forbid_2_pattern:       直接补 glib/KF6 的全局 CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES 了事|
+                        复制一份 KConfig 头到源码树里
+forbid_2_reason:        全局 include 注入是给已退化成裸 -l 的消费者的兜底手法；
+                        对 target-based 工程用它会抹平 target 的语义，且复制的头
+                        会与运行时链接的库版本脱钩。
+forbid_2_consequence:   当下能编过，但依赖关系从此不可审计，后续换 baseline /
+                        多版本共存时以更贵的方式再炸一次。
+forbid_3_pattern:       把转发头缺失当成真身头缺失处理（去查 kconfig 包的文件清单）
+forbid_3_reason:        转发头（KConfig，无扩展名）与真身头（kconfigcore/kconfig.h）
+                        的失败含义相反：前者=include 目录没传到位，后者=目录在但
+                        包内容/安装路径不对。
+forbid_3_consequence:   按错误分支去改包或改安装规则，等于把正确的东西改坏。
+
+principles:             P012（边界与反例：同一份 configure 日志里的 found 与编译期
+                        file not found 必须分别归因）
+causes:                 []
+caused_by:              ohpcd 的 kio 以 KIOCORE_ONLY 发布，KF6::KIOCore 的导出
+                        不重新导出 KF6::ConfigCore
+similar_to:             DRAFT-knotifyconfig-6.26.0-ui-customwidget-kiowidgets-swap
+                        （同一 PR 的另一半：.ui/源码层面的控件降级，本条讲它顺带
+                        引起的 usage requirement 丢失）、
+                        DRAFT-kf6-top-level-component-negotiation（组件协商；
+                        本条是"组件找到了、target 也在，但没链进本目标"的下一层）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-knotifyconfig-6.26.0-kf6-usage-requirement-not-reexported.md
+last_updated:           2026-09-22
+source_event:           archives/k/knotifyconfig/6.26.0 适配（CI #55258 编译期
+                        'KConfig' file not found）
+
+authors:                2301_76770579
+source_pr:              11634
+source_commit:          pending
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-22

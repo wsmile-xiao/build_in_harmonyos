@@ -1,28 +1,43 @@
-# sdl2_net
+# SDL2_net
 
-SDL2 networking library.
+SDL2_net is the official SDL2 networking companion library. It provides a
+small portable API for TCP, UDP, address resolution, packet allocation, and
+socket readiness sets.
 
-## 描述
+## Version
 
-SDL2_net 是 SDL2 的网络扩展库，提供简单的网络通信功能。
+- `2.2.0`
 
-## 编译版本
+## Dependency
 
-- 2.2.0
+- Exact Conan dependency: `sdl2/2.30.10`
+- SDL2 minimum accepted by upstream: `2.0.4`
+- The `shared` option must match between SDL2 and SDL2_net.
 
-## 依赖
+## OpenHarmony PC Adaptation
 
-- SDL2 2.30.0
+- Build with upstream CMake.
+- Set `SDL2NET_INSTALL=ON` and `SDL2NET_SAMPLES=OFF` explicitly.
+- Export `SDL2_net::SDL2_net` for shared packages and
+  `SDL2_net::SDL2_net-static` for static packages.
+- On `OHOS|HarmonyOS`, skip upstream shared-library version aliases and install
+  one real unversioned `libSDL2_net.so`; retain upstream behavior elsewhere.
+- On native OHOS, atomically sign the shared library and every test executable
+  and verify one nonempty `.codesign` section before execution.
+- Do not carry the historical `config.guess` or `config.sub` patches; they are
+  only relevant to the unused Autotools path.
+- Validate TCP and UDP only over the local loopback interface.
 
-## 编译说明
+An SDK 12 CMake install reproduced a collision between upstream version links
+and its extra unversioned link. The scoped CMake patch passed fresh shared and
+static install plus installed-metadata compile/link preflight. Fresh W3 must
+still verify the actual file, SONAME, NEEDED, RPATH, and runtime contract.
 
-使用 CMake 构建系统（避开 autotools 在 OpenHarmony 上的临时文件权限问题）。
+## Status
 
-## 平台适配
-
-- config.guess: 添加 HarmonyOS 平台识别
-- config.sub: 添加 ohos 系统支持
-
-## 产物
-
-- libSDL2_net.so: 网络库
+The r27 target run completed against the frozen, independently validated SDL2
+r30 package trees: the upstream entry passed `1/1`, the six adapted entries
+passed `6/6`, and both shared and static modes executed `7/7`. The separate W0
+release-chain gate remains blocked until the exact SDL2 recipe can be freshly
+consumed as a published artifact; that publication gate does not change the
+completed target test status.

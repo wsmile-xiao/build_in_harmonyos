@@ -1,0 +1,101 @@
+#====================================================================
+# DRAFT-ncmpc-meson-install-elf-remirror
+# Meson install package copy is rejected by OHOS while build-tree ELF runs
+#====================================================================
+
+id:                     DRAFT-ncmpc-meson-install-elf-remirror
+trigger_tool:           meson|conan|test_package|VirtualRunEnv|shell
+phase:                  packaging|testing|runtime
+error_signature:        Operation not permitted.*p/bin/.*|ConanException: Error 126 while executing|
+                         test_package.*RUN:.*--version|meson install.*Installing .* to .*p/bin
+
+severity:               2
+category:               harmonyos|elf-signing|meson|conan|packaging|runtime
+match_keywords:         Meson install, Conan package bin, build tree ELF, package copy,
+                         Operation not permitted, exit 126, .codesign, test_package,
+                         VirtualRunEnv, cp -p, chmod 755, OHOS
+title:                  Re-mirror the linker-produced Meson build ELF when the OHOS package copy cannot execute
+
+root_cause: >
+  On the ncmpc 0.53 OHOS runner, the Meson build-tree executable was accepted by
+  the device and could run both the upstream smoke path and --version, but the
+  Meson-installed copy under the Conan package p/bin directory failed with
+  "Operation not permitted" during test_package. The visible executable bits and
+  .codesign section were present, so chmod alone was insufficient. Replacing the
+  package copy with the linker-produced build-tree ELF restored execution and
+  kept the final package binary hash identical to the build target.
+
+affected_scope: >
+  Conan application recipes on HarmonyOS PC that use Meson install to copy a
+  linked target into package_folder/bin and then execute that command from
+  test_package through VirtualRunEnv.
+
+verification_cmd: >
+  BUILD_ELF=$CONAN_BUILD_FOLDER/build-release/<program>
+  PKG_ELF=$CONAN_PACKAGE_FOLDER/bin/<program>
+  "$BUILD_ELF" --version
+  "$PKG_ELF" --version
+  sha256sum "$BUILD_ELF" "$PKG_ELF"
+  cp -p "$BUILD_ELF" "$PKG_ELF" && chmod 755 "$PKG_ELF" && "$PKG_ELF" --version
+
+rec_priority:           1
+rec_approach:           ohos-package-bin-remirror-from-build-elf
+rec_description: >
+  After Meson install completes, for OHOS only, copy the current package's own
+  build-tree executable over package_folder/bin/<program> with cp -p and restore
+  mode 0755. Run the normal consumer test afterward. This preserves the
+  linker-produced executable state without mutating dependency packages or
+  bypassing test_package.
+rec_command: >
+  if str(self.settings.os) == "OHOS":
+      built = os.path.join(self.build_folder, "<program>")
+      packaged = os.path.join(self.package_folder, "bin", "<program>")
+      self.run(f'cp -p "{built}" "{packaged}"', env="conanbuild")
+      self.run(f'chmod 755 "{packaged}"', env="conanbuild")
+rec_auto_fix:           false
+rec_impl:               conan-package-post-install-remirror
+
+fallback_priority:      2
+fallback_approach:      explicit-elf-resign-when-tools-are-available
+fallback_description: >
+  If the build-tree executable is not runnable or install performs additional
+  required transformations, use the standard OHOS objcopy plus binary-sign-tool
+  flow on the final package ELF, then rerun the consumer test. This fallback is
+  appropriate only when the signing tools are available to the recipe.
+fallback_command: >
+  llvm-objcopy --remove-section .codesign "$PKG_ELF" 2>/dev/null || true
+  binary-sign-tool sign -inFile "$PKG_ELF" -outFile "$PKG_ELF.signed" -selfSign 1
+  mv "$PKG_ELF.signed" "$PKG_ELF" && chmod 755 "$PKG_ELF"
+fallback_auto_fix:      false
+fallback_impl:          ohos-explicit-resign-final-elf
+
+forbid_1_pattern:       chmod.*Operation not permitted.*p/bin
+forbid_1_reason:        Existing execute bits do not prove the OHOS kernel will accept the ELF.
+forbid_1_consequence:   The consumer test keeps failing with exit 126.
+forbid_2_pattern:       external_blocked.*Operation not permitted
+forbid_2_reason:        A runnable build-tree ELF is strong evidence that the package copy can be fixed in recipe packaging.
+forbid_2_consequence:   A fixable package-stage issue is incorrectly handed off as an environment block.
+
+principles:             P017,P019
+causes:                 []
+caused_by:              [E077,E046,E087]
+similar_to:             [DRAFT-gtk4-glib-tool-codesign-rpath]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ncmpc-meson-install-elf-remirror.md
+last_updated:           2026-09-12
+source_event:           ncmpc 0.53 HarmonyOS PC shadow CI
+
+authors:
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     1
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-12
+
+draft:                  true
+contributor_id:         codex
+difficulty_evidence:    B-candidate

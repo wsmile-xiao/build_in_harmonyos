@@ -1,0 +1,146 @@
+#====================================================================
+# DRAFT-ohos-perl-noncore-runtime-dep-requires-vs-recommends —— Perl 包的非核心
+#   运行时依赖：须区分 requires 与 recommends，缺 requires 时框架实质不可用
+# 对应文档: knowledge/drafts/DRAFT-ohos-perl-noncore-runtime-dep-requires-vs-recommends.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-ohos-perl-noncore-runtime-dep-requires-vs-recommends
+trigger_tool:           perl|conan|cpan|pytest
+phase:                  dependency-resolution|runtime
+error_signature:        Can't locate (Future|Future/Utils|Struct/Dumb)\.pm in \@INC|
+                         Can't locate .*\.pm in \@INC.*@INC entries checked
+
+severity:               2
+category:               perl, conan, dependency, packaging, false-failure
+match_keywords:         Perl, cpan, META.json, prereqs, requires, recommends,
+                         非核心依赖, non-core, Future, Future::Utils, Struct::Dumb,
+                         IO::Async, Can't locate .* pm in @INC, 依赖缺口, perl-*,
+                         不声明 conan requires, 探测并申报
+title:                  Perl 包的非核心运行时依赖须区分 **requires 与 recommends** ——
+                        缺的是 requires 时框架**实质不可用**，且按仓内惯例不写 conan
+                        依赖，须**探测并如实申报**
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             CPAN 发行版的 ``META.json`` 的 ``prereqs`` 分 ``requires`` /
+                        ``recommends`` / ``suggests`` 三档，且按 ``runtime`` /
+                        ``test`` / ``configure`` 分期。二者语义差别很大：
+                          · ``requires`` 缺失 → **功能不可用**（模块 import 即
+                            ``Can't locate X.pm in @INC``）；
+                          · ``recommends`` 缺失 → **功能降级但可用**。
+                        实测 IO-Async 0.805：``Future >= 0.44`` 是 **runtime
+                        requires**，且 12 个 ``lib/`` 文件 ``use Future`` ——
+                        缺失时 39 个模块中 **27 个无法加载**（可加载仅 12 个）；
+                        而 ``IO::Socket::IP`` 只是 *recommends*，缺失不影响加载。
+                        若把二者混为一谈（例如只看"缺了几个依赖"而不管档位），就会
+                        误判影响面——把"框架实质不可用"当成"少个可选功能"。
+                        另一层复杂度：本仓既有 perl-* 惯例**不声明 conan
+                        ``requires``**（实测抽样 30 个配方仅 1 个声明；perl-moose 的
+                        ``requirements()`` 直接 ``pass``，并在注释里写明"Perl 依赖
+                        在 Perl/系统层面处理，见 notes.md"）。故依赖缺口不能靠
+                        ``requires()`` 表达，只能**探测 + 如实申报**（R51）。
+affected_scope:         所有非核心依赖未随解释器分发的 Perl 包适配；典型是 CPAN 生态
+                        的框架类包（IO::Async 等）。测试侧另有独立一层：``test``
+                        期依赖缺失会使整个套件无法收集。
+                        与"纯 Perl 包无外部依赖"（perl-carp 等）不同：那类包的
+                        ``prereqs`` 仅核心模块，不存在本问题。
+                        与"依赖库符号未实现"不同：Perl 侧是**模块文件缺失**
+                        （``@INC`` 里找不到），报错形态与处置都不同。
+verification_cmd:       ① 读权威依赖档位（勿凭印象）：
+                          python3 -c "import json;d=json.load(open('META.json'));\
+                            print(json.dumps(d.get('prereqs'),indent=1))"
+                          # 区分 requires / recommends，按 runtime/test/configure 分期
+                        # ② 实测每个模块能否加载（量化影响面，决定性）：
+                        for f in $(find lib -name '*.pm'); do
+                          m=$(echo "$f" | sed 's#^lib/##; s#\.pm$##; s#/#::#g')
+                          perl -Ilib -M"$m" -e 1 2>/dev/null && echo "OK $m"
+                        done | wc -l
+                        # ③ 用 perl -c 预检测试文件（BEGIN 期 import 是否可满足）：
+                        perl -Ilib -c t/<file>.t 2>&1 | grep -q "Can't locate" && echo BLOCKED
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           probe-and-report-honestly-no-conan-requires
+rec_description:        沿用仓内 perl-* 惯例：**不把 Perl 依赖写成 conan ``requires``**，
+                        而是在 ``build()`` 内**探测**并把缺口与影响面**显式输出**（R51）：
+                          ① 探测 ``requires`` 档模块是否可加载，列出缺失者；
+                          ② **量化影响面**（如"39 个模块中 27 个无法加载"），
+                             让评审一眼看出是"框架实质不可用"还是"少个可选功能"；
+                          ③ 说明处置方向（这些是 Perl 层面依赖，需适配并发布后
+                             方达完整功能），并在 notes.md / manifest.yaml 记录
+                             （含 rejects / required / optional 三档归类）。
+                        测试侧：先用 ``perl -c`` **逐个预检**筛出可运行子集，
+                        再对子集跑 ``prove``，并显式输出被排除文件数与缺失依赖——
+                        因为 ``prove`` 遇到收集失败会**整体中断**。
+                        设计成**自愈式**：探测通过即自动纳入，无需改配方。
+rec_command:            # build() 内（示意）：
+                        #   missing = [m for m in ("Future","Future::Utils","Struct::Dumb")
+                        #              if not perl_can_load(m)]
+                        #   if missing: self.output.warning(f"non-core runtime deps "
+                        #       f"unavailable: {missing} — 39 modules: 27 unloadable ...")
+rec_auto_fix:           false
+rec_impl:               probe-and-report-honestly-no-conan-requires
+
+fallback_priority:      2
+fallback_approach:      adapt-and-publish-perl-deps-then-require
+fallback_description:   若确需在 conan 层表达依赖（例如消费方需要可解析的依赖图），
+                        则须先把这些 CPAN 发行版逐一适配并发布到制品仓，再以
+                        ``requires()`` 引入。代价是依赖链显著变长（IO-Async 会引入
+                        Future / Future::Utils / Struct::Dumb 等一串），且与仓内既有
+                        perl-* 惯例不一致，需与维护者确认口径。
+fallback_command:       # 逐一适配 Future 等 → conan list 确认已发布 → self.requires(...)
+fallback_auto_fix:      false
+fallback_impl:          adapt-and-publish-perl-deps-then-require
+
+forbid_1_pattern:       不区分.*(requires|recommends).*(统计|判断).*依赖.*(影响|缺口)|
+                         只数.*缺失依赖.*个数.*(判定|认为).*影响面
+forbid_1_reason:        requires 缺失＝功能不可用，recommends 缺失＝降级可用；
+                        混为一谈会把"框架实质不可用"误判为"少个可选功能"。
+forbid_1_consequence:   影响面判断失真，可能据此做出错误的适配优先级或"其实能用"的结论。
+
+forbid_2_pattern:       因.*Can't locate .*\.pm.*(去|以).*(改模块源码|注释掉 use|伪造 .pm 桩)|
+                         为.*Perl 依赖缺失.*(而|就).*(删测试|跳过所有测试).*(不|未).*说明
+forbid_2_reason:        缺失的是**外部模块**，改本包源码或伪造桩只会掩盖问题（且伪造桩
+                        与真模块行为不一致时会给出**虚假通过**）；而静默跳过测试违反 R51，
+                        使"依赖缺失"与"功能正常"在记录上无差别。
+forbid_2_consequence:   掩盖真实依赖缺口；或将环境问题伪装成适配成功。
+
+forbid_3_pattern:       只(按|看|依据).*(错误信息|报错文本|stderr).*(分支|判断).*(不|未).*(检查|判定).*(rc|退出码|returncode)|
+                         (缺失依赖|依赖不可用).*(分支|路径).*(未|不).*检查.*(rc|退出码).*(便|即).*(返回|记为).*成功
+forbid_3_reason:        用「是否缺少某依赖的报错文本」来决定分支时，**必须同时检查退出码**。
+                        只按文本分支会让**任何其它原因的失败**落入"依赖已可用"的路径：
+                        实测把探测目标换成一个**根本不存在的模块**，旧代码仍打印
+                        「Future appears to be available now」并**返回 0**——
+                        测试断言的事实与真相相反，恰好掩盖了它本该检出的回归
+                        （而"依赖后来可用了"正是该分支宣称要覆盖的自愈场景）。
+                        正确顺序：**先判 rc**；rc==0 才谈"依赖已可用"；rc!=0 时再看
+                        报错文本是否**正是**所缺依赖——是则按预期缺口处置，否则**必须失败**。
+forbid_3_consequence:   测试在该依赖一旦可用（或其场景变化）后立刻失去检出能力，
+                        打包回归/语法错误被当成"依赖已具备"而放行。
+
+principles:             honest-reporting, measure-not-assume
+
+causes:                 []
+caused_by:              []
+similar_to:             [DRAFT-ohos-upstream-tests-bare-import-unpublished-dep]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-perl-noncore-runtime-dep-requires-vs-recommends.md
+last_updated:           2026-09-16
+source_event:           perl-io-async 0.805 适配（Future 为 runtime requires 且 12 个
+                        lib 文件 use 之 → 39 模块中 27 个不可加载；IO::Socket::IP 仅
+                        recommends；按仓内惯例探测并申报）
+
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     1
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:        B2E5

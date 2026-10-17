@@ -1,0 +1,81 @@
+--- a/core/CMakeLists.txt
++++ b/core/CMakeLists.txt
+@@ -21,6 +21,20 @@
+ include_directories(ampi)
+ include_directories(amci)
+ 
++# Libevent2 headers: FindLibevent2 sets LIBEVENT2_INCLUDE_DIR but it was
++# never added to the include path (upstream relied on system /usr/include).
++include_directories(${LIBEVENT2_INCLUDE_DIR})
++# FindLibevent2 only finds libevent; event_pthreads is linked by bare name
++# which fails when the lib lives outside default linker paths (conan).
++find_library(EVENT_PTHREADS_LIBRARY NAMES event_pthreads)
++# Probe pthread_cancel instead of hard-coding platforms: musl-based libcs
++# (no implementation) fall back to cooperative cancel in AmThread.cpp.
++include(CheckFunctionExists)
++check_function_exists(pthread_cancel HAVE_PTHREAD_CANCEL)
++if(HAVE_PTHREAD_CANCEL)
++  add_definitions(-DHAVE_PTHREAD_CANCEL=1)
++endif()
++
+ add_library(sems_core STATIC ${sems_core_SRCS})
+ add_library(sems_sip STATIC ${sems_sip_SRCS})
+ 
+@@ -39,8 +53,8 @@
+       -Wl,-force_load
+       sems_sip
+       ${CMAKE_DL_LIBS}
+-      event
+-      event_pthreads
++      ${LIBEVENT2_LIBRARIES}
++      ${EVENT_PTHREADS_LIBRARY}
+       -rdynamic)
+   else()
+     target_link_libraries(
+@@ -50,15 +64,16 @@
+       sems_sip
+       -Wl,--no-whole-archive
+       ${CMAKE_DL_LIBS}
+-      event
+-      event_pthreads
++      ${LIBEVENT2_LIBRARIES}
++      ${EVENT_PTHREADS_LIBRARY}
+       -rdynamic)
+   endif()
+ 
+   if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_libraries(${EXE_TARGET} execinfo)
+   else(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+-    target_link_libraries(${EXE_TARGET} resolv)
++    # OHOS (musl): res_search lives in libc; there is no libresolv.
++    # (linkage was unconditional although HAVE_RES_SEARCH is probed)
+   endif(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+ 
+   if(SPANDSP_FOUND)
+--- a/core/AmThread.cpp
++++ b/core/AmThread.cpp
+@@ -145,6 +145,8 @@
+ void AmThread::cancel() {
+   _m_td.lock();
+ 
++#ifdef HAVE_PTHREAD_CANCEL
++  // Full pthread_cancel is available; keep upstream behavior.
+   int res;
+   if ((res = pthread_cancel(_td)) != 0) {
+     ERROR("pthread_cancel failed with code %i\n", res);
+@@ -152,6 +154,15 @@
+     DBG("Thread %lu is canceled.\n", (unsigned long int) _pid);
+     _stopped.set(true);
+   }
++#else
++  // pthread_cancel has no implementation on this libc (e.g. musl);
++  // graceful flag-only cancel: the thread observes _stopped and exits
++  // at its next checkpoint.
++  WARN("pthread_cancel not available; "
++       "thread %lu flagged for cooperative stop\n",
++       (unsigned long int) _pid);
++  _stopped.set(true);
++#endif
+ 
+   _m_td.unlock();
+ }

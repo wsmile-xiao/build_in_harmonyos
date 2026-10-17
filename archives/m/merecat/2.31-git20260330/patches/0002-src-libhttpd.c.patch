@@ -1,0 +1,163 @@
+--- a/src/libhttpd.c
++++ b/src/libhttpd.c
+@@ -37,6 +37,8 @@
+ #include <ctype.h>
+ #include <errno.h>
+ #include <fcntl.h>
++#include <limits.h>
++#include <paths.h>
+ #include <pwd.h>
+ #include <signal.h>
+ #include <stdio.h>
+@@ -130,6 +132,87 @@
+ 	} while (0)
+ 
+ /* Forwards. */
++/*
++ * The POSIX "other" permission bits are not reported by every file system.
++ * HMDFS, which hosts /storage/Users on HarmonyOS PC, masks them out: a file
++ * that is chmod(2)ed 0777 is still reported as 0750, so the world-readable
++ * and world-executable tests below - all of them written in terms of
++ * S_IROTH/S_IXOTH - would reject every static file, directory listing and
++ * CGI program with 403.
++ *
++ * httpd_other_bits_hidden() decides, once per device and cached, whether the
++ * "other" bits seen in st_mode can be trusted for the file system holding
++ * the file.  Only positive evidence turns the fallback off: a 0777 file is
++ * created in the temporary directory and read back, and that answer is used
++ * only when the temporary directory lives on the same device as the file
++ * being checked.  A file system that reports the bits faithfully therefore
++ * keeps the upstream tests verbatim - "the server can read it" must never be
++ * mistaken for "everyone can read it" - while a file system that hides the
++ * bits falls back to an access(2) probe, the closest available equivalent,
++ * while a probe that cannot tell keeps the upstream test unchanged.
++ */
++static int httpd_other_bits_hidden(dev_t dev)
++{
++	static dev_t cached_dev;
++	static int cached = -1;
++	struct stat tsb, psb;
++	const char *dir;
++	char path[PATH_MAX];
++	int fd;
++
++	/* Cached per device, so one probe covers a whole directory listing. */
++	if (cached >= 0 && cached_dev == dev)
++		return cached;
++
++	/*
++	 * Fail safe: assume the file system reports the "other" bits until
++	 * the runtime probe below proves otherwise (evidence only, no
++	 * platform conditional; R8).
++	 */
++	cached = 0;
++
++	dir = getenv("TMPDIR");
++	if (dir == NULL || *dir == '\0')
++		dir = _PATH_TMP;
++
++	if (stat(dir, &tsb) == 0 && tsb.st_dev == dev &&
++	    snprintf(path, sizeof(path), "%s/merecat-othbits-XXXXXX", dir) < (int)sizeof(path)) {
++		fd = mkstemp(path);
++		if (fd >= 0) {
++			if (fchmod(fd, S_IRWXU | S_IRWXG | S_IRWXO) == 0 &&
++			    fstat(fd, &psb) == 0)
++				cached = (psb.st_mode & (S_IROTH | S_IXOTH)) ? 0 : 1;
++			close(fd);
++			unlink(path);
++		}
++	}
++
++	cached_dev = dev;
++	return cached;
++}
++
++/* World-executable test used for CGI programs. */
++static int httpd_executable(const char *path, const struct stat *sb)
++{
++	if (sb->st_mode & S_IXOTH)
++		return 1;
++	if (!httpd_other_bits_hidden(sb->st_dev))
++		return 0;
++
++	return path && access(path, X_OK) == 0;
++}
++
++/* World-readable/world-executable test used for static files. */
++static int httpd_accessible(const char *path, const struct stat *sb, mode_t bits)
++{
++	if (sb->st_mode & bits)
++		return 1;
++	if (!httpd_other_bits_hidden(sb->st_dev))
++		return 0;
++
++	return path && access(path, R_OK) == 0;
++}
++
+ static void check_options(void);
+ static void free_httpd_server(struct httpd *hs);
+ static int initialize_listen_socket(sockaddr_t *sa);
+@@ -3637,7 +3720,7 @@
+ 
+ 			if (stat(name, &st))
+ 				continue;
+-			if (!(st.st_mode & (S_IROTH | S_IXOTH)))
++			if (!httpd_accessible(name, &st, S_IROTH | S_IXOTH))
+ 				continue;
+ 
+ 		fallback:
+@@ -3653,7 +3736,7 @@
+ 				goto fallback;
+ 			}
+ 
+-			if (!(st.st_mode & (S_IROTH | S_IXOTH)))
++			if (!httpd_accessible(path, &st, S_IROTH | S_IXOTH))
+ 				continue;
+ 
+ 			free(path);
+@@ -4782,7 +4865,7 @@
+ 	/* is there a .gz file */
+ 	if (!stat(fn, &st)) {
+ 		/* Is it world-readable or world-executable? and newer than original */
+-		if (st.st_mode & (S_IROTH | S_IXOTH) && st.st_mtime >= hc->sb.st_mtime)
++		if (httpd_accessible(fn, &st, S_IROTH | S_IXOTH) && st.st_mtime >= hc->sb.st_mtime)
+ 			serve_dotgz = 1;
+ 	}
+ 
+@@ -4853,7 +4936,7 @@
+ 	** a file that's not set world-readable and yet somehow is
+ 	** readable by the HTTP server and therefore the *whole* world.
+ 	*/
+-	if (!(hc->sb.st_mode & (S_IROTH | S_IXOTH))) {
++	if (!httpd_accessible(hc->expnfilename, &hc->sb, S_IROTH | S_IXOTH)) {
+ 		syslog(LOG_INFO, "%.80s URL \"%s\" resolves to a non world-readable file",
+ 		       httpd_client(hc), hc->encodedurl);
+ 		httpd_send_err(hc, 403, err403title, "",
+@@ -4900,7 +4983,7 @@
+ 		/* Nope, no index file, so it's an actual directory request. */
+ #ifdef GENERATE_INDEXES
+ 		/* Directories must be readable for indexing. */
+-		if (!(hc->sb.st_mode & S_IROTH)) {
++		if (!httpd_accessible(hc->expnfilename, &hc->sb, S_IROTH)) {
+ 			syslog(LOG_INFO, "%.80s URL \"%s\" tried to index a directory with indexing disabled",
+ 			       httpd_client(hc), hc->encodedurl);
+ 			httpd_send_err(hc, 403, err403title, "",
+@@ -4952,7 +5035,7 @@
+ 		strlcpy(hc->expnfilename, cp, hc->maxexpnfilename);
+ 
+ 		/* Now, is the index version world-readable or world-executable? */
+-		if (!(hc->sb.st_mode & (S_IROTH | S_IXOTH))) {
++		if (!httpd_accessible(hc->expnfilename, &hc->sb, S_IROTH | S_IXOTH)) {
+ 			syslog(LOG_INFO, "%.80s URL \"%s\" resolves to a non-world-readable index file",
+ 			       httpd_client(hc), hc->encodedurl);
+ 			httpd_send_err(hc, 403, err403title, "",
+@@ -5034,7 +5117,8 @@
+ 
+ 	/* Is it world-executable and in the CGI area? */
+ 	if (is_cgi(hc)) {
+-		if (hc->sb.st_mode & S_IXOTH && hc->hs->cgi_enabled)
++		if (httpd_executable(hc->expnfilename, &hc->sb) &&
++		    hc->hs->cgi_enabled)
+ 			return cgi(hc);
+ 
+ 		if (is_php(hc, NULL) || is_ssi(hc, NULL))

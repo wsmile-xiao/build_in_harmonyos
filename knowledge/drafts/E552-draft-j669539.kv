@@ -1,0 +1,101 @@
+#====================================================================
+# Draft: E552 — 上游自带特性宏守卫的 Qt PrintSupport 缺失适配
+#        （kdiagram 3.0.1 / KGantt 实证）：
+#        ① QT_NO_PRINTER 一行定义启用上游原生打印降级
+#        ② install(EXPORT) 无 NAMESPACE 裸目标名 + KGantt6Config 去依赖
+#        ③ 任务卡元数据世代甄别（源码实证优先）
+#====================================================================
+
+draft:                  E552-draft-j669539
+status:                 pending-editor-review
+title:                  "上游自带特性宏守卫的 Qt PrintSupport 缺失适配：QT_NO_PRINTER 一行定义启用原生降级（KGantt 实证，零手写 no-op）+ install(EXPORT) 无 NAMESPACE 裸目标名与导出配置去依赖 + 任务卡元数据世代甄别（源码实证优先）"
+category:               cmake, conan, dependency, packaging, ohos
+match_keywords: >
+  Qt6PrintSupport, PrintSupport=OFF, QT_NO_PRINTER, HAVE_PRINTER, QPrinter,
+  KGantt6Config.cmake, KChart6Config.cmake, find_dependency, install(EXPORT),
+  NAMESPACE, bare target name, KChart6, KGantt6, QT_REQUIRED_VERSION,
+  Qt5 metadata, generation mismatch, kdiagram, kgraphviewer, KDE print
+error_signature:       Could NOT find Qt6PrintSupport|find_package\(Qt6[^)]*PrintSupport[^)]*REQUIRED\)|The imported target "Qt6::PrintSupport"[^\n]*does not exist|QPrinter: No such file or directory|find_dependency\(Qt6PrintSupport\)|Could not find a package configuration file provided by "Qt6PrintSupport"|Target "KChart6" links to:[^\n]*but the target was not found|Target "KGantt6" links to:[^\n]*but the target was not found|QT_REQUIRED_VERSION
+root_cause: >
+  三层根因（kdiagram 3.0.1 / KGantt 适配实证，PR #14653）：
+
+
+  ① 平台层：OHOS 无打印栈，已发布的 qtbase/6.11.1 线 PrintSupport=OFF
+  （本地缓存 4 个变体 cmake/ 目录均无 Qt6PrintSupport、无 libQt6PrintSupport.so、
+  无 QPrinter 头文件，kgraphviewer 26.04.0 先例确认）；而 KDE 上游模块顶层普遍
+  find_package(Qt6 ... PrintSupport) REQUIRED——configure 第一步即失败。
+
+
+  ② 库源码层：KGantt 自带 HAVE_PRINTER 宏守卫
+  （src/KGantt/kganttgraphicsscene.cpp:36-44：#ifndef QT_NO_PRINTER →
+  #define HAVE_PRINTER），所有打印入口已按守卫分流为 no-op 分支——这正是上游
+  为无打印环境预留的原生降级路径；顶层一行 add_definitions(-DQT_NO_PRINTER)
+  即可整体启用，API 签名完整保留。对照重路径：kgraphviewer 26.04.0 无此守卫，
+  被迫手写 13 对源文件 no-op patch。
+
+
+  ③ 导出层 + 元数据层：KGantt6Config.cmake.in 携带
+  find_dependency(Qt6PrintSupport)，库本体裁掉 PrintSupport 后消费端
+  find_package(KGantt6) 仍会在该行失败——导出配置必须同步去依赖；且上游
+  install(EXPORT) 无 NAMESPACE，导出的是裸目标名 KChart6/KGantt6（非
+  KChart6::KChart6），test_package/消费者须按裸名链接。另：任务卡元数据可能
+  写错世代——kdiagram 3.0.1 任务卡列 Qt5 依赖（qt5-qtbase/kcoreaddons5/
+  ki18n5），源码实证为 Qt6/KF6 世代（QT_REQUIRED_VERSION "6.5.0"、
+  KF_MIN_VERSION "5.245.0"、ECM-only、全树零 KF6 框架链接）。
+solution: |
+  ① QT_NO_PRINTER 一行定义启用上游原生降级（patch 顶层，kdiagram 实证零手写 no-op）：
+
+  ```diff
+   # 顶层 CMakeLists.txt
+  -find_package(Qt6 ${QT_REQUIRED_VERSION} CONFIG REQUIRED COMPONENTS Core Gui Widgets Svg PrintSupport)
+  +find_package(Qt6 ${QT_REQUIRED_VERSION} CONFIG REQUIRED COMPONENTS Core Gui Widgets Svg)
+  +add_definitions(-DQT_NO_PRINTER)
+  ```
+
+  前置侦察（判断本库能否走原生降级而非手写 no-op）：
+
+  ```bash
+  grep -rn 'QT_NO_PRINTER\|HAVE_PRINTER' src/ | head    # 有守卫→原生降级；无守卫→手写 no-op
+  ```
+
+  ② 导出配置去依赖（库本体裁掉后消费端不再炸）：
+
+  ```diff
+   # src/KGantt/KGantt6Config.cmake.in
+  -find_dependency(Qt6PrintSupport)
+  ```
+
+  ③ 消费端按裸目标名链接（上游 install(EXPORT) 无 NAMESPACE）：
+
+  ```cmake
+  find_package(KChart6 REQUIRED)   # 裸目标名 KChart6，非 KChart6::KChart6
+  find_package(KGantt6 REQUIRED)
+  target_link_libraries(consumer KChart6 KGantt6)
+  ```
+
+  ④ 世代甄别（不信任务卡元数据，以源码实证为准）：
+
+  ```bash
+  grep -E 'QT_REQUIRED_VERSION|KF[56]_MIN_VERSION' CMakeLists.txt
+  grep -rh 'find_package(' --include=CMakeLists.txt | sort -u   # 全树依赖面扫描
+  # kdiagram 3.0.1 → QT_REQUIRED_VERSION "6.5.0" → Qt6 栈：
+  #   qtbase/6.11.1 + qtsvg/6.11.1 + ecm/6.26.0(tool_requires)，勿引 kcoreaddons/ki18n
+  ```
+fallback: >
+  上游无 HAVE_PRINTER 类守卫的库（kgraphviewer 26.04.0 先例）：手写 no-op 函数体
+  patch（保持 API 签名不变，13 对源文件先例）；导出配置不可修改时，消费者侧提供
+  自写前置 Config 屏蔽 find_dependency；世代存疑且源码无明确版本宏时，按
+  find_package(Qt5/Qt6) 实际解析结果回退，并报平台主 agent 裁决换栈（本件先例：
+  任务卡 Qt5 清单 → 源码实证 Qt6 → 裁决换 Qt6 栈后 23/23 全绿）。
+verify_builds:          "#14653（本地 conan create 实证：裁剪+去依赖后 23/23 上游测试、1/1 test_package 全绿；裁剪前 configure 失败于 find_package PrintSupport REQUIRED）"
+reference_impl: >
+  PR #14653 archives/k/kdiagram/3.0.1/patches/0001-ohos-drop-printsupport.patch
+  （11 文件：顶层 QT_NO_PRINTER + PrintSupport 组件/链接裁除 +
+  KGantt6Config.cmake.in 去 find_dependency + QPrinter include 守卫化 +
+  examples 补链 Qt::Svg + takeGrid 空指针守卫[上游 15a4437 回移植]）；
+  对照重路径先例：kgraphviewer 26.04.0 手写 13 对 no-op 源文件。
+  同 PR 姊妹草稿：DRAFT-kdiagram-3.0.1-takegrid-null-deref-musl-vs-glibc
+  （musl-vs-glibc 空指针差异 + 上游修复回移植范式）——两条共同构成
+  「上游原生降级/修复优先于手写补丁」方法论。
+id:                     E552
+doc_file:               doc/E552.md

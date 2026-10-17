@@ -1,0 +1,109 @@
+--- a/include/asyncpp/testing/interleaver.hpp
++++ b/include/asyncpp/testing/interleaver.hpp
+@@ -57,62 +57,102 @@
+ };
+ 
+ 
+ class thread {
+ public:
+     thread() = default;
+     thread(thread&&) = delete;
+ 
+     template <class Func, class... Args>
+     thread(Func func, Args&&... args) {
+-        const auto wrapper = [this, func = std::move(func)]<class... Args_>(std::stop_token, Args_&&... args_) {
++        const auto wrapper = [this, func = std::move(func)]<class... Args_>(Args_&&... args_) {
+             initialize_this_thread();
+             INTERLEAVED("initial_point");
+             func(std::forward<Args_>(args_)...);
+             m_content->state.store(thread_state::completed());
+         };
+-        m_content->thread = std::jthread(wrapper, std::forward<Args>(args)...);
++        m_content->thread = std::thread(wrapper, std::forward<Args>(args)...);
+     }
+ 
+     void resume();
+     static void suspend_this_thread(const suspension_point& sp);
+     thread_state get_state() const;
+ 
+ private:
+     void initialize_this_thread();
+     void suspend(const suspension_point& sp);
+ 
+ private:
+     struct content {
+-        std::jthread thread;
++        std::thread thread;
+         std::atomic<thread_state> state = thread_state::running();
++        ~content() {
++            if (thread.joinable()) {
++                thread.join();
++            }
++        }
+     };
+     std::unique_ptr<content> m_content = std::make_unique<content>();
+     static thread_local thread* current_thread;
+ };
+ 
+ 
+ template <class Scenario>
+ struct thread_function {
+     std::string name;
+     void (Scenario::*func)();
++
++    // clang 15 不支持 C++20 括号聚合初始化（P0960）：上游 THREAD 宏用
++    // `thread_function(NAME, METHOD)` 直接初始化聚合体，补显式构造函数后该
++    // 形态在 C++17 下同样合法（成员与语义零改动）。
++    thread_function(std::string thread_name, void (Scenario::*method)())
++        : name(std::move(thread_name)), func(method) {}
+ };
+ 
+ 
+ template <std::convertible_to<std::string> Str, class Scenario>
+ thread_function(const Str&, void (Scenario::*)()) -> thread_function<Scenario>;
+ 
+ 
+ struct swarm_state {
+     std::vector<thread_state> thread_states;
+ 
+-    auto operator<=>(const swarm_state&) const = default;
++    swarm_state() = default;
++    // OHOS libc++ 15 的 std::vector 没有 operator<=>，默认的 operator<=> 会被
++    // 隐式删除（std::map 的 std::less<swarm_state> 随之失效）；同时 clang 15 不支持
++    // C++20 括号聚合初始化（P0960），故补一个显式构造函数，让 swarm_state(vector)
++    // 这一既有调用形态在 C++17/20 下都合法。
++    explicit swarm_state(std::vector<thread_state> states)
++        : thread_states(std::move(states)) {}
++
++    // 与「按 vector 逐元素字典序」的默认实现等价。
++    friend std::strong_ordering operator<=>(const swarm_state& lhs, const swarm_state& rhs) {
++        const auto& l = lhs.thread_states;
++        const auto& r = rhs.thread_states;
++        const auto n = l.size() < r.size() ? l.size() : r.size();
++        for (std::size_t i = 0; i < n; ++i) {
++            const auto cmp = l[i] <=> r[i];
++            if (cmp != 0) {
++                return cmp < 0 ? std::strong_ordering::less : std::strong_ordering::greater;
++            }
++        }
++        if (l.size() == r.size()) {
++            return std::strong_ordering::equal;
++        }
++        return l.size() < r.size() ? std::strong_ordering::less : std::strong_ordering::greater;
++    }
++
++    // clang 15 不会把「用户提供的 operator<=>」重写成 operator==（只对默认成员生效），
++    // 显式补一个等价的 operator==。
++    friend bool operator==(const swarm_state& lhs, const swarm_state& rhs) {
++        return (lhs <=> rhs) == 0;
++    }
+ };
+ 
+ 
+ class tree {
+ public:
+     struct transition_node;
+ 
+     struct stable_node : std::enable_shared_from_this<stable_node> {
+         stable_node() = default;
+         stable_node(std::map<swarm_state, std::shared_ptr<transition_node>> swarm_states,

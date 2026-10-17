@@ -1,0 +1,125 @@
+# ═══ Draft knowledge entry — 20 世纪末 autotools 老包在 OHOS+conan 下的
+#    三类探测失配：config.sub 不认 aarch64 / -lcurses 探测撞 conan 宽字符
+#    ncurses / CPPFunction 撞 readline 8；外加 config-script 探测宏的
+#    --with-*-prefix 承重与 cdcdrc 首启向导挂死
+# Software: cdcd 0.6.6 (同类面：任何 1996–2004 生成物 + readline>=6 的 CLI)
+# Gate: 原生探索 configure/make/make check/make install 全 rc=0 + 采信轮 conan-verify
+# Status: DRAFT
+# Reserved entry id: E688 (tools/knowledge_id.py --claim，任务私有登记)
+
+id: cdcd-0.6.6-legacy-autotools-ohos-detection-mismatches
+severity: 3
+category: build-system|configure|portability|ohos
+trigger_tool: configure|make|clang|sh
+phase: build
+
+keywords: config.sub, aarch64, Invalid configuration, config.guess, cannot guess build type, AC_CHECK_LIB, curses, ncursesw, CPPFunction, rl_completion_func_t, RL_READLINE_VERSION, AM_PATH_LIBCDAUDIO, libcdaudio-config, --with-libcdaudio-prefix, conanbuild PATH, prefix=/, cdcdrc, interactive wizard, uMASK 077, confstat, HMDFS, HMBS
+
+error_signature: Invalid configuration .*not recognized|cannot guess build type|checking for tputs in -lcurses\.\.\. no|cannot find the curses library|use of undeclared identifier 'CPPFunction'|undefined symbol.*CPPFunction|could not be found.*libcdaudio-config|-I//include|-L//lib|Your .cdcdrc file is invalid
+
+# 可被 prescan 引擎直接使用的窄判据（必须能被 re.compile；比 error_signature 更严，
+# 只收三类「探测名失配」的决定性行，避免把泛化的 -I//include 文本误报进来）
+prescan_pattern: Invalid configuration .*not recognized|checking for tputs in -lcurses\.\.\. no|use of undeclared identifier 'CPPFunction'|libcdaudio-config script installed by libcdaudio could not be found
+
+match_keywords: config.sub, aarch64, Invalid configuration, config.guess, --build, --host, AC_CHECK_LIB, curses, ncursesw, tputs, CPPFunction, rl_completion_func_t, RL_READLINE_VERSION, readline 6, readline 8, AM_PATH_LIBCDAUDIO, libcdaudio-config, --with-libcdaudio-prefix, LIBCDAUDIO_CONFIG, -I//include, -L//lib, conanbuild PATH, host requires bindir, cdcdrc, first-run wizard, interactive, 交互式, 首启, umask 077, confstat, subs.sed, Permission denied, E011, E206
+
+root_cause: |
+  同一个 1996–2004 年生成的老 autotools 包在 OHOS+conan 现代依赖面下
+  会在 configure/make 两阶段连续踩四类「探测名与真实交付物失配」：
+
+  (1) **config.sub/config.guess 世代过老**：随包 config.sub（1996）CPU
+      清单无 aarch64，`sh config.sub aarch64-unknown-linux-gnu` 直接
+      `Invalid configuration … not recognized`，configure 在
+      build system type 一步即死；而 config.guess 在 HarmonyOS PC 上
+      rc=1 空输出（`uname` 识别不了），即使 config.sub 过了也猜不出。
+      且 conan `build==host` profile 时 `cross_building()` 为 False，
+      AutotoolsToolchain **不注入** `--build/--host`——两处都要自己显式给。
+
+  (2) **AC_CHECK_LIB 探测名撞 conan 包交付形态**：conan 的 ncurses 包
+      （archives/n/ncurses/6.6）只交付宽字符库名
+      `libncursesw/libformw/libmenuw/libpanelw`，**根本没有 libcurses**；
+      老 configure 的 `AC_CHECK_LIB(curses, tputs,, AC_MSG_ERROR)` 找
+      `-lcurses` 必然 no → configure 硬失败（本例出现在
+      readline 检测之前，是首个致命点）。同族：readline>=6 移除
+      `CPPFunction` typedef（改成 `rl_completion_func_t`），2003 年的
+      源码写 `rl_attempted_completion_function = (CPPFunction *) fn`
+      在 clang+readline 8 下报 `use of undeclared identifier`，
+      属「编译期 API 代际失配」，与 (2) 同根：**上游假设的世界
+      （旧库名/旧类型名）与 conan 制品仓实际交付的东西不是一回事**。
+
+  (3) **config-script 探测宏在 conan 下两处承重都靠
+      `--with-*-prefix`**：AM_PATH_LIBCDAUDIO 用 AC_PATH_PROG 找
+      `libcdaudio-config`，但 conanbuild PATH 只带 build 依赖的
+      bindir，**不含 host 依赖** bin/ → 找不到 →
+      `*** The libcdaudio-config script … could not be found`；
+      即使找到，conan 包内该脚本 `prefix=/` 是烘焙死的，输出
+      `-I//include -L//lib` 假路径。传
+      `--with-libcdaudio-prefix=<package_folder>` 一个参数同时解决：
+      宏内直接把 LIBCDAUDIO_CONFIG 置成绝对路径（绕过 PATH 搜索），
+      并把 `--prefix=<pkg>` 传给脚本重推 -I/-L。
+
+  (4) **配置文件读取先于 getopt 的老 CLI 会挂死无头测试**：
+      cdcd 的 `cdcdrc_read()` 在 getopt 循环**之前**执行，
+      `$HOME/.cdcdrc` 缺失即进 `cdcdrc_manual_configuration()`
+      交互向导（stdin 逐题提问、还可能写回 HOME）——test_package
+      不预置 rc 文件就永久挂起。若首行 revision 不匹配则
+      `exit(1)`+`Your .cdcdrc file is invalid.`（可作负路径用例）。
+
+  附带：config.status 自建 confstat 临时目录用 `umask 077`，
+  HMDFS 把 0700 目录落成组位不可写（E011/E206 族本例实测
+  `drwx--S---` 写入 Permission denied；`umask 000` 落 `drwxrws--x` 可写）。
+
+rec_approach: 显式 --build/--host 三元组 + config.sub 补 aarch64 + 探测名/类型名与 conan 交付面对齐 + config-script 宏传 --with-*-prefix + 无头测试预置配置文件
+rec_description: |
+  1. configure 参数：`--build=aarch64-unknown-linux-gnu
+     --host=aarch64-unknown-linux-gnu`（build==host 保持原生语义、
+     AC_TRY_RUN 真跑；`linux-gnu` 走 configure 的 `*linux*` 分支，
+     定义 HAVE_CDAUDIO/DEFAULT_DEVICE——cdck 0.7.0 同款先例）。
+     配方侧 `if str(self.settings.arch) == "armv8": tc.configure_args.extend([...])`
+     （AutotoolsToolchain 因 build==host profile 不会自动注入）。
+  2. config.sub 补丁只加两处清单项（裸名 `arm | aarch64` 与
+     `arm-* | aarch64-*`），不引入 linux-ohos（本例 linux-gnu 即可，
+     省 OS 侧三处补丁）。
+  3. `AC_CHECK_LIB(curses, tputs,, …)` → `AC_CHECK_LIB(ncursesw, tputs,, …)`，
+     **configure 与 configure.ac 同改**（后者防日后 autoreconf 回退）；
+     若项目真正 include curses.h 用宽字符库同样成立（tputs/tgoto 在
+     libncursesw.a 内，nm 实测 T 符号在）。
+  4. readline 代际：用 `#if defined(RL_READLINE_VERSION) && (RL_READLINE_VERSION >= 0x0600)`
+     守卫切 `rl_completion_func_t *`，else 保留 `CPPFunction *`——
+     两代 readline 都能编，不引入版本硬断言。
+  5. AM_PATH_* 宏一律显式 `--with-<lib>-prefix=<package_folder>`
+     （在 generate() 里取 `self.dependencies["<lib>"].package_folder`），
+     不要指望 conanbuild PATH 或包内烘焙的 prefix。
+  6. 老 CLI 的 test_package：先在隔离 HOME 写出该工具**自己会写出的
+     配置文件**（首行+键值，逐字对齐其 write 函数格式），再跑用例；
+     把「畸形配置非零退出」做成一条负路径用例。
+  7. `umask 077`→`umask 000`（E011/E206 族），两处都要改
+     （mktemp 分支与 mkdir 回退分支）。
+
+rec_commands:
+  - "sh $TASK_DIR/explore-src/config.sub aarch64-unknown-linux-gnu   # 补丁后 rc=0；补丁前 Invalid configuration（0001 存在理由实证）"
+  - "grep -n 'CPPFunction' $TASK_DIR/explore-src/cmd_cdcd.c          # 0005 守卫两分支各一行；readline/8.3 头无 CPPFunction typedef"
+  - "grep -E '^(checking for tputs in|checking for rl_completion_matches|checking for libcdaudio)' $TASK_DIR/explore-build/configure.log   # 三项全 yes 的承重读数"
+  - "conan list -r=ohpcd 'libcdaudio/*' 'readline/*' 'ncurses/*'    # 三硬依赖在架（真实 --build=missing 组合 rc=0 见 w0/combo-install2.log）"
+
+verification: |
+  原生探索（2026-09-23，$TASK_DIR/explore-evidence.md）：5 补丁应用后
+  configure rc=0（tputs in -lncursesw=yes、rl_completion_matches=yes、
+  libcdaudio version>=0.99.0 AC_TRY_RUN 真跑 yes、vasprintf=yes、
+  strcasestr=yes、socket=no 非致命）、make rc=0（ELF arm64 PIE，
+  NEEDED 仅 libc.so，四库全静态）、make check rc=0（上游 0 用例空目标）、
+  make install DESTDIR rc=0（bin/cdcd+man+info 三件）；
+  运行三路径：-v rc=0（"cdcd 0.6.6"+"Using libcdaudio 0.99.12p2."）、
+  -h rc=0（Usage+21 命令表）、坏设备 rc=1（cannot initialize）；
+  toybox /bin/sh 直跑 configure+make 亦双 rc=0（conan run 真实 shell 语义）。
+  5 补丁在干净 tarball 树按 conandata 顺序串行 dry-run 5/5 全过。
+
+related:
+  - archives/c/cdcd/0.6.6/patches/0001-config.sub-aarch64.patch
+  - archives/c/cdcd/0.6.6/patches/0003-configure-curses-to-ncursesw.patch
+  - archives/c/cdcd/0.6.6/patches/0005-cmd_cdcd-readline8-cppfunction.patch
+  - knowledge/graph/E007.kv (老 config.sub 不认 aarch64 —— 本条是同族的 config.guess+conan 不注入三元组增量面)
+  - knowledge/graph/E011.kv (mktemp/umask 0700 HMDFS 不可写 —— 本条 config.status confstat 是同族新落点)
+  - knowledge/graph/E206.kv (HMDFS 目录权限族)
+  - archives/c/cdck/0.7.0/conanfile.py (显式 --build/--host=aarch64-unknown-linux-gnu + linux-gnu 走 *linux* 分支的先例)
+last_updated: 2026-09-23

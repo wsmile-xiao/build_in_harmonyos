@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E565.kv，填写各字段
+# 对应的人类文档: doc/E565.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E565
+trigger_tool: conan, clang, upstream-test-suite
+phase: build|test|package
+error_signature: upstream tests all PASS but the installed artifact was never compiled or executed|test binary includes a file that is not the packaged one|version macro of the shipped artifact is 0 / snapshot value|tests reference release/<x>-unsupported-snapshot instead of the versioned release
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: test-evidence-provenance, validation-methodology, conan, patch, version
+match_keywords: upstream test suite targets a different file than the shipped artifact, unversioned snapshot vs versioned release, WUFFS_VERSION mismatch, single file C library, amalgamation, tarball-root test include rewriting, tests pass but artifact never exercised, installed-artifact identity assertion
+title: 交付产物与上游测试靶向文件不一致时的验证盲区（单文件/amalgamation 类包）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: 单文件/amalgamation 类库把「生成产物」随源码树检入，上游测试套件却往往靶向另一个文件：开发期快照、未版本化产物、或生成器重新生成的临时副本。配方只搬运并安装其中一个文件时，测试仍然全绿，但被测试的从来不是被安装的那个文件；解码器/库的 initialize 还会比对自身版本宏，快照版本恒为 0 时测试语义也随之错位。此类假绿不会被编译警告、sha256 校验或「N 个用例全过」发现，只有把被安装产物的身份带进测试断言才能暴露。
+affected_scope: 适用于交付物是单文件/amalgamation/子集产物而上游测试套件靶向另一文件（快照、未版本化产物、生成器输出）的包；不适用于上游测试本就针对所交付文件、或交付物即整棵源码树的包。
+verification_cmd: patch_ng.fromfile(f).apply(strip=1, root=tree) 逐补丁复验 + diff -rq 结果树与探索树；test_package 内断言 WUFFS_VERSION/WUFFS_VERSION_STRING
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: 在包内把上游测试的靶向文件改指到实际交付的产物（wuffs 实测：30 个 test/c/std/*.c 的 include 由未版本化 snapshot 改指版本化 release，补丁只改 include 行，不动断言与黄金值），并用 patch_ng 库调用复验补丁应用结果与探索树逐字节一致；同时在 test_package 消费者里断言被安装产物自报的身份/版本宏（wuffs 实测 WUFFS_VERSION==0x000040000、WUFFS_VERSION_STRING 前缀 0.4.0-alpha.10），让「装错文件」变成硬失败而不是静默通过。
+rec_description: 把包内上游测试的靶向文件改指到实际交付产物，并在 test_package 中断言该产物自报的身份/版本，使「测试从未覆盖被安装文件」变成硬失败。
+rec_command: patch_ng.fromfile("<patch>").apply(strip=1, root="<src-tree>") ; diff -rq "<patched-tree>" "<exploration-tree>"
+rec_auto_fix:           false
+rec_impl:               impl-name                   # 内置实现名 (见 DESIGN §5)
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach: 若无法改动上游测试的 include（测试是生成物或不可改），退一步在消费者侧独立断言被安装产物的身份与关键行为（版本宏 + 真实解码/哈希已知答案），并在 MANIFEST.yml 明确声明上游测试未覆盖该产物、覆盖缺口与替代验证。
+fallback_description: 上游测试不可改向时，用消费者侧身份断言与独立黄金值补足，并如实声明覆盖缺口
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern: 把「上游 N 个用例全过」直接当作被安装产物的验证证据
+forbid_1_reason: 上游测试靶向的文件可能与交付产物不是同一个；以测试全过推断产物已被验证是无效推断。
+forbid_1_consequence: 交付了从未被编译或运行过的文件，且以「全绿」上报，属假绿。
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E565.md
+last_updated: 2026-09-10
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors: Awstme <awstme@qq.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: CBFA

@@ -1,0 +1,158 @@
+--- a/lib/x86simdsort.cpp
++++ b/lib/x86simdsort.cpp
+@@ -2,20 +2,21 @@
+ #include "x86simdsort-internal.h"
+ #include "x86simdsort-scalar.h"
+ #include <algorithm>
+ #include <iostream>
+ #include <string>
+ 
+ static int check_cpu_feature_support(std::string_view cpufeature)
+ {
+     const char *disable_avx512 = std::getenv("XSS_DISABLE_AVX512");
+ 
++#if defined(__x86_64__) || defined(__i386__)
+     if ((cpufeature == "avx512_spr") && (!disable_avx512))
+ #ifdef __FLT16_MAX__
+         return __builtin_cpu_supports("avx512f")
+                 && __builtin_cpu_supports("avx512fp16")
+                 && __builtin_cpu_supports("avx512vbmi2");
+ #else
+         return 0;
+ #endif
+     else if ((cpufeature == "avx512_icl") && (!disable_avx512))
+         return __builtin_cpu_supports("avx512f")
+@@ -23,20 +24,28 @@
+                 && __builtin_cpu_supports("avx512bw")
+                 && __builtin_cpu_supports("avx512vl");
+     else if ((cpufeature == "avx512_skx") && (!disable_avx512))
+         return __builtin_cpu_supports("avx512f")
+                 && __builtin_cpu_supports("avx512dq")
+                 && __builtin_cpu_supports("avx512vl");
+     else if (cpufeature == "avx2")
+         return __builtin_cpu_supports("avx2");
+ 
+     return 0;
++#else
++    /* x86-simd-sort is an x86-only SIMD library.  On non-x86 targets (e.g.
++     * OHOS aarch64) the x86 __builtin_cpu_supports() builtin does not exist,
++     * so always fall back to the portable scalar implementation. */
++    (void)cpufeature;
++    (void)disable_avx512;
++    return 0;
++#endif
+ }
+ 
+ std::string_view static find_preferred_cpu(
+         std::initializer_list<std::string_view> cpulist)
+ {
+     for (auto cpu : cpulist) {
+         if (check_cpu_feature_support(cpu)) return cpu;
+     }
+     return "scalar";
+ }
+@@ -96,66 +105,84 @@
+             TYPE *, size_t, size_t, bool) \
+             = NULL; \
+     template <> \
+     std::vector<size_t> argselect( \
+             TYPE *arr, size_t k, size_t arrsize, bool hasnan) \
+     { \
+         return (*internal_argselect##TYPE)(arr, k, arrsize, hasnan); \
+     }
+ 
+ /* runtime dispatch mechanism */
+-#define DISPATCH(func, TYPE, ISA) \
+-    DECLARE_INTERNAL_##func(TYPE) static __attribute__((constructor)) void \
+-    CAT(CAT(resolve_, func), TYPE)(void) \
+-    { \
+-        CAT(CAT(internal_, func), TYPE) = &xss::scalar::func<TYPE>; \
++/* x86-simd-sort is an x86-only SIMD library.  On non-x86 targets (e.g. OHOS
++ * aarch64) the x86 __builtin_cpu_init()/__builtin_cpu_supports() builtins do
++ * not exist, so the ISA selection body is compiled out and every entry point
++ * resolves to the portable scalar implementation. */
++#if defined(__x86_64__) || defined(__i386__)
++#define XSS_RUNTIME_DISPATCH(func, TYPE, ISA) \
+         __builtin_cpu_init(); \
+         std::string_view preferred_cpu = find_preferred_cpu(ISA); \
+         if constexpr (dispatch_requested("avx512", ISA)) { \
+             if (preferred_cpu.find("avx512") != std::string_view::npos) { \
+                 CAT(CAT(internal_, func), TYPE) = &xss::avx512::func<TYPE>; \
+                 return; \
+             } \
+         } \
+         if constexpr (dispatch_requested("avx2", ISA)) { \
+             if (preferred_cpu.find("avx2") != std::string_view::npos) { \
+                 CAT(CAT(internal_, func), TYPE) = &xss::avx2::func<TYPE>; \
+                 return; \
+             } \
+-        } \
+-    } \
+-
+-#define DISPATCH_KEYVALUE_SORT(TYPE1, TYPE2, ISA) \
+-    static void (CAT(CAT(*internal_kv_qsort_, TYPE1), TYPE2))(TYPE1*, TYPE2*, size_t, bool) = NULL; \
+-    template <> \
+-    void keyvalue_qsort(TYPE1 *key, TYPE2* val, size_t arrsize, bool hasnan) \
+-    { \
+-        (CAT(CAT(*internal_kv_qsort_, TYPE1), TYPE2))(key, val, arrsize, hasnan); \
+-    } \
+-    static __attribute__((constructor)) void \
+-    CAT(CAT(resolve_keyvalue_qsort_, TYPE1), TYPE2)(void) \
+-    { \
+-        CAT(CAT(internal_kv_qsort_, TYPE1), TYPE2) = &xss::scalar::keyvalue_qsort<TYPE1, TYPE2>; \
++        }
++#else
++#define XSS_RUNTIME_DISPATCH(func, TYPE, ISA) /* scalar only */
++#endif
++
++#if defined(__x86_64__) || defined(__i386__)
++#define XSS_RUNTIME_DISPATCH_KV(TYPE1, TYPE2, ISA) \
+         __builtin_cpu_init(); \
+         std::string_view preferred_cpu = find_preferred_cpu(ISA); \
+         if constexpr (dispatch_requested("avx512", ISA)) { \
+             if (preferred_cpu.find("avx512") != std::string_view::npos) { \
+                 CAT(CAT(internal_kv_qsort_, TYPE1), TYPE2) = &xss::avx512::keyvalue_qsort<TYPE1, TYPE2>; \
+                 return; \
+             } \
+         } \
+         if constexpr (dispatch_requested("avx2", ISA)) { \
+             if (preferred_cpu.find("avx2") != std::string_view::npos) { \
+                 CAT(CAT(internal_kv_qsort_, TYPE1), TYPE2) = &xss::avx2::keyvalue_qsort<TYPE1, TYPE2>; \
+                 return; \
+             } \
+-        } \
++        }
++#else
++#define XSS_RUNTIME_DISPATCH_KV(TYPE1, TYPE2, ISA) /* scalar only */
++#endif
++
++#define DISPATCH(func, TYPE, ISA) \
++    DECLARE_INTERNAL_##func(TYPE) static __attribute__((constructor)) void \
++    CAT(CAT(resolve_, func), TYPE)(void) \
++    { \
++        CAT(CAT(internal_, func), TYPE) = &xss::scalar::func<TYPE>; \
++        XSS_RUNTIME_DISPATCH(func, TYPE, ISA) \
++    } \
++
++#define DISPATCH_KEYVALUE_SORT(TYPE1, TYPE2, ISA) \
++    static void (CAT(CAT(*internal_kv_qsort_, TYPE1), TYPE2))(TYPE1*, TYPE2*, size_t, bool) = NULL; \
++    template <> \
++    void keyvalue_qsort(TYPE1 *key, TYPE2* val, size_t arrsize, bool hasnan) \
++    { \
++        (CAT(CAT(*internal_kv_qsort_, TYPE1), TYPE2))(key, val, arrsize, hasnan); \
++    } \
++    static __attribute__((constructor)) void \
++    CAT(CAT(resolve_keyvalue_qsort_, TYPE1), TYPE2)(void) \
++    { \
++        CAT(CAT(internal_kv_qsort_, TYPE1), TYPE2) = &xss::scalar::keyvalue_qsort<TYPE1, TYPE2>; \
++        XSS_RUNTIME_DISPATCH_KV(TYPE1, TYPE2, ISA) \
+     }
+ 
+ #define ISA_LIST(...) \
+     std::initializer_list<std::string_view> \
+     { \
+         __VA_ARGS__ \
+     }
+ 
+ #ifdef __FLT16_MAX__
+ DISPATCH(qsort, _Float16, ISA_LIST("avx512_spr"))

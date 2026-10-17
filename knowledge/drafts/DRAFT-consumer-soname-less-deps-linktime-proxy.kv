@@ -1,0 +1,161 @@
+#====================================================================
+# DRAFT — 消费已发布 soname-less 共享库：链接期 find_package 宏钩子 +
+#         patchelf 代理副本实现可重定位裸名链接
+#====================================================================
+
+id:                     DRAFT-consumer-soname-less-deps-linktime-proxy
+trigger_tool:           conan|cmake|ld|clang|patchelf|readelf|musl|lld
+phase:                  linking|runtime
+error_signature:        DT_NEEDED.*(/storage|/data|\.conan2|\.cache/conan2)|NEEDED.*/lib.*\.so|
+                         Error relocating .*: symbol not found|Error loading shared library /|
+                         clang.*: error: no such file or directory: 'lib.*\.so'|
+                         No rule to make target '-l|SONAME quality gate
+
+severity:               2
+category:               linking, conan, packaging, ohos
+match_keywords:         consumer, 消费侧, soname-less, 无SONAME, DT_SONAME, DT_NEEDED,
+                         IMPORTED_LOCATION, IMPORTED_NO_SONAME, find_package hook,
+                         宏钩子, conan_cmakedeps_paths.cmake, patchelf --set-soname,
+                         代理副本, ohos-soname-proxies, 裸名, relocatable,
+                         CMAKE_EXE_LINKER_FLAGS, -L, 引号断裂, set() 未转义,
+                         musl loader, HMDFS, 烙印
+
+title: 依赖发布包缺 DT_SONAME 时，消费侧必须在链接期以 find_package 宏钩子换用 patchelf 代理副本实现裸名链接，禁止绝对路径链接输入、发布期 patchelf 改写与带内嵌引号的 -L 闭包
+
+root_cause: >
+  平台制品仓（ohpcd）部分已发布 KF6/Qt 二进制包的 .so 没有 DT_SONAME（实例：
+  某 KDE 应用 26.04.0 消费面逐一 readelf 实测 12 个导入目标 SONAME=0，含
+  KF6::CoreAddons/I18n/ConfigCore/ConfigGui/ColorScheme/GuiAddons/WidgetsAddons/
+  Service/ItemViews/WindowSystem/Codecs 与 Qt6::Core5Compat）。ld 对无 SONAME
+  的链接输入原样记录传入路径（链接器语义），而 CMake 导入目标的
+  IMPORTED_LOCATION(_RELEASE) 携带构建机 conan 缓存的机器本地绝对路径 → 产物
+  DT_NEEDED 烙印绝对路径 → 换机器/换缓存布局后 musl loader 按路径解析失败
+  （绝对 NEEDED 无法用 LD_LIBRARY_PATH/RPATH 补救）或 CI ELF 门禁拦截；
+  运行期偶发同链路其他库重定位失败 rc=127。修复只能发生在链接期：事后
+  patchelf 改写的文件被 HMDFS 代码签名校验拒绝加载（P-SIGN-001/E537 先例）。
+  链接期常规方案在 CMake 4.1.2 + OHOS SDK clang/lld 下被定向实验逐一否定：
+  IMPORTED_SONAME/IMPORTED_NO_SONAME stamp 不改变链接行；IMPORTED_LOCATION
+  改写为裸文件名被 clang 驱动当文件路径（no such file or directory）；
+  改写为 -l<name> 被 make 当 target 依赖（No rule to make target '-lX'）。
+  唯一可行路径：每个消费工程 include 的 cmake 路径文件注入 find_package 宏
+  钩子，配置后把 soname-less 导入目标的 IMPORTED_LOCATION 换成构建目录内
+  patchelf --set-soname 的私有代理副本 → ld 读代理 SONAME → DT_NEEDED 只记
+  裸名 → 运行期 LD_LIBRARY_PATH 按裸名解析到真实发布库。
+  配套独立陷阱：显式 -L 闭包若路径字符串带内嵌双引号，经 Conan CMakeToolchain
+  发射（tc.variables → 生成未转义的 set(CMAKE_*_LINKER_FLAGS "...")）后，CMake
+  按列表解析把缓存值断裂成 "-L;/path\" ..." 多参形式 → 全部 -L/-rpath-link
+  目录沉默失效（构建仍 rc=0，非致命）；该断裂只能经 conan 发射路径复现，手写
+  toolchain 的转义 set() 不复现。显式链接闭包必须配对"链接行可复现且值无内嵌
+  引号"的 -L，否则闭包从未生效，直到引入依赖搜索路径的裸名/-l 输入才连锁暴露。
+
+affected_scope: >
+  任何消费已发布 soname-less 共享库包的项目（当前 OHOS KF6/Qt6 制品生态的普遍
+  状态：某消费 run 消费面 12/12 导入目标命中，任何新消费 run 均会复现）。
+  与 E537 打包侧互补：E537 处理"自己打包时链接自家 soname-less 依赖"（自己
+  CMakeLists 可改），本条处理"消费不可修改的已发布第三方包"。
+
+verification_cmd: |
+  # ① 发布依赖 SONAME 快查（设备新 shell 可跑；命中即候选场景）
+  readelf -d "$(ls /storage/Users/currentUser/.conan2/p/kcore*/p/lib/libKF6CoreAddons.so | head -1)" | grep -c SONAME
+  #    → 输出 0（无 DT_SONAME）
+
+  # ② -L 引号断裂复现（必须走 conan CMakeToolchain 发射路径；
+  #    手写 set(CMAKE_EXE_LINKER_FLAGS "-L\"...\"") 的 toolchain 不复现——实测）
+  mkdir -p /tmp/quote-probe && cd /tmp/quote-probe
+  cat > conanfile.py <<'EOF'
+  from conan import ConanFile
+  from conan.tools.cmake import CMakeToolchain, cmake_layout
+  class P(ConanFile):
+      name = "quoteprobe"
+      version = "1.0"
+      settings = "os", "compiler", "build_type", "arch"
+      def layout(self):
+          cmake_layout(self)
+      def generate(self):
+          tc = CMakeToolchain(self)
+          tc.variables["CMAKE_EXE_LINKER_FLAGS"] = '-L"/tmp/x" -Wl,-rpath-link,"/tmp/x"'
+          tc.generate()
+  EOF
+  printf 'int main(void){return 0;}\n' > main.c
+  printf 'cmake_minimum_required(VERSION 3.15)\nproject(quoteprobe C)\nadd_executable(quoteprobe main.c)\n' > CMakeLists.txt
+  conan install . -s build_type=Release -pr:h=<ci profile> -pr:b=<ci profile>
+  grep CMAKE_EXE_LINKER_FLAGS build/Release/generators/conan_toolchain.cmake
+  #    → set(CMAKE_EXE_LINKER_FLAGS "-L"/tmp/x" -Wl,-rpath-link,"/tmp/x"" ...)（引号未转义）
+  cmake -S . -B b -DCMAKE_TOOLCHAIN_FILE="$PWD/build/Release/generators/conan_toolchain.cmake" -DCMAKE_BUILD_TYPE=Release
+  grep 'CMAKE_EXE_LINKER_FLAGS:STRING' b/CMakeCache.txt
+  #    → CMAKE_EXE_LINKER_FLAGS:STRING=-L;/tmp/x" -Wl,-rpath-link,"/tmp/x""（断裂 + 尾引号）
+  grep -c -- '-L;' b/CMakeFiles/quoteprobe.dir/link.txt
+  #    → ≥1（链接行断裂；构建 rc 仍为 0，-L 闭包沉默失效）
+
+  # ③ 修复路径验证（套用 rec 方案后）
+  readelf -d <产物>.so | grep NEEDED        # 全为裸名（libKF6ConfigCore.so 等，无路径分隔符）
+  LD_LIBRARY_PATH=<全依赖链 libdir> <消费进程> ；echo rc=$?   # → rc=0
+
+rec_priority:           1
+rec_approach:           find-package-hook-soname-proxy
+rec_description: >
+  消费侧 generate() 写出 cmake 路径文件（实例名 conan_cmakedeps_paths.cmake，
+  由每个消费工程的 toolchain/工程入口 include；主构建 + 全部 vendored staging
+  工程 + test_package 共 5 处工程验证）。文件内容三段：
+  (a) OHOS_SONAME_LESS_DEPS 清单（以 readelf SONAME=0 逐一实测维护，不臆测；
+      新依赖遗漏时由 CI ELF 门禁点名补录）；
+  (b) 宏钩子：override find_package 为 _find_package + ohos_relocatable_link_fixup，
+      对清单内每个已创建的导入目标，isfile 守卫读取原 IMPORTED_LOCATION(_RELEASE)，
+      在 ${CMAKE_BINARY_DIR}/ohos-soname-proxies/ 生成 patchelf --set-soname <basename>
+      私有代理副本（find_program HINTS /data/service/hnp/bin），并以
+      OHOS_SONAME_PROXY 属性防重复；
+  (c) set_property(TARGET <t> IMPORTED_LOCATION <代理副本>)。
+  ld 读代理的 SONAME → DT_NEEDED 只记裸名；运行期 LD_LIBRARY_PATH（全依赖链
+  libdir）按裸名解析到真实发布库。代理副本仅作链接输入、永不发布。
+  配套：-L/-Wl,-rpath-link 闭包值禁止内嵌双引号（见 forbid_3），并在 CMake
+  链接行（CMakeFiles/<t>.dir/link.txt）抽查确认 -L 真实生效。
+rec_command:            核心判定链：readelf -d <发布依赖>.so | grep -c SONAME → 0；套钩子后 readelf -d <代理副本> | grep SONAME → lib<name>.so；readelf -d <产物>.so | grep NEEDED → 全裸名；运行 rc=0
+rec_auto_fix:           false
+rec_impl:               消费侧配方 generate() 片段（OHOS_SONAME_LESS_DEPS + conan_cmakedeps_paths.cmake 写出 + 工程 include），可从 kgraphviewer/26.04.0 配方（conanfile.py generate()/OHOS_E537_FIXUP_CMAKE）搬运
+
+fallback_priority:      2
+fallback_approach:      runtime-symlink-signature-preserving
+fallback_description:   对无法触达链接期的预编译消费场景，按 DRAFT-E5xx-registry-so-baked-absolute-needed-symlink 在烙印绝对路径处建 symlink 指向依赖图内同名真实库（文件内容不变、代码签名有效），并内联注入全依赖链 LD_LIBRARY_PATH。诚实权衡：治标不治本——依赖 HOME 树可写、机器本地、掩盖发布包缺陷，仅作退路。另一备选"改用 static staging 消费"在本平台存在符号可见性边界（QObject/metaobject 单副本语义依赖符号统一，详见经验仓素材），不作为通用退路。
+fallback_command:       mkdir -p <烙印路径父目录> && ln -s <依赖图真实库> <烙印绝对路径>
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       把 patchelf 改写后的 .so 作为交付物发布|publish.*(patchelf|rewritten).*\.so
+forbid_1_reason:        HMDFS 对 ELF 做代码签名校验，改写后的文件运行期加载直接 Permission denied（mmap PROT_EXEC；P-SIGN-001、E537 forbid_1 同源）。patchelf 代理只允许存在于构建目录内作链接输入。
+forbid_1_consequence:   产物部署到目标机后加载失败，失败点在运行期（离构建最远、最难排查）。
+forbid_2_pattern:       链接输入含绝对缓存路径且依赖无 DT_SONAME|IMPORTED_LOCATION.*(conan|cache).*绝对路径(?!.*代理)
+forbid_2_reason:        ld 对无 SONAME 输入原样记录路径 → DT_NEEDED 烙印机器本地绝对路径，换机器/换缓存布局必失效；绝对 NEEDED 无法用 LD_LIBRARY_PATH/RPATH 补救。
+forbid_2_consequence:   CI ELF 门禁（L5b 类）拦截，或发布物在消费机上 loader 报绝对路径加载失败/重定位失败 rc=127。
+forbid_3_pattern:       CMAKE_EXE_LINKER_FLAGS.*-L"|toolchain.*set().*内嵌引号
+forbid_3_reason:        -L"/path" 形式的值经 Conan CMakeToolchain tc.variables 发射为未转义 set()，CMake 按列表解析断裂成 -L;/path" ...，全部 -L/-rpath-link 沉默失效（构建 rc 仍 0）；implement-policy 的显式链接闭包必须配对真实生效的 -L。
+forbid_3_consequence:   链接"成功"但闭包从未生效；一旦引入需要搜索路径的裸名/-l 输入即连锁暴露（驱动错误、make 报 No rule to make target），定位成本高且误导方向。
+
+principles:             P-SIGN-001,P-RUNTIME-002
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E537,E316,E383,DRAFT-E5xx-registry-so-baked-absolute-needed-symlink]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 近邻边界注记 ═══
+# E537（kpackage !6997）：打包侧在自己 CMakeLists 内 target_link_directories + 裸 -l；
+#   其 stamp/裸名手法在本 CMake 4.1.2 + clang 驱动下被定向实验否定，本条方案换为
+#   宏钩子 + 代理副本。E316：conan 包内 SONAME 符号链接实体缺失（包内自修复）。
+# E383：无 Platform/HarmonyOS.cmake 致产物自身缺 SONAME（用 CMAKE_SHARED_LIBRARY_
+#   SONAME_*_FLAG 解决，与本条互补）。DRAFT-E5xx：运行期 symlink 保签名缓解
+#   （烙印路径处），本条为链接期根治，两案互补不重叠。
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-consumer-soname-less-deps-linktime-proxy.md
+last_updated:           2026-09-18
+source_event:           某 KDE 图形应用 26.04.0 适配 CI r15-r22：r15 绝对 DT_NEEDED 拦截 + rc=127；r16/r17 stamp/裸名/-l 三路否定实验 + -L 引号连锁根因；r18 宏钩子+代理副本方案落地；r22 门禁点名补 KF6::Codecs（清单实测维护）；r23 全绿
+authors: GoliWie <GoliWie@noreply.gitcode.com>
+source_pr: 合并后回填
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-18

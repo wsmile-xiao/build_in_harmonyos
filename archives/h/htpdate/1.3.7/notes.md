@@ -12,7 +12,7 @@ htpdate 是一个简单的 C 程序，使用 Makefile 构建，无需 configure 
 
 1. 下载源码：从 GitHub 下载 v1.3.7 tag
 2. 解压到 builds 目录
-3. 使用 make CC=clang CFLAGS="-Wall -std=c11 -pedantic -O2 -D__OHOS__" 编译
+3. 使用 make CC=$CC CFLAGS="-Wall -std=c11 -pedantic -O2" 编译（CC 从环境变量获取，默认 clang；Debug 构建使用 -g -O0）
 4. 手动安装到 staging 目录（因为 install 命令不存在）
 5. 签名 ELF 文件
 6. 创建预编译包
@@ -28,11 +28,11 @@ htpdate 是一个简单的 C 程序，使用 Makefile 构建，无需 configure 
 
 ## 源码修改
 
-### 补丁 0001-adjtime-adjtimex-compat.patch
+### 补丁 0001-htpdate.c.patch
 
 ```diff
-+/* OpenHarmony uses adjtimex instead of adjtime */
-+#ifdef __OHOS__
++/* On Linux, use adjtimex instead of adjtime (adjtime may be unavailable on some libc) */
++#ifdef __linux__
 +#define adjtime(tv, oldtv) adjtimex_compat(tv)
 +static inline int adjtimex_compat(const struct timeval *tv) {
 +    struct timex txc = {0};
@@ -64,7 +64,7 @@ htpdate version 1.3.7
 ## 注意事项
 
 1. htpdate 可选择编译 HTTPS 支持版本（make https），需要 libssl
-2. 编译时必须使用 `-D__OHOS__` 定义以启用 adjtimex 兼容性补丁
+2. 补丁使用 `__linux__` 标准宏（编译器预定义）启用 adjtimex 兼容性，无需额外编译参数
 3. 运行时需要 root 权限才能调整系统时间
 
 ---

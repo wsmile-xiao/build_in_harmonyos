@@ -1,0 +1,59 @@
+#====================================================================
+# DRAFT-ifile-1.3.9-extern-inline
+#====================================================================
+
+id:                        DRAFT-ifile-1.3.9-extern-inline
+trigger_tool:              cc|ld.lld
+phase:                     build
+error_signature:           ld.lld 报 duplicate symbol argp_usage|duplicate symbol _option_is_short|duplicate symbol argp_fmtstream_write
+severity:                  2
+category:                  toolchain|linking
+match_keywords:            extern inline, ARGP_EI, ARGP_FS_EI, fgnu89-inline, inline semantics, C17, argp, argp-fmtstream, duplicate symbol, clang 15, lld, glibc 派生头文件
+title:                     头文件中的 extern inline 定义在 clang 默认 C17 内联语义下每个编译单元都发出强符号，链接期 duplicate symbol，应加 -fgnu89-inline 回到上游所依赖的 GNU89 语义
+
+root_cause:                因果链。glibc 时代的 argp（含 argp-standalone 与各包内嵌副本）按 **GNU89 内联语义** 书写。argp/argp.h 在 `#ifdef __OPTIMIZE__` 下 `#define ARGP_EI extern inline`，并把 argp_usage、_option_is_short、_option_is_end 的 **函数体直接写进头文件**；argp-fmtstream.h 同族（AFS/ARGP_FS_EI，8 个 argp_fmtstream_* 函数）。上游另用 argp-fs-xinl.c 与 argp-xinl.c 里 `#define ARGP_FS_EI`（置空后再次包含头文件）保证 **恰好一个 TU** 发出外部可见的实体。这套写法只有在 GNU89 语义下成立——GNU89 里 `extern inline` 表示"仅供内联的副本，不发独立符号"。clang 默认走 C99/C17 内联语义，其中 `extern inline` 的含义反过来——**在本 TU 发出一份额外的强外部定义**。于是每个包含 argp.h 的编译单元都产出 argp_usage 等强符号，与真实定义所在的 argp-parse.c/argp-help.c 相撞，链接期报 duplicate symbol。触发条件含任何 -O 优化（它定义 __OPTIMIZE__，头中的定义块才生效）；-O0 时该块被条件编译跳过、症状消失，极易被误判成"优化等级问题"。
+affected_scope:            任何内嵌 glibc 时代 argp/getopt/argp-fmtstream 头、或以"头中 extern inline 给定义 + 单 TU 置空宏重生成实体"这套 GNU89 惯用法组织的 C 包，在 clang（默认 gnu11/gnu17 内联语义）下构建时。判据。报错符号成组出现且都是函数（argp_usage、_option_is_short、_option_is_end、argp_fmtstream_*），而 `-fcommon` 完全无效。
+verification_cmd:         三臂对照（真机）：A 臂 CFLAGS="-O2" 得 20 条 duplicate symbol 且无产物；B 臂加 -fgnu89-inline 得 0 条并产出可执行文件；C 臂换 -fcommon 仍 20 条且无产物（证明 -fcommon 非解）。          双臂对照（真机 HarmonyOS PC，ifile 1.3.9，clang-15 交叉 aarch64-unknown-linux-ohos）。cd <src> && make clean；臂 A，make CC=<clang> AR=<llvm-ar> RANLIB=<llvm-ranlib> CFLAGS="-O2"，预期 ld.lld：error：duplicate symbol 计数 20、无产物，且 llvm-nm --defined-only opts.o 里 argp_usage 计 1、llvm-nm --defined-only libifile.a 里 argp_usage 计 13；臂 B，同命令 CFLAGS="-O2 -fgnu89-inline"，预期 duplicate symbol 计数 0、产物生成、llvm-nm --defined-only opts.o 里 argp_usage 计 0、实体只由 argp/libargp.a 提供 1 份。两臂唯一变量是内联语义开关。
+rec_priority:              1
+rec_approach:              compile-with-fgnu89-inline
+rec_description:           给编译标志加 -fgnu89-inline，让 clang 恢复上游所依赖的 GNU89 内联语义，extern inline 不再在每个 TU 发出强符号。一个标志即可，不动上游一行源码，也不影响其它编译单元。conan 配方写 tc.extra_cflags.append("-fgnu89-inline")；裸 Makefile 写 CFLAGS="-O2 -fgnu89-inline"；autotools 传 ./configure CFLAGS=... 或直接 make CFLAGS=...。
+rec_command:               conan 配方 generate() 中 tc.extra_cflags.append("-fgnu89-inline")；等价手工命令 make CFLAGS="-O2 -fgnu89-inline"
+rec_auto_fix:              false
+rec_impl:                  conan-recipe-conf
+
+fallback_priority:         2
+fallback_approach:         macro-override-argp-ei
+fallback_description:      当构建系统把 CFLAGS 烙进多个子工程、加全局标志不方便时，改为覆盖头文件自带的守卫宏。argp.h/argp-fmtstream.h 的声明都写成 #ifndef ARGP_EI / #define ARGP_EI extern inline，因此从外部传 -DARGP_EI=static inline（同理 -DARGP_FS_EI=static inline）即可让每份定义变成 TU 内部静态、跨 TU 不再撞名。诚实权衡。它只治 argp 这一族头，不治同族写法的其它头文件，且把 inline 变 static 会留下"未使用静态函数"警告；只作为局部退路。
+fallback_command:          给受影响子工程追加 CPPFLAGS="-DARGP_EI=static inline -DARGP_FS_EI=static inline"（值需带引号，注意 Makefile 变量展开）
+fallback_auto_fix:         false
+fallback_impl:             conan-recipe-conf
+
+forbid_1_pattern:          (^|\s)-fcommon(\s|$)
+forbid_1_reason:           -fcommon 只解决"头文件中定义的 **全局变量**（tentative definition）"，对本条的 **函数** extern inline 完全无效。已在本包实证，加 -fcommon 后 duplicate symbol 计数不变。
+forbid_1_consequence:      白改一轮编译标志，并把诊断引向 DRAFT-clang-fno-common-header-globals 那条不同的机理。
+
+forbid_2_pattern:          删除头文件里的定义|把 inline 直接改成 static 而不改声明点
+forbid_2_reason:           直接删定义会让 argp_usage 等只剩 libargp.a 一份实现（若某包不含该库则缺符号），手工把定义改 static 会与同头后部的 extern 声明冲突；两者都在制造"链接期缺符号"的新问题。
+forbid_2_consequence:      从 duplicate symbol 变成 undefined symbol，且改动面扩大到源码补丁。
+
+principles:                P-TOOLCHAIN-001, P-CFLAGS-001
+causes:
+caused_by:
+similar_to:                DRAFT-clang-fno-common-header-globals（error_signature 同为 duplicate symbol，但那条是头中定义的 **全局变量** 与 -fno-common，解法 extern 化 + 单一定义点或 -fcommon；本条是 **函数** 与内联语义切换，-fcommon 对本条无效——按 §6.2 属同族不同签名，不得混引）、E169（argp.h 缺失，另一族症状）
+conflicts_with:
+prerequisite_of:
+
+doc_file:                  knowledge/drafts/DRAFT-ifile-1.3.9-extern-inline.md
+last_updated:              2026-09-25
+source_event:              ifile/1.3.9 HarmonyOS PC adaptation (worktree hw-7-ifile-1.3.9, 双臂对照日志 ~/tmp/uc2/hw-7/logs/gnu89-{A,B}.log)
+
+draft:                     true
+contributor_id:            ifile-1.3.9
+authors:                   hw-7
+source_pr:
+source_commit:
+
+metrics_success_count:     1
+metrics_fail_count:        0
+metrics_confidence:        0.85
+metrics_last_used:         2026-09-25

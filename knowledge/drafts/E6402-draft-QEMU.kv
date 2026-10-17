@@ -1,0 +1,102 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E6402.kv，填写各字段
+# 对应的人类文档: doc/E6402.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E6402
+trigger_tool:           conan|meson|ninja|binary-sign-tool|llvm-objcopy
+phase:                  linking
+error_signature:        Error loading shared library (libpixman-1|libglib|libz)\.so|cannot open shared object file|Operation not permitted|No such file or directory.*\.so\.\d
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               1
+category:               linking, packaging, ohos, hmdfs
+match_keywords:         RUNPATH, rpath, LDFLAGS, Error loading shared library, rc=127, EPERM, rc=126, package(), sign, selfSign, binary-sign-tool, .codesign, _sign_all_elfs
+title:                  OHOS conan 包执行不可用：meson 不写 $ORIGIN RUNPATH 致依赖库定位失败（rc=127）+ 未签名多二进制 ELF 拒绝加载（rc=126 EPERM）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             meson 只记录构建期 -L 路径，不写 $ORIGIN：包内容迁移到 conan package folder 后，
+                        可执行文件按构建期 conan 缓存绝对路径找 libpixman-1.so.0 等共享库，必然失败（rc=127）。
+                        OHOS 内核拒绝加载无有效 .codesign 签名段的 ELF（rc=126/EPERM）；
+                        大型应用包（QEMU 含 bin/libexec/lib 下 50+ ELF 与 .so）必须在 package() 时
+                        按 E077 四步流程（移除 .codesign → 修改 → 重新签名 → 恢复权限）批量重签，
+                        否则 test_package 实跑必然失败。
+affected_scope:         所有 meson 构建 + 动态链接依赖、产出多二进制应用包的 conan 包（RUNPATH 注入 + package() 批量签名是 OHOS 上可执行性的共同前提）
+verification_cmd:       |
+  readelf -d bin/qemu-img | grep -E 'RUNPATH|NEEDED'   # RUNPATH 应指向 conan 依赖 lib 目录
+  bin/qemu-img --version           # 应输出 11.1.1（rc=0，无 EPERM、无 shared library 报错）
+  bin/qemu-system-riscv64 --version
+  llvm-readelf -S bin/qemu-img | grep codesign          # 签名段存在
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           build-env + package-script 双修：
+                        1) conanfile generate() 对每个动态依赖（pixman/glib/zlib）按依赖
+                           Environment.append("LDFLAGS", "-Wl,-rpath,<dep.package_folder>/lib")（写入独立 env 脚本）；
+                        2) conanfile package() 递归扫描 bin/libexec/lib，按 \x7fELF magic 判定（跳过 .a/数据文件/符号链接），
+                           对每个 ELF 执行 E077 流程：llvm-objcopy --remove-section .codesign →
+                           binary-sign-tool sign -inFile X -outFile X -selfSign 1。
+rec_description:        链接期注入依赖 RUNPATH + 打包期对全部 ELF 批量签名，二者缺一不可
+rec_command:            |
+  # conanfile generate():
+  env.append("LDFLAGS", f"-Wl,-rpath,{dep.package_folder}/lib")
+  # conanfile package(): _sign_all_elfs() — 参考 archives/q/qemu/11.1.1/conanfile.py
+rec_auto_fix:           false
+rec_impl:               conanfile.py generate() LDFLAGS 循环 + _sign_ohos_elf()/_sign_all_elfs()
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:      依赖改静态链接（BUILD_SHARED_LIBS=OFF）可消除 RUNPATH 依赖；
+                        但 glib/pixman 等由 conan 依赖链管理、默认动态（R26 仅系统同名库允许强制静态），仅作为备选
+fallback_description:   静态化会改变包接口与体积，且 R26 限制其适用范围，默认不采用
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+forbid_1_pattern:       /usr/local|SYS_PREFIX
+forbid_1_reason:        R49/E524：依赖注入指向共享 /usr/local 前缀——CI worker 与本地共享文件系统互相污染
+forbid_1_consequence:   跨机器包污染（asterisk-srtp E524：19 轮 CI 全挂根因）
+forbid_2_pattern:       os\.access\(.*X_OK\)
+forbid_2_reason:        HMDFS 忽略 chmod、权限固定 660，X_OK 恒 False（E077 关联平台限制），用其探测 work 目录可执行性无意义
+forbid_2_consequence:   永远回退 noexec 路径，掩盖真实问题
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E077]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+keywords: RUNPATH, -Wl,-rpath, Error loading shared library, rc=127, EPERM, rc=126, binary-sign-tool, .codesign, selfSign, _sign_all_elfs, LDFLAGS
+doc_file:               doc/E6402.md
+last_updated: 2026-09-22
+source_event:           qemu 11.1.1 OHOS armv8 适配（build_in_harmonyos archives/q/qemu/11.1.1，2026-09-22）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                AtomCode (qwen3.8) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: QEMU

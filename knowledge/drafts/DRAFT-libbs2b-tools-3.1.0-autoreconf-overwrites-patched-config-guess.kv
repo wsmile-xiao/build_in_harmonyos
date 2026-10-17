@@ -1,0 +1,79 @@
+#====================================================================
+# DRAFT — 补丁面在 configure.ac / Makefile.am 的配方必须 autoreconf 重生成，
+#         而 autoreconf -fi 会用 automake 自带的 config.guess / config.sub
+#         把 tarball 里的老副本换掉；新换上的副本同样不认 HarmonyOS，
+#         于是先前对老副本打的鸿蒙补丁被静默丢弃，只留下
+#         "cannot guess build type; you must specify one"
+# Timestamp: 2026-09-17
+# Software: libbs2b 3.1.0（autotools，tarball 自带 2009-06-05 的 build-aux/config.guess）
+# Status: DRAFT — 待复审提升为正式 E 条目
+#
+# 复现证据（WSL + automake 1.18.1，与 conan 里 tool_requires("automake/1.18") 同家族）：
+#   打上 configure.ac / Makefile.am 补丁后 `autoreconf -fi` 成功，随后
+#     build-aux/config.guess  45630B 2009-06-05 sha256 f0653127…
+#                          -> 50743B 新时间戳  sha256 e3d14813…
+#     build-aux/config.sub    34040B 2009-06-05 -> 39713B 新时间戳
+#   用假 uname 模拟 HarmonyOS / aarch64 时的 config.guess 输出：
+#     tarball 老副本      -> 只打印 UNAME_SYSTEM = "HarmonyOS" 诊断，猜不出来
+#     automake 1.18 副本  -> 同样只打印 UNAME_* 诊断，猜不出来
+#     补丁后的副本        -> aarch64-unknown-linux-ohos
+#
+# To promote:
+#   1. Review the evidence below
+#   2. Rename to Ennn.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/Ennn.md
+#====================================================================
+
+id:                     DRAFT-libbs2b-tools-3.1.0-autoreconf-overwrites-patched-config-guess
+trigger_tool:           autoreconf|automake|aclocal|libtoolize|configure
+phase:                  configuration
+error_signature:        Can't exec "aclocal": No such file or directory| cannot guess build type; you must specify one| unable to guess system type| Invalid configuration .*machine.*not recognized| UNAME_SYSTEM\s*=\s*.?HarmonyOS
+severity:               3
+category:               autotools|tooling|cross-compile|platform|configuration
+match_keywords:         autoreconf -fi, aclocal, automake, libtoolize, ACLOCAL_PATH, config.guess, config.sub, patch-autotools-ohos.pl, 变更过大, AI 检视跳过, 最小注入, build-aux, AC_CONFIG_AUX_DIR, AM_INIT_AUTOMAKE, dist-lzma, Makefile.in, configure.ac, tool_requires automake, add-missing, install-sh, depcomp, UNAME_SYSTEM, fake uname, aarch64-unknown-linux-ohos, hnp
+title:                  补丁面在 configure.ac / Makefile.am 的配方必须 autoreconf，而 autoreconf -fi 会用 automake 自带的 config.guess/config.sub 覆盖 tarball 里的老副本；鸿蒙补丁要打在"覆盖之后"（随配方携带补丁后的副本再写回），而不是打在 tarball 的老副本上
+root_cause:             autoconf 的生成物（configure / Makefile.in）是 configure.ac / Makefile.am 的展开结果，所以补丁一落到 .ac/.am 上就必须重新生成。 autoreconf 的 automake 环节会执行 --add-missing：把 config.guess / config.sub / install-sh / compile / depcomp / missing 这些 aux 脚本 按 automake 自己的副本重装到 AC_CONFIG_AUX_DIR 下。于是同时发生两件事： (1) 先前对 tarball 老副本打的 HarmonyOS 补丁被整体丢弃； (2) 新装上的 automake 副本本身也不认 HarmonyOS： config.guess 拿到 uname -s = HarmonyOS 后落进 "unable to guess system type" 分支，只把 UNAME_* 打到 stdout 并以 1 退出，configure 随即报 cannot guess build type。 链路最阴的地方是：补丁干净适用、autoreconf 成功、日志里没有一条 "patch failed"，唯一症状是 configure 阶段一句 "cannot guess build type; you must specify one"， 极易被误判成"补丁没打上"而反复重打同一个补丁。
+affected_scope:         所有补丁面落在 configure.ac / Makefile.am 的 autotools 配方，且 tarball 自带的 config.guess 早于 2023（不认识 HarmonyOS）。 自带 2023+ config.guess 的上游不受影响；只改 configure / Makefile.in、不跑 autoreconf 的配方也不受影响。
+verification_cmd:       假 uname 探测（普通 x86 机器上就能跑，不必占鸿蒙设备）： mkdir -p /tmp/fb && printf '#!/bin/sh\ncase "$1" in -s) echo HarmonyOS;; -m|-p) echo aarch64;; -r) echo kr;; -v) echo v;; *) echo x;; esac\n' > /tmp/fb/uname && chmod +x /tmp/fb/uname env -i PATH=/tmp/fb:/usr/bin:/bin HOME=/tmp ./config.guess 期望 aarch64-unknown-linux-ohos；打印 UNAME_SYSTEM = HarmonyOS 之类的诊断即说明这份 config.guess 不认鸿蒙。 静态判据：grep -c 'HarmonyOS' <auxdir>/config.guess
+rec_priority:           1
+rec_approach:           inject-missing-harmonyos-branches-after-autoreconf（不要整份携带现代副本）
+rec_description:        不要 patch tarball 里的 config.guess/config.sub，改为 把"补丁后的成品副本"随配方携带（export_sources）， 在 autoreconf -fi 之后写回 AC_CONFIG_AUX_DIR： self.run("autoreconf -fi", cwd=self.source_folder, env="conanbuild") self._restore_config_helpers()      # 覆盖 build-aux/config.guess + config.sub 判据是"这两个文件在 autoreconf 之后必须是配方自己的副本"， 所以写回动作要放在 autoreconf 与 configure 之间，且要能容忍 export_sources_folder == source_folder（Conan 2.30 把导出源码 直接铺进源码树，此时 copy(src,dst) 的 src 与 dst 相同，必须跳过）。 同一次适配还要一起解决 worker 上没有 automake 的问题： def build_requirements(self): self.tool_requires("automake/1.18") self.tool_requires("libtool/2.5.4") autoreconf/aclocal 要找 pkg.m4 等宏，hnp 下的隔离目录不在默认搜索路径， 需要显式注入（AutotoolsToolchain 的 environment()）： for _dir in glob.glob("/data/service/hnp/*/*/share/aclocal"): env.append_path("ACLOCAL_PATH", _dir) 再 VirtualBuildEnv(self).generate() 把 tool_requires 的 aclocal/automake/libtoolize 放进 conanbuild 环境。
+关键取舍（2026-09-19 补）：**不要用"整份携带现代 config.guess/config.sub 再写回"这条路**。
+ 它功能可行，但会给 PR 带来 3800+ 行 diff（config.guess 1823 行 + config.sub 1966 行），
+ 平台 AI 检视会直接以"本次变更过大（8 个可审文件、4172 行）…本次跳过"收场 ——
+ rule6（必须有有效 AI 检视且 P0/P1=0）直接不通过，而且没有任何可修的具体缺陷。
+ 正解是**只注入缺的分支**：autoreconf 之后对刚生成的 build-aux/config.guess|config.sub
+  ① 优先调用仓库自带脚本 scripts/patch-autotools-ohos.pl（它注入 `__OHOS__ → LIBC=ohos`
+     与 `*:HarmonyOS:*:*` 分支）；
+  ② 脚本不可用/锚点缺失时退回最小内置改写（幂等）：config.guess 在 `*:NetBSD:*:*` 前插
+     `*:HarmonyOS:*:*` 分支输出 `${MACHINE}-unknown-linux-ohos`；config.sub 补
+     `ohos*` 到 OS 白名单、`linux-ohos*` 到内核-OS 校验、并让 `-linux-ohos` 不被归一化成
+     `-linux-gnu`（远古版本还要补 aarch64/arm64 的 CPU 规则）；
+  ③ 注入后**静态自检**两份脚本都出现 HarmonyOS/ohos 标记，否则立刻报错，
+     不要留给 configure 用 "cannot guess build type" 收场。
+ 实测（现代 automake/libtool 产物）：注入后 `sh config.guess` → aarch64-unknown-linux-ohos，
+ `sh config.sub aarch64-unknown-linux-ohos` 原样回显；PR diff 从 4757 行降到约 1000 行，
+ 可审文件从 8 个（含两个 1800+ 行的辅助脚本）降到 7 个且总量 ~650 行。
+
+rec_command:            # 注意：不要在 grep 出来的整行上做 dirname（AC_CONFIG_AUX_DIR([build-aux]) 整行
+                        # 不含 "/"，dirname 会返回 "."，cp 因目标已存在而静默成功、其实没覆盖到 build-aux）
+                        auxdir=build-aux   # 取自 configure.ac 的 AC_CONFIG_AUX_DIR([build-aux])
+                        perl "$OHC_SKILL_ROOT/scripts/patch-autotools-ohos.pl" "$auxdir/config.guess" "$auxdir/config.sub"
+                        grep -c HarmonyOS "$auxdir/config.guess" && grep -c ohos "$auxdir/config.sub"
+
+
+rec_auto_fix:           false
+rec_impl:               restore-config-helpers-after-autoreconf
+principles:             
+doc_file:               drafts/DRAFT-libbs2b-tools-3.1.0-autoreconf-overwrites-patched-config-guess.md
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+last_updated:           2026-09-17
+source_event:           libbs2b-tools 3.1.0 适配：configure.ac/Makefile.am 打补丁 -> 必须 autoreconf -> autoreconf -fi 把 2009 年的 build-aux/config.guess 换成 automake 副本，且两者都不认 HarmonyOS
+source_pr:              
+source_commit:          
+authors:                username- <ajOovSKTQ0vaLwZB.username-@noreply.gitcode.com>

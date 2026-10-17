@@ -1,0 +1,131 @@
+# ═══ Draft knowledge entry — 老式 vendored AM_PATH_* 宏以 *-config 输出无条件覆盖 precious 变量：
+#     以 X_CONFIG=<自建 shim> 作 configure 参数走 AC_PATH_PROG 预设覆盖 ═══
+# Timestamp: 2026-09-19
+# Software: lbreakout2 2.6.5（机理适用于任何 vendored AM_PATH_*/AC_PATH_PROG 探测 *-config 的 autotools 项目）
+# Gate: 权威 CI run2 PASS（ci/conan/build_and_test.sh, profile ohos-aarch64）+ fail-first 探针四段全完成（DONE.txt=PROBE_ALL_DONE）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-old-config-macro-precious-var-clobber-x-config-shim
+title:                  老式 vendored AM_PATH_* 宏无条件以 *-config 输出覆盖 X_CFLAGS/X_LIBS precious 变量致依赖探测死路，应以 X_CONFIG=<自建 shim> 作 configure 参数走 AC_PATH_PROG 预设覆盖（lbreakout2 2.6.5 案例）
+trigger_tool:           configure|make
+phase:                  configure
+error_signature:        checking for SDL - version.*no|lib SDL is needed|sdl-config: (inaccessible|not found)|SDL\.h. file not found
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               platform-detect|autotools|conan
+match_keywords:         sdl-config, SDL_CONFIG, AM_PATH_SDL, SDL_CFLAGS, SDL_LIBS, AC_PATH_PROG, precious, gpgme-config, freetype-config, package_folder, prefix baked, cross compile
+error_excerpt:          "checking for SDL - version >= 1.2.0... no / configure: error: lib SDL is needed（无 sdl-config 或版本不符）；或 configure 假通过后 make 报 'SDL.h' file not found（SDL_CFLAGS 已被 *-config 死路径输出覆盖）"
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             完整因果链（四环，全部有实物证据）：
+                        (1) Conan relocatable 依赖包内的 *-config 脚本把打包机前缀固化进输出——sdl12-compat 包内
+                        sdl-config 报 -I<打包机>/.cache/conan2/.../include/SDL（probe0 实测：该路径在消费设备
+                        No such file or directory）；SDL1.2 时代无 pkg-config 模块名可回退（sibling run sdl-image
+                        死路记录同源）。
+                        (2) 上游 vendored 老式 m4 宏（lbreakout2 acinclude.m4 的 1999 年代 AM_PATH_SDL）只认
+                        sdl-config 且无 PKG_CHECK_MODULES 短路：configure:8781-8782 无条件
+                        SDL_CFLAGS=`$SDL_CONFIG --cflags`、SDL_LIBS=`$SDL_CONFIG --libs`；探测失败分支
+                        configure:8931-8932 还把两变量重置为空串 → 新式宏有效的"导出 precious 变量"路线在此
+                        完全无效（probe2 实证：与 probe1 逐字节同败）。
+                        (3) AC_PATH_PROG 对 SDL_CONFIG 遵守用户预设：configure:8742 "Let the user override the
+                        test with a path"；宏实际只调用 --version/--cflags/--libs 三种形（configure:8781-8789）。
+                        (4) 正路 = 在 build 目录自建三形齐备的 shim，以 SDL_CONFIG=<shim> 作 configure 参数注入：
+                        探测段通过，宏顺势把 SDL_CFLAGS/SDL_LIBS 覆盖为 shim 输出的消费侧真实路径
+                        （probe4 config.status 实录 S["SDL_CFLAGS"] 为真实 include 路径）。
+affected_scope:         任何 vendored AM_PATH_*/AC_PATH_PROG 探测 *-config 的 autotools 项目（SDL1.2 老宏族及
+                        gpgme/libpng/freetype 等同代项目）在 Conan 打包前缀漂移或交叉场景；本仓配方树同模式实践
+                        3 处（sdl_ttf/2.0.11 自建 shim 注入、smpeg2/2_0_0 SDL_CONFIG 直指依赖包脚本、
+                        lbreakout2/2.6.5 本 run）此前零文档化
+
+verification_cmd:       自包含探针序列（新 shell 可独立复跑；${SDL12}=解析后 sdl12-compat 依赖包的 package_folder）：
+                        wget https://downloads.sourceforge.net/project/lgames/lbreakout2/2.6/lbreakout2-2.6.5.tar.gz &&
+                        echo "9104d6175553da3442dc6a5fc407a669e2f5aff3eedc5d30409eb003b7a78d6f  lbreakout2-2.6.5.tar.gz" | sha256sum -c &&
+                        tar xzf lbreakout2-2.6.5.tar.gz && cd lbreakout2-2.6.5 &&
+                        ./configure --disable-nls --disable-network --disable-sdltest --build=x86_64-unknown-linux-gnu --host=aarch64-unknown-linux-ohos ; echo rc=$?
+                        # 观察点 A（无 SDL_CONFIG）：依赖段先过则 SDL 段硬失败——checking for SDL - version... no +
+                        # "*** The sdl-config script installed by SDL could not be found" + lib SDL is needed，rc=1
+                        printf '#!/bin/sh\ncase "$1" in\n  --version) echo 1.2.68 ;;\n  --cflags) echo "-I${SDL12}/include/SDL -I${SDL12}/include" ;;\n  --libs) echo "-L${SDL12}/lib -Wl,-rpath-link,${SDL12}/lib -lSDL-1.2" ;;\n  *) echo "unsupported sdl-config option: $1" >&2 ; exit 1 ;;\nesac\n' > sdl-config &&
+                        chmod +x sdl-config &&
+                        ./configure --disable-nls --disable-network --disable-sdltest --build=x86_64-unknown-linux-gnu --host=aarch64-unknown-linux-ohos SDL_CONFIG=$PWD/sdl-config ; echo rc=$?
+                        # 观察点 B（shim 注入）：checking for sdl-config... $PWD/sdl-config 被接受、探测段 rc=0，
+                        # config.status 的 S["SDL_CFLAGS"]/S["SDL_LIBS"] 即 shim 输出的真实路径
+verification_evidence:  本 run 留证（Builder 2026-09-18 实跑，脚本+日志可复核；目录
+                        /storage/Users/currentUser/tmp/oh-device-porting-v2/lbreakout2-2.6.5/probe/，
+                        run_probe.sh 四段同一解包基线、SDL_CONFIG/SDL_* 为唯一变量，DONE.txt=PROBE_ALL_DONE）：
+                        - probe1-configure-no-sdl-config.log：无 SDL_CONFIG → configure 硬失败 rc=1（最小环境未注入
+                          依赖 CPPFLAGS/LDFLAGS，首个 fatal 落在 libpng 段；SDL 段失败文本由宏源码
+                          configure:8880-8884/8935 保证）
+                        - probe2-configure-exported-precious-vars.log：导出 SDL_CFLAGS/SDL_LIBS（sdl-mixer/sdl-image
+                          手法）→ 与 probe1 逐字节同日志、同 rc=1 → 老式宏下完全无效的实证
+                        - probe3-configure-packaged-sdl-config.log + probe3-make-first-error-headline.txt/.log：
+                          SDL_CONFIG 指向包内 sdl-config → configure rc=0 假通过，但 SDL_CFLAGS 被覆盖为打包机
+                          死路径 → make 首错 gui/stk.h:21:10: fatal error: 'SDL.h' file not found
+                        - probe4-configure-self-built-shim.log + probe4-make-progress-headline.txt/.log：SDL_CONFIG
+                          指向自建 shim → configure rc=0，config.status S["SDL_CFLAGS"]=真实 include 路径，make
+                          越过 SDL.h 编译进入 gui 深层（SDL_mixer.h 在探针作用域外，配方中由 CPPFLAGS 补齐）
+                        正路径 CI 佐证：worktree .ci_logs/conan_build_lbreakout2_2.6.5.log:95（configure 命令行含
+                        SDL_CONFIG=<build>/sdl-config）与 :241（checking for sdl-config... <shim> 被接受；run2 PASS）
+
+# ═══ Layer 3: 方案层 (Solution Space) ═══
+rec_priority:           1
+rec_approach:           x-config-self-built-shim-ac-path-prog-preset
+rec_description:        配方 build() 内自建 shim：(a) 位于 build 目录，不碰依赖包缓存；(b) include/lib 路径由
+                        self.dependencies 解析后的 package_folder 拼出（能力注入，非硬编码）；(c) 三形齐备——
+                        --version/--cflags/--libs（AC_PATH_PROG 实际只调这三种），未知形显式报错退出，上游宏
+                        演化时早暴露；(d) 以 SDL_CONFIG=<shim> 作 configure 参数注入（AC_PATH_PROG 预设，
+                        configure:8742 明文支持），不动 PATH、不导环境。老式宏随即自行把 SDL_CFLAGS/SDL_LIBS
+                        覆盖为 shim 输出——顺势而为，不与宏对抗。
+rec_command:            配方实现样例 archives/l/lbreakout2/2.6.5/conanfile.py（写 shim + configure_args 追加
+                        "SDL_CONFIG=" + shim）；探针级最小样例见 verification_cmd 的 printf 段
+
+fallback_priority:      2
+fallback_approach:      exported-precious-vars（仅新式宏有效，须先做代际判别）
+fallback_description:   导出 X_CFLAGS/X_LIBS precious 变量（sdl-mixer/sdl-image 手法）。代际判别法：读 vendored
+                        m4/configure——含 PKG_CHECK_MODULES 短路或对变量 set 状态检查者为新式，导出即最小干预
+                        首选；老式宏（如 1999 AM_PATH_SDL）无条件覆盖 → 完全无效（probe2 实证）。适用边界必须
+                        写明，防止在老式宏上空转。
+fallback_command:       SDL_CFLAGS="-I${SDL12}/include/SDL -I${SDL12}/include" SDL_LIBS="-L${SDL12}/lib -Wl,-rpath-link,${SDL12}/lib -lSDL-1.2" ./configure --host=aarch64-unknown-linux-ohos ...
+
+fallback2_priority:     3
+fallback2_approach:     path-prepend-x-config-wrapper（E433 手法）
+fallback2_description:  自建 wrapper 经 PATH 前置注入（conan Environment.prepend_path，注意 prepend 顺序，
+                        最后 prepend config-overrides/bin 才能胜出）。通用性更强——上游硬编码调用 x-config 而无
+                        X_CONFIG 入口时仍生效；代价是作用域大（PATH 上所有 x-config 调用被接管）、顺序敏感。
+                        能用 AC_PATH_PROG 预设时不选它。
+fallback2_command:      env = Environment(); env.prepend_path("PATH", str(config_overrides_bin))  # 于 build() 应用
+
+forbid_1_pattern:       sed -i.*/\.conan2/.*-config
+forbid_1_reason:        直改依赖包缓存内 *-config：conan 包缓存对配方只读；依赖脚本/元数据修正属该依赖自己的 PR（PR 原子性）
+forbid_1_consequence:   缓存重解包/校验即丢改动，其他消费者不受益，本地缓存状态被污染且难复现
+forbid_2_pattern:       SDL_CONFIG=(/usr/bin|/usr/local/bin)/sdl-config
+forbid_2_reason:        依赖宿主系统 sdl-config：宿主脚本报告宿主前缀与宿主 ABI，configure 探测假通过
+forbid_2_consequence:   链到宿主（x86_64）库或错 ABI，错误推迟到 link/runtime 期才爆，排查成本更高
+
+# ═══ Layer 4: 原则引用与关系图 ═══
+principles:             P-ENV-001（id P014）环境变量与构建系统语义冲突→优先构建系统原生机制；X_CONFIG 作
+                        configure 参数即 AC_PATH_PROG 原生预设入口（作者复核：比 PATH 前置/环境注入更贴合该
+                        原则取向）
+similar_to:             E433（*-config wrapper 族最近邻；差异=注入路线 PATH 前置 vs AC_PATH_PROG 预设参数、
+                        根因面 脚本过滤自身 include vs 前缀固化+宏覆盖 precious 变量、E433 不涉及宏代际决策）、
+                        DRAFT-E572-removed-config-script-pkgconfig-migration（config script 移除族；前提相反——
+                        脚本被上游删除 vs 脚本存在但输出死路）、E064（探针执行限制族，不同层不覆盖）、
+                        sdl-image-1.2.12-autotools-cross-ohos（SDL1.2 autotools 交叉族；'SDL.h not found' 家族
+                        失败面同源，本条补齐 *-config 探测语义层）
+related:                archives/l/lbreakout2/2.6.5/conanfile.py（rec 实现样例）、knowledge/graph/E011.kv（HMDFS
+                        umask，同 run 配套补丁 0002-configure-umask）、E007（config.sub aarch64/linux-ohos，
+                        同 run 配套补丁 0001-config.sub）
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-old-config-macro-precious-var-clobber-x-config-shim.md
+last_updated:           2026-09-19
+source_event:           lbreakout2 2.6.5 OHOS 适配（run_key=lbreakout2-2.6.5）；SDL_CONFIG shim 为 CI run2 PASS
+                        构建的关键路径，fail-first 探针四段补齐阻塞面证据
+authors:                sea_crab <gcw_pI8jWfnO@noreply.gitcode.com>

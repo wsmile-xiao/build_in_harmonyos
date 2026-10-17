@@ -1,0 +1,117 @@
+#====================================================================
+# E568-draft — Release(-DNDEBUG) 下共享库残留未解析符号：条件编译守卫不一致导致链接失败
+# 对应的人类文档: doc/E568.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E568
+trigger_tool: ld.so 动态加载器 / clang 链接器
+phase: link
+error_signature: undefined symbol: [a-z0-9_]+|Symbol not found|error adding symbols: DSO missing|undefined reference to .* but library contains no definition
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 3
+category: linking|portability|build
+match_keywords: undefined symbol, NDEBUG, dlopen failed, symbol lookup error, 未解析符号, 共享库加载失败, -DNDEBUG, assert guard, bjnp-debug.c, libinklevel
+title: Release(-DNDEBUG)下 NDEBUG 守卫剔除的内部函数定义与无条件调用不一致,共享库残留未解析符号,消费者加载即失败
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: 上游库同时提供 release 与 debug 构建路径,把调试 helper 的定义放进 #ifndef NDEBUG,但调用点(或在 NDEBUG 之外的其他文件)未同步加守卫;上游默认 ./configure && make 不带 -DNDEBUG,因此缺陷长期潜伏。Conan/发行版 Release 构建由 AutotoolsToolchain 注入 -DNDEBUG 后暴露:定义被预处理剔除、引用仍在,libtool 默认不传 --no-undefined 故链接期不报错,直到消费者 dlopen 才炸
+affected_scope: 所有上游默认构建不带 -DNDEBUG、而消费者/发行版以 Release(NDEBUG) 构建的 autotools/CMake C 库;典型为调试 helper(hexdump/level2str/日志格式化)被守卫包裹的老代码
+verification_cmd: nm -D --undefined-only <pkg>/lib/lib<name>.so* | grep -v 'GLIBC\|libc\.'; grep -rn '#ifndef NDEBUG' <src>/*.c | head
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: remove-NDEBUG-guard-around-definitions
+rec_description: 打补丁去掉 #ifndef NDEBUG 守卫(保留函数本体)使定义无条件编译;仅适用于纯日志/转储 helper,若有真实副作用则改为给调用点补同样守卫
+rec_command: patch -p1 < patches/0001-remove-ndebug-guard.patch
+rec_auto_fix: false
+rec_impl: conandata patches + apply_conandata_patches, patch_type: bugfix
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: strip-NDEBUG-from-toolchain
+fallback_description: 配方内向 AutotoolsToolchain 去掉 NDEBUG 定义(还原上游默认语义),代价是 Release 保留 assert;仅在守卫移除会改变上游行为时使用
+fallback_command: (recipe) tc = AutotoolsToolchain(self); tc.defines = [d for d in tc.defines if d != 'NDEBUG']
+fallback_auto_fix: false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:
+forbid_1_reason:
+forbid_1_consequence:
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles: 构建期不报错不等于产物可用——共享库必须做未解析符号检查(nm -D --undefined-only);上游默认构建参数的成功不可外推到 Release/发行版参数;禁止用空壳 stub 掩盖缺失定义
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes: 链接期静默通过、消费者 dlopen/启动时报 undefined symbol,库不可用
+caused_by: 上游 debug helper 定义被 #ifndef NDEBUG 守卫包住而调用点无守卫 + 消费者以 Release(-DNDEBUG) 构建
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+keywords: NDEBUG guard, assert 守卫, 定义缺失, 未解析符号, dlopen 失败, 消费者加载失败, Release 构建, AutotoolsToolchain, conanfile 默认 CFLAGS, 上游 latent bug, weak 符号, libtool, shared library
+approach: 共享库能编译成功(无 -Wl,--no-undefined)但在消费者进程加载时报 undefined symbol 时,先 nm -D --undefined-only 列出未定义符号,再在源码里 grep 该符号名:若定义位于 #ifndef NDEBUG(或其它平台/调试宏)守卫内、而调用点在该守卫之外,即为命中。修复:对 NDEBUG 场景去掉守卫常编译定义(日志/转储类 helper 无副作用),而不是删掉 -DNDEBUG,也不要用空壳 stub 顶替。
+doc_file:               doc/E568.md
+last_updated: 2026-09-13
+source_event: libinklevel 0.9.7 OHOS aarch64 conan create:test_package 加载 libinklevel.so.5 报 undefined symbol bjnp_hexdump/level2str/str2level;补丁去掉 bjnp-debug.c 的 NDEBUG 守卫后 4 例消费者测试全通过
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors: wingsluo
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: FD39

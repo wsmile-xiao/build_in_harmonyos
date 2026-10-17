@@ -1,0 +1,121 @@
+#====================================================================
+# DRAFT-gated-sublib-dual-archive-closure — 单工程门控子库的静态链接闭包
+#   与伴生库未发布（R36）下的单包双库自含打包决策规程
+# 触发事件: libdwarfp 2.1.0 HarmonyOS PC 适配（archives/l/libdwarfp/2.1.0，
+#   CI round-01 一次通过；上游测试 26/26 原生全过）
+# 主从：单一主题（上游 option 门控子库目标 + 静态归档跨库未定义符号
+#   + 伴生库版本未发布制品仓 → 单包双库自含打包），无拆分
+#====================================================================
+
+id:                     DRAFT-gated-sublib-dual-archive-closure
+trigger_tool:           conan|cmake|ld.lld|llvm-nm
+phase:                  configuration|linking
+error_signature:         undefined reference to .*(dwarf_encode_|dwarfstring_)|
+                         Dependencies not published to registry \(R36\)|unpublished_deps|
+                         Unable to find '.*' in remotes|Package '.*' not resolved|
+                         Target ".*" not found|
+                         static library.*transitive dependencies
+
+severity:               2
+category:               build-chain|static-lib|conan
+match_keywords:         门控, gated sublib, BUILD_DWARFGEN, option, add_subdirectory,
+                         单包双库, dual-archive, self-contained, 自含, 静态库, staticlib,
+                         undefined symbol, undefined reference, 未定义符号,
+                         R36, 未发布, unpublished, conan download, ohpcd,
+                         cpp_info.libs, LIBDWARF_STATIC
+title:                  上游单工程以工具选项门控子库目标、且其伴生库未发布制品仓时，应单包双库自含打包闭合静态链接
+
+root_cause: >
+  三层复合机理（任一层存在即需自含式打包）：
+  (1) 工程结构层：上游单工程以 CMake option 门控子库目标（libdwarf 2.1.0
+  顶层 CMakeLists.txt 仅在 BUILD_DWARFGEN=TRUE 时 add_subdirectory(src/lib/libdwarfp)），
+  且子库目标 target_link_libraries(<sub> PRIVATE <companion>) 同工程链接伴生库，
+  子库无法脱离伴生库独立配置/构建；
+  (2) 链接语义层：子库静态归档不内嵌伴生库符号——跨库公开 API 未定义符号
+  （libdwarfp.a 实测 2 个：dwarf_encode_leb128/dwarf_encode_signed_leb128，
+  libdwarf.h:9667/9671）与跨库内部符号（7 个 dwarfstring_*，借用的
+  dwarf_string.c 同时编入两归档）必须由伴生库归档在链接期闭合；只打包子库
+  .a 的包对静态下游必然 undefined reference；
+  (3) 依赖治理层：伴生库该版本未发布到制品仓（ohpcd 只有 libdwarf/0.11.1），
+  CI 门禁 R36/L0i 用 conan download --only-recipe 探测每个 requires，
+  未发布依赖是确定性 fail（unpublished_deps），不是可重试问题。
+affected_scope: >
+  所有"单工程多库 + option 门控子库"形态的上游（producer/consumer、
+  core/util 同工程多库）的 Conan 化适配；凡子库静态归档引用伴生库符号、
+  而伴生库目标版本未发布制品仓的场景。典型：libdwarfp（dwarf producer）、
+  其他同工程读写双库或工具+库结构。
+verification_cmd: >
+  # 1) 探测上游门控（子库目标是否存在、被什么选项守卫）：
+  grep -n "add_subdirectory.*<sublib>" <top>/CMakeLists.txt
+  # 2) 探测子库静态归档跨库未定义符号（llvm-nm -u，小写 u；总数与逐符号）：
+  llvm-nm -u <pkg>/lib/lib<sublib>.a | grep -c ' U '
+  llvm-nm -u <pkg>/lib/lib<sublib>.a | grep ' U <companion>_'
+  # 3) 探测伴生库制品仓版本缺口（conan list 仅作人工佐证；
+  #    CI 门禁实际语义是 conan download --only-recipe 探测，R35/R36）：
+  conan list "<companion>/*" -r <remote>
+  conan download "<companion>/<ver>" -r <remote> --only-recipe
+  # 三项齐备（门控存在 + 有跨库未定义符号 + 伴生库未发布）即命中本模式。
+
+rec_priority:           1
+rec_approach:           single-package-dual-archive-closure
+rec_description: >
+  单包双库自含打包：整工程一起构建（显式打开门控选项，如
+  BUILD_DWARFGEN=True），打包同时交付子库与伴生库归档 + 全部公共头文件
+  + 各自 license；package_info() 声明 cpp_info.libs = [<sublib>, <companion>]
+  （与 libdwarf 配方 with_dwarfgen=True 路径"单包双归档闭包"同型）；静态
+  构建补 cpp_info.defines（如 LIBDWARF_STATIC=1）；剔除工具可执行文件与
+  工程打包元数据（bin/、lib/cmake、lib/pkgconfig、share/）以避免与伴生库
+  独立包的产物/头文件冲突，并在 notes 声明头文件共存警示。伴生库日后发布
+  制品仓且 R37 允许时可回退 requires() 模式（诚实权衡：受制于发布节奏）。
+rec_command: >
+  # conanfile.py（以 libdwarfp/2.1.0 为例）
+  # generate(): tc.variables["BUILD_DWARFGEN"] = True  # 打开门控
+  # package(): cmake.install() 后 rmdir bin/ lib/cmake lib/pkgconfig share/
+  #   （保留 include/<sublib>.h <companion>.h <common>.h 与
+  #    lib/lib<sublib>.a lib/lib<companion>.a 及双 license）
+  # package_info():
+  self.cpp_info.libs = ["dwarfp", "dwarf"]
+  if not self.options.shared:
+      self.cpp_info.defines = ["LIBDWARF_STATIC=1"]
+
+rec_auto_fix:           false
+rec_impl:               conan-recipe-dual-archive-closure
+
+fallback_priority:      2
+fallback_approach:      publish-companion-then-requires
+fallback_description: >
+  待伴生库版本发布到制品仓后（或由其他 run 先行适配发布），回退为标准
+  requires() 依赖模式，包内只保留子库产物；需先过 R37 版本占用检查
+  （制品仓不支持同版本多 revision 并存）。
+fallback_command:       conan list "<companion>/*" -r <remote>  # 确认版本已发布后再改写配方
+
+forbid_1_pattern:       requires\(.*<unpublished-ver>.*\)
+forbid_1_reason: >
+  对未发布到制品仓的依赖版本声明 requires()，CI 门禁 R36/L0i 用
+  conan download --only-recipe 探测，确定性 fail（unpublished_deps /
+  Package not resolved），重试无意义（ci/conan/build_and_test.sh:481-529）。
+forbid_1_consequence:   L0_RESULT=fail: unpublished_deps，conan create 前即被拦截
+
+forbid_2_pattern:       cpp_info\.libs = \["<sublib>"\](?!.*<companion>)
+forbid_2_reason: >
+  只打包子库 .a：静态归档不内嵌伴生库符号，跨库公开 API 与内部符号
+  在下游链接期必然未定义。
+forbid_2_consequence:   下游 test_package/消费者链接失败（undefined reference to dwarf_encode_leb128 等）
+
+principles:             P010, P012
+similar_to:             [E277, E278, DRAFT-KPACKAGE-KARCHIVE-619-ZLIB-DISCOVERY]
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-gated-sublib-dual-archive-closure.md
+last_updated:           2026-09-14
+source_event:           archives/l/libdwarfp/2.1.0（round-1 CI 一次通过；上游测试 26/26 原生全过；llvm-nm -u 实测 135 未定义引用）
+
+authors:                GoliWie <GoliWie@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-14

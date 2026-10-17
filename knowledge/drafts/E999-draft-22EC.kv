@@ -1,0 +1,85 @@
+#====================================================================
+# E999 草稿 — OHOS（musl 系 libc）上游测试/库代码的 glibc 专有符号与
+# 64 位整数对齐溢出两类可移植性陷阱（iqueue 2.2，2026-09-23）
+#
+# 场景: iqueue 2.2（上游纯 Makefile C 工程）适配 OHOS aarch64 时，
+#       上游测试 src/test.c 与库代码 src/iqueue.c 命中两类跨库可复用问题：
+#       ①allocated_bytes() 使用 glibc 专有 malloc_stats()，OHOS libc
+#       未导出该符号，链接报 undefined symbol: malloc_stats；
+#       ②new_iqueue() 用 uint32_t aligned_capacity 对超大容量对齐，
+#       64 位下左移越过 2^32 溢出为 0，while 死循环（本应 EINVAL）。
+#       另有测试侧 ③：clearsignal_iqsignal() 返回 uint32_t，而测试循环用
+#       size_t i 计数，64 位下 i≥2^32 时断言必然失败。
+# 适用: 所有在 OHOS（musl 系 libc）上运行上游测试或移植含 glibc 专有
+#       扩展（malloc_stats 等）/ uint32 对齐循环的 C/C++ 库。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E999
+trigger_tool:           ld|clang|test
+phase:                  linking|testing|runtime
+error_signature:        undefined symbol: malloc_stats|malloc_stats.*referenced|while \(aligned_capacity < capacity\)|TEST failed.*clearsignal|ld\.lld: error: undefined symbol: malloc_stats
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               libc, musl, testing, portability
+match_keywords:         malloc_stats, malloc.h, glibc, __GLIBC__, musl, OHOS, undefined symbol, aligned_capacity, uint32_t, overflow, EINVAL, size_t, clearsignal_iqsignal, TEST, 64-bit, test loop
+title:                  OHOS musl libc 缺 glibc 专有符号（malloc_stats）用 __GLIBC__ 守卫；uint32 对齐容量 64 位溢出改 size_t 并返回 EINVAL；测试循环计数类型须与 API 返回类型一致
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             ①OHOS libc 为 musl 系，无 glibc 专有 malloc_stats()；上游测试在 #ifdef __linux 下编译该路径导致链接失败，需改 #if defined(__linux) && defined(__GLIBC__) 走上游自带回退分支（allocated_bytes 返回 0）。②uint32_t aligned_capacity 在 64 位上可超过 UINT32_MAX：new_iqueue(0xFFFFFFFF) 时左移 2^32 溢出为 0，while(0 < capacity) 死循环；上游在 32 位下靠 (size_t) 上限检查返回 EINVAL，64 位下该检查不可达。③测试循环 for(size_t i=1;;i<<=1) 与 uint32_t 返回类型比较，64 位 i≥2^32 时必然失败；循环计数须与 API 返回/字段类型一致。
+affected_scope:         所有 OHOS（musl 系）构建的、上游测试或库代码含 glibc 专有扩展或 uint32 容量对齐/计数循环的 C/C++ 库；64 位目标上尤其常见。
+verification_cmd:       clang -Iinclude -std=c99 -O3 src/test.c bin/iqueue.a -lpthread -o bin/iqueue_test && ./bin/iqueue_test
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           glibc-ext-guard-and-64bit-align-fix
+rec_description:        ①glibc 专有符号路径用 #if defined(__linux) && defined(__GLIBC__) 守卫，非 glibc（OHOS/musl）走上游自带 #else 回退；②容量对齐变量改 size_t 并在左移前检测超出 uint32_t 范围即返回 EINVAL；③测试循环计数类型与 API 返回类型（uint32_t）对齐。
+rec_command:            sed -i 's/#ifdef __linux$/#if defined(__linux) \&\& defined(__GLIBC__)/' src/test.c   # + size_t aligned_capacity + uint32_t 循环计数
+rec_auto_fix:           false
+rec_impl:               conanfile-edit
+
+# 回退方案
+fallback_priority:      2
+fallback_approach:      patch-upstream-test
+fallback_description:   无法改上游库源码时，用 patches/*.patch 携带上述最小改动（注意 PF5：补丁新增行不得含 __OHOS__，故用 __GLIBC__ 作为守卫而非平台宏）。
+fallback_command:       patch -p1 < patches/0001-*.patch
+fallback_auto_fix:      false
+fallback_impl:          patch-file
+
+# ★ 禁止策略 ★
+forbid_1_pattern:        -D__OHOS__|#ifdef __OHOS__|#if defined\(__OHOS__\)
+forbid_1_reason:         PF5/R8：patches 新增行禁止平台宏 __OHOS__，会触发 CI 拦截。
+forbid_1_consequence:    preflight PF5 拦截，CI 红。
+forbid_2_pattern:        malloc_stats\(\)\s*;
+forbid_2_reason:         OHOS/musl libc 不存在该 glibc 专有函数；直接调用链接必失败。
+forbid_2_consequence:    ld.lld undefined symbol: malloc_stats。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P020
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             E245
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E999.md
+last_updated: 2026-09-23
+source_event:           iqueue 2.2 OHOS 适配 (2026-09-23)
+
+# ═══ 知识协作 ═══
+authors:                AtomCode
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-23
+
+draft: true
+contributor_id: 22EC

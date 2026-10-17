@@ -1,0 +1,85 @@
+# test_package/MANIFEST.yml — wmfire 1.2.4
+# 上游官方测试声明文件 (CI 脚本 build_and_test.sh L0e 强制要求存在)
+# 详见: docs/TEST_QUALITY_SPEC.md
+
+package: wmfire/1.2.4
+homepage: "https://www.improbability.net/wmfire/"
+
+# 上游测试命令
+upstream_check_command: "make check"
+
+# conanfile.py build() 中是否已集成上游测试
+upstream_test_in_build: true
+upstream_test_command: "make check"
+
+# 上游 make check 实际运行的测试程序
+# wmfire 1.2.4 的 Makefile.am 未声明 TESTS 变量，也没有 test suite 目录，
+# 因此 `make check` 是「成功的空操作」——入口被执行但不运行任何用例。
+# 仍保留该调用，以证明此入口在 OHOS 上可正常执行（见 conanfile.py build()）。
+upstream_tests: []
+
+# test_package 中自带的鸿蒙特有测试（具名端到端消费者用例，编译产物 src/hc_consumer.c）
+#
+# 背景：wmfire 的 main() 在解析任何命令行参数之前就先调用 gdk_init_check()，
+# 无 X display 时打印诊断并 exit(-1)。因此该二进制无法在无头 CI 中完成一次运行，
+# 但**可以被启动**：OHOS musl 加载器在 exec 时解析完整 DT_NEEDED 闭包，之后 main()
+# 才走到依赖 display 的初始化并退出。这一特性正是 HC-2 的判据。
+#
+# 实现约束（知识库 E502）：鸿蒙 CI 运行器拒绝 dlopen/LD_PRELOAD 用户目录下的 .so，
+# 因此全部用例只走 exec-time DT_NEEDED 加载路径，不使用 dlopen。
+#
+# 实现约束（知识库 E505）：OHOS musl 按名字打开 DT_NEEDED 且不跟随符号链接，
+# 依赖以 `libX.so.1 -> libX.so.1.2.3` 形式投递时加载器看不到它，wmfire 会以
+# "Error loading shared library libXrender.so.1" 退出。conanfile.py test() 因此
+# 先用 `cp -nL`（先到先得，保留 LD_LIBRARY_PATH 搜索顺序）把 conan 依赖闭包摊平到
+# 临时目录再启消费者（与已入库的 wmgtemp 消费者测试同一手法）；直接使用 conan 缓存
+# 目录会复现该加载错误。
+#
+# 实现约束（libc++_shared.so 优先级）：OHOS 上有三份 libc++_shared.so——
+# SDK llvm/lib/aarch64-linux-ohos（1267392 B，带 .codesign，可加载）、
+# /system/lib64（1289544 B，可加载）、/data/storage/el1/bundle/libs/arm64
+# （7519624 B，应用包副本，加载器拒绝）。VirtualRunEnv 的 LD_LIBRARY_PATH 尾巴
+# 含 /data/storage/el1/bundle/libs/arm64，若 sweep 用后到先得会让那份不可加载的
+# 副本覆盖工具链的可加载副本。test() 因此先播 SDK libc++_shared.so 再用 cp -nL
+# sweep（平台 cp 支持 -n，先到先得），还原加载器搜索顺序。
+test_package_tests:
+  - file: src/hc_consumer.c
+    id: HC-1
+    description: >-
+      elf-contract: 读取已安装的 bin/wmfire，校验其 ELF 契约——ELF64/小端/AArch64、
+      ET_DYN(PIE)、存在 OHOS .codesign 段、DT_NEEDED 非空
+    command: "./hc_consumer <pkg>/bin/wmfire"
+  - file: src/hc_consumer.c
+    id: HC-2
+    description: >-
+      loader-closure: 【具名端到端用例】在 conanrun 环境中以无 DISPLAY 方式 exec 已安装的
+      bin/wmfire —— OHOS 加载器必须解析其全部 DT_NEEDED 闭包（musl 不跟随符号链接，
+      依赖 .so 未摊平会在此暴露），且 main() 必须真正被执行到
+      （以 stderr 出现 "GDK init failed" 且退出码 255 为证）；出现任何加载器诊断即判失败
+    command: "./hc_consumer <pkg>/bin/wmfire"
+  - file: src/hc_consumer.c
+    id: HC-3
+    description: >-
+      x11-geometry-parse: 功能用例——真实调用 XParseGeometry()（wmfire 处理 -g 选项所用
+      src/wmfire.c:664 同一入口），校验解析出的宽高/偏移与返回的 mask 位
+    command: "./hc_consumer <pkg>/bin/wmfire"
+  - file: src/hc_consumer.c
+    id: HC-4
+    description: >-
+      cpu-sample: 功能用例——在子进程中真实调用 glibtop_init() + glibtop_get_cpu()
+      （wmfire 每次刷新绘制火焰所用的同一入口 src/wmfire.c:286,391），并写成交叉校验的
+      蕴含式：先在本进程域内独立探测 /proc/stat 是否可读；可读时要求两次采样返回非零且
+      单调不减的真实 jiffies/idle；不可读时（鸿蒙 /proc 以 hidepid=invisible,hmmac=genfs
+      挂载，MAC 策略只允许系统镜像内二进制读取 /proc/stat，libgtop 的 CPU sysdeps 正是读它）
+      要求采样器必须拒绝执行并精确报出 /proc/stat + Permission denied，绝不允许伪造计数器。
+      子进程隔离运行，libgtop 的拒绝不会带走整个消费者进程。
+    command: "./hc_consumer <pkg>/bin/wmfire"
+
+# 测试判定总数（gating 断言逐条计）
+#   HC-1 = 3 （elf_open 契约、DT_NEEDED>0、.codesign 存在）
+#   HC-2 = 4 （正常退出、退出码 255、无加载器诊断、出现 GDK 诊断）
+#   HC-3 = 10（4 个数值 + 6 个 mask 位）
+#   HC-4 = 4 （① 平台能力被独立探测；② 子进程结束方式与能力一致；③ 计数器断言：
+#              可读时非零且单调不减 / 不可读时必须为 0；④ 拒绝理由必须精确匹配
+#              /proc/stat + Permission denied）
+assertion_count: 21

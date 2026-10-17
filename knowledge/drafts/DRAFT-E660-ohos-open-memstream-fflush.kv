@@ -1,0 +1,70 @@
+# ═══ Draft knowledge entry — OHOS musl open_memstream 不显式 fflush 则缓冲/大小不回写 ═══
+# Timestamp: 2026-09-22
+# Software: mustach 1.2.10（任何用 open_memstream 实现"内存渲染/内存拼接"输出的 C 库）
+# Gate: 原生运行验证（conan build() 内测试 / test_package / 真机 CLI）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-E660
+title: "OHOS musl 的 open_memstream 纯 fclose 不回写 *buffer/*size（输出恒空、size 下溢），必须先 fflush 再 fclose；tmpfile() 因 /tmp 只读同样不可用"
+trigger_tool: open_memstream / musl
+phase: testing
+error_signature: sz=18446744073709551615|size underflow|\*size\s*--\s*on\s+zero|rendered output empty
+severity: 1
+category: platform|libc|false-green
+match_keywords: open_memstream,fclose,fflush,memstream,musl,OHOS,tmpfile,/tmp read-only,
+  内存渲染,空输出,size 下溢,18446744073709551615,mustach_mem
+keywords: open_memstream 不回写,fflush before fclose,HarmonyOS musl,内存输出恒空,
+  mustach 1.2.10,memfile_close,fputc 0,tmpfile NULL,只读 /tmp,内存渲染
+approach: OHOS 平台 musl 的 open_memstream 仅在**显式 flush** 时才把字节与长度发布到
+  调用方的 *buffer/*size；"写入后直接 fclose"（std 流缓冲在 close 时才落）时
+  fclose 后 *buffer 为空串、*size 为 0——上游若再做 `(*size)--` 即下溢成
+  SIZE_MAX（18446744073709551615），且进程退出期可触发 SIGTRAP。处置：给
+  memfile_close 一类封装在 fclose 前补 fflush(file)（一行平台补丁，不改 API）；
+  设备探针四象限实测——plain close sz=0 / fputc+close sz=0 / fflush+close sz=11 /
+  fputc+fflush+close sz=12。注意替代路径 tmpfile() 在设备返回 NULL（/tmp 只读），
+  不可作为 fallback；同理任何 （星号）_mem 渲染类接口在 OHOS 上采信前必须先用最小探针
+  验证 open_memstream 回写行为
+root_cause: HarmonyOS 修改版 musl 的 open_memstream 实现把缓冲发布挂在显式 flush
+  上，与"fclose 隐式刷新并回写"的常规预期不符；写入数据停留在 stdio 缓冲，
+  fclose 时缓冲内容未进入 open_memstream 的动态缓冲区
+affected_scope: OHOS 设备上所有经 open_memstream 做"渲染到内存"的 C 库及其 （星号）_mem
+  接口（mustach 1.2.10 的 mustach_mem/mustach_cJSON_mem/mustach_json_c_mem/
+  mustach_jansson_mem 全命中）；glibc 上正常的上游测试在 OHOS 上输出恒空但
+  退出码 0，属高隐蔽假绿
+verification_cmd: printf '#include <stdio.h>\n#include <string.h>\nint main(void){char *b=0;size_t s=0;FILE *f=open_memstream(&b,&s);fputs("ab",f);fclose(f);return s==2?0:1;}\n' | /data/service/hnp/bin/clang -x c -o ms_probe - && ./ms_probe; echo "memstream-rc=$? (1=命中:纯fclose不回写)"
+rec_priority: 1
+rec_approach: fflush-before-fclose-patch
+rec_description: 在库内 memstream 封装的 close 路径补 fflush(file) 后再 fclose，
+  以包补丁交付并在 PR 说明；不得改用 tmpfile() fallback（设备 /tmp 只读，实测
+  返回 NULL）；修复后以最小探针 + 真实 （星号）_mem 调用双向复核
+rec_command: printf '#include <stdio.h>\n#include <string.h>\nint main(void){char *b=0;size_t s=0;FILE *f=open_memstream(&b,&s);fputs("ab",f);fflush(f);fclose(f);return (s==2&&b&&0==strcmp(b,"ab"))?0:1;}\n' | /data/service/hnp/bin/clang -x c -o ms_probe - && ./ms_probe && echo OHOS-MEMSTREAM-OK
+rec_auto_fix: false
+rec_impl: 包补丁（上游源码一行级平台适配，patches/ 登记）
+fallback_priority: 3
+fallback_approach: replace-mem-with-file-output
+fallback_description: 无法打补丁时改走 *_file/fd 输出路径（真实 FILE* 直写不经过
+  memstream），或自建缓冲渲染；不得依赖 tmpfile()
+fallback_command: (改调 <lib>_file 接口，输出重定向到 $TASK_DIR 下的可写文件)
+fallback_auto_fix: false
+fallback_impl: 消费侧规避
+principles: 平台 musl 差异要先用最小探针定性再写补丁；"退出码 0 + 输出恒空"是
+  典型假绿形态，内存渲染接口的验证必须断言输出内容与 size 而非只看 rc
+caused_by: HarmonyOS musl open_memstream 的缓冲发布挂在显式 flush 上
+causes: （星号）_mem 接口返回空串且 *size 下溢；依赖 size 的调用方按 SIZE_MAX 分配/
+  循环即崩溃或挂死
+similar_to: E011/E547（同为设备临时目录/内存文件路径类平台差异；E011 是 umask 权限
+  位、E547 是 P_tmpdir 优先级、本条是 memstream flush 语义）
+conflicts_with:
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-E660-ohos-open-memstream-fflush.md
+last_updated: 2026-09-22
+source_event: mustach 1.2.10 设备适配：test_package 消费者断言 3 失败，最小探针
+  四象限定性 open_memstream flush 语义，memfile_close 补 fflush 后 13/13 通过；
+  tmpfile() 设备实测返回 NULL
+authors: Awstme
+source_pr: (本 PR)
+source_commit: (待提交后回填)
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 1.0
+metrics_last_used: 2026-09-22

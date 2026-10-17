@@ -1,0 +1,110 @@
+# ═══ Draft knowledge entry — 上游把 errno 当普通局部变量名声明：有的 libc 编不过、有的编过但错误检查成死代码 ═══
+# Timestamp: 2026-09-25
+# Software: proda 1.0（首个实证先例）——凡"声明 int errno"且未显式 include errno.h 的上游都适用
+# Gate: 编译期实测（OHOS aarch64 / musl / clang 15）
+# Status: create（【四范围】查重零命中——检索面覆盖 ①knowledge/graph/*.kv ②knowledge/graph/index.tsv
+#         ③knowledge/drafts/*.kv ④archives/**/notes.md（W4 r2 P3 补正：原申报只写了 ①③）：
+#         graph 侧按 index.tsv 关键词列命中 4 行（E008/E190/E405/E415，E190 实为 Perl XS 构建参数属假命中）；
+#         按 .kv 正文 grep errno 命中 13 个 .kv——两个口径逐条读原文，无一讲「把 errno 当变量名声明」；
+#         E400 关键词 __errno_location 重合但属 V8 运行期断言、不同层次，亦判假阳性；
+#         drafts 定向检索「局部变量 × errno 宏」0 命中；
+#         archives 面最近邻是「extern int errno」族（daemontools notes.md:18,27,43 与其 manifest.yaml:77 的
+#         ref:E999、bootp、bsdutils、iozone、buffer）：该族是**自己写 extern int errno 去取全局 errno**
+#         （POSIX 已不推荐的旧写法，处置=补 include errno.h），与本条**把 errno 当局部自动变量名声明、遮蔽宏**
+#         根因不同、处置面不同、症状不同（那族各 libc 都能编过，本条在 musl 上直接编不过）
+#         ⇒ 判不同机制、本条仍为 create；similar_to 未列该族属已知披露缺口，此句即为补正）
+# 取用说明：本条由通用池草稿 DRAFT-PKG-VER-libc-errno-name-used-as-local-variable 复制改名而来，
+#         占位字段已换成 proda 1.0 的实测值；本包为该项的首个实证先例。
+
+id: DRAFT-proda-1.0-libc-errno-name-used-as-local-variable
+title: 上游把 errno 当普通局部变量名声明（且未显式 include errno.h）——在把头文件链意外带进 errno.h 的 libc 上编译期报 illegal initializer，在没带进来的 libc 上照样编过、却把真线程 errno 遮蔽成死代码（错误检查永不生效）。首个实证落点：proda 1.0 的 Main.cc 解析辅助函数 GetInteger()，唯一调用点是命令行 -L 参数的取值解析
+trigger_tool: clang|conan|make
+phase: compilation
+# （W4 r2 P3 收窄：删去 use of undeclared identifier——那是补丁 0002 的签名，会把别包的 stdio
+#   缺失误配到本条；同时删去两个本包未实测的推测签名。prescan_globs 一并删去 conanfile.py 噪声）
+error_signature: "error: illegal initializer|illegal initializer.*__errno_location"
+severity: 2
+category: portability|libc|musl|glibc|macro-collision|silent-failure
+match_keywords: errno,illegal initializer,__errno_location,macro expansion,局部变量遮蔽,dead code,strtol,LONG_MAX,LONG_MIN,errno.h,include 链,静默失效,musl,glibc
+prescan_pattern: \bint\s+errno\b|errno\s*=\s*0|strtol\(|strtoll\(|strtod\(
+prescan_globs: "**/*.c, **/*.cc, **/*.cpp, **/*.h"
+safety_boundary: 只覆盖「**把 errno 当标识符名去声明**」这一种写法造成的两类后果（编译期宏冲突 / 运行期死代码）。
+  ⚠ **不要**外推到"OHOS 没有 errno"或"musl 与 glibc 的 errno 语义不同"——两边 errno 都是宏
+  `(*__errno_location())`，本条讲的是**上游自己的命名错误**在不同 include 链下的两种暴露方式。
+  ⚠ 也不覆盖 `errno` 的线程局部性、`setsid`/signal 族、以及 E400 的 V8 运行时 Check failed 场景。
+keywords: errno 命名冲突, illegal initializer, 宏展开, 死代码, 静默降级, proda, strtol 错误检查
+approach: 典型上游写法是在解析函数里写一行局部声明（`int errno = 0;`），随后用 `errno` 判断
+  `strtol` 是否出错。这个标识符**能不能编译**取决于该翻译单元里 `errno` 宏**是否已被某条 include 链带入**：
+  ①带进来（musl 的若干公共头会间接拉入 errno.h）⇒ `errno` 先展开成 `(*__errno_location())`，
+  于是声明变成 `int (*__errno_location()) = 0;` ⇒ clang 报 **`error：illegal initializer`**，
+  症状完全看不出根因是"变量名撞宏"；
+  ②没带进来（glibc 的 x86 构建链常属此类）⇒ 它就是个普通 int，**编译照过**，
+  但此后所有 `if (errno != 0)` 读的都是这个局部变量，而 `strtol` 写的是**真线程 errno**
+  ⇒ 错误检查**恒为假、成死代码**，非法输入被静默接受。
+  ⇒ 同一段代码在两种 libc 上表现相反：**要么编不过，要么静默失效**。⚠ 后者最危险，
+  因为它在 CI 上是绿的，只在真实输入触发边界时才暴露。
+root_cause: C/POSIX 的 `errno` 在 glibc 与 musl 上都是**宏**（`(*__errno_location())`），不是对象；
+  任何把 `errno` 当变量名声明的上游代码都属**未定义行为级别的命名违规**（违反保留标识符使用惯例），
+  只是多数上游翻译单元恰好没引入 errno.h 宏定义而"混过去"。OHOS 用 musl，其头文件包含链与
+  glibc 不同，于是这类潜伏缺陷在 OHOS 构建时**以编译错误的形态暴露**——属上游缺陷被新 libc 揭出，
+  **不是** OHOS/musl 的不兼容
+affected_scope: 所有在函数内写 `int errno`/`errno = 0` 式局部声明的老代码（1990—2010 年代 C/C++
+  项目常见，尤其自带数字解析、`strtol`/`strtod` 错误判定的工具）。首个实证：proda 1.0 的
+  `Main.cc` 第 119 行所在的解析辅助函数 `GetInteger()`，**唯一调用点是命令行 `-L <length>` 的取值解析**
+  （本包实测改前改后对合法输入行为一致、非法输入仍由 `retVal==0 && data==endPtr` 与
+  `INT_MIN/INT_MAX` 边界判定拦住 ⇒ 修复遮蔽 bug 的同时**不改变任何可观测行为**）。
+  **不适用**：正确使用 `errno`（不声明、只读、并显式 include errno.h）的实现
+verification_cmd: 最小复现两臂对照——A 臂 printf 一个含 int errno=0 声明与 strtol 判定的小 .c，
+  分别用「不 include errno.h」与「include errno.h」两种翻译单元编译，前者 rc=0 但错误分支恒不触发、
+  后者 clang 直接报 illegal initializer；命令：clang -t aarch64-unknown-linux-ohos -c a.c 与
+  clang -t aarch64-unknown-linux-ohos -c b.c
+rec_priority: 1
+rec_approach: delete-the-shadowing-declaration-and-use-the-errno-macro
+rec_description: 删掉那行局部声明，**显式** `#include <errno.h>`，让原地的 `errno = 0;` 变成对真线程
+  errno 宏赋值的**正确写法**。这样①编译期宏冲突消失；②`strtol` 的错误检查**从死代码恢复生效**
+  （属功能增强，需在 notes 里写明"修复后新增了一条原本会被静默接受的输入会被拒绝"这一行为变化，
+  并论证对现有调用点的影响面）。**禁止**用改名（如 `err_no`）绕过——那会保留死代码缺陷。
+rec_command: 补丁形态（实测先例 proda 补丁 0001）——在 include 段加 errno.h；把
+  局部声明那一行的 `int errno = 0;` 改成 `errno = 0;`（即去掉类型名，使其成为对宏的赋值）
+rec_auto_fix: false
+rec_impl: source-patch
+fallback_priority: 2
+fallback_approach: rename-local-and-fix-the-check-explicitly
+fallback_description: 若上游确有一套自己的"局部错误码"语义（不是真 errno），则改名并**同时**把
+  判定改成读真 errno 或直接检查 `strtol` 返回值与 `endPtr`，在 notes 里写清该检查此前的失效状态。
+  ⚠ 该 fallback 必须让"错误检查真的生效"，否则等于把静默缺陷固化
+fallback_command: 先 grep 出该变量的所有读写点，逐点判定语义归属后再改
+fallback_auto_fix: false
+fallback_impl: 上游用法迁移（配方 notes/补丁说明）
+principles: ①"编译错误"与"静默死代码"可能是**同一个上游缺陷**的两种暴露方式，判根因时要把两臂都跑一遍；
+  ②把"在 OHOS 上才报错"直接写成"OHOS 不兼容"是**归因错误**——本条恰恰是 OHOS 的 libc 把上游缺陷揭了出来；
+  ③修这类缺陷会**改变可接受输入集**（原本被静默接受的非法输入此后被拒绝），属行为变化，
+  必须披露并纳入测试断言，不能只当编译修复
+caused_by: 上游把保留名 errno 当普通局部变量声明，而 errno 在 libc 上是宏；include 链差异决定其暴露形态
+causes: musl 构建期编译失败（症状为 illegal initializer，与根因相距很远）；或 glibc 构建"绿"但
+  strtol/strtod 的错误分支恒不生效，非法输入被静默接受（在真实用户输入下才暴露）
+similar_to: E400（关键词 __errno_location 重合，但其 error_signature 是 Node.js/V8 运行期 Check failed
+  与 CLI 能力面，**语义不同层次**——判为假阳性，列于此仅为避免后人重复按关键词误判为 hit）；
+  E534（musl 缺 GNU/BSD 扩展函数——那是**符号缺失**，本条是**命名撞宏**，且本条两侧 libc 都有 errno）；
+  E547-draft-B5C3 与 DRAFT-8543-plain-char-eof-sentinel-infinite-loop（同包 proda 的另一机制
+  ——plain char 承接 fgetc() 再比 EOF，编译期零告警、运行期死循环；**层次与解法都不同**，
+  本包只主张本条，那一条按 hit 既有库处理不再新建）；
+  DRAFT-qperf-0.4.11-posix-sockatmark-absent-use-siocatmark-ioctl（同为"按规范/POSIX 语义找底层等价实现"
+  的修法范式，层次不同）
+conflicts_with:
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-proda-1.0-libc-errno-name-used-as-local-variable.md
+last_updated: 2026-09-25
+source_event: 2026-09-25 主理-32 窗在 B 机（HarmonyOS PC aarch64，HongMeng Kernel 1.12.0，musl，clang 15）
+  适配 proda 1.0 时实测。proda 的 Main.cc 第 119 行所在的解析辅助函数 GetInteger() 里写 int errno = 0
+  （该文件原本不 include errno.h），musl 头链把 errno.h 带入后 clang 报 error：illegal initializer，
+  并紧跟 note 指向 errno.h 的 errno 宏展开；补丁 0001 为「加 include errno.h + 去掉局部声明的类型名」，
+  唯一受影响调用点是命令行 -L 参数解析，已论证行为中性（合法输入不变，非法输入仍由既有边界判定拦住）。
+  补丁文件 archives/p/proda/1.0/patches/0001-Main.cc-name-shadowed-libc-errno.patch
+authors: 主理-32
+source_pr: 随 proda 1.0 的 PR 原子提交（分支 feat/proda-1.0，基线 origin/main=48d9cee684，平台任务号 9738）
+source_commit: W4 r1 审至 d0ba16d3ee6ccbf6ece31e5463f8253f0d52d4c7；本草稿由其后续整改提交引入同一分支
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.9
+metrics_last_used: 2026-09-25

@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.16)
+project(test_dhrystone LANGUAGES C)
+if(TEST_OHOS)
+    add_executable(test_ohos_runtime test_ohos_runtime.c)
+    target_compile_definitions(test_ohos_runtime PRIVATE _GNU_SOURCE)
+    target_link_libraries(test_ohos_runtime PRIVATE ${CMAKE_DL_LIBS})
+    set_target_properties(test_ohos_runtime PROPERTIES C_STANDARD 99)
+endif()

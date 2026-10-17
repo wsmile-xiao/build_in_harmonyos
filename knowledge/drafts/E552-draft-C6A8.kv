@@ -1,0 +1,55 @@
+#====================================================================
+# E552 draft - C 库安装公共头不自包含：缺依赖类型头（pthread/json_t）导致消费者编译 unknown type name
+# 触发事件: c-vtapi 0.0-git20230329.226eda8 HarmonyOS PC 适配（archives/c/c-vtapi/0.0-git20230329.226eda8）
+# 主从明确：库安装的公共头直接使用外部依赖类型却未 include 声明头；库自身编译因翻译单元
+#           include 顺序巧合通过，消费者以安装头独立编译必失败。正解是库侧补丁补 include
+#           使其自包含（区别于 E420 消费者侧 include 拥有者头、E342 X11 consumer include 顺序）。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E552
+trigger_tool:           clang|make|cmake|conan
+phase:                  testing
+error_signature:        unknown type name 'pthread_mutex_t'|unknown type name 'json_t'|unknown type name '(DIR|FILE|cchar_t)'|fatal error: '.*\.h' file not found.*Vt[A-Za-z]+\.h
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               headers, conan, packaging, c, self-contained
+match_keywords:         public header, installed header, self-contained, pthread_mutex_t, jansson.h, pthread.h, include missing, consumer compile, unknown type name, VT_OBJECT_COMMON
+title:                  C 库安装公共头不自包含：库侧补 include 使其自包含（消费者以安装头独立编译必失败）
+prescan_pattern:        \b(pthread_mutex_t|json_t)\b[^;]*;|#include <(jansson|curl|pthread)\.h>
+prescan_globs:          *.h, include/*.h, lib/*.h
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             库安装的公共头直接使用外部依赖类型（如 VtObject.h 宏内 pthread_mutex_t、VtResponse.h 函数签名 json_t），
+                         却未包含声明这些类型的头文件（上游 vtcapi_common.h 把 #include <pthread.h> 注释掉；
+                         VtResponse.h 从未 include <jansson.h> 而依赖 jansson.h 的结构体不影响）。库自身编译
+                         因翻译单元 include 顺序巧合（VtObject.c 先 include <pthread.h>）而通过，隐蔽性极强；
+                         消费者以安装头为唯一事实独立编译 → unknown type name，且本库 test_package 才能暴露。
+affected_scope:         安装公共头使用第三方类型却缺 include 的 C/C++ 库；典型类型 pthread_mutex_t / json_t /
+                         FILE* / DIR* / cchar_t；与平台无关，OHOS 消费者测试即可触发；表现为"库能构建、消费者编译炸"。
+verification_cmd:       grep -RInE "pthread_mutex_t|json_t" <pkg>/include/ | grep -vE "#include" ; 头文件仅依赖
+                        源码内 include 顺序通过时必现——写一个只 include 公共头的极小消费者 TU 编译复现。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           patch-public-headers-self-contained
+rec_description:        用 conan 补丁（modified-file diff）给库的公共头补上缺失的依赖类型 include，使安装头自包含：
+                        如 vtcapi_common.h 恢复 `#if !defined(WINDOWS) #include <pthread.h> #endif`、
+                        VtResponse.h 增加 `#include <jansson.h>`。src 目录与安装头都随补丁生效，库侧一处修复，
+                        所有消费者（含 test_package）受益；补丁按 modified-file diff 形式（R 规则禁止 new-file diff）。
+rec_command:            # 补丁后重跑 conan create 验证（test_package 必须包含一个"仅 include 公共头"的消费者编译）:
+                        conan create . -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+rec_auto_fix:           false
+rec_impl:               patches
+
+fallback_priority:      2
+fallback_approach:      consumer-side-include-owner
+fallback_description:   若不能改库（外部依赖包元数据缺 includedirs 的关联场景），消费者侧显式补依赖 include 或依赖头
+                        路径注入（改消费者），但库侧自包含修复更彻底，优先（E420 消费者侧 include 拥有者头是并列方）。
+fallback_command:       target_include_directories(<tgt> PRIVATE ${DEP_INCLUDE_DIR})
+fallback_auto_fix:      false
+fallback_impl:          recipe
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+forbid_1_pattern:       仅改消费者测试/仅加 -I 绕过（漏修库公共头，换消费者仍炸）|new-file patch 补头

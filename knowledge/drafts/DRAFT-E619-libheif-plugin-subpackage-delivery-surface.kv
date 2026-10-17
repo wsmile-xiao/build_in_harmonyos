@@ -1,0 +1,143 @@
+id: DRAFT-E619-libheif-plugin-subpackage-delivery-surface
+status: pending-editor-review
+title: "libheif 编解码插件子包的交付面裁剪与依赖边界判定：MODULE 插件不能只交付插件 .so、宿主无 SONAME 会让 DT_NEEDED 变成带斜杠的相对路径、libc++15 把 C++20 ranges 藏在 _LIBCPP_ENABLE_EXPERIMENTAL 后面"
+category: cmake, libheif, plugin, module-library, subpackage, dlopen, soname, libcxx, dependency-boundary, delivery-surface, ohos
+build_system: cmake
+phase: build
+trigger_tool: conan-create
+severity: 2
+match_keywords: >
+  libheif, libheif-openh264, libheif-libde265, libheif-aom, libheif-dav1d, libheif-jpeg,
+  libheif-openjpeg, libheif-svtenc, heif-openh264dec, heif-libde265, heif-j2kdec, heif-aomdec,
+  libheif-<codec>.so, ENABLE_PLUGIN_LOADING, WITH_<CODEC>_PLUGIN, plugin_option,
+  plugin_compilation, add_library MODULE, LIBHEIF_PLUGIN_PATH, LIBHEIF_PLUGIN_DIRECTORY,
+  PLUGIN_DIRECTORY, heif_init, heif_have_decoder_for_format, heif_load_plugins,
+  heif_get_plugin_directories, FindOpenH264, FindLIBDE265, libfind_pkg_check_modules,
+  DT_NEEDED 相对路径, SONAME, CMAKE_SHARED_LIBRARY_SONAME_C_FLAG,
+  Platform/HarmonyOS, Platform/OHOS, _LIBCPP_ENABLE_EXPERIMENTAL,
+  _LIBCPP_HAS_NO_INCOMPLETE_RANGES, std::ranges, 编解码插件子包, 交付面裁剪, 依赖边界,
+  插件模块, dlopen 插件, 代码签名, .codesign, binary-sign-tool
+error_signature: >
+  no member named '(all_of|find)' in namespace 'std::ranges'|
+  Error loading shared library \.\./libheif\.so|
+  Cannot open plugin \(dlopen\)|
+  heif_have_decoder_for_format\(.*\) == 0|
+  Shared library: \[\.\./libheif\.so\]|
+  libheif-openh264dec\.so: Permission denied|
+  System is unknown to cmake, create: Platform/HarmonyOS|
+  Could NOT find OpenH264|OpenH264_INCLUDE_DIR-NOTFOUND
+error_excerpt: >
+  ① 宿主编译（libc++15 ranges，逐字）：libheif/box.cc:4155:25: error: no member named 'all_of'
+  in namespace 'std::ranges'；box.cc:4156:25 与 4166:22 同形 'find'；3 errors generated →
+  make[1]: *** [libheif/CMakeFiles/heif.dir/rule] Error 2。同一源码加 -D_LIBCPP_ENABLE_EXPERIMENTAL 即通过。
+  ② 插件装载（宿主无 SONAME，逐字）：readelf -d <pkg>/lib/libheif/libheif-openh264dec.so →
+  (NEEDED) Shared library: [../libheif.so]（含斜杠）；运行期
+  dlopen: Error loading shared library ../libheif.so: (needed by .../lib/libheif/libheif-openh264dec.so)
+  → heif_init(NULL) -> code=11 (Cannot open plugin (dlopen).) → heif_load_plugins -> code=11 loaded=0。
+  ③ SONAME 最小对照（$TASK_DIR/repro-e619-output.txt ④）：不加变量 → lib/libcore.so 单文件、
+  core SONAME (无)、plugin NEEDED [libcore.so]；加 -Wl,-soname, → libcore.so/.so.1/.so.1.23.0
+  三件套、core SONAME [libcore.so.1]、plugin NEEDED [libcore.so.1]。
+root_cause: >
+  libheif 1.23.0 把每个编解码后端做成可独立装载的 CMake MODULE 插件（树内目标 heif-<name>，
+  产物 libheif-<name>.so，装在 <libdir>/libheif/）。判定交付面与依赖边界要同时答对五问：
+  ① 交付面开关是**三件套** ENABLE_PLUGIN_LOADING + WITH_<CODEC> + WITH_<CODEC>_PLUGIN
+     （libheif/plugins/CMakeLists.txt 的 plugin_compilation() 宏里 add_library(... MODULE ...)
+     与 target_sources(heif ...) 二选一）；只开前两个 ⇒ 后端静态编入宿主，包内没有本包命名的产物。
+  ② 插件不能只交付 .so：动态分支里有 target_link_libraries(heif-<name> PRIVATE ... heif)，
+     插件 DT_NEEDED 宿主 libheif.so，且必须由宿主 heif_init() 扫插件目录 dlopen 才注册后端。
+  ③ 树内**没有**编解码器源码副本（find -type f -iname '*openh264*' = 3：Find 模块 + 插件 .cc/.h），
+     find_package(OpenH264) 走 cmake/modules/FindOpenH264.cmake 的 MODULE 模式
+     （libfind_pkg_check_modules + 无 HINTS 的 find_path/find_library），不认 CMakeDeps 的 config 包
+     → 要用 cache 变量 OpenH264_INCLUDE_DIR/OpenH264_LIBRARY 钉住依赖路径。
+  ④ 插件目录被编译期钉死：heif_version.h.in 的 LIBHEIF_PLUGIN_DIRECTORY="@PLUGIN_DIRECTORY@" =
+     构建时 ${CMAKE_INSTALL_FULL_LIBDIR}/libheif 绝对路径，跨缓存/跨机不可移植；
+     libheif/init.cc:62 只在环境变量为空时才回退该默认值 → 必须 runenv_info 导出
+     LIBHEIF_PLUGIN_PATH（单数；heif_library.h 注释里的复数 PATHS 是过期文档）。
+  ⑤ 仓库既有 codec-free 核心包（libheif/1.22.2，ENABLE_PLUGIN_LOADING=OFF、WITH_* 全 False）
+     运行期不装载插件且 ABI 不匹配，不能当子包依赖 → 只能自包含交付同源同版本宿主。
+  三个 OHOS 平台缺口（与本经验同时命中，且对任何 CMake 共享库包都成立）：
+  E 宿主无 SONAME：CMake 4.1.2 没有 Platform/HarmonyOS.cmake，CMAKE_SHARED_LIBRARY_SONAME_<LANG>_FLAG
+    未定义 → 宿主无 DT_SONAME、无版本化软链，插件 DT_NEEDED 被写成构建树相对路径 ../libheif.so。
+  F libc++15 ranges：libcxx-ohos 的 __config 在未定义 _LIBCPP_ENABLE_EXPERIMENTAL 时定义
+    _LIBCPP_HAS_NO_INCOMPLETE_RANGES，隐藏 std::ranges::all_of/find（上游 CMAKE_CXX_STANDARD 20）。
+  G 代码签名：cmake --install 就地改写 RUNPATH → 字节变 → 链接器自签失效 → dlopen 报
+    Permission denied（EACCES，形态不是 not found）。
+affected_scope: >
+  所有「父项目 + 可独立装载 MODULE 插件」形态的子包家族（libheif 的 libde265/openjpeg/svtenc/
+  aom/dav1d/jpeg/openh264 七个同构）。判定信号三条全中即适用：①包名 ≠ 树内目标名
+  ②CMakeLists 里有 plugin_option/add_library(... MODULE ...) ③交付产物 readelf -d 显示
+  DT_NEEDED 另一个同源库。E~G 三个平台缺口则对任何在 OHOS 上用 CMake 产共享库/可执行文件的包
+  都可能成立（与 libheif 无关，只是 libheif 插件把它们一次踩齐）。
+rec_priority: 1
+rec_approach: self-contained-host-plus-single-codec-module-plugin-with-ohos-gap-fixes
+rec_description: >
+  配方五件事：①generate() 里 BUILD_SHARED_LIBS=ON + ENABLE_PLUGIN_LOADING=ON +
+  WITH_<CODEC>=ON + WITH_<CODEC>_PLUGIN=ON，其余后端全部显式 OFF，并把
+  <CODEC>_INCLUDE_DIR/<CODEC>_LIBRARY 作为 cache 变量钉成依赖包内绝对路径；
+  ②build() 只建交付面两个目标 cmake.build(target=["heif","heif-<codec>"])；
+  ③package() 里 cmake.install() 之后对 lib/**/*.so*（跳软链）用
+  /data/service/hnp/bin/{llvm-objcopy,binary-sign-tool} 重签；
+  ④package_info() = cpp_info.libs=["heif"] + runenv_info 导出 LIBHEIF_PLUGIN_PATH=<pkg>/lib/libheif；
+  ⑤OHOS 分支注入 _LIBCPP_ENABLE_EXPERIMENTAL 与 CMAKE_SHARED_LIBRARY_SONAME_C/CXX_FLAG。
+  全程零补丁（R1/参数最少化）。
+rec_command: >
+  TASK_DIR=$HOME/tmp/libheif-openh264-1.23.0; PROF=$TARGET_REPO/ci/conan/profiles/ohos-aarch64;
+  conan create "$PACKAGE_DIR" -pr:h "$PROF" -pr:b "$PROF" -c tools.build:jobs=1
+rec_auto_fix: false
+rec_impl: >
+  archives/l/libheif-openh264/1.23.0/conanfile.py（generate/build/package/package_info）+
+  test_package/{conanfile.py,CMakeLists.txt,test_libheif_openh264.cpp}；
+  同族先例 archives/l/libheif-libde265/1.23.0/（同构）；对照 archives/l/libheif/1.22.2/
+  （codec-free 核心，ENABLE_PLUGIN_LOADING=OFF，仅作对照）。
+fallback_priority: 2
+fallback_approach: cmake-system-name-linux-instead-of-soname-flags
+fallback_description: >
+  缺口 E 的等价修法：tc.cache_variables["CMAKE_SYSTEM_NAME"] = "Linux"（走 Platform/Linux.cmake，
+  仓库 693 个配方同口径）。两者都能让宿主拿到 SONAME、插件 DT_NEEDED 不带斜杠；但改
+  CMAKE_SYSTEM_NAME 会同时影响上游 if(CMAKE_SYSTEM_NAME STREQUAL "Linux") 分支与查找路径，
+  故本任务选了更窄的 SONAME 变量注入。注意：若另外用 -DCMAKE_TOOLCHAIN_FILE 配置子工程，
+  cache_variables 不落 toolchain 文件，子工程要显式再传 -DCMAKE_SYSTEM_NAME=Linux。
+fallback_command: >
+  N/A
+fallback_auto_fix: false
+fallback_impl: 本任务未采用（用两条 SONAME 变量注入，并做了新旧对照最小实验）
+forbid_1_pattern: >
+  self\.cpp_info\.libs = \["heif-openh264dec"\]|cpp_info\.libs = \["libheif-openh264"\]
+forbid_1_reason: >
+  插件是 MODULE（dlopen 用），不在 libdirs 语义里；消费者链接的是宿主 heif，
+  cpp_info.libs 必须等于宿主库名 "heif"，插件目录用 runenv_info 的 LIBHEIF_PLUGIN_PATH 导出。
+forbid_1_consequence: 消费者链接到不可链接的插件模块，test_package 在编译/链接期失败
+forbid_2_pattern: >
+  (ENABLE_PLUGIN_LOADING|WITH_[A-Za-z0-9_]+_PLUGIN)\s*=\s*(False|OFF|0)
+forbid_2_reason: >
+  只开 WITH_<CODEC> 不开 WITH_<CODEC>_PLUGIN（或反之）得到的是「后端静态编入宿主」，
+  交付物里不会出现 libheif-<codec>.so，包名与交付面不符——而 conan create 仍然全绿（假绿）。
+forbid_2_consequence: 交付面与包名/声明不符，外部审查按「交付物与声明不一致」判 P1
+forbid_3_pattern: >
+  \.\./libheif\.so
+forbid_3_reason: >
+  DT_NEEDED 里出现带斜杠的相对路径说明宿主没有 SONAME（OHOS 未注入 SONAME 变量的必然结果），
+  加载器按 CWD 解析该路径，装到任何别处都 dlopen 失败。判据是 readelf -d，不是"本机能跑"。
+forbid_3_consequence: 包能装、装完不可用；宿主与插件都在同一台机器上时也可能因 CWD 不同而偶发
+prescan_pattern: "plugin_compilation|add_library\\(heif-|LIBHEIF_PLUGIN_PATH|WITH_[A-Za-z0-9_]+_PLUGIN|find_package\\(OpenH264\\)|CMAKE_SHARED_LIBRARY_SONAME"
+verification_cmd: >
+  TASK_DIR=$HOME/tmp/libheif-openh264-1.23.0; sh "$TASK_DIR/repro-e619-libheif-plugin-surface.sh"
+  （①plugin_option/plugin_compilation 的开关与动态静态分支 ②树内编解码器源码副本计数
+  ③已安装产物的宿主 SONAME/插件 DT_NEEDED/plugin_info 符号/能力标识只在插件里/.codesign
+  ④宿主无 SONAME 的最小新旧对照实验；逐字输出留档 $TASK_DIR/repro-e619-output.txt）
+doc_file: knowledge/drafts/DRAFT-E619-libheif-plugin-subpackage-delivery-surface.md
+verify_builds: >
+  libheif-openh264 1.23.0（任务 libheif-openh264-1.23.0，2026-09-20，分支 feat/libheif-openh264-1.23.0）：
+  ① 干净缓存轮 conan create rc=0；test_package 自报
+     LIBSHEIF_OPENH264_CONSUMER checks_total=14 checks_passed=14 → RESULT: PASS
+     （宿主版本指纹 1.23.0 / heif_init code=0 / 插件目录来自 LIBHEIF_PLUGIN_PATH /
+      heif_have_decoder_for_format(AVC)==1 / heif_load_plugins code=0 loaded=1 且含 decoder 类型 /
+      HEVC·AV1 解码器与 AVC 编码器反证 / 320x240 I420 H.264 编码→解码回环 / context 生命周期 / heif_deinit）。
+  ② 产物读数：宿主 libheif.so→.so.1→.so.1.23.0，SONAME libheif.so.1；插件
+     lib/libheif/libheif-openh264dec.so，NEEDED [libopenh264.so.7, libheif.so.1, libc++_shared.so, libc.so]，
+     nm -D 有 D plugin_info；宿主含 "OpenH264" 行数 = 0（证明后端确实在插件里而不是静态编入宿主）。
+  ③ 依赖可用性（R35，不用 conan list）：conan install --requires=openh264/2.6.0 --build=never
+     -pr:h=<绝对 profile> rc=0（已下载 recipe + package）。
+  ④ 安装前后 sha256 对比：插件 6e1eef9b… → f85ef8bc…（install 改写了字节），但安装后仍带
+     .codesign + .note.ohos.ident，且运行期 dlopen 成功 → package() 的装后重签有效。
+last_updated: 2026-09-20

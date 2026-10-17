@@ -1,0 +1,95 @@
+--- a/include/config.h
++++ b/include/config.h
+@@ -53,6 +53,13 @@
+ 
+ const char *pev_plugins_path(void);
+ 
++// Resolve a compile-time-baked installation path (PLUGINSDIR / SHAREDIR) to
++// its runtime location. Returns a malloc'd copy of `baked` itself when it
++// exists; otherwise, on Linux (/proc/self/exe), a malloc'd copy of
++// "<executable dir>/<exe_relative>" when that exists; otherwise a malloc'd
++// copy of `baked` again. Keeps DESTDIR/staging/relocatable installs usable.
++char *pev_config_baked_or_relocatable(const char *baked, const char *exe_relative);
++
+ int pev_load_config(pev_config_t * const config);
+ void pev_cleanup_config(pev_config_t * const config);
+ 
+--- a/src/config.c
++++ b/src/config.c
+@@ -40,8 +40,10 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <stdarg.h>
++#include <sys/stat.h>
+ #if defined(__linux__)
+ #include <linux/limits.h>	// FIXME: Why?
++#include <unistd.h>		// readlink
+ #elif defined(__APPLE__) || defined(__OpenBSD__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__CYGWIN__)
+ #include <limits.h>
+ #endif
+@@ -172,11 +174,48 @@
+ 	// Default values
+ 	//
+ 	if (config->plugins_path == NULL)
+-		config->plugins_path = strdup(DEFAULT_PLUGINS_PATH);
++		config->plugins_path = pev_config_baked_or_relocatable(DEFAULT_PLUGINS_PATH, "../lib/pev/plugins");
+ 
+ 	return 0;
+ }
+ 
++// The tools dlopen their output plugins from PLUGINSDIR and read
++// SHAREDIR "/userdb.txt", both baked at compile time. When the install is
++// relocated (DESTDIR/staging/relocatable prefixes, e.g. a Conan package
++// cache), the baked absolute path does not exist; fall back to the same
++// trailing path relative to the running executable (<exedir>/../…).
++char *pev_config_baked_or_relocatable(const char *baked, const char *exe_relative)
++{
++	struct stat st;
++
++	if (baked && stat(baked, &st) == 0)
++		return strdup(baked);
++
++#if defined(__linux__)
++	char exedir[PATH_MAX];
++	ssize_t len = readlink("/proc/self/exe", exedir, sizeof(exedir) - 1);
++	if (len > 0) {
++		exedir[len] = '\0';
++		char *last_slash = strrchr(exedir, '/');
++		if (last_slash != NULL && exe_relative != NULL) {
++			last_slash[1] = '\0';
++			char *candidate = malloc(strlen(exedir) + strlen(exe_relative) + 1);
++			if (candidate != NULL) {
++				strcpy(candidate, exedir);
++				strcat(candidate, exe_relative);
++				if (stat(candidate, &st) == 0)
++					return candidate;
++				free(candidate);
++			}
++		}
++	}
++#else
++	(void)exe_relative;
++#endif
++
++	return strdup(baked ? baked : ".");
++}
++
+ void pev_cleanup_config(pev_config_t * const config) {
+ 	if (config == NULL)
+ 		return;
+--- a/src/pepack.c
++++ b/src/pepack.c
+@@ -153,8 +153,11 @@
+ 	*fp = fopen(dbfile, "r");
+ 	// FIXME(jweyrich): Granted read permission to the informed dbfile, this will succeed even if it's a directory!
+ 	if (!*fp) {
+-		// SHAREDIR is defined via CPPFLAGS in the Makefile
+-		*fp = fopen(SHAREDIR "/userdb.txt", "r");
++		// SHAREDIR is defined via CPPFLAGS in the Makefile; fall back to
++		// the executable-relative location for relocated installs.
++		char *shared_userdb = pev_config_baked_or_relocatable(SHAREDIR "/userdb.txt", "../share/pev/userdb.txt");
++		*fp = fopen(shared_userdb, "r");
++		free(shared_userdb);
+ 	}
+ 
+ 	return *fp != NULL;

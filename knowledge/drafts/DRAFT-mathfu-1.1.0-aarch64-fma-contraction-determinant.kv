@@ -1,0 +1,82 @@
+#====================================================================
+# DRAFT-mathfu-1.1.0-aarch64-fma-contraction-determinant - aarch64 FMA 收缩改变浮点相消边界用例结果，需 -ffp-contract=off
+#====================================================================
+
+draft:                   DRAFT-mathfu-1.1.0-aarch64-fma-contraction-determinant
+status:                  pending-editor-review
+id:                      E5xx
+title:                   aarch64 clang 默认 FMA 收缩改变浮点舍入路径，精确相消类边界测试需 -ffp-contract=off
+category:                aarch64, clang, floating-point, testing, portability
+severity:                2
+last_updated:            2026-10-02
+software:                mathfu-1.1.0
+verify_builds:           "本地 conan create RC=0（mathfu 325/325：vector 180、matrix 129、quaternion 16）；对照复现：不加 -ffp-contract=off 时 3 例确定性失败"
+
+match_keywords: >
+  FMA, ffp-contract, fp-contract, floating point contraction,
+  __ARM_FEATURE_FMA, __FP_FAST_FMA, determinant, InverseWithDeterminantCheck,
+  inverse, singular matrix, exact cancellation, rounding, 舍入,
+  精度边界, expected false actual true, EXPECT_NEAR 超差, aarch64, NEON
+
+error_signature: >
+  Value of: matrix\.InverseWithDeterminantCheck\(&inverse_matrix\)\s*\n\s*Actual: true\s*\nExpected: false|FAILED.*InverseNonInvertible|FAILED.*QuaternionTests\.Inverse|mathfu.*Inverse.*precision
+
+root_cause: >
+  OHOS aarch64 工具链（clang 15.0.4）默认 -ffp-contract=on：硬件 __ARM_FEATURE_FMA
+  存在时 clang 将 a*b+c 融合为单步舍入的 fma 指令（预定义宏 __FP_FAST_FMA=1
+  实证）。mathfu 上游 InverseNonInvertible 测试构造"8 个 kDeterminantThresholdSmall
+  + 1 个 kDeterminantThresholdInverseLarge"的数学奇异矩阵（两列成比例，行列式
+  理论精确为 0），其判定依赖中间乘积逐步 IEEE 754 舍入后精确相消；FMA 单步
+  融合改变了部分积的舍入路径，行列式残留非零值越过 1e-7f/1e-15 阈值，被判为
+  可逆。QuaternionTests.Inverse 的四元数乘逆往返比对同理（累积舍入路径改变致
+  1e-6f/1e-15 容差超差）。x86 无 FMA 硬件默认不收缩，上游 CI（x86）从未暴露
+  该差异——这是 aarch64 与 x86 的真实平台浮点语义分叉，非上游代码缺陷。
+
+solution: |
+  测试与库编译统一追加 -ffp-contract=off（恢复 IEEE 754 逐步舍入），保持上游
+  断言原样不放宽。mathfu 配方实测：matrix 129/129、quaternion 16/16 全过：
+
+  ```python
+  # conanfile.py build()：编译上游测试翻译单元
+  base_flags = [
+      "-std=c++11", "-O2",
+      "-ffp-contract=off",          # 关键：禁用 FMA 收缩
+      "-Wall", "-Wextra", "-Werror",
+      "-Wno-deprecated-copy-with-user-provided-copy",
+      "-Wno-deprecated-copy",
+      "-DMATHFU_COMPILE_WITHOUT_SIMD_SUPPORT",
+  ]
+  # OHOS 上另需 -static 链接测试二进制（SDK libc++.so 是链接器脚本）
+  ```
+
+  验证命令（无 conan 直接复现）：
+  ```
+  clang++ -std=c++11 -O2 -ffp-contract=off -DMATHFU_COMPILE_WITHOUT_SIMD_SUPPORT \
+    -Iinclude -Iunit_tests -isystem <gtest>/include \
+    unit_tests/matrix_test/matrix_test.cpp <gtest>/lib/libgtest.a -lpthread -static \
+    -o matrix_test && ./matrix_test   # 129/129
+  # 去掉 -ffp-contract=off 重编 → InverseNonInvertible_float_3/_double_3 必现失败
+  ```
+
+fallback: >
+  若测试框架/构建系统不允许改编译 flag：将 3 个边界用例登记 known_failures 并
+  附平台浮点语义说明（322/325 申报），但这是下策——丢失的是真实平台差异的
+  修复证据。禁止改断言容差或删测试（等于篡改上游测试语义）。另一替代：
+  -O0 不收缩但拖慢全部测试且治标不治本（消费者仍可能踩）。
+
+forbid_1_pattern:       EXPECT_NEAR.*1e-[37].*放宽容差|删除 InverseNonInvertible
+forbid_1_reason:        改容差/删用例是篡改上游测试语义，掩盖真实浮点行为差异。
+forbid_1_consequence:   审核打回"修改上游测试未逐条说明"；平台差异证据丢失。
+
+forbid_2_pattern:       -ffast-math
+forbid_2_reason:        -ffast-math 本身引入更多非 IEEE 舍入假设，与本修复目标相反。
+forbid_2_consequence:   引入新的不可复现精度问题。
+
+principles:             保持上游断言原样；平台差异在配方/编译层解决
+causes:                 []
+caused_by:              []
+similar_to:             [E401]
+conflicts_with:         []
+
+reference_impl: >
+  archives/m/mathfu/1.1.0/conanfile.py build() base_flags

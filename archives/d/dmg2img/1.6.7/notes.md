@@ -1,35 +1,45 @@
 # dmg2img 1.6.7 适配笔记
 
 ## 编译环境
-- 构建系统: makefile
-- 编译日期: 2026-04-24
+- 构建系统: makefile (raw, no configure)
+- 编译日期: 2026-08-06
 - 编译器: clang / clang++
-- 状态: success
+- 状态: success (conan-verify passed)
+
+## 源码来源
+- 原始 URL: http://vu1tur.eu.org/tools/dmg2img-1.6.7.tar.gz (已下线)
+- 替代源: https://github.com/citruz/dmg2img (GitHub fork, version 1.6.7)
 
 ## 编译步骤
-1. 下载并解压 dmg2img 1.6.7 源码
-2. 应用 2 个补丁（Makefile 调整、vfdecrypt.c OpenSSL API 兼容修复）
-3. 修改 Makefile 设置 CFLAGS 和 LDFLAGS
-4. make 编译
-5. 手动安装二进制到目标目录
-6. 独立目录安装验证通过
-7. 预编译包制作完成
+1. 下载并解压 dmg2img 1.6.7 源码 (citruz/dmg2img GitHub fork)
+2. 应用 4 个补丁:
+   - 0001-Makefile: LZFSE 条件编译, 交叉编译 CC/CFLAGS/LDFLAGS 支持
+   - 0002-dmg2img.c: LZFSE 代码用 #ifdef HAVE_LZFSE 保护
+   - 0003-dmg2img.h: BT_LZFSE 定义用 #ifdef HAVE_LZFSE 保护
+   - 0004-vfdecrypt.c: OpenSSL 1.1.1 API 兼容性修复
+3. make CC=clang CFLAGS=... LDFLAGS=... -j1
+4. 验证 dmg2img 和 vfdecrypt 二进制可执行
 
 ## 遇到的问题与解决方案
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
-| 1 | vfdecrypt.c 编译错误 | OpenSSL 1.1.1 API 变更（EVP_CIPHER_CTX、HMAC_CTX 结构体不再透明） | 适配 OpenSSL 1.1.1+ API |
-| 2 | Makefile 不支持交叉编译 | 原始 Makefile 硬编码 CC=gcc | 修改 Makefile 添加 CFLAGS/LDFLAGS 支持 |
+| 1 | LZFSE 依赖缺失 | citruz fork 硬编码了 lzfse 依赖 | 用 #ifdef HAVE_LZFSE 条件编译 |
+| 2 | vfdecrypt.c 编译错误 | OpenSSL 1.1.1 API 变更 | 适配 EVP_CIPHER_CTX/HMAC_CTX 指针式 API |
+| 3 | Makefile 不支持 conan 依赖 | 原始 Makefile 硬编码 CC=gcc | 传递 CC/CFLAGS/LDFLAGS 到 make 命令行 |
+| 4 | conan conf.get 不支持嵌套 key | OHOS 适配版 conan 限制 | 使用 dict 访问 tools.build:compiler_executables |
+| 5 | make 找不到 Makefile | conan build folder 与 source folder 不同 | cd 到 source folder 后执行 make |
 
 ## 依赖版本
-- zlib >= 1.3.1
-- bzip2 >= 1.0.8
-- openssl >= 1.1.1w
+- zlib/1.3.1
+- bzip2/1.0.8
+- openssl/1.1.1w
 
 ## 交付物
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| dmg2img-1.6.7-ohos-aarch64.tar.gz | 68KB | 主包 |
+| 文件 | 说明 |
+|------|------|
+| dmg2img | DMG 转 IMG 工具 |
+| vfdecrypt | 加密 DMG 解密工具 |
+---
 
-## 注意事项
-- packaging 目录还包含 debug tar.gz 和已解压的 pkg 目录（待清理）
+**编译结束**: 2026-08-06 07:47
+**最终状态**: built

@@ -1,0 +1,111 @@
+id: DRAFT-E586-libyal-ohos-false-signals-langdetect-and-api
+status: pending-editor-review
+title: "纯 C 的 libyal/autotools 发布包在 OHOS 上的三处假信号：根目录绑定 manifest 触发 lang-preflight 假 mixed→env_unsupported；test_runner.sh 的 libtool 判定在 OHOS file 输出下失效但 make check 仍全绿；消费者测试撞上三处反直觉 API 返回值"
+category: language-preflight, testing, libyal, autotools, ohos
+build_system: autotools
+phase: preflight, test
+severity: 2
+match_keywords: >
+  libyal, libfsfat, libfsntfs, libbfio, libfsxfs, libfvde, pyproject.toml, setup.cfg,
+  setup.py, pyfsfat, python bindings, lang-preflight, lang_detect, detected_language,
+  mixed, env_unsupported, 语言不匹配, manifest 与统计矛盾, binding_override,
+  test_runner.sh, file -b, POSIX shell script, libtool wrapper, check_PROGRAMS,
+  volume_close, get_file_system_format, get_version, consumer test, test_package
+error_signature: >
+  语言不匹配: task=cpp, detected=mixed|
+  冲突: manifest=python 但统计 c 占|
+  FAIL: volume_close failed|
+  FAIL: file system format is not FAT-16|
+  FAIL: libfsfat is not the expected OHOS package
+error_signature_note: >
+  5 个分支都是**纯字面量**（不含正则元字符转义需求），因为 engine Phase B 对分支做
+  .strip().lower() 后是字面子串匹配、不 re.compile；写成 \\. 之类的正则转义会被当字面量、
+  对真实日志恒不命中。它们同时作为正则也合法，对按正则消费的 graph.py 无副作用。
+error_excerpt: >
+  ❌ 语言不匹配: task=cpp, detected=mixed → env_unsupported /
+  {"detected_language": "mixed", "language_evidence": {"build_system": "setuptools",
+  "manifest": "pyproject.toml 存在（python 打包 manifest）；命中 manifest 路径: pyproject.toml（未排除）",
+  "source_stats": "源文件 237 个（c:232, bash:7, python:3, cpp:2），主体占比 98%"},
+  "notes": ["冲突: manifest=python 但统计 c 占 98% → mixed"]} /
+  消费者测试首轮：FAIL: version mismatch（期望 0-20260208，实为 20260208）、
+  FAIL: file system format is not FAT-16（该 API 写回单字节枚举而非字符串）、
+  FAIL: volume_close failed（该 API 成功返回 0 而非 1）
+root_cause: >
+  三处假信号都出现在「纯 C 的 libyal/autotools 发布包 + OHOS 设备」这一组合上，各自根因独立：
+  (1) lang-preflight（framework/overlay/scripts/ohc/lang_detect.py）的 manifest 判定顺序把
+  仓库根目录的 pyproject.toml/setup.py/setup.cfg 排在 configure.ac/Makefile.am 之前，于是
+  libyal 把 **python 绑定模块（pyXXX）** 的打包元数据放在源码根时被判成 manifest=python；
+  而 binding_override 的触发条件是 dominant == "cpp" 且 share >= 0.70，纯 C 主体
+  （dominant == "c"）拿不到覆盖，直接落进「manifest 与统计矛盾 → mixed」规则并写出
+  env_unsupported 终态。overlay 已有的「缺陷 C」只排除绑定/示例/文档/测试**目录内**的
+  manifest，管不住根目录形态。
+  (2) libyal 的 tests/test_runner.sh 用 `file -b <path>` 输出里是否含字面量
+  "POSIX shell script" 判断测试程序是不是 libtool 包装脚本；OHOS 的 file 输出形如
+  "/bin/sh script"，判定恒不成立 → 测试直接执行 libtool 包装脚本本身。这只影响
+  「是否优先解析到 .libs/ 下的真实 ELF」，不影响执行结果：设备实测 make check 全绿。
+  (3) libyal 公开 API 有三处反直觉约定，照抄 libfsntfs 先例写消费者测试会连撞三次：
+  libfsfat_volume_get_file_system_format() 的参数是 uint8_t* 且写回**单字节枚举**
+  （LIBFSFAT_FILE_SYSTEM_FORMAT_FAT16 = 3，不是字符串；"FAT-16" 只是 fsfatinfo 的显示名）、
+  libfsfat_volume_close() 成功返回 **0**（头文件注明 "Returns 0 if successful or -1 on error"）、
+  libfsfat_get_version() 返回**上游版本串 20260208** 而非 Conan 版本 0-20260208。
+affected_scope: >
+  按判定信号适用，不按家族名默认适用。
+  (1) 适用面最广：任何 autotools/C 为主体的包，只要**仓库根目录**同时存在
+  pyproject.toml/setup.py/setup.cfg（Python 绑定、setuptools 构建后端声明）与
+  configure.ac/Makefile.am，且源文件统计主体为 C，就会命中假 mixed→env_unsupported。
+  本批 2026-09-19 同设备三个 libyal 任务（libfsxfs、libfvde、libfsfat）独立命中同一形态。
+  (2) 只在「TESTS 为引用 test_runner.sh 的 .sh runner」的 libyal 修订上成立；
+  判定信号：tests/ 下存在 test_runner.sh 且其中含 find_binary_executable 与
+  `grep "POSIX shell script"`。
+  (3) 逐字实测的只有 libfsfat 0-20260208（Debian orig tarball sha256 043cf14a...），
+  其它 libyal 包的 API 返回值需按各自 include/<lib>.h 的头文件注释逐条核对，不作逐包断言。
+rec_approach: evidence-based-per-case-adjudication-plus-api-contract-probe
+rec_description: >
+  ① lang-preflight 命中后**不要**按 env_unsupported 直接终态：先做三条人工核验——
+  (a) 读命中 manifest 的**全文**（libyal 的 pyproject.toml 只有 3 行 setuptools 后端声明，
+  setup.cfg 自述 "Python bindings module for libfsfat"）；(b) 确认真实构建入口是
+  configure/Makefile.am 且源文件统计主体为 C/C++；(c) 确认配方已 --disable-python。
+  三条都成立即判假阳性，用编排的 `--skip-step lang-preflight --start-note "<理由>"`
+  留痕跳步（readiness 记 skip，不是通过），证据落任务目录并写 feedback/pending/。
+  ② test_runner.sh 的 libtool 判定在 OHOS 上失效**不需要**改写上游文件：先原样跑
+  make check；只有出现 "Invalid test executable" 之类真实失败时才考虑同族先例的
+  find_binary_executable 补丁，不要照抄。
+  ③ 消费者测试对每个 API 先写最小探针断言其**实测返回值**（枚举/0/版本串），
+  再写正式断言，避免把显示名或 Conan 版本当成 API 契约。
+rec_command: >
+  TASK_DIR=$HOME/tmp/libfsfat-0-20260208;
+  sh "$TASK_DIR/lang-preflight-check.sh"（复核①：重算主体语言占比 + 打印命中 manifest 全文，
+  不写共享 result 槽）；sh "$TASK_DIR/api-contract-probe.sh"（复核③：对已安装包编译探针并打印
+  get_version / get_file_system_format / volume_close 的实测返回值）
+rec_auto_fix: false
+rec_impl: >
+  无仓库内补丁（不改上游任何文件、不改 tests/test_runner.sh）。证据与复现脚本落 $TASK_DIR；
+  逐字记录见 archives/l/libfsfat/0-20260208/reports/lang-preflight-review.md 与
+  reports/upstream-tests.md；lang_detect 的修法建议写 feedback/pending/2026-09-19-libfsfat-0-20260208.md
+fallback_priority: 2
+fallback_approach: patch-lang-detect-binding-override-and-manifest-priority
+fallback_description: >
+  若能改工具侧（属框架任务，不与软件 PR 混提）：把 binding_override 的判据从
+  dominant == "cpp" 放宽为 dominant in ("c","cpp") 且 share >= 0.70 且存在绑定类 manifest；
+  或把 c/cpp 族构建系统（configure.ac / Makefile.am / CMakeLists.txt）的优先级提到
+  pyproject.toml/setup.py/setup.cfg 之前。二者都能让本形态直接判 c/cpp（与任务语言兼容族），
+  不再产生假终态。
+fallback_command: >
+  python3 "$HOME/ws/framework/overlay_tool.py" status（确认 overlay 漂移基线）；
+  修法验证：python3 "$HOME/ws/framework/verify.py"（组[1]-[9] 离线断言，含 lang_detect C5 组）
+fallback_auto_fix: false
+fallback_impl: 需改 framework/overlay/scripts/ohc/lang_detect.py 并重生 patches/ 与 BASELINE.tsv（框架任务）
+forbid_1_pattern: "OHC_PREFLIGHT=0|--lang mixed|env_unsupported 直接终态后放弃|edit tests/test_runner.sh"
+forbid_1_reason: >
+  把任务语言改成 mixed、或用 OHC_PREFLIGHT=0 绕过门禁，都是用谎报换取放行；
+  对真实主体是 C 的包直接按假终态放弃，会把可完成的适配判死；改写上游 test_runner.sh
+  属"修改上游测试用例"，且实测并不需要（不改也全绿）。
+forbid_1_consequence: 语言字段失真（协议 R47 违约）、PR 面失真、被 W4 判 P0/P1 返工
+prescan_pattern: "pyproject\\.toml|setup\\.cfg|lang-preflight|PYFSFAT|--disable-python"
+verify_builds: >
+  libfsfat 0-20260208（任务 libfsfat-0-20260208）：设备原生 configure/make/make check
+  全部 rc=0；make check 读数 # TOTAL: 3 / # PASS: 2 / # SKIP: 1 / # FAIL: 0，19 个
+  check_PROGRAMS 全部 PASS；消费者测试 test_libfsfat.c 11 项断言 + test_ohos.c 20 项断言
+  （含合成 FAT-16 镜像读回链路）全通过；同批 libfsxfs、libfvde 在 lang-preflight 上
+  独立命中同一假阳性形态（编排方跨任务观测，2026-09-19）。
+last_updated: 2026-09-19

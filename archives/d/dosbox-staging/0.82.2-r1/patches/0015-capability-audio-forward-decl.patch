@@ -1,0 +1,769 @@
+diff --git a/meson.build b/meson.build
+index 1458e4d..915f9d6 100644
+--- a/meson.build
++++ b/meson.build
+@@ -434,10 +434,12 @@ conf_data.set_quoted(
+ )
+-
++
+ conf_data.set10(os_family_name, true)
+-conf_data.set10('C_MODEM', get_option('use_sdl2_net'))
+-conf_data.set10('C_IPX', get_option('use_sdl2_net'))
+-conf_data.set10('C_SLIRP', get_option('use_slirp'))
+-conf_data.set10('C_NE2000', get_option('use_slirp'))
++# Final backend dependency probes below determine whether these facilities
++# are actually available on the target platform.
++conf_data.set10('C_MODEM', false)
++conf_data.set10('C_IPX', false)
++conf_data.set10('C_SLIRP', false)
++conf_data.set10('C_NE2000', false)
+ conf_data.set10('C_FLUIDSYNTH', get_option('use_fluidsynth'))
+ conf_data.set10('C_MT32EMU', get_option('use_mt32emu'))
+ conf_data.set10('C_TRACY', get_option('tracy'))
+@@ -973,6 +975,8 @@ if get_option('use_sdl2_net')
+-
++
+ endif
+ summary('SDL_net 2.0 support', sdl2_net_summary_msg)
++conf_data.set10('C_MODEM', sdl2_net_dep.found())
++conf_data.set10('C_IPX', sdl2_net_dep.found())
+-
++
+ # slirp (depends on glib)
+ libslirp_dep = optional_dep
+@@ -996,6 +1000,8 @@ if get_option('use_slirp')
+-
++
+ endif
+ summary('slirp support', libslirp_summary_msg)
++conf_data.set10('C_SLIRP', libslirp_dep.found())
++conf_data.set10('C_NE2000', libslirp_dep.found())
+-
++
+-
++
+ # OpenGL
+
+diff --git a/src/cpu/core_dyn_x86.cpp b/src/cpu/core_dyn_x86.cpp
+index 5171a06..365518e 100644
+--- a/src/cpu/core_dyn_x86.cpp
++++ b/src/cpu/core_dyn_x86.cpp
+@@ -315,6 +315,16 @@ auto sync_normal_fpu_and_run_dyn_code = gen_runcode;
+ Bits CPU_Core_Dyn_X86_Run() noexcept
+ {
+-	ZoneScoped;
++	ZoneScoped;
++	const auto probe = std::getenv("DOSBOX_CAPABILITY_PROBE");
++	const auto dynrec = std::getenv("DOSBOX_CAPABILITY_DYNREC");
++	if (probe && std::strcmp(probe, "1") == 0 && dynrec &&
++	    std::strcmp(dynrec, "1") == 0) {
++		static bool marker_emitted = false;
++		if (!marker_emitted) {
++			LOG_MSG("DOSBOX_CAPABILITY_DYNREC|core=dynamic-x86|execution=entered");
++			marker_emitted = true;
++		}
++	}
+-
++
+ #	if defined(X86_DYNFPU_DH_ENABLED)
+-	// activates at each return point below (on scope closure)
++	// activates at each return point below (on scope closure)
+
+diff --git a/src/cpu/core_dynrec.cpp b/src/cpu/core_dynrec.cpp
+index b09adbf..bf9b77e 100644
+--- a/src/cpu/core_dynrec.cpp
++++ b/src/cpu/core_dynrec.cpp
+@@ -236,6 +236,16 @@ CacheBlock *LinkBlocks(BlockReturn ret)
+ Bits CPU_Core_Dynrec_Run() noexcept
+ {
+-	ZoneScoped;
++	ZoneScoped;
++	const auto probe = std::getenv("DOSBOX_CAPABILITY_PROBE");
++	const auto dynrec = std::getenv("DOSBOX_CAPABILITY_DYNREC");
++	if (probe && std::strcmp(probe, "1") == 0 && dynrec &&
++	    std::strcmp(dynrec, "1") == 0) {
++		static bool marker_emitted = false;
++		if (!marker_emitted) {
++			LOG_MSG("DOSBOX_CAPABILITY_DYNREC|core=dynrec|execution=entered");
++			marker_emitted = true;
++		}
++	}
+-	for (;;) {
++	for (;;) {
+-		// Determine the linear address of CS:EIP
++		// Determine the linear address of CS:EIP
+-		PhysPt ip_point=SegPhys(cs)+reg_eip;
++		PhysPt ip_point=SegPhys(cs)+reg_eip;
+
+diff --git a/src/gui/meson.build b/src/gui/meson.build
+index 66e0862..70e000b 100644
+--- a/src/gui/meson.build
++++ b/src/gui/meson.build
+@@ -7,6 +7,11 @@ libgui_sources = files(
+     'titlebar.cpp',
+ )
+-
++
++native_image_dep = optional_dep
++if host_machine.system() == 'ohos'
++    native_image_dep = cxx.find_library('native_image', required: true)
++endif
++
+ libgui = static_library(
+     'gui',
+     libgui_sources,
+@@ -18,10 +23,14 @@ libgui = static_library(
+         opengl_dep,
+         sdl2_dep,
+         tracy_dep,
++        native_image_dep,
+     ],
+     cpp_args: warnings,
+ )
+-
++
+-libgui_dep = declare_dependency(link_with: libgui)
++libgui_dep = declare_dependency(
++    link_with: libgui,
++    dependencies: native_image_dep,
++)
+-
++
+ internal_deps += libgui_dep
+
+diff --git a/src/gui/sdlmain.cpp b/src/gui/sdlmain.cpp
+index 04b7641..ed0f991 100644
+--- a/src/gui/sdlmain.cpp
++++ b/src/gui/sdlmain.cpp
+@@ -22,6 +22,7 @@
+ #include "dosbox.h"
+-
++
+ #include <array>
++#include <atomic>
+ #include <cassert>
+ #include <cerrno>
+ #include <cmath>
+@@ -30,6 +31,7 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <signal.h>
++#include <string>
+ #include <sys/types.h>
+ #include <tuple>
+ #include <unistd.h>
+@@ -48,6 +50,10 @@
+ #include <SDL_opengl.h>
+ #endif
+-
++
++#if defined(DOSBOX_STAGING_CAPABILITY_NATIVE_BACKEND)
++#include <native_image/native_image.h>
++#endif
++
+ #include "../capture/capture.h"
+ #include "../dos/dos_locale.h"
+ #include "../ints/int10.h"
+@@ -305,6 +311,8 @@ void OPENGL_ERROR(const char*) {
+ #endif
+ #endif
+-
++
++static void cleanup_capability_nativewindow();
++
+ static void QuitSDL()
+ {
+-	if (sdl.initialized) {
++	if (sdl.initialized) {
+@@ -312,9 +320,16 @@ static void QuitSDL()
+-		SDL_Quit();
++		SDL_Quit();
+ #endif
+-	}
++	}
++	cleanup_capability_nativewindow();
+-	restore_console_encoding();
++	restore_console_encoding();
+ }
+-
++
++static bool capability_probe_enabled();
++static bool capability_audio_only_enabled();
++static bool capability_video_probe_enabled();
++static bool report_capability_video_present(const char *driver,
++                                            const char *renderer);
++
+ // Globals for keyboard initialisation
+ static bool startup_state_numlock  = false;
+ static bool startup_state_capslock = false;
+@@ -1731,6 +1746,20 @@ uint8_t GFX_SetSize(const int render_width_px, const int render_height_px,
+                     const VideoMode& video_mode, GFX_CallBack_t callback)
+ {
+-	uint8_t retFlags = 0;
++	uint8_t retFlags = 0;
++	if (capability_audio_only_enabled()) {
++		sdl.draw.has_changed = true;
++		sdl.draw.render_width_px = render_width_px;
++		sdl.draw.render_height_px = render_height_px;
++		sdl.draw.render_pixel_aspect_ratio = render_pixel_aspect_ratio;
++		sdl.draw.width_was_doubled = flags & GFX_DBL_W;
++		sdl.draw.height_was_doubled = flags & GFX_DBL_H;
++		sdl.maybe_video_mode = video_mode;
++		sdl.draw.callback = callback;
++		sdl.rendering_backend = RenderingBackend::Texture;
++		sdl.desktop.dpi_scale = 1.0;
++		GFX_DisengageRendering();
++		return GFX_CAN_32;
++	}
+-	if (sdl.updating)
++	if (sdl.updating)
+-		GFX_EndUpdate(nullptr);
++		GFX_EndUpdate(nullptr);
+-
++
+@@ -2688,6 +2717,14 @@ static bool present_frame_texture()
+-		}
++		}
+-
++
+-		SDL_RenderPresent(sdl.renderer);
++		SDL_RenderPresent(sdl.renderer);
++		if (capability_video_probe_enabled()) {
++			SDL_RendererInfo info = {};
++			SDL_GetRendererInfo(sdl.renderer, &info);
++			if (!report_capability_video_present(SDL_GetCurrentVideoDriver(),
++			                                     info.name)) {
++				return false;
++			}
++		}
+-	}
++	}
+-	render_pacer->Checkpoint();
++	render_pacer->Checkpoint();
+-	return is_presenting;
++	return is_presenting;
+@@ -2746,6 +2783,11 @@ static bool present_frame_gl()
+-		}
++		}
+-
++
+-		SDL_GL_SwapWindow(sdl.window);
++		SDL_GL_SwapWindow(sdl.window);
++		if (capability_video_probe_enabled() &&
++		    !report_capability_video_present(SDL_GetCurrentVideoDriver(),
++		                                     "opengl")) {
++			return false;
++		}
+-	}
++	}
+-	render_pacer->Checkpoint();
++	render_pacer->Checkpoint();
+-	return is_presenting;
++	return is_presenting;
+@@ -2771,6 +2813,10 @@ void GFX_Stop() {
+ }
+-
++
+ void GFX_Start() {
++	if (capability_audio_only_enabled()) {
++		sdl.active = false;
++		return;
++	}
+-	sdl.active=true;
++	sdl.active=true;
+ }
+-
++
+@@ -3248,6 +3294,12 @@ static void set_output(Section* sec, const bool wants_aspect_ratio_correction)
+-	std::string output = section->Get_string("output");
++	std::string output = section->Get_string("output");
+-
++
+-	GFX_DisengageRendering();
++	GFX_DisengageRendering();
++	if (capability_audio_only_enabled()) {
++		sdl.want_rendering_backend = RenderingBackend::Texture;
++		sdl.rendering_backend = RenderingBackend::Texture;
++		sdl.render_driver = "audio-only";
++		return;
++	}
+-	// it's the job of everything after this to re-engage it.
++	// it's the job of everything after this to re-engage it.
+-
++
+-	if (output == "texture") {
++	if (output == "texture") {
+@@ -3542,7 +3594,9 @@ static void read_gui_config(Section* sec)
+-	                                       Pacer::LogLevel::TIMEOUTS);
++	                                       Pacer::LogLevel::TIMEOUTS);
+-
++
+-	const int display = section->Get_int("display");
++	const int display = section->Get_int("display");
+-	if ((display >= 0) && (display < SDL_GetNumVideoDisplays())) {
++	if (capability_audio_only_enabled()) {
++		sdl.display_number = 0;
++	} else if ((display >= 0) && (display < SDL_GetNumVideoDisplays())) {
+-		sdl.display_number = display;
++		sdl.display_number = display;
+-	} else {
++	} else {
+-		LOG_WARNING("SDL: Display number out of bounds, using display 0");
++		LOG_WARNING("SDL: Display number out of bounds, using display 0");
+@@ -3564,7 +3618,7 @@ static void read_gui_config(Section* sec)
+-	}
++	}
+-
++
+-	sdl.desktop.full.display_res = sdl.desktop.full.fixed && (!sdl.desktop.full.width || !sdl.desktop.full.height);
++	sdl.desktop.full.display_res = sdl.desktop.full.fixed && (!sdl.desktop.full.width || !sdl.desktop.full.height);
+-	if (sdl.desktop.full.display_res) {
++	if (sdl.desktop.full.display_res && !capability_audio_only_enabled()) {
+-		GFX_ObtainDisplayDimensions();
++		GFX_ObtainDisplayDimensions();
+-	}
++	}
+-
++
+@@ -4792,6 +4846,157 @@ static void set_wm_class()
+ #endif
+ }
+-
++
++static bool capability_probe_enabled()
++{
++	const auto value = std::getenv("DOSBOX_CAPABILITY_PROBE");
++	return value && std::strcmp(value, "1") == 0;
++}
++
++static bool capability_audio_only_enabled()
++{
++	const auto audio_only = std::getenv("DOSBOX_CAPABILITY_AUDIO_ONLY");
++	return capability_probe_enabled() && audio_only &&
++	       std::strcmp(audio_only, "1") == 0;
++}
++
++static bool capability_video_probe_enabled()
++{
++	const auto value = std::getenv("DOSBOX_CAPABILITY_VIDEO");
++	return capability_probe_enabled() && value && std::strcmp(value, "1") == 0;
++}
++
++#if defined(DOSBOX_STAGING_CAPABILITY_NATIVE_BACKEND)
++static OH_NativeImage *capability_native_image = nullptr;
++static std::atomic<bool> capability_frame_available = false;
++static std::string capability_surface_id = {};
++
++static void capability_on_frame_available(void *)
++{
++	capability_frame_available.store(true, std::memory_order_release);
++}
++#endif
++
++static void cleanup_capability_nativewindow()
++{
++#if defined(DOSBOX_STAGING_CAPABILITY_NATIVE_BACKEND)
++	if (capability_native_image) {
++		OH_NativeImage_UnsetOnFrameAvailableListener(capability_native_image);
++		OH_NativeImage_Destroy(&capability_native_image);
++	}
++	capability_frame_available.store(false, std::memory_order_release);
++	capability_surface_id.clear();
++#endif
++}
++
++static bool capability_positive_decimal(const char *value)
++{
++	if (!value || !*value) {
++		return false;
++	}
++	for (const char *cursor = value; *cursor; ++cursor) {
++		if (*cursor < '0' || *cursor > '9') {
++			return false;
++		}
++	}
++	errno = 0;
++	char *end = nullptr;
++	const auto parsed = std::strtoull(value, &end, 10);
++	return errno == 0 && end && *end == '\0' && parsed > 0;
++}
++
++static bool apply_capability_nativewindow_hints()
++{
++	if (!capability_video_probe_enabled()) {
++		return true;
++	}
++	const auto surface_id = std::getenv("DOSBOX_NATIVEWINDOW_SURFACE_ID");
++	const auto width = std::getenv("DOSBOX_NATIVEWINDOW_WIDTH");
++	const auto height = std::getenv("DOSBOX_NATIVEWINDOW_HEIGHT");
++	const auto has_external_tuple = surface_id || width || height;
++	if (has_external_tuple) {
++		if (!capability_positive_decimal(surface_id) ||
++		    !capability_positive_decimal(width) ||
++		    !capability_positive_decimal(height)) {
++			LOG_ERR("DOSBOX_CAPABILITY_VIDEO_FAIL invalid NativeWindow surface tuple");
++			return false;
++		}
++		LOG_ERR("DOSBOX_CAPABILITY_VIDEO_FAIL external NativeWindow tuple requires an in-process NativeImage observer");
++		return false;
++	}
++
++#if defined(DOSBOX_STAGING_CAPABILITY_NATIVE_BACKEND)
++	capability_native_image = OH_ConsumerSurface_Create();
++	if (!capability_native_image) {
++		LOG_ERR("DOSBOX_CAPABILITY_VIDEO_FAIL unable to create NativeImage consumer surface");
++		return false;
++	}
++	uint64_t native_surface_id = 0;
++	if (OH_NativeImage_GetSurfaceId(capability_native_image,
++	                                &native_surface_id) != 0 ||
++	    native_surface_id == 0) {
++		LOG_ERR("DOSBOX_CAPABILITY_VIDEO_FAIL unable to obtain NativeImage surface ID");
++		cleanup_capability_nativewindow();
++		return false;
++	}
++	OH_OnFrameAvailableListener listener = {};
++	listener.onFrameAvailable = capability_on_frame_available;
++	if (OH_NativeImage_SetOnFrameAvailableListener(capability_native_image,
++	                                                listener) != 0) {
++		LOG_ERR("DOSBOX_CAPABILITY_VIDEO_FAIL unable to register NativeImage frame listener");
++		cleanup_capability_nativewindow();
++		return false;
++	}
++	capability_surface_id = std::to_string(native_surface_id);
++	if (!SDL_SetHint("SDL_NATIVEWINDOW_SURFACE_ID", capability_surface_id.c_str()) ||
++	    !SDL_SetHint("SDL_NATIVEWINDOW_WIDTH", "640") ||
++	    !SDL_SetHint("SDL_NATIVEWINDOW_HEIGHT", "480")) {
++		LOG_ERR("DOSBOX_CAPABILITY_VIDEO_FAIL unable to set NativeWindow hints");
++		cleanup_capability_nativewindow();
++		return false;
++	}
++	return true;
++#else
++	LOG_ERR("DOSBOX_CAPABILITY_VIDEO_FAIL NativeImage consumer surface is unavailable");
++	return false;
++#endif
++}
++
++static bool report_capability_video_present(const char *driver,
++                                            const char *renderer)
++{
++	static bool marker_emitted = false;
++	if (marker_emitted) {
++		return true;
++	}
++	if (!driver || std::strcmp(driver, "nativewindow") != 0 || !renderer ||
++	    (std::strcmp(renderer, "opengles2") != 0 &&
++	     std::strcmp(renderer, "opengl") != 0)) {
++		LOG_ERR("DOSBOX_CAPABILITY_VIDEO_FAIL unexpected SDL backend: driver=%s renderer=%s",
++		        driver ? driver : "unknown",
++		        renderer ? renderer : "unknown");
++		return false;
++	}
++#if defined(DOSBOX_STAGING_CAPABILITY_NATIVE_BACKEND)
++	if (!capability_native_image) {
++		LOG_ERR("DOSBOX_CAPABILITY_VIDEO_FAIL no in-process NativeImage observer");
++		return false;
++	}
++	for (int attempt = 0; attempt < 200; ++attempt) {
++		if (capability_frame_available.load(std::memory_order_acquire)) {
++			LOG_MSG("DOSBOX_CAPABILITY_VIDEO_PRESENT|driver=%s|renderer=%s|frame_available=1",
++			        driver, renderer);
++			marker_emitted = true;
++			return true;
++		}
++		SDL_Delay(10);
++	}
++	LOG_ERR("DOSBOX_CAPABILITY_VIDEO_FAIL NativeImage frame callback timeout");
++	return false;
++#else
++	return false;
++#endif
++}
++
+ int sdl_main(int argc, char* argv[])
+ {
+-	// Ensure we perform SDL cleanup and restore console settings
++	// Ensure we perform SDL cleanup and restore console settings
+@@ -5009,8 +5219,13 @@ int sdl_main(int argc, char* argv[])
+-			return err;
++			return err;
+-		}
++		}
+-
++
++		if (!apply_capability_nativewindow_hints())
++			return 1;
++
+-		// Timer is needed for title bar animations
++		// Timer is needed for title bar animations
+-		if (SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO | SDL_INIT_TIMER) < 0) {
++		const Uint32 sdl_init_flags = SDL_INIT_AUDIO | SDL_INIT_TIMER |
++		                              (capability_audio_only_enabled() ? 0u : SDL_INIT_VIDEO);
++		if (SDL_Init(sdl_init_flags) < 0) {
+-			E_Exit("SDL: Can't init SDL %s", SDL_GetError());
++			E_Exit("SDL: Can't init SDL %s", SDL_GetError());
+-		}
++		}
+-		sdl.start_event_id = SDL_RegisterEvents(enum_val(SDL_DosBoxEvents::NumEvents));
++		sdl.start_event_id = SDL_RegisterEvents(enum_val(SDL_DosBoxEvents::NumEvents));
+@@ -5023,12 +5238,18 @@ int sdl_main(int argc, char* argv[])
+-		SDL_version sdl_version = {};
++		SDL_version sdl_version = {};
+-		SDL_GetVersion(&sdl_version);
++		SDL_GetVersion(&sdl_version);
+-
++
++		const auto video_driver = SDL_WasInit(SDL_INIT_VIDEO)
++		                                  ? SDL_GetCurrentVideoDriver()
++		                                  : "disabled";
+-		LOG_MSG("SDL: version %d.%d.%d initialised (%s video and %s audio)",
++		LOG_MSG("SDL: version %d.%d.%d initialised (%s video and %s audio)",
+-		        sdl_version.major,
++		        sdl_version.major,
+-		        sdl_version.minor,
++		        sdl_version.minor,
+-		        sdl_version.patch,
++		        sdl_version.patch,
+-		        SDL_GetCurrentVideoDriver(),
++		        video_driver ? video_driver : "unknown",
+-		        SDL_GetCurrentAudioDriver());
++		        SDL_GetCurrentAudioDriver());
++		if (capability_audio_only_enabled()) {
++			LOG_MSG("DOSBOX_CAPABILITY_AUDIO_ONLY|video=disabled|audio=enabled");
++		}
+-
++
+ #if defined SDL_HINT_APP_NAME
+-		// For KDE 6 volume applet and PipeWire audio driver; further
++		// For KDE 6 volume applet and PipeWire audio driver; further
+@@ -5178,4 +5399,3 @@ int sdl_main(int argc, char* argv[])
+-
++
+-	return return_code;
++	return return_code;
+ }
+-
+
+diff --git a/src/hardware/mixer.cpp b/src/hardware/mixer.cpp
+index b6d6adf..5670a86 100644
+--- a/src/hardware/mixer.cpp
++++ b/src/hardware/mixer.cpp
+@@ -26,6 +26,7 @@
+ #include <cmath>
+ #include <cstdint>
+ #include <cstring>
++#include <cstdlib>
+ #include <optional>
+ #include <sys/types.h>
+-
++
+@@ -202,6 +203,10 @@ struct MixerSettings {
+-
++
+-	SDL_AudioDeviceID sdl_device = 0;
++	SDL_AudioDeviceID sdl_device = 0;
+-
++
++	// The backend may negotiate a supported PCM format when the requested
++	// float format is unavailable (for example, OHAudio on some devices).
++	SDL_AudioFormat sdl_format = AUDIO_F32SYS;
++
+-	std::atomic<MixerState> state = MixerState::Uninitialized;
++	std::atomic<MixerState> state = MixerState::Uninitialized;
+-
++
+-	HighpassFilter highpass_filter = {};
++	HighpassFilter highpass_filter = {};
+@@ -2369,6 +2374,41 @@ static float normalize_sample(float sample)
+-	return sample / 32768.0f;
++	return sample / 32768.0f;
+ }
+-
++
++static bool capability_audio_probe_enabled()
++{
++	const auto probe = std::getenv("DOSBOX_CAPABILITY_PROBE");
++	const auto tone = std::getenv("DOSBOX_CAPABILITY_AUDIO_TONE");
++	return probe && std::strcmp(probe, "1") == 0 && tone &&
++	       std::strcmp(tone, "1") == 0;
++}
++
++// Add the probe signal before capture and final format conversion. The SDL
++// callback remains a read-only observer of the mixed stream.
++static void apply_capability_audio_probe()
++{
++	if (!capability_audio_probe_enabled()) {
++		return;
++	}
++	constexpr float Pi = 3.14159265358979323846f;
++	constexpr float FrequencyHz = 440.0f;
++	constexpr float Amplitude = 2048.0f;
++	static float phase = 0.0f;
++	const auto sample_rate = static_cast<float>(mixer.sample_rate_hz.load());
++	if (!(sample_rate > 0.0f)) {
++		return;
++	}
++	const auto phase_step = 2.0f * Pi * FrequencyHz / sample_rate;
++	for (auto& frame : mixer.output_buffer) {
++		const auto sample = std::sin(phase) * Amplitude;
++		frame.left += sample;
++		frame.right += sample;
++		phase += phase_step;
++		if (phase >= 2.0f * Pi) {
++			phase -= 2.0f * Pi;
++		}
++	}
++}
++
+ // Mix a certain amount of new sample frames
+ static void mix_samples(const int frames_requested)
+ {
+@@ -2460,6 +2500,8 @@ static void mix_samples(const int frames_requested)
+-		}
++		}
+-	}
++	}
+-
++
++	apply_capability_audio_probe();
++
+-	// Capture audio output if requested
++	// Capture audio output if requested
+-	if (CAPTURE_IsCapturingAudio() || CAPTURE_IsCapturingVideo()) {
++	if (CAPTURE_IsCapturingAudio() || CAPTURE_IsCapturingVideo()) {
+-		mixer.capture_buffer.clear();
++		mixer.capture_buffer.clear();
+@@ -2532,10 +2574,16 @@ static void SDLCALL mixer_callback([[maybe_unused]] void* userdata,
+-	ZoneScoped;
++	ZoneScoped;
+-	memset(stream, 0, static_cast<size_t>(bytes_requested));
++	memset(stream, 0, static_cast<size_t>(bytes_requested));
+-
++
+-	constexpr auto BytesPer32BitSample = 4;
+-	constexpr auto BytesPerSampleFrame = BytesPer32BitSample * 2; // stereo
+-
+-	const auto frames_requested = bytes_requested / BytesPerSampleFrame;
++	const auto bytes_per_sample = mixer.sdl_format == AUDIO_F32SYS
++	                                  ? sizeof(float)
++	                                  : mixer.sdl_format == AUDIO_S16SYS ? sizeof(int16_t) : 0;
++	const auto bytes_per_sample_frame = bytes_per_sample * 2; // stereo
++	if (bytes_per_sample_frame == 0 ||
++	    bytes_requested % bytes_per_sample_frame != 0) {
++		LOG_ERR("MIXER: SDL callback supplied an invalid negotiated frame size");
++		return;
++	}
++	const auto frames_requested = check_cast<int>(bytes_requested / bytes_per_sample_frame);
+-
++
+-	// Mac OSX has been observed to be problematic if we ever block inside SDL's callback
++	// Mac OSX has been observed to be problematic if we ever block inside SDL's callback
+-	// This ensures that we do not block waiting for more audio
++	// This ensures that we do not block waiting for more audio
+@@ -2544,7 +2592,55 @@ static void SDLCALL mixer_callback([[maybe_unused]] void* userdata,
+-	if (num_frames > 0) {
++	if (num_frames > 0) {
+-		std::vector<AudioFrame> audio_frames = {};
++		std::vector<AudioFrame> audio_frames = {};
+-		mixer.final_output.BulkDequeue(audio_frames, num_frames);
++		mixer.final_output.BulkDequeue(audio_frames, num_frames);
+-		memcpy(stream, audio_frames.data(), audio_frames.size() * sizeof(AudioFrame));
++		if (mixer.sdl_format == AUDIO_F32SYS) {
++			memcpy(stream, audio_frames.data(), audio_frames.size() * sizeof(AudioFrame));
++		} else if (mixer.sdl_format == AUDIO_S16SYS) {
++			for (size_t i = 0; i < audio_frames.size(); ++i) {
++				const auto left = static_cast<int16_t>(host_to_le16(static_cast<uint16_t>(
++				        clamp_to_int16(static_cast<int>(audio_frames[i].left * 32767.0f)))));
++				const auto right = static_cast<int16_t>(host_to_le16(static_cast<uint16_t>(
++				        clamp_to_int16(static_cast<int>(audio_frames[i].right * 32767.0f)))));
++				memcpy(stream + i * sizeof(left) * 2, &left, sizeof(left));
++				memcpy(stream + i * sizeof(left) * 2 + sizeof(left), &right, sizeof(right));
++			}
++		}
++	}
++
++	if (capability_audio_probe_enabled() && bytes_requested >=
++	    static_cast<int>(sizeof(uint16_t))) {
++		bool nonzero = false;
++		if (mixer.sdl_format == AUDIO_F32SYS) {
++			const auto sample_count = static_cast<size_t>(bytes_requested) /
++			                          sizeof(float);
++			for (size_t i = 0; i < sample_count; ++i) {
++				float sample = 0.0f;
++				memcpy(&sample, stream + i * sizeof(sample), sizeof(sample));
++				if (std::isfinite(sample) && std::fabs(sample) > 0.0001f) {
++					nonzero = true;
++					break;
++				}
++			}
++		} else if (mixer.sdl_format == AUDIO_S16SYS) {
++			const auto sample_count = static_cast<size_t>(bytes_requested) /
++			                          sizeof(int16_t);
++			for (size_t i = 0; i < sample_count; ++i) {
++				int16_t sample = 0;
++				memcpy(&sample, stream + i * sizeof(sample), sizeof(sample));
++				if (sample != 0) {
++					nonzero = true;
++					break;
++				}
++			}
++		}
++		if (nonzero) {
++			static bool marker_emitted = false;
++			if (!marker_emitted) {
++				const auto driver = SDL_GetCurrentAudioDriver();
++				LOG_MSG("DOSBOX_CAPABILITY_AUDIO_CALLBACK|driver=%s|bytes=%d|nonzero=1",
++				        driver ? driver : "unknown", bytes_requested);
++				marker_emitted = true;
++			}
++		}
+-	}
++	}
+ }
+-
++
+@@ -2705,7 +2801,8 @@ static bool init_sdl_sound(const int requested_sample_rate_hz,
+-	desired.callback = mixer_callback;
++	desired.callback = mixer_callback;
+-	desired.userdata = nullptr;
++	desired.userdata = nullptr;
+-
++
+-	int sdl_allow_flags = SDL_AUDIO_ALLOW_FREQUENCY_CHANGE;
++	int sdl_allow_flags = SDL_AUDIO_ALLOW_FREQUENCY_CHANGE |
++	                       SDL_AUDIO_ALLOW_FORMAT_CHANGE;
+-
++
+-	if (allow_negotiate) {
++	if (allow_negotiate) {
+-		// Allow negotiating the audio buffer size, hopefully to obtain
++		// Allow negotiating the audio buffer size, hopefully to obtain
+@@ -2745,8 +2842,19 @@ static bool init_sdl_sound(const int requested_sample_rate_hz,
+-	mixer.sample_rate_hz = obtained_sample_rate_hz;
++	mixer.sample_rate_hz = obtained_sample_rate_hz;
+-	mixer.blocksize      = obtained_blocksize;
++	mixer.blocksize      = obtained_blocksize;
+-
++
+-	assert(obtained.channels == NumStereoChannels);
+-	assert(obtained.format == desired.format);
++	mixer.sdl_format = obtained.format;
++	if (obtained.channels != NumStereoChannels) {
++		LOG_WARNING("MIXER: SDL negotiated unsupported channel count %d", obtained.channels);
++		SDL_CloseAudioDevice(mixer.sdl_device);
++		mixer.sdl_device = 0;
++		return false;
++	}
++	if (obtained.format != AUDIO_F32SYS && obtained.format != AUDIO_S16SYS) {
++		LOG_WARNING("MIXER: SDL negotiated unsupported audio format 0x%x", obtained.format);
++		SDL_CloseAudioDevice(mixer.sdl_device);
++		mixer.sdl_device = 0;
++		return false;
++	}
+-
++
+-	// Did SDL negotiate a different playback rate?
++	// Did SDL negotiate a different playback rate?
+-	if (obtained_sample_rate_hz != requested_sample_rate_hz) {
++	if (obtained_sample_rate_hz != requested_sample_rate_hz) {

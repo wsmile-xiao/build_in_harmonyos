@@ -1,0 +1,94 @@
+#====================================================================
+# E543 draft — OHOS: 上游 CMake 平台分支仅匹配 Linux 时
+#         Threads::Threads 链接分支失效 → 配方 package_info 用
+#         system_libs 补 pthread，供下游静态链接消费
+# 触发事件: zycore-c 1.5.1 HarmonyOS PC 适配（pc3-6 R01）
+#====================================================================
+
+id:                     E543
+trigger_tool:           cmake|conan|ld
+phase:                  linking|packaging
+error_signature: 'undefined reference to pthread_create|undefined reference to pthread_key_create|Threads::Threads.*not found|CMAKE_SYSTEM_NAME STREQUAL "Linux".*Threads'
+
+severity:               2
+category:               platform, ohos, cmake, linking, conan
+match_keywords:         CMAKE_SYSTEM_NAME, HarmonyOS, OHOS, STREQUAL, Linux,
+                         Threads::Threads, find_package(Threads), pthread,
+                         system_libs, static library, zycore-c, 平台分支, 条件链接
+
+title: 'OHOS: 上游 CMake 仅 Linux 分支链接 Threads::Threads 时，配方 package_info 需补 pthread system_libs'
+
+root_cause: >
+  上游 CMake 用 `if (${CMAKE_SYSTEM_NAME} STREQUAL "Linux")` 精确匹配后再
+  `find_package(Threads)` 并链接 `Threads::Threads`。OHOS 下
+  CMAKE_SYSTEM_NAME=HarmonyOS，该分支整体不执行，库本身可正常编译（.a/.so
+  不产生链接错误），但源码实际调用 pthread 符号（pthread_key_create 等），
+  下游静态链接消费者链接该库时会报 undefined reference 到 pthread_*。
+  1.5.1 实测：zycore-c src/API/Thread.c 使用 pthread_key_*，上游 CMake
+  Linux 分支不命中，静态库 libZycore.a 无 pthread 链接信息，消费者
+  test_zycore_ohos（调用 ZyanThreadTlsAlloc）若不补 pthread 即链接失败。
+
+affected_scope: >
+  CMake 工程以 CMAKE_SYSTEM_NAME STREQUAL "Linux" 条件链接 Threads::Threads
+  （或条件 find_package(Threads)）且源码实际使用 pthread API 的库，在 OHOS
+  静态库配方场景下均适用；与 E607（平台分支漏编源文件）同家族但缺的是链接
+  库依赖而非源文件，修复面在配方层，不涉及源码补丁。
+
+verification_cmd: >
+  grep -n 'STREQUAL "Linux"' CMakeLists.txt; grep -rn 'pthread_' src/;
+  conan create . -pr:h=ohos-aarch64 -pr:b=ohos-aarch64;
+  消费者可执行直接链接 Zycore::Zycore 并调用 Thread API 后运行成功
+
+rec_priority:           1
+rec_approach:           recipe-package-info-pthread-system-libs
+rec_description: >
+  在 Conan 配方 package_info() 中，对 os in ("Linux", "OHOS") 声明
+  cpp_info.system_libs = ["pthread"]，使 CMakeDeps 生成的目标携带 pthread
+  传递依赖，下游静态链接消费者无需手工加 -pthread。
+rec_command: >
+  if self.settings.os in ("Linux", "OHOS"):
+      self.cpp_info.system_libs = ["pthread"]
+rec_auto_fix:           true
+rec_impl:               conan-recipe-system-libs
+
+fallback_priority:      2
+fallback_approach:      consumer-ldflags-pthread
+fallback_description:   若不允许改配方（外部配方），消费者侧 target_link_libraries
+                        显式加 pthread 或 CMakeLists 加 find_package(Threads)；
+                        仅作兜底，推荐仍走配方 system_libs 以保持原子性。
+fallback_command:       find_package(Threads REQUIRED); target_link_libraries(app PRIVATE Zycore::Zycore Threads::Threads)
+fallback_auto_fix:      false
+fallback_impl:          consumer-cmake-links-threads
+
+forbid_1_pattern:       __OHOS__.*pthread|ifdef __OHOS__.*pthread
+forbid_1_reason:        patches 新增行平台宏违反 R8/PF5；本问题修复面在配方，不需改源码。
+forbid_1_consequence:   CI PF5 拦截，且平台宏分支掩盖配方原子性。
+forbid_2_pattern:       -lpthread.*static.*ignore|undefined reference.*pthread.*ignore
+forbid_2_reason:        链接错误必须由 system_libs 声明闭环，不能忽略或绕行。
+forbid_2_consequence:   下游消费者仍会复现链接失败，配方交付不完整。
+
+principles:             P002, P003, P014
+causes:                 []
+caused_by:              []
+similar_to:             [E003, E607]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E543.md
+last_updated:           2026-09-18
+source_event:           zycore-c 1.5.1 pc3-6 R01 HarmonyOS 适配
+
+# ═══ 知识协作 ═══
+authors:                AtomCode <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-18
+
+draft: true
+contributor_id: E932

@@ -1,0 +1,73 @@
+# DRAFT-ffc.h-26.07.01-makefile-uname-gcc-hardcode - Makefile 系 C 库在 OHOS 的平台检测与编译器硬编码
+
+id:                     DRAFT-ffc.h-26.07.01-makefile-uname-gcc-hardcode
+trigger_tool:           make|makefile|gcc|clang|uname
+phase:                  compilation|testing
+error_signature:        use of undeclared identifier 'MADV_|make: gcc: No such file or directory|ifeq \(\$\(UNAME_S\),Linux\)|UNAME_S.*HarmonyOS
+severity:               2
+category:               ohos, build-system, makefile, platform-detection
+match_keywords:         makefile, uname -s, HarmonyOS, _DEFAULT_SOURCE, _POSIX_C_SOURCE, madvise, MADV_SEQUENTIAL, gcc, clang, symlink shim
+title:                  Makefile 系 C 库在 OHOS 首编：uname -s 平台检测不匹配致特性宏缺失 + 硬编码 gcc 无编译器
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+error_excerpt: >
+    test_src/sonicsv.h:1611:36: error: use of undeclared identifier 'MADV_SEQUENTIAL'
+    make: gcc: No such file or directory
+    make: *** [Makefile:30: out/test_runner] Error 127
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+root_cause: >
+    两个独立根因叠加：①上游 Makefile 用 `UNAME_S := $(shell uname -s)` + `ifeq ($(UNAME_S),Linux)`
+    决定是否加 `-D_DEFAULT_SOURCE`，而 OHOS 上 `uname -s` 返回 "HarmonyOS"（非 "Linux"），条件不成立，
+    导致依赖特性宏的 POSIX 声明（madvise/MADV_*）缺失而编译失败；
+    ②上游 Makefile 直接硬编码 `gcc -fsyntax-only`（或 gcc 编译命令），OHOS PC 环境只提供 clang 15 无 gcc，
+    直接报 "make: gcc: No such file or directory"。
+affected_scope: >
+    所有以 Makefile 为主构建、用 `uname -s`/uname 输出做平台分支（决定特性宏或编译参数）且硬编码
+    gcc/g++ 的 C/C++ 库在 HarmonyOS PC (OHOS, arm64) 的首次适配。CMake/autoconf 系库不适用
+    （分别见 E140 / E007、E160）。
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+verification_cmd: >
+    uname -s; grep -n "UNAME_S\|ifeq.*Linux\|gcc " Makefile;
+    clang -xc -std=c99 -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -I. -Itest_src test_src/test.c -o out/test_runner -lm
+similar_to:             E140 (CMake CMAKE_SYSTEM_NAME 平台块不匹配，CMake 口径), E359 (autotools configure 探测 gcc 缺失), E007/E160 (config.guess HarmonyOS)
+caused_by:              uname -s 在 HarmonyOS 返回非 Linux；OHOS 环境无 gcc
+prerequisite_of:        （无）
+conflicts_with:         （无）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           makefile-uname-feature-macro-restore
+rec_description: >
+    ①平台特性宏显式恢复：编译命令显式传 `-D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L`
+    （与上游 CMakeLists.txt 的 target_compile_definitions 声明保持一致，而非硬编码进配方）；
+    ②编译器垫片：若 Makefile 硬编码 gcc/g++ 且不便于改源码，在本地建 gcc→clang、c++→clang++
+    符号链接并置于 PATH 前置（不修改上游源码、不生成补丁）。
+    ③可选：若库用 CMake 而非 Makefile 做正式构建，直接以 CMake 配置编译（CMakeLists 通常已声明正确宏）。
+rec_command: >
+    mkdir -p ~/tmp/ohc-shims && ln -sf $(which clang) ~/tmp/ohc-shims/gcc && \
+    ln -sf $(which clang++) ~/tmp/ohc-shims/c++ && \
+    PATH=~/tmp/ohc-shims:$PATH make test
+rec_auto_fix:           false
+rec_impl:               build-flag-injection
+
+fallback_priority:      2
+fallback_approach:      cmake-config-path
+fallback_description:   上游同时提供 CMakeLists.txt 时，优先走 CMake 配置编译（其 target_compile_definitions 已含正确特性宏），Makefile 路径仅用于测试入口复跑。
+fallback_command:       cmake -B build && cmake --build build -j1 && ctest --test-dir build
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       sed -i.*ifeq.*UNAME_S|patch.*Makefile.*uname
+forbid_1_reason:        修改上游 Makefile 平台检测会引入平台宏补丁（R8 patches 默认禁平台宏），且破坏上游语义；应以编译参数注入解决。
+forbid_1_consequence:   补丁被 preflight PF5 拦截或污染上游语义。
+
+# 边界与反例
+boundary_notes: >
+    ①适用：Makefile 主构建 + uname 平台分支 + 硬编码 gcc 的 C 库（ffc.h 26.07.01 实证）。
+    ②反例：autotools 库走 E007/E160 (config.guess)；CMake 库走 E140；
+    configure 探测 gcc 的库走 E359。三者方案不同，不可套用本条目。
+    ③头文件单头实现库（stb-style，如 ffc.h 的 FFC_IMPL）：消费者 TU 需定义实现宏（如 #define FFC_IMPL）
+    才能链接实现，详见 DRAFT-enet-2.7.0-single-header-impl-lib 模式。
+last_updated:           2026-09-22

@@ -1,0 +1,129 @@
+id: DRAFT-E614-openfst-subpackage-recipe-pattern
+status: pending-editor-review
+title: "同 tarball 子包（OpenFST 家族）配方形态：configure 扩展开关默认 no、上游注册面 7 项不裁剪、REGISTER_FST 静态注册器必须 --whole-archive、子包证据要用注册表消费者测试"
+category: autotools, openfst, subpackage, static-link, whole-archive, test-counting
+build_system: autotools
+phase: build
+trigger_tool: conan-create
+severity: 2
+match_keywords: >
+  openfst, libfst, libfstconst, libfstlookahead, libfstngram, libfstfar,
+  same tarball subpackage, 同 tarball 子包, extension sublibrary, 扩展子库,
+  --enable-lookahead-fsts, --enable-const-fsts, --enable-ngram-fsts, --enable-far,
+  --enable-bin default yes, check_PROGRAMS, TESTS, fst_test, weight_test, algo_test,
+  BUILD.bazel cc_test, REGISTER_FST, FstRegisterer, FstRegister, GetEntry,
+  GenericRegister, dlopen vector-fst.so, whole-archive, --no-whole-archive,
+  LookAheadFst, arc_lookahead, ilabel_lookahead, olabel_lookahead,
+  install Error 64, toybox install -c, FST_FLAGS_tmpdir, --tmpdir
+error_signature: >
+  GenericRegister::GetEntry: Error loading shared library|
+  Fst::Read: Unknown FST type|no member named 'NumStates' in 'fst::Fst<|
+  must have one of the TEST_* macros defined|install:.*Error 64
+error_excerpt: >
+  ① 静态链接丢注册表（本任务 repro-e614-openfst-subpackage.sh 第②段实测，libfst.a 取采信轮安装树）：
+  不用 --whole-archive：
+    ERROR: GenericRegister::GetEntry: Error loading shared library vector-fst.so: No such file or directory
+    FstRegister<StdArc>::GetEntry("vector").reader = NULL
+    ERROR: GenericRegister::GetEntry: Error loading shared library const-fst.so: No such file or directory
+    FstRegister<StdArc>::GetEntry("const").reader = NULL
+  加 --whole-archive（只包夹核心库、未链扩展库）：
+    FstRegister<StdArc>::GetEntry("vector").reader = present
+    FstRegister<StdArc>::GetEntry("const").reader = present
+    ERROR: GenericRegister::GetEntry: Error loading shared library arc_lookahead-fst.so: No such file or directory
+    FstRegister<StdArc>::GetEntry("arc_lookahead").reader = NULL   ← 扩展库也必须一并包夹
+  ② 消费者首版编译错误（真机 conan create 的 test_package 段逐字）：
+    lookahead_consumer.cc:100:19: error: no member named 'NumStates' in
+    'fst::Fst<fst::ArcTpl<fst::TropicalWeightTpl<float>>>'
+  ③ configure.ac 默认值（repro 第①段逐字）：enable_compact_fsts=no / enable_compress=no /
+    enable_const_fsts=no / enable_far=no / enable_linear_fsts=no / enable_lookahead_fsts=no /
+    enable_mpdt=no / enable_ngram_fsts=no / enable_pdt=no / enable_python=no / enable_special=no，
+    只有 enable_bin=yes。
+  （完整输出：$HOME/tmp/libfstlookahead-1.8.4/repro-e614-output.txt）
+root_cause: >
+  OpenFST 1.8.4 的发布 tarball（openfst-1.8.4.tar.gz，sha256
+  a8ebbb6f3d92d07e671500587472518cfc87cb79b9a654a5a8abb2d0eb298016）是**单 tarball 多子库**形态：
+  核心库 libfst/libfstscript + 十余个扩展子库（const/compact/compress/lookahead/ngram/far/mpdt/pdt/
+  special/linear）共享一个 configure。三个家族级坑：
+  ① **扩展开关默认全 no**（configure.ac 每个 AC_ARG_ENABLE 的默认值都是 no），只有 `--enable-bin`
+     默认 **yes**——所以"照 openfst 完整配方"并不等于"全开扩展"，子包必须显式
+     `--enable-<ext>-fsts`；反过来不传 `--disable-*` 也不会误开其它扩展（与默认值相反直觉的常见误判）。
+  ② **上游测试面是整体 7 项、与子库无关**：src/test/Makefile.am 的
+     `check_PROGRAMS = fst_test weight_test` + `+= algo_test_{log,tropical,minmax,lexicographic,power}`，
+     `TESTS = $(check_PROGRAMS)`（7 项）；BUILD.bazel 的 cc_test 是同一组 7 项
+     （fst_test + weight_test + `algo_test_%s` 循环 5 个 weight）。子包**不裁剪**上游测试面，
+     故声明 N 必须按父 tarball 的注册面 = 7 走（少报即 rule4 不通过）。
+  ③ **静态链接会吃掉注册表**：FST 类型注册靠 `REGISTER_FST` 展开出的静态 `FstRegisterer`
+     对象（如 fst-types.cc 的 VectorFst/StdArc）；链 libfst.a 时无强引用会被链接器整对象剔除，
+     于是 `Fst::Read`（fst/fst.h:266 经 `FstRegister<Arc>::GetRegister()->GetReader(type)`）
+     查不到类型 → GenericRegister::GetEntry 回退 `dlopen("<type>-fst.so")` → 找不到而失败。
+      上游 `make check` 用 libtool 动态链，正好绕开这个坑；手工编译上游测试/消费者时必须
+     `-Wl,--whole-archive libfst.a -Wl,--no-whole-archive`。
+affected_scope: >
+  所有"单 tarball 多子库 + autotools + 扩展库以注册器形式挂进核心库"的家族，逐个可复现：
+  openfst 的 libfstconst/libfstlookahead/libfstngram/libfstfar（同 tarball、同 7 项注册面）、
+  gmp 的 libgmpxx（同 tarball 子包，但注册面口径相反：审方按父 tarball 全量 190 量，只声明自身 22 即少报）。
+  判定信号：①包名 ≠ tarball 名 ②configure.ac 里有 `--enable-<x>-fsts` 类开关 ③`nm lib<core>.a | grep -c REGISTER`
+  非 0。三条全中即适用本条。
+rec_priority: 1
+rec_approach: single-tarball-subpackage-explicit-extension-flag-plus-whole-archive-tests
+rec_description: >
+  配方四件事：①conandata 复用父 tarball 的 URL+sha256（R39 官方源不变），
+  `sources.filename` 显式写 `openfst-1.8.4.tar.gz`（否则 init-build 按**包名**搜下载会命中
+  savannah/waterlan 的 `libfstlookahead-1.8.4.tar.gz` 假 URL——HEAD 探测假阳性，实测 4 个候选全 404/不存在）；
+  ②configure_args 显式写 `--enable-<ext>-fsts` + `--enable-bin` + static/shared 两项，
+  不写任何 `--disable-*`（默认即关，避免与默认值语义重复）；③build() 里手工编译上游 7 个
+  check_PROGRAMS（make 默认目标不编 check_PROGRAMS），链接用
+  `-Wl,--whole-archive <libfst.a> -Wl,--no-whole-archive -lm -ldl`，产物装进包内 `_ohos_tests/`，
+  用 `os.open(..., 0o755)` 落盘执行位（HMDFS 不支持 chmod）；④test_package 真机按退出码逐项跑这 7 项，
+  并**另外**编译一个扩展消费者程序覆盖子库自身：查 `FstRegister<Arc>::GetRegister()->GetEntry("<type>").reader != nullptr`
+  （3 个类型名）、构造扩展 FST、写出后用 `Fst<Arc>::Read` 读回（reader 由扩展库提供）——这才是"子包真的可用"的证据，
+  只 grep 头文件不算。
+rec_command: >
+  TASK_DIR=$HOME/tmp/libfstlookahead-1.8.4; sh "$TASK_DIR/run-manual-create.sh"
+  （清缓存 + conan create（含 test_package））
+rec_auto_fix: false
+rec_impl: >
+  archives/l/libfstlookahead/1.8.4/conanfile.py（generate/build/package）+ test_package/conanfile.py +
+  test_package/lookahead_consumer.cc；同族先例 archives/l/libfstconst/1.8.4/（已合并）、
+  archives/o/openfst/1.8.4/（父包全量配方）。
+fallback_priority: 2
+fallback_approach: run-upstream-tests-via-make-check-instead-of-manual-compile
+fallback_description: >
+  不想手工编译上游测试时可直接 `make check`：automake 会编 check_PROGRAMS 并跑 TESTS。
+  代价与边界：①需要 libtool 动态链路径完好（它绕开 whole-archive 坑），故"make check 绿"不能证明
+  静态消费者可用；②日志里 7 项散在 make 输出中，计数不如逐项执行可核对；③`make check` 的
+  LOG_COMPILER 在设备上要指向真实 bash（设备无 /bin/bash），否则个别测试的驱动脚本 ENOENT。
+fallback_command: >
+  cd <build_folder> && make check LOG_COMPILER=/data/service/hnp/bin/bash
+fallback_auto_fix: false
+fallback_impl: 本任务未采用（逐项手工编译 + 逐项执行，计数可核对）
+forbid_1_pattern: >
+  self.cpp_info.libs = ["fst"]|cpp_info.libs = \["fst", "fstscript"\]
+forbid_1_reason: >
+  子包（libfstlookahead 等）声明成核心库名会让消费者链接到错误产物：包内确实含 libfst.a，
+  但子包的语义交付物是 lib<ext>.a/.so；cpp_info.libs 必须等于子库输出名
+  （lookahead → "fstlookahead"、const → "fstconst"）。
+forbid_1_consequence: 下游链接到非预期库、CI L0k/PF8 配方静态闸口径不一致
+forbid_2_pattern: >
+  make check$|make check\s*&&|--disable-.*-fsts.*--enable-lookahead
+forbid_2_reason: >
+  ①裸 `make check` 依赖 libtool 动态路径，得到的是"动态链可用"而非"包内静态产物可用"，
+  且 7 项计数埋在 make 输出里不易核对；②同一条 configure 里既 disable 又 enable 同一扩展，
+  后写的生效，容易与 manifest 的 configure_options 记录不一致。
+forbid_2_consequence: 证据与声明面不同源，W4/外部审查按"用例数不可复算"判 P1
+prescan_pattern: "check_PROGRAMS|REGISTER_FST|BUILD\\.bazel|--enable-.*-fsts"
+verification_cmd: >
+  TASK_DIR=$HOME/tmp/libfstlookahead-1.8.4; sh "$TASK_DIR/repro-e614-openfst-subpackage.sh"
+  （打印 ①configure.ac 各扩展开关默认值 ②src/test/Makefile.am 与 BUILD.bazel 两处注册面计数
+  ③libfst.a 中 REGISTER_FST 符号数 ④无/有 --whole-archive 两种链接下 Fst::Read 的读数）
+doc_file: knowledge/doc/DRAFT-E614-openfst-subpackage-recipe-pattern.md
+verify_builds: >
+  libfstlookahead 1.8.4（任务 libfstlookahead-1.8.4，2026-09-20，分支 feat/libfstlookahead-1.8.4）：
+  ① 采信轮（清缓存后的干净轮）conan create + test_package：上游 7 项全过
+     （HMBS_UPSTREAM_TEST_RESULT status=passed discovered=7 executed=7 passed=7 failed=0 skipped=0）；
+     鸿蒙侧消费者 16/16（HMBS_CONSUMER_ASSERTIONS total=16 passed=16 failed=0）+ 产物/头文件检查 9/9。
+  ② repro-e614-openfst-subpackage.sh 第②段实测：无 --whole-archive 时 vector/const/arc_lookahead 三个
+     reader 全 NULL 且打出 dlopen 回退错误；只包夹核心库时 vector/const 恢复 present、扩展类型仍 NULL
+     （逐字读数见 error_excerpt ①，完整输出 $TASK_DIR/repro-e614-output.txt）。
+  ③ 设备读数：MemFree 3.5–4.2 GB，构建 -j1（autotools.make(args=["-j1"])）。
+last_updated: 2026-09-20

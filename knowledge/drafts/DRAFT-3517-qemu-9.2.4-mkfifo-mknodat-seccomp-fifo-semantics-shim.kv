@@ -1,0 +1,97 @@
+id: DRAFT-3517-qemu-9.2.4-mkfifo-mknodat-seccomp-fifo-semantics-shim
+title: "OHOS 沙箱拒 mknodat 致 mkfifo 全域 EPERM/EVANCED——用户态 FIFO 语义模拟，及 fortify __open_chk 让「open 垫片」失效的陷阱（qemu 9.2.4 实证）"
+category: platform-syscall
+severity: 3
+error_signature: "mkfifo.*Operation not permitted|mkfifo.*Permission denied|unblock_blocked_cmd.*assertion failed \\(fd >= 0\\)|g_error.*mkfifo|ENOPERM.*S_IFIFO"
+keywords:
+  - mkfifo
+  - mknodat
+  - S_IFIFO
+  - seccomp
+  - CAP_MKNOD
+  - FIFO semantics
+  - blocking open
+  - EOF on writer close
+  - LD_PRELOAD
+  - fortify
+  - __open_chk
+  - fopen
+  - qtest
+  - qemu
+affected_build_systems:
+  - meson
+affected_compilers:
+  - clang
+affected_platforms:
+  - OHOS
+  - aarch64-linux-ohos
+first_seen:
+  package: qemu
+  version: "9.2.4"
+  date: "2026-09-27"
+last_updated: "2026-09-27"
+hit_count: 0
+verified: false
+verify_builds: []
+prescan_pattern: "mkfifo|S_IFIFO|mkfifoat|mknodat"
+root_cause: |-
+  OHOS PC 的进程处于 **seccomp 过滤**下（`/proc/self/status` 实测
+  `Seccomp: 2`、`CapEff: 0x2a` 且**不含 CAP_MKNOD**）。`mkfifo(3)` 走
+  `mknodat(2)`，故在**任何**可写目录都返回 EPERM（部分目录 EACCES）：
+
+    | 目录                       | mkfifo / mknodat(S_IFIFO) |
+    |----------------------------|---------------------------|
+    | `$HOME`、`$TMPDIR`、HMDFS  | EPERM                     |
+    | `/dev/shm`、`/tmp`、系统目录| EPERM / EACCES / 只读     |
+
+  因是**系统调用级**拒绝（非文件系统能力差异），换目录无解。受影响的是任何
+  依赖 FIFO 做同步/管道的测试：qemu 的 `qmp-test` 用 FIFO 制造「阻塞中的
+  in-band 命令」（setup 时 `g_dir_make_tmp` + `mkfifo`，随后
+  `blockdev-add` 配 blkdebug 从该 FIFO 读配置 → 真实阻塞；解除时写端
+  open+close 让读端收到 EOF）——本机直接 `g_error("mkfifo: ...")` 退出，
+  表现为 `unblock_blocked_cmd: assertion failed (fd >= 0)`。
+
+  第二个隐藏陷阱：即使实现了垫片，**writer 侧的 `open()` 可能根本不经过
+  `open` 符号**。上游二进制以 `_FORTIFY_SOURCE` 编译时，两参数形式的
+  `open(fifo, O_WRONLY)` 在重定位表中解析为 **`__open_chk`**；只拦
+  `open`/`open64` 的实现会被绕过，writer 拿到 ENOENT（因为 FIFO 只存在于
+  内存映射中），断言照样失败。同理读端若用 `fopen()`，其内部走 libc 内部的
+  `open`，也必须单独拦 `fopen`/`fopen64`。
+rec_approach: |-
+  1. 先判定是「系统调用被过滤」还是「文件系统不支持」：查
+     `/proc/self/status` 的 `Seccomp`/`CapEff`，并对多个目录（含 tmpfs）各跑
+     一次 `mknodat(AT_FDCWD, p, S_IFIFO|0600, 0)` 原始系统调用。全域同错 =
+     沙箱问题，换目录无用。
+  2. 用**抽象 AF_UNIX 套接字**模拟 FIFO 语义（抽象命名空间在 OHOS 可用）：
+     - 路径 → 抽象名用纯函数派生（多进程免协调）；
+     - 读端：`bind` + `listen` + `accept()`（accept 天然阻塞，对应 FIFO 读端
+       open 的阻塞语义）；
+     - 写端：`connect()`，对 `ECONNREFUSED`/`ENOENT` 重试（对应 FIFO 写端
+       open 的阻塞语义）；
+     - 写端 `close()` → 读端 `read()` 得 EOF（与 FIFO 一致）；
+     - `mkfifo()` 直接返回成功（不创建节点），`unlink()` 也返回成功。
+  3. 必须成对拦截这些入口（本包实测逐一踩到）：
+     `mkfifo`、`open`、`open64`、`openat`、`openat64`、
+     **`__open_chk`/`__openat_chk`/`__open64_chk`/`__openat64_chk`**、
+     `fopen`/`fopen64`。
+     注意 `__open_chk` 的签名由 sysroot 的 `fortify/fcntl.h` 决定——本机是
+     **两参数** `int __open_chk(const char *, int)`（带 mode 的重载改走
+     `__open_real`），按变参定义会与头文件声明冲突而编译失败。
+  4. 用环境变量（如 `QTEST_FIFO_SHIM=1`）与路径形状双重门禁，避免影响非目标
+     路径。
+solution: |-
+  qemu 9.2.4 验证 harness（不随配方发布）：`qtest_fifo_shim.c` 实现上述语义，
+  并对 `"<tmpdir>/qmp-test-XXXXXX/fifo"` 与
+  `"<tmpdir>/qemu-test-io-channel.XXXXXX/*.fifo"` 两类路径生效。
+
+  实测：`qmp-test`（arm + aarch64）由 ERROR 转为 **4/4 通过**；
+  `test-io-channel-command`（另需 socat，其 `PIPE:` 地址自身也调 `mkfifo`）
+  由 SKIP 转为 **4/4 通过**。
+fallback: |-
+  若上游测试允许改写，最省事的是把 FIFO 换成 socketpair 或命名信号；
+  或把该用例标注为宿主能力不支持（本包在配方侧即采此策：CI 无垫片，
+  故不把 socat 纳入依赖，避免该测试由 SKIP 变硬失败）。
+reference_builds: []
+related_docs:
+  - DRAFT-3517-qemu-9.2.4-pathname-af-unix-bind-eperm-reversible-address-shim
+  - DRAFT-7605-jellyfish-mkfifo-named-pipes-unavailable

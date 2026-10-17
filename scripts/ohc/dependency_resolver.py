@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -157,6 +158,22 @@ def _update_index_repo() -> int:
     return _fetch_update()
 
 
+def _run_git_retry(cmd_args, cwd=None, attempts=3, backoff=(10, 30, 60)):
+    """网络类 git 命令重试（反馈 0831 P0-2: 凹晨 registry 不可达多为瞬时抖动，
+    单次失败即判 unreachable 造成了 111 例误拒——退避重试后再判）。"""
+    result = None
+    for i in range(attempts):
+        result = _run_git(cmd_args, cwd=cwd)
+        if result.returncode == 0:
+            return result
+        if i < attempts - 1:
+            wait = backoff[i] if i < len(backoff) else backoff[-1]
+            log_warn(f"git {cmd_args[0]} 失败（第 {i + 1}/{attempts} 次，"
+                     f"{result.stderr[:80] if result.stderr else '无输出'}）——{wait}s 后重试")
+            time.sleep(wait)
+    return result
+
+
 def _init_sparse_clone() -> int:
     """初始化sparse clone仓库，只拉取README.md。"""
     repo_dir = Path(_INDEX_CACHE_DIR)
@@ -176,15 +193,20 @@ def _init_sparse_clone() -> int:
         ["remote", "add", "origin", _CMD_PKGS_REPO],
         ["sparse-checkout", "init", "--cone"],
         ["sparse-checkout", "set", "README.md"],
-        ["fetch", "--depth=1", "origin", "main"],
-        ["checkout", "origin/main"],
     ]
 
     for cmd_args in cmds:
         result = _run_git(cmd_args, cwd=repo_dir)
-        if result.returncode != 0 and "checkout" not in cmd_args[0]:
+        if result.returncode != 0:
             log_warn(f"git命令失败: git {' '.join(cmd_args)}")
             return 1
+
+    # fetch 是唯一网络命令——退避重试（反馈 0831 P0-2）
+    result = _run_git_retry(["fetch", "--depth=1", "origin", "main"], cwd=repo_dir)
+    if result.returncode != 0:
+        log_warn(f"git fetch 失败（已重试 3 次）: {result.stderr[:100]}")
+        return 1
+    _run_git(["checkout", "origin/main"], cwd=repo_dir)
 
     log_ok("索引仓库初始化完成")
     return 0
@@ -203,11 +225,11 @@ def _fetch_update() -> int:
     # 设置safe.directory
     _run_git(["config", "--global", "--add", "safe.directory", str(repo_dir)])
 
-    # fetch检查更新
-    result = _run_git(["fetch", "--depth=1", "origin", "main"], cwd=repo_dir)
+    # fetch检查更新（网络命令——退避重试，反馈 0831 P0-2）
+    result = _run_git_retry(["fetch", "--depth=1", "origin", "main"], cwd=repo_dir)
 
     if result.returncode != 0:
-        log_warn(f"fetch失败: {result.stderr[:100]}")
+        log_warn(f"fetch失败（已重试 3 次）: {result.stderr[:100]}")
         return 1
 
     # 检查是否有更新
@@ -891,6 +913,25 @@ def refresh_index(pdir: str | None = None) -> int:
 # CLI entry point
 # ═══════════════════════════════════════════════════════
 
+def _topo_layers_packages(pkgs: list[str], prefix: str | None = None) -> list[list[str]]:
+    """包级拓扑分层：同层互不依赖可并行（v12.6 L3b，社区多机/多进程排程）。
+
+    每包的缺失依赖来自 get_missing_deps；若某依赖也在包集合内，则该包须排后层。
+    """
+    dep_map = {p: [d for d in get_missing_deps(p, prefix) if d in pkgs] for p in pkgs}
+    resolved: set[str] = set()
+    layers, pending = [], list(pkgs)
+    while pending:
+        layer = [p for p in pending if not [d for d in dep_map[p] if d not in resolved]]
+        if not layer:
+            layers.append(pending)  # 依赖环兜底
+            break
+        layers.append(layer)
+        resolved.update(layer)
+        pending = [p for p in pending if p not in layer]
+    return layers
+
+
 def resolve_deps_cli(argv: list[str] | None = None) -> int:
     """CLI entry point: ohc resolve-deps"""
     import argparse
@@ -910,10 +951,23 @@ def resolve_deps_cli(argv: list[str] | None = None) -> int:
                         help="从远程仓库刷新索引")
     parser.add_argument("--check-tools", "-t", action="store_true",
                         help="检查常见构建工具可用性")
+    parser.add_argument("--batch", "-b", metavar="FILE",
+                        help="批量模式：文件内每行一个包名，输出拓扑分层（同层可并行）")
     parser.add_argument("--prefix", default=None,
                         help="安装前缀（默认 ~/usr/local）")
     parser.add_argument("--project-dir", "-p", default=None)
     args = parser.parse_args(argv)
+
+    if args.batch:
+        from pathlib import Path as _P
+        lines = [ln.strip() for ln in _P(args.batch).read_text(encoding="utf-8").splitlines()
+                 if ln.strip() and not ln.startswith("#")]
+        layers = _topo_layers_packages(lines, args.prefix)
+        print("📦 拓扑分层（同层可并行，层间按序）:")
+        for i, layer in enumerate(layers):
+            print(f"  Layer {i}: {' | '.join(layer)}")
+        print(f"\n  并行提示: 每层包可在不同 workdir/机器并发执行 ohc build（状态文件已加锁，v12.6）")
+        return 0
 
     if args.refresh:
         return refresh_index(getattr(args, "project_dir", None))

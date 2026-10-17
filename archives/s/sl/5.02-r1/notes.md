@@ -52,5 +52,13 @@ make
 2026-06-04
 ---
 
-**编译结束**: 2026-06-04 16:44
+**编译结束**: 2026-08-23 00:28
 **最终状态**: built
+
+## Conan Adaptation (2026-08-22)
+- Conan recipe (conanfile.py) generated and verified
+- test_package with test_sl.py smoke test
+- commands.json declared (R38)
+- W3 local CI simulation passed
+- W4 pre-PR audit passed
+<!-- PR created via ohc-run.py submit -->

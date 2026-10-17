@@ -1,0 +1,43 @@
+#====================================================================
+# DRAFT-10767-puredata-conan-registry-download-premature - conan 二进制包从 ohpcd 制品仓下载 "Response ended prematurely"（传输中断，环境网络问题，非配方缺陷）
+#====================================================================
+
+id:                     DRAFT-10767-puredata-conan-registry-download-premature
+trigger_tool:           conan|create|install
+phase:                  dependency-install
+error_signature:        Response ended prematurely|Download failed, check server, possibly try again|ConanConnectionError|Exception while getting package
+
+severity:               2
+category:               conan|network|registry|dependency
+match_keywords:         Response ended prematurely, Download failed check server, ConanConnectionError, conan_package.tgz, Downloading binary packages, ohpcd, cnb.cool, conan registry, binary package download, tool_requires, build_requires
+title:                  conan create 在依赖二进制包下载阶段报 "Response ended prematurely"（ohpcd 制品仓传输中断）——环境网络问题，发生在 build() 之前，与配方/源码无关
+
+root_cause:             conan create 安装 tool_requires/build_requires 的预编译二进制包时，从 ohpcd 制品仓（conan.cnb.cool）拉取 conan_package.tgz 的 HTTP 传输被中途断开（urllib3 "Response ended prematurely"，服务端提前关闭连接/链路抖动），重试仍失败即抛 ConanConnectionError 终止构建。该失败发生在 "Downloading binary packages"（依赖安装阶段）、recipe build() 之前，配方与源码尚未参与，因此不是配方缺陷。典型触发：CI worker 缓存为空需全量下载、目标包体积较大（如 perl/5.42.2 二进制 17MB）、worker 到制品仓网络链路不稳定。puredata/0.54.1 CI #59420 实测：perl/5.42.2 的 17MB 包下载两次均 "Response ended prematurely"，同批其余 4 个小包（autoconf/automake/libtool/m4）全部正常 → 判定为传输中断而非制品缺失；同一包从正常网络路径 15 秒下载成功。
+affected_scope:         所有 conan 缓存未命中、需实时从 ohpcd 拉取二进制包的构建（CI worker 首次构建、缓存被清理后）；大体积（>10MB）依赖包更易触发；本地/缓存命中的环境不会复现——这是"本地通过、CI 失败"的常见核心差异点之一（另一差异是 worker PATH 缺 curl 导致 pre-download 步骤降级，见 CI #59420）。
+verification_cmd:       用全新缓存强制走远程下载验证制品仓健康：CONAN_HOME=<fresh-dir> conan remote add ohpcd https://conan.cnb.cool/OpenHarmonyPCDeveloper/Conan/-/packages/ && CONAN_HOME=<fresh-dir> conan download "<pkg>#<recipe_rev>:<package_id>" -r ohpcd；成功=制品仓健康、纯瞬时网络问题；配方本身用本地缓存 conan create 验证（下载失败点早于 build()，配方逻辑未被执行）。
+
+rec_priority:           1
+rec_approach:           verify-infra-then-retry
+rec_description:        三步定位+重跑：① 看 conan create 日志确认失败发生在 "Downloading binary packages"（install 阶段、build() 之前）→ 排除配方问题；② 用全新 CONAN_HOME conan download 验证同一包当前可下载 → 确认制品仓健康；③ CI 评论 /rebuild 触发重跑（R42：CI 是评论触发型，push 本身不触发 CI）。瞬时网络中断重跑通常转绿，无需任何配方修改。
+rec_command:            CONAN_HOME=$(mktemp -d) conan download "perl/5.42.2#13c4f5bde5668df0b7268c4d0c01073c:6b129b068851896169fae42d399fa922d239ce8a" -r ohpcd；PR 评论 /rebuild 触发 CI 重跑。
+rec_auto_fix:           false
+rec_impl:               conan-retry-after-download-verify
+
+fallback_priority:      2
+fallback_approach:      preseed-worker-conan-cache
+fallback_description:   若 worker 到制品仓链路长期不稳（连续多次 /rebuild 同点失败）：在网络正常的主机上 conan download 把该依赖二进制拉入本地缓存，再复制到 worker 的 CONAN_HOME 对应 p/ 目录，使 CI 构建不依赖实时下载；或让 worker 首次构建前统一预热缓存。仍持续失败按 R41 外部阻塞止损上报，禁止无限重试。
+fallback_command:       conan download "perl/5.42.2#13c4f5bde5668df0b7268c4d0c01073c:6b129b068851896169fae42d399fa922d239ce8a" -r ohpcd && rsync -a ~/.conan2/p/perl*/ <worker-CONAN_HOME>/p/
+fallback_auto_fix:      false
+fallback_impl:          cache-seed-copy
+
+forbid_1_pattern:       (Download failed|Response ended prematurely).*(conanfile\.py|requirements\(|patches/)
+forbid_1_reason:        二进制包下载失败发生在依赖安装阶段，配方内容尚未执行；此时修改 conanfile/补丁不会影响下载结果，属于对环境类失败盲改。
+forbid_1_consequence:   同一 PR 反复重推触发 CI（R42/R44 禁止对环境/网络类失败盲改重推），浪费 CI 额度且不解决问题。
+
+forbid_2_pattern:       Response ended prematurely.*--build=missing
+forbid_2_reason:        --build=missing 只在制品仓缺包时从源码编译；本错误是传输中断（包已在制品仓），触发源码编译反而更慢更易失败，大型工具链（perl）源码编译在受限 worker 上不可行。
+forbid_2_consequence:   从源码编译 perl 等工具链超时/OOM（本机 qtbase 级编译 OOM 先例），构建更慢，掩盖真实环境问题。
+
+ref_pr:                 10767
+ref_package:            puredata/0.54.1
+ref_ci_run:             59420

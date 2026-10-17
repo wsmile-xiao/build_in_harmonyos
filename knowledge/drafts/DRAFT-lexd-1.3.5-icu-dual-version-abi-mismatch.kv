@@ -1,0 +1,88 @@
+#====================================================================
+# Draft: lexd 1.3.5 — 依赖图里同时出现 icu/76.1 与 icu4c/77 时，
+#        编译期取 icu_77 头文件而 -licuuc 命中另一份归档，
+#        链接期全量 icu_77::* 未定义；且 icu4c 的 cpp_info 不含
+#        libicuio，而上游 configure 硬要求 icu-io
+#====================================================================
+
+id:                     DRAFT-LEXD-135-ICU-DUAL-VERSION-ABI-MISMATCH
+trigger_tool:           conan|clang|ld.lld|configure
+phase:                  linking
+error_signature:        undefined symbol: icu_[0-9]+::UnicodeString::|
+                         undefined symbol: u_vfprintf_[0-9]+|
+                         undefined reference to .*icu_[0-9]+::|
+                         ld.lld: error: too many errors emitted, stopping now
+
+severity:               2
+category:               linking|dependency-graph|pkg-config|icu|abi-mismatch|conan
+match_keywords:         icu dual version, icu/76.1, icu4c/77, icu_77::, icu_76::,
+                         u_vfprintf_77, undefined symbol UnicodeString, icuio,
+                         libicuio, icu-uc, icu-io, PKG_CHECK_MODULES icu-io,
+                         cpp_info.libs missing icuio, transitive dependency pulls
+                         a second ICU, same-library two-recipes in one graph,
+                         lttoolbox requires icu4c, LexdCompiler, icu-iter.cc
+title:                  依赖图里两份 ICU（icu/76.1 + lttoolbox 传递引入的 icu4c/77）导致「头文件与库来自不同大版本」：编译期按 icu_77 解析符号、链接期 -licuuc 命中 76.1 归档，全量 icu_77::* 未定义；只保留一个 ICU 即可（lexd 1.3.5 适配）
+
+root_cause:             Conan 制品仓同时存在两个 ICU 配方：`icu/76.1`（自己的
+                        package folder）与 `icu4c/77`（lttoolbox/3.7.6 的传递依赖，
+                        `transitive_headers=True`）。当被测包自己 requires 了
+                        `icu/76.1` 时，一个 host 图里出现两份 ICU：
+                        - 头文件来自 transitive 的 icu4c/77（Conan 注入的
+                          includedirs 顺序靠前），符号前缀是 `icu_77`；
+                        - 链接时 `-licuuc` 按 LDFLAGS 里 `-L` 的出现顺序命中
+                          `icu/76.1` 的 package folder，那是 ICU 76 的归档，
+                          只导出 `icu_76::*`。
+                        于是每一处 UnicodeString / u_fprintf 调用都是未定义符号，
+                        报错成片出现（lexd 实测一次报上百条
+                        `undefined symbol: icu_77::UnicodeString::…`）。
+                        这不是 ABI 兼容性问题，而是「同一库两个来源」导致的
+                        头/库错配：两套符号命名空间互不相交。
+                        第二个独立坑：`icu4c/77` 的 `package_info` 只声明
+                        `libs = [icui18n, icuuc, icudata]`，**不含 libicuio**，
+                        而 lexd 的 configure.ac 硬要求 `PKG_CHECK_MODULES([ICU_IO],
+                        [icu-io])`，`u_vfprintf`/`u_fopen` 等符号住在
+                        `libicuio.a`。照抄 cpp_info 拼 LIBS 会二次链接失败。
+
+affected_scope:         任何「上游 configure 硬要求 pkg-config 模块，而该模块的
+                        提供者与某个传递依赖是同一个库的不同配方/版本」的 autotools
+                        包。判据：`conan graph info` 或链接命令里出现同一库的两个
+                        package folder，或 `-l<lib>` 的 `-L` 顺序与头文件来源不一致。
+                        本仓已知同族：apertium（requires icu4c/77 + lttoolbox）、
+                        lexd（误用 icu/76.1）、任何 HFST/foma/lttoolbox 家族包。
+
+verification_cmd:       # 1) 看图里是否有两份 ICU
+                        conan graph info <recipe> -pr:h=ohos-aarch64-wsl -pr:b=ohos-aarch64-wsl --format=json \
+                          | python3 -c "import json,sys;[print(n['ref']) for n in json.load(sys.stdin)['graph']['nodes'].values() if n.get('ref') and 'icu' in n['ref']]"
+                        # 期望只出现 icu4c/77 一行
+                        # 2) 对比头文件与库的实际大版本符号前缀
+                        grep -o 'U_ICU_VERSION_MAJOR_NUM [0-9]*' <icu include dir>/unicode/uvernum.h
+                        nm -g --defined-only <icu lib dir>/libicuuc.a 2>/dev/null | grep -o 'icu_[0-9]*' | sort -u | head -1
+                        # 两者的 [0-9]* 必须一致
+                        # 3) 确认 icu-io 的提供者在 LIBS 里
+                        grep -n 'PKG_CHECK_MODULES.*icu' <src>/configure.ac
+                        # 4) 修法：只 requires 与传递依赖一致的版本 + 显式补 -licuio
+
+rec_priority:           1
+rec_approach:           pin-single-icu-and-add-icuio-explicitly
+rec_description:        ① **只保留一份 ICU**：requires 与传递依赖同款的配方
+                        （lexd 实测：lttoolbox/3.7.6 requires icu4c/77 → lexd 也
+                        requires icu4c/77；不要图省事用 `icu/76.1`，那会引入第二份）。
+                        若两个配方都必须存在，只能改上游源码去掉其中一个依赖，
+                        否则无解。
+                        ② **显式补 `-licuio`**：从 cpp_info 推导 LIBS 时，对
+                        `PKG_CHECK_MODULES` 硬要求的模块，检查提供者的
+                        `cpp_info.libs` 是否覆盖该 `.pc` 文件的 `Libs:` 行；
+                        缺失就手工补，且**放在静态归档解析顺序的前面**
+                        （`-licuio -licuuc -licui18n -licudata`，libicuio 自身
+                        依赖 trio）。lexd 实测：`-licuio` 缺失时报
+                        `undefined symbol: u_vfprintf_77`。
+                        ③ 校验习惯：链接报「某库符号全量未定义」时，先比对
+                        头文件 `uvernum.h` 的大版本与归档里 `icu_<N>::` 前缀，
+                        再看链接命令中 `-L` 的顺序，而不是去加
+                        `-Wl,--start-group` 之类的链接技巧掩盖错配。
+rec_command:            sed -i 's|self.requires("icu/76.1"|self.requires("icu4c/77"|' conanfile.py
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              PENDING
+source_commit:          PENDING

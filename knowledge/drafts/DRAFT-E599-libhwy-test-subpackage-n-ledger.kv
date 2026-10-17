@@ -1,0 +1,84 @@
+#====================================================================
+# Draft: 同 tarball CMake 子库独立成包（sublibrary packaging）：交付面裁剪
+#        + 父 tarball 注册面 N 台账（rule4 防少报）+ 消费者测试面
+# 实操实例: libhwy_test/1.3.0（google/highway 1.3.0 tarball 内的 hwy_test 子库；
+#          同 tarball 兄弟包 archives/l/libhwy/1.3.0 已在 upstream/main）
+# 同族先例: libgmpxx/6.3.0（gmpxx ⊂ GMP：只声明自身 22 项 → 审方按父 tarball
+#          量出 190/200 判 FAIL，返修后按父注册面 200 申报 + NOT_RUN 台账通过）
+#          libfstconst/1.8.4（openfst tarball 子库：全开构建 + 7 个上游测试程序）
+#====================================================================
+
+draft:                 E599-libhwy-test-subpackage-n-ledger
+status:                pending-editor-review
+id:                    E599
+trigger_tool:          conan|cmake|ctest|gtest_discover_tests|ninja|make
+phase:                 packaging|testing|review
+error_signature:       file INSTALL cannot find|Total Tests:\s*0|No tests were found|HWY_ENABLE_TESTS.*install|install\(TARGETS.*hwy_test|上游实测 N > 声明 N|rule4.*少报|gtest_discover_tests
+
+severity:              1
+category:              packaging, testing, review-gate, cmake, conan-recipe
+prescan_pattern:       file INSTALL cannot find|No tests were found|Total Tests:\s*0|gtest_discover_tests\s*\(|install\(TARGETS
+match_keywords:        libhwy_test, 同 tarball 子包, 子库独立成包, sublibrary packaging, rule4 少报, N 台账, NOT_RUN 归因, 交付面裁剪, cmake.build(target=), HWY_ENABLE_TESTS, HWY_TEST_STANDALONE, hwy_test, test_util, gtest_discover_tests 发现数, 断言单列
+title:                 同 tarball CMake 子库独立成包：①交付面裁剪时必须覆盖 install(TARGETS) 全集 ②主 N 取父 tarball 注册面最大值并给 NOT_RUN 自洽台账（rule4 只判少报）
+
+root_cause:            两件事叠在一起才会踩坑。①【构建面】上游把子库的安装规则藏在功能开关里（Highway：`if (HWY_ENABLE_TESTS) install(TARGETS hwy_test …)`），所以「只为交付子库而最小化构建」时该开关不能关；同时 `cmake --build --target` 一旦只编子库目标，`cmake --install` 会对 install(TARGETS) 里**未构建**的目标报 `file INSTALL cannot find …`（CMake 不会跳过缺失产物），必须让构建目标集合 ⊇ install(TARGETS) 全集。②【N 口径】外部审查是脚本化 rule4「上游实测 N > 声明 N 即不通过」，而子包声明自己的用例数必然小于父 tarball 全量注册面（libgmpxx 实测：自身 22 vs 父面 190/200 → FAIL）。CMake 工程还有第三层：`gtest_discover_tests` 的 ctest 用例数**不是静态可读的**——每个 `HWY_EXPORT_AND_TEST_P` 注册点会按运行时支持目标数展开（Highway aarch64 实测 ×2），只按 `add_test` 或源文件数申报同样会被下一轮口径超过。
+affected_scope:        任意「同一上游 tarball 内多个库目标」的 CMake 包（highway→hwy/hwy_test/hwy_contrib、boost 组件、openfst 扩展、libyal 家族等），以及一切要求按父 tarball 全量注册面申报 N 的提审流程。
+error_excerpt:         'CMake Error at cmake_install.cmake:62 (file): file INSTALL cannot find "/…/libhwy_contrib.a": No such file or directory.'
+rec_approach:          |
+  四步法（libhwy_test/1.3.0 完整实证）：
+  ①【读 install 门控】从上游 CMakeLists.txt 找子库的 `install(TARGETS <sub>)` 与它的外围 `if(...)`：
+     hwy_test 的安装与 libhwy-test.pc 都在 `if (HWY_ENABLE_TESTS)` 内 → 交付面**要求**该开关为 ON，
+     这不是「为凑数字放开 build 开关」，notes/manifest 里必须写明这条因果。
+  ②【裁剪构建目标，但覆盖 install 全集】`cmake.build(target=["hwy","hwy_test","test_util_test"])`
+     —— hwy 是 install(TARGETS hwy) 的产物、也是 hwy_test 的 PUBLIC 依赖，漏掉它 install 必失败；
+     不编 hwy/tests 下其余 83 个测试可执行文件（不在交付面，可省 1~2 小时编译）。
+  ③【N 台账】把父 tarball 的**全部候选口径**都数出来并各自带单位披露（同单位不得混用）：
+     a. 测试目标/框架注册项 = CMakeLists 的 `HWY_TEST_FILES` 条目（Highway：contrib ON 84 / OFF 67）
+     b. 测试源文件数 = `hwy/tests/*.cc` 60、tarball `*_test.cc` 84（另一口径 85 含 bench）
+     c. 注册宏点数 = `HWY_EXPORT_AND_TEST_P` 388 + `TEST(` 48 = 436（contrib ON）
+     d. **用例口径（运行时展开，主 N 取它）= 注册点 × 平台实测目标展开数 T + TEST 用例**：
+        先编一个交付面内用例，跑 `<exe> --gtest_list_tests` 得发现数 / 该文件注册点数 = T
+        （Highway OHOS aarch64 实测 T=2 → 388×2+48 = 824；同 tarball 兄弟包 libhwy 按
+        ctest -N 申报 801，两者同量级、824 ≥ 801）；断言数（HWY_ASSERT 851）属**另一单位，只披露不并入**
+     主 N = max(a…d)，且 ≥ 同 tarball 兄弟包已通过审查的申报值。
+  ④【执行面 + 自洽台账】只跑交付面内用例（本例 `hwy/tests/test_util_test.cc`：上游唯一直接测
+     test_util 库本身的用例），其余按 `TOTAL = PASS + FAIL + SKIP + NOT_RUN` 记账，逐项写
+     「不在本包交付面的原因 + 替代验证」，**不得写 PASS、不得为凑数打开 contrib/examples 开关**。
+     防空套件假通过：先 `--gtest_list_tests` 取发现数，再取执行数，`executed < discovered` 即报错。
+solution:              |
+  # ① 从上游 CMakeLists 取 install 门控与子库源清单
+  grep -n "add_library(hwy_test\|install(TARGETS hwy_test\|HWY_ENABLE_TESTS" CMakeLists.txt
+  # ② 裁剪目标但覆盖 install 全集（conan 2 的 CMake.build 支持 target 列表）
+  cmake.build(target=["hwy", "hwy_test", "test_util_test"])   # 漏 hwy → file INSTALL cannot find libhwy.a
+  # ③ 候选口径读数（设备可直接执行；SRC=解包根）
+  python3 - <<'PY'
+  import re
+  src=open('CMakeLists.txt').read()
+  base=[w for w in re.search(r'set\(HWY_TEST_FILES\s*(.*?)\n\)',src,re.S).group(1).split() if w.endswith('.cc')]
+  contrib=[w for w in re.search(r'list\(APPEND HWY_TEST_FILES\s*(.*?)\n\)',src,re.S).group(1).split() if w.endswith('.cc')]
+  e=t=0
+  for f in base+contrib:
+      s=open(f,encoding='utf-8',errors='ignore').read()
+      e+=len(re.findall(r'HWY_EXPORT_AND_TEST_P\s*\(',s)); t+=len(re.findall(r'(?m)^\s*TEST\s*\(',s))
+  print("targets=%d files=%d export_sites=%d TEST=%d"%(len(base)+len(contrib),len(base)+len(contrib),e,t))
+  PY
+  # ④ 平台实测目标展开数 T 与交付面内用例的发现数/执行数
+  <build>/tests/test_util_test --gtest_list_tests | grep -c '^  '   # 发现数（本例 4 = 2 注册点 × T2）
+  <build>/tests/test_util_test                                      # 执行数（stdout 的 "=== " 行数）
+
+fallback:              |
+  子库的 install 规则**完全**被功能开关包住且该开关会连带编译大量非交付面目标时：
+  a) 保持开关 ON 但按目标裁剪（如上），额外用 `cmake --install --component` 或显式
+     `install(TARGETS … OPTIONAL)` 补丁收敛（补丁要进 conandata.yml 并登记 manifest.patches_applied）；
+  b) 上游用例与交付面完全不同源（如纯绑定层）时，交付面内若无上游用例，则上游表全部 NOT_RUN +
+     技术原因，另在 test_package 写消费者断言（鸿蒙特有测试行 ≥1），**不得**把消费者断言并入上游 N。
+  c) `ctest -N` 拿不到静态用例数（gtest_discover_tests 需先构建）时，用「注册点数 × 实测 T」给出
+     可复现读数并把公式写进 PR 正文，同时给出兄弟包/上游 HEAD 的注册面作为下界交叉印证。
+
+verify_builds:         libhwy_test/1.3.0 首次 conan create（dev 轮）通过：上游测试 discovered=4 executed=4 passed=4；test_package 15/15；HMBS_UPSTREAM_TEST_SURFACE 标记给出 824 的展开读数（详见 archives/l/libhwy_test/1.3.0/notes.md 与 reports/）
+verify_cmd:            conan create archives/l/libhwy_test/1.3.0 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 -c tools.build:jobs=2 --build=missing
+reference_impl:        archives/l/libhwy_test/1.3.0/conanfile.py（交付面裁剪 + N 读数标记）、test_package/test_libhwy_test.cpp（消费者断言用交付的 test_util/hwy_gtest 头文件）；对照合并先例 archives/l/libhwy/1.3.0（父包全量构建）与 archives/l/libfstconst/1.8.4（兄弟子包）
+solution_ref:          archives/l/libhwy_test/1.3.0/notes.md（N 台账逐项归因；上游 N 取数命令）
+related_docs:          knowledge/operations/build-systems.md, knowledge/ARCHIVE-SPEC.md
+doc_file:              doc/E599.md
+last_updated:          2026-09-20

@@ -1,8 +1,8 @@
 # easy-rsa 3.2.6 适配笔记
 
 ## 编译环境
-- 构建系统: shell（纯脚本工具，无需编译）
-- 编译日期: 2026-05-27
+- 构建系统: shell（纯 POSIX shell 脚本，无需编译）
+- 编译日期: 2026-08-06
 - 编译器: 无（shell 脚本）
 - 状态: published
 
@@ -11,34 +11,43 @@
 Easy-RSA 是一个纯 POSIX shell 脚本工具，用于管理 PKI（公钥基础设施）。无需传统编译过程。
 
 1. **下载源码**: 从 GitHub 下载 v3.2.6 tarball
-2. **解压源码**: 解压到工作目录
-3. **手动安装**: 复制 easyrsa3/ 目录中的文件到目标位置
-   - `easyrsa` 脚本 → `$DEFAULT_PREFIX/bin/easyrsa`
-   - `openssl-easyrsa.cnf` → `$DEFAULT_PREFIX/share/easy-rsa/`
-   - `vars.example` → `$DEFAULT_PREFIX/share/easy-rsa/`
-   - `x509-types/` → `$DEFAULT_PREFIX/share/easy-rsa/x509-types/`
-4. **版本替换**: 使用 sed 替换版本占位符（~VER~, ~DATE~, ~HOST~）
-5. **功能测试**: 运行 `--version` 和 `init-pki` 验证基本功能
-6. **创建预编译包**: 打包安装文件为 tar.gz
+2. **版本占位符替换**: 在 easyrsa 脚本中替换 `~VER~` → `3.2.6`、`~DATE~` → 构建日期、`~GITHEAD~` → unknown
+3. **安装文件**: 复制 easyrsa3/ 目录中的文件到目标位置
+   - `easyrsa` 脚本 → `$PREFIX/bin/easyrsa`
+   - `openssl-easyrsa.cnf` → `$PREFIX/share/easy-rsa/`
+   - `vars.example` → `$PREFIX/share/easy-rsa/`
+   - `x509-types/` → `$PREFIX/share/easy-rsa/x509-types/`
+4. **功能测试**: 运行 `--version`、`init-pki`、`build-ca nopass` 验证完整功能
 
 ## 遇到的问题与解决方案
 
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
 | 1 | 无法自动检测下载 URL | Easy-RSA 不在 registry 中 | 手动提供 GitHub URL |
-| 2 | 版本信息显示占位符 | 未运行 build-dist.sh | 使用 sed 替换占位符 |
-| 3 | tar 打包路径过长警告 | ustar 格式限制 | 使用 Python 创建 tar.gz |
+| 2 | 版本信息显示占位符 | 源码中含 ~VER~ 等占位符 | 在 conanfile.py build() 中用 replace_in_file 替换 |
+| 3 | ~HOST~ 占位符不存在 | easyrsa 脚本中无 ~HOST~ | 去掉对 ~HOST~ 的替换（build-dist.sh 中有但 easyrsa 无） |
+| 4 | conan-init 生成 Autotools 模板 | 默认模板假设 C 库 | 手动重写 conanfile.py 为 application 类型 |
 
 ## 源码修改
 
-无补丁文件。所有修改通过 sed 命令完成：
+补丁文件: `0001-easyrsa3-easyrsa.patch`（版本占位符替换）
 - 替换 `~VER~` → `3.2.6`
-- 替换 `~DATE~` → 当前日期
-- 替换 `~HOST~` → 主机名
+- 替换 `~DATE~` → 构建日期
+- 替换 `~GITHEAD~` → unknown
+
+## Conan 配方说明
+
+- **package_type**: application（命令行工具，非库）
+- **settings**: os, arch（无 compiler/build_type，纯 shell 脚本）
+- **依赖**: openssl/1.1.1w（运行时依赖 openssl 命令行工具）
+- **build()**: apply_conandata_patches + replace_in_file 替换版本占位符
+- **package()**: 安装 easyrsa 脚本、配置文件、x509-types 到 bin/ 和 share/easy-rsa/
+- **package_info()**: bindirs=["bin"], resdirs=["share/easy-rsa"]
+- **test_package**: 运行 easyrsa --version、init-pki、build-ca nopass
 
 ## 依赖版本
 
-- OpenSSL: 1.1.1w（运行时依赖）
+- OpenSSL: 1.1.1w（运行时依赖，通过 Conan 管理）
 
 ## 验证结果
 
@@ -46,31 +55,38 @@ Easy-RSA 是一个纯 POSIX shell 脚本工具，用于管理 PKI（公钥基础
 $ easyrsa --version
 EasyRSA Version Information
 Version:     3.2.6
-Generated:   Wed May 27 17:20:09 CST 2026
-SSL Lib:     OpenSSL 1.1.1w  11 Sep 2023
+Generated:   Thu Aug  6 08:11:51 CST 2026
+SSL Lib:     OpenSSL 3.0.9 30 May 2023
 
-$ easyrsa init-pki
+$ easyrsa --batch init-pki
 'init-pki' complete; you may now create a CA or requests.
+
+$ easyrsa --batch build-ca nopass
+CA creation complete. Your new CA certificate is at:
+* ca.crt
 ```
 
-## 交付物
+## Conan 验证结果
 
-| 文件 | 大小 | SHA256 |
-|------|------|--------|
-| easy-rsa-3.2.6-ohos-aarch64.tar.gz | 61499 bytes | d23b04efa69284bc460fc2c98fd7f0effadcc0353d90260b46e0e319fdb68598 |
-
-包含文件：
-- `usr/local/bin/easyrsa` (197980 bytes) - 主脚本
-- `usr/local/share/easy-rsa/` - 配置文件目录
-- `usr/local/share/doc/easy-rsa/` - 文档目录
+| 门禁 | 结果 |
+|------|------|
+| G1 配方完整性 | PASS |
+| G2 conan create | PASS |
+| G3 系统同名库隔离 | PASS |
+| G4 产物完整性 | PASS |
+| L2 平台功能测试 | PASS |
+| L4 静态安全扫描 | PASS |
+| L5 产物基线对比 | PASS |
+| W3 本地 CI 模拟 | PASS |
 
 ## 注意事项
 
-1. Easy-RSA 是 shell 裚本，不需要 ELF 签名（但依赖的 openssl 需要）
+1. Easy-RSA 是 shell 脚本，不需要 ELF 签名（但依赖的 openssl 需要）
 2. 需要确保 OpenSSL 已安装并在 PATH 中
-3. 预编译包解压后，easyrsa 脚本可直接执行
+3. easyrsa 脚本安装后可直接执行
 4. 建议用户通过 `source vars.example` 配置环境变量
+
 ---
 
-**编译结束**: 2026-05-27 20:02
-**最终状态**: built
+**编译结束**: 2026-08-06 08:17
+**最终状态**: published

@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_cgltf C)
+find_package(cgltf REQUIRED)
+add_executable(test_cgltf test.c)
+target_link_libraries(test_cgltf PRIVATE cgltf::cgltf)
+enable_testing()
+add_test(NAME test_cgltf COMMAND test_cgltf)

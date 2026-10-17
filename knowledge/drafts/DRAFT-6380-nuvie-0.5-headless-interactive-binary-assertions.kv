@@ -1,0 +1,149 @@
+# ═══ Draft knowledge entry — 无 CLI 的交互式程序（游戏/全屏应用）在无显示设备的 CI 上
+# 怎么写 test_package：挑一条**必经且必然自行退出**的初始化失败路径，用环境变量
+# 驱动到该路径，正向判据用 check_any（到达该段代码即可）、反例判据用 check_not，
+# 再叠一个有界运行器兜底 ═══
+# Timestamp: 2026-09-20（2026-09-27 修订：删去「假 SDL_VIDEODRIVER ⇒ SDL_Init 失败」的错误前提）
+# Software: nuvie 0.5（Ultima 6 / Martian Dreams / Savage Empire 的开源引擎，SDL 1.2）
+# Gate: 构建准入 + 消费者侧测试设计（rule12 鸿蒙特有测试的可证伪写法）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-6380-nuvie-0.5-headless-interactive-binary-assertions
+trigger_tool:           conan|sh
+phase:                  testing
+
+severity:               2
+category:               testing, conan, ohos, ci
+match_keywords:         test_package, headless, no display device, SDL_VIDEODRIVER, interactive program, game engine, main loop, early return before init, ConsolePause, g_console NULL, set -e backgrounding, kill -0 polling, bounded runner, timeout kill -9, check_any reached-code-segment, check_not loader error, cannot open shared object, undefined symbol, Error loading shared library, readelf binary attribute scan, R34 real binary, R51 unexecuted items, TAP diagnostic dump hash prefix
+
+title:                  无 CLI 的交互式程序（游戏/全屏应用）在无显示设备 CI 上的可验证
+                        test_package 写法：挑一条**在交互式暂停点之前就自行退出**的
+                        初始化失败路径，用环境变量（HOME / SDL_VIDEODRIVER）把进程引到
+                        该路径；正向判据用 check_any（到达该段代码即可，不写死单条平台
+                        相关文案）、反例判据用 check_not，两者把「加载器/符号解析失败」
+                        与「程序自己正常走到失败分支」区分开
+
+root_cause: >
+  游戏/全屏应用类上游通常**没有** --version / --help，main() 直接进 SDL 事件循环。
+  在 CI 沙箱（无显示设备、无游戏数据）里天真地 `run "$BIN"` 会挂死在事件循环里
+  （CI 卡到超时），或行为不确定（取决于该 worker 碰巧有没有视频驱动）。
+  于是移植者退化成两条错路：
+    (a) 编译一个 print-only 的 stub 来「跑」——跑的不是打包产物，不构成 R34 要求的
+        「对真实二进制实跑」；
+    (b) 用 readelf / file / 字符串扫描二进制来「验证」——根本没执行任何代码，且与
+        工具链实现细节耦合。
+  真正的难点不是「跑起来」，而是：**在「没有显示设备、没有游戏数据、没有 CLI 参数
+  可借」的约束下，找出一条一定能走到、且一定自行退出的执行路径。**
+
+affected_scope:         所有无 CLI 的交互式程序在 CI 上的 test_package 设计：
+  SDL 1.2 游戏引擎、全屏应用、GUI 程序。手法与具体库无关，可迁移到任何
+  「main() 之后进事件循环」的上游。
+
+rec_priority:           1
+rec_approach:           assert-on-provably-exiting-pre-init-failure-paths
+rec_description: >
+  三步：
+  (1) **读源码，找「初始化失败早期 return」的分支**，条件是它必须发生在
+      「设置交互式暂停点 / 进入事件循环」**之前**。
+      nuvie 的实例 —— main() 在 init() == false 时是：
+          if(nuvie->init(argc, argv) == false) { ConsolePause(); return 1; }
+      而 ConsolePause() 的第一句就是：
+          void ConsolePause() { if(g_console == NULL) return; ...SDL_PollEvent 循环... }
+      g_console **只在 ConsoleInit() 之后才非空**，而 ConsoleInit() 排在
+      initConfig() 与 screen->init() 之后（nuvie.cpp:138）。于是：**ConsoleInit()
+      之前的失败路径必然立即返回、以退出码 1 结束，不会挂死。**
+      但**不要**把这条当作「所有可用的失败路径都在 ConsoleInit 之前」：nuvie 里
+      initConfig() 失败（路径 B）在它之前，而 screen->init() 成功、之后
+      checkGameDir() 失败（路径 C 实测走的就是这条）是在 ConsoleInit() **之后**
+      才 return false 的 —— 此时 g_console 已非空，ConsolePause() 会真的进事件循环。
+      本包实测该进程仍自行退出（rc=1），但这是**观测结果而非源码可证**，所以必须叠
+      一个有界运行器兜底。教训：**「哪条失败路径在暂停点之前」要一条一条按源码行号
+      落实，不能一句话概括。**
+      读源码时务必确认「失败路径不会先去调未初始化对象」——nuvie 里
+      ConsoleAddInfo / ConsoleAddError 都自带 `if(g_console != NULL)` 守卫，
+      所以提前调用是安全的空操作，这一点要**逐处核对**，不能想当然。
+  (2) **用环境变量把进程引到目标路径，但别假设「设个假驱动就让 SDL_Init 失败」**。
+      nuvie 的两条路径：
+        B) `( unset HOME; exec "$BIN" )` + cwd 无配置文件 → initConfig() 失败。
+           **前提是源码对 HOME 未设置做了显式守卫**
+           （nuvie: `if(home_env != NULL && initDefaultConfigUnix(home_env))`），
+           否则 unset HOME 会变成空指针解引用 —— 这一条必须读源码确认。
+        C) `HOME=<可写空目录>` + `SDL_VIDEODRIVER=<不存在的驱动>` → 配置能写能读，
+           执行流进入 new Screen / Screen::init() / set_screen_mode()。
+      **踩坑**：最初把路径 C 写死成「假 SDL_VIDEODRIVER ⇒ SDL_Init(SDL_INIT_VIDEO)
+      返回负值 ⇒ 打印 `Couldn't initialize SDL:`」。在 OHOS 的 sdl12-compat 上**不成立**：
+      SDL_Init 对未知 SDL_VIDEODRIVER **不返回负值**，进程继续跑到 set_screen_mode()
+      打印 `Attempting to set vid mode:`，于是既不打印 `Couldn't initialize SDL:`、
+      也不打印 `Initializing screen!`（后者只在 screen->init() 返回 false 时打印）。
+      教训：**假环境变量不是「确定性失败开关」**，它只是把进程引到某段代码；到底在
+      这段代码的哪个分支退出是**平台相关**的。
+  (3) **正向判据用 `check_any`（到达该段代码即可），反例判据用 `check_none`/`check_not`**：
+      - 启动日志（证明 main() 真的跑了，如 `Debugging enabled`）；
+      - 到达目标代码段（证明执行流进去了）：`No config file found!`（B）/
+        `Loading Config from` + `check_any`（C：`Attempting to set vid mode:` /
+        `Couldn't initialize SDL:` / `Initializing screen!` / `Unable to create surface`）。
+        **`check_any` 列出该段可能打印的若干文案，命中任一即通过** —— 这样既证明
+        「执行到了这段代码」，又不与平台分支耦合。
+      - **反例**：断言 stderr 里**没有** `cannot open shared object` /
+        `undefined symbol` / `Error loading shared library` / `Error relocating`。
+        这把「动态加载器 / 符号解析失败」（那是退出码 126/127 与**另一种 stderr 文本**）
+        与「程序自己正常走到失败分支」（退出码 1）严格区分开 —— 这是鸿蒙特有测试最
+        核心、最可证伪的判据。**一宽（正向）一紧（反例）**恰好在平台差异与可证伪性
+        之间取得平衡。
+  (3b) **把路径 C 的真实输出 dump 进 CI 日志**：用 `#` 前缀的 TAP 诊断行
+      （`echo "# ..."; while read line; do echo "# $line"; done < out`）把整份 stderr
+      带进日志；`#` 行不参与 ok/not-ok 判定，不改通过率，却让下一次失败无需再补一次 CI。
+  两个工程细节（都是踩过的坑）：
+    - **不要用 `set -e`**：脚本要后台起进程再按秒轮询，`set -e` 会让 `wait` 的非零
+      返回直接终止脚本，而不是记一条 FAIL。改用显式 ok/bad 计数函数 + 末尾统一判定。
+    - **叠一个有界运行器**：`"$@" >out 2>&1 &` + `kill -0` 轮询 N 秒，超时 `kill -9`
+      并返回 124。它把「上游将来行为变化导致挂死」从 **CI 永久卡住**降级成**一条 FAIL**。
+  另：**不要**做 readelf/file/字符串扫描这类二进制静态属性检查 —— 断言写在可观测
+  运行行为（stderr 文本 + 退出码）上。
+  最后，**未执行项要如实登记**（真正的主循环/需要真实显示栈与版权数据的部分），
+  并说明为什么不计入通过率。
+rec_command:            sh test_nuvie.sh <package_folder>   # 内部：run_bounded 30 "$BIN" + ( unset HOME; exec "$BIN" )
+rec_auto_fix:           false
+rec_impl:               consumer-test-headless-pre-init-failure-paths
+
+fallback_1_approach:    stub-only-cli-surface
+fallback_1_description: >
+  若上游连一条「初始化前就 return」的路径都没有（main() 一进去就进事件循环、
+  失败也只弹 GUI），退而求其次：给上游**提一个上游化补丁**加一条
+  `--self-test` / `--version` 式的纯文本早期出口（可上游化、不改变游戏语义），
+  再对这个出口写断言。**不要**用 print-only stub 冒充（R34），也不要改成
+  「只要不崩就算过」的空断言。
+
+fallback_2_approach:    xvfb-style-virtual-display
+fallback_2_description: >
+  若必须验证真实的窗口/渲染路径，需要在 CI 侧提供虚拟显示（Xvfb / weston headless）。
+  这属于**环境**能力而非配方能力，且 OHOS 沙箱当前不提供 —— 故不要把结论建立在
+  它之上；把它写成「未执行项」并说明所需环境。
+
+verification_cmd: >
+  sh test_nuvie.sh <package_folder>    # → nuvie test_package: all 29 checks passed
+  # B 组（无配置）：退码 1 + stderr 含 "Debugging enabled" / "No config file found!"
+  #                 + stderr **不含** "cannot open shared object" / "undefined symbol"
+  # C 组（配置+SDL）：退码 1 + stderr 含 "Loading Config from" +
+  #                 check_any 命中 "Attempting to set vid mode:" / "Couldn't initialize SDL:"
+  #                 / "Initializing screen!" / "Unable to create surface" 之一
+  #                 + check_none 无加载器/符号错误 + $HOME/.nuvierc 非空
+
+verification: >
+  nuvie 0.5 实测：`test_package/test_nuvie.sh` 29 条断言，其中 B/C 两组共 10 条
+  为鸿蒙特有（真实执行 OHOS aarch64 二进制）。两组退出码均为 1、未挂死
+  （C 组另有 30s run_bounded 兜底）。
+  踩坑复现：最初路径 C 写死断言 "Initializing screen!" + "Couldn't initialize SDL:"，
+  在 OHOS/sdl12-compat 上**两条都 FAIL**（进程实际走 set_screen_mode() →
+  "Attempting to set vid mode:"）；改用 check_any 覆盖该段全部可能文案后通过。
+  这正是「假 SDL_VIDEODRIVER ⇒ SDL_Init 失败」假设不可移植的证据。
+
+related:
+  - archives/n/nuvie/0.5/test_package/test_nuvie.sh
+  - archives/n/nuvie/0.5/test_package/conanfile.py
+  - archives/n/nuvie/0.5/test_package/MANIFEST.yml
+  - archives/b/ballandpaddle/0.8.1/test_package/test_ballandpaddle.sh (同类手法：借 --version/--help 在 SDL 初始化之前的 exit(0) 路径)
+  - knowledge/drafts/DRAFT-6380-nuvie-0.5-autotoolsdeps-vs-sdl-config-two-flag-channels.kv
+
+source_pr:              11647
+source_commit:          ac94b36a62c015d965754f3399a31d1efda12ffc
+last_updated:           2026-09-27

@@ -1,0 +1,26 @@
+#====================================================================
+# Draft: 编译期烘焙绝对路径（-DPLUGINSDIR/-DSHAREDIR 类）在 Conan 包内
+# 必然悬空：包目录构建后会被搬移；用 /proc/self/exe 相对回退 + 静态
+# 库 --export-dynamic 组合实现可重定位
+#====================================================================
+
+id:                     DRAFT-E641
+trigger_tool:           conan|make|patchelf|dlopen|readelf
+phase:                  packaging|compilation|testing
+error_signature:        could not open directory|dlopen failed| DT_NEEDED|unable to find library|p/b/.*/p|package folder|PLUGINSDIR|SHAREDIR|userdb|plugins_dir|exit\(EXIT_FAILURE\).*plugin
+
+severity:               2
+category:               packaging|conan|dlopen|portability|ohos-platform
+match_keywords:         baked path, 编译期, PLUGINSDIR, SHAREDIR, plugins dir, dlopen, DESTDIR, staging, relocatable, 可重定位, package_folder, conan cache, p/b, export-dynamic, R26, 系统同名库, libpe, patchelf, userdb
+
+title:                  上游把运行期资源路径（插件目录/签名库）烘焙成编译期绝对路径时，Conan 包必然悬空（包目录构建后在 p/b/<hash>/p 与 p/<hash>/p 之间搬移）：用「存在即用、否则 /proc/self/exe 相对回退」补丁 + 静态库 --export-dynamic 组合实现可重定位
+
+root_cause:             两层事实叠加：①pev 式工具经 PEV_INITIALIZE 宏 dlopen 编译期 -DPLUGINSDIR 指定的输出插件，目录打不开即 exit(EXIT_FAILURE)（text 默认输出也依赖插件），pepack 经 SHAREDIR 读 userdb.txt——路径是编译期常量；②Conan 2 的 conan create 在缓存里构建时 package_folder 位于 `p/b/<hash>/p` 临时区，成功后整体搬移到最终 `p/<hash>/p`——构建期 self.package_folder 的任何绝对路径烘焙（含 -Wl,-rpath）在终态**必然失效**，patchelf 事后改写在 HMDFS 上还会被运行期拒绝。另外一个真实约束：设备系统 /lib64 已有 libpe.so（R26：系统同名库禁止包内输出动态库），但插件 dlopen 又依赖进程内 libpe 符号，纯静态可执行文件没有动态符号表可供解析。
+affected_scope:         一切把资源路径编译进二进制的工具包（pev、aircrack 系插件、带 plugins_dir 的解释器类）；以及"Conan 缓存路径当安装路径用"的任何绝对 rpath/前缀烘焙。
+verification_cmd:       grep -c "pev_config_baked_or_relocatable" "$HOME/ws/worktrees/pev-0.82/archives/p/pev/0.82/patches/0002-relocatable-pluginsdir-sharedir.patch"
+
+rec_priority:           1
+rec_approach:           runtime-fallback-relatively-to-proc-self-exe-plus-static-lib-export-dynamic
+rec_description:        三件套，顺序固定：①**路径回退补丁**：新增 `baked_or_relocatable(baked, exe_relative)` 帮助函数——stat(baked) 命中即原样用（上游常规安装零行为变化）；否则 readlink /proc/self/exe 取可执行目录，拼 `<exedir>/../<suffix>`（bin 的兄弟目录），命中即用；再退回 baked。仅 `__linux__` 分支启用，非 Linux 行为不变。DESTDIR/staging 安装同样受益，可上游化。②**库符号**：dlopen 的插件要从宿主进程全局作用域解析符号——宿主必须动态链接 libpe（配方以 `-lpe` 链接静态归档 libpe.a 后加 `-Wl,--export-dynamic` 把 pe_* 放进 .dynsym，musl dlopen 可解析），这样既满足 R26（包内不输出与系统同名的 .so），又保住插件运行时。③**不要**用绝对 rpath 指包目录（构建后搬移必悬空）、不要用 patchelf 事后改写（HMDFS 拒绝）、不要让全部工具纯静态（静态可执行无动态符号表，dlopen 的插件全部失联）。验收：对包内二进制 readelf -d 查无本包缓存路径残留；把包目录改名/搬移后工具仍能 -V、出 json 输出。
+rec_command:            cd "$HOME/ws/worktrees/pev-0.82" && grep -c "export-dynamic" archives/p/pev/0.82/patches/0003-libpe-static-r26.patch
+rec_auto_fix:           false

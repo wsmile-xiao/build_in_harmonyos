@@ -1,0 +1,78 @@
+# DRAFT-tetradraw-2.0.3-tui-headless-real-exec-assert
+
+> Draft（待审核 promote）｜对应: `knowledge/drafts/DRAFT-tetradraw-2.0.3-tui-headless-real-exec-assert.kv`
+> 说明：该 kv 为文档式条目，本文档为其可读镜像。
+
+---
+
+# DRAFT-tetradraw-2.0.3: 无上游测试套件的 curses TUI 怎么写"真执行"断言
+
+- 条目主题：上游零测试的 ncurses/curses 全屏 TUI 程序，test_package 如何既满足 R34（真实执行被测产物）又不依赖终端、terminfo 与宿主专有 shim
+- 状态：草稿（待知识库主编审核，拟提升编 Exxx）
+- 关联包：tetradraw 2.0.3（`tetradraw` / `tetraview`，2003 年代码，GPL-2）
+- 关联 PR：见 tetradraw 2.0.3 积分赛 PR
+
+## 适用场景
+
+三方库是全屏 TUI（ncurses/curses），上游没有任何测试套件（无 `make check`、
+无 `tests/`、无 ctest），但制品是必须真实跑起来的可执行文件。R34 / PF3 / CI L1d
+都不接受"只 print 不执行"的空壳，L1e 还会把 `bin/` 移走做反向破坏测试。
+
+## 关键手法
+
+1. **挑一个"程序自己必然打印"的锚点，而不是猜终端行为。**
+   tetradraw 的 `src/term.c: setup_ncurses()` 在 `initscr()` **之前**无条件打印
+   自己的 banner（`TERM != "linux"` 时）。于是：
+   * 二进制没起来 / 没链接上 → 看不到这行；
+   * 起来了并进了 TUI 设置路径 → 一定看得到。
+   找到这种"进入 TUI 前、且与环境无关"的输出行，比断言 `--version` 或退出码可靠得多。
+
+2. **`TERM` 换成一个任何机器都没有 terminfo 条目的假名**（如 `tetradraw-ci-no-terminfo`）。
+   * 不会因为 CI runner 恰好装了 xterm/linux 的 terminfo 就走进交互主循环**卡死**；
+   * `initscr()` 必然立刻失败早退，行为确定、可复现。
+   * 反例：`TERM=xterm` 在本地必然失败、在某些 runner 上却可能成功进主循环 → 挂死。
+
+3. **用退出码排除法把"loader 拒绝"和"信号死亡"显式判死**，否则 R34 不成立：
+   * `127` = 动态 loader/exec 失败（正是平台私有符号缺失的表征）
+   * `>= 128` = 被信号打死（如缺符号导致的 SIGSEGV）
+   * `124` = `timeout` 守卫触发 = 掉进了交互循环
+   三者任一命中即 FAIL。
+
+4. **`timeout 30` 只当挂死守卫，不当断言**；`command -v timeout` 探测后再用。
+
+5. **不要在入库的 test 脚本里写宿主专属路径**（`/opt/...`、`LD_PRELOAD=...`）。
+   本地为了跑通交叉产物搭的 shim 目录一旦进 git，换台机器/换 CI runner 就红，
+   而且会被判"测试依赖宿主环境"。正确做法是**修产物**（见
+   `DRAFT-tetradraw-2.0.3-ohos-sys-select-fd-chk`），让产物本身不依赖特定 libc。
+
+6. **`TERM` 为空会崩**：tetradraw 的 `setup_ncurses()` 直接
+   `strcmp(getenv("TERM"), "linux")`，`TERM` 未设置就是 NULL 解引用。
+   所以测试里必须显式 `TERM=... ` 前缀，不能依赖继承环境。
+
+## 本例的断言清单（8 条）
+
+| # | 断言 | 手段 |
+|---|------|------|
+| 1,2 | 两二进制存在且为 ELF | `od -An -tx1 -N4` 验魔数 `7f454c46` |
+| 3,4 | 目标架构 aarch64 | `od -An -tx1 -j18 -N2` 验 `e_machine == b700` |
+| 5,6 | **真实执行**穿透到程序自身 `setup_ncurses()` | 捕获 stderr 匹配 banner，且不含 `Error relocating` / `symbol not found` |
+| 7,8 | 正常退出而非 loader/信号/挂死 | 断言 `rc != 124 && rc != 127 && rc < 128` |
+
+## 证据（真实执行）
+
+- tetradraw 2.0.3：`conan create` RC=0，test_package 输出 `ASSERTIONS 8/8 passed`
+  / `TEST_RESULT=pass`。
+- 同源门禁 L1e 反向破坏测试（把 `bin/` 移走）**确认测试必须失败**，证明非空壳。
+- 对照：本包更早一版测试依赖 `/opt/ohos-guest/lib/libfdchkshim.so`，本地能过、
+  但那是宿主专属路径；改掉产物依赖后彻底删除该 shim 逻辑。
+
+## 推广价值
+
+- 所有"上游零测试 + 全屏 TUI + 交付物是可执行文件"的适配
+- ncurses / readline / dialog / 任何走 terminfo 的程序
+- 与 R34 / PF3 / L1d / L1e 配套的断言设计方法
+
+## 查重关键词
+
+R34、PF3、L1e、ncurses、curses、terminfo、TERM、initscr、TUI headless 测试、
+真实执行断言、exit 127、timeout 守卫、tetradraw、空壳测试

@@ -70,7 +70,7 @@ make install PREFIX=$DEFAULT_PREFIX DESTDIR=$TEST_PREFIX CC=clang
 
 ### 4. 测试验证
 
-- `make cautiously` 通过（ctangle 能自复制 common.c 和 ctangle.c，diff 无差异）
+- `make cautious` 通过（ctangle 能自复制 common.c 和 ctangle.c，diff 无差异）
 - ctangle 功能测试通过：`ctangle wc` 正确生成 wc.c（215行）
 - cweave 功能测试通过：`cweave wc` 正确生成 wc.tex（342行）
 - 用户安装验证通过：`$PREFIX/bin/ctangle` 和 `$PREFIX/bin/cweave` 均可正常执行
@@ -80,8 +80,8 @@ make install PREFIX=$DEFAULT_PREFIX DESTDIR=$TEST_PREFIX CC=clang
 - 预编译包: `cweb-4.12.2-ohos-aarch64.tar.gz` (286KB)
 - 预编译包内容: bin/cweave, bin/ctangle, lib/cweb/ 下的 2 个 .w 文件, share/ 下的 4 个文件
 - 无外部依赖库
-
 ---
 
-**编译结束**: 2026-06-09
-**最终状态**: published
+**编译结束**: 2026-07-15 22:21
+**最终状态**: built
+

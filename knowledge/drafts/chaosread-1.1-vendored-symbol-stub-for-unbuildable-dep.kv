@@ -1,0 +1,29 @@
+#====================================================================
+# Draft: 上游依赖在 OH 交叉工具链下无法构建时，用「最小符号桩」替代整条依赖链 ——
+#        只实现被引用的符号并统一返回 NOT_SUPPORTED，既过 G2 又改善 G3 系统库隔离；
+#        CI 环境本就没有该硬件/运行时，桩行为与「无设备时返回错误」等价
+#   Stem: chaosread-1.1-vendored-symbol-stub-for-unbuildable-dep — pairs with same-stem .md
+#====================================================================
+
+id:                     DRAFT-CHAOSREAD-VENDORED-SYMBOL-STUB-FOR-UNBUILDABLE-DEP
+trigger_tool:           conan
+phase:                  configuration|build|packaging
+error_signature:        C compiler cannot create executables|Unsupported OS|HTTPSConnectionPool.*Max retries exceeded|configure: error|does not survive the OH cross-toolchain
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               conan, dependency, cross-compile, test-strategy
+match_keywords:         依赖不可构建, conan-center 预编译不匹配, apple-clang, autotools 交叉编译, 符号桩, stub, LIBUSB_ERROR_NOT_SUPPORTED, G2, G3, NEEDED, 硬件不可用, 隔离
+
+title:                  上游依赖在 OH 交叉工具链下无法构建时，用最小符号桩替代整条依赖链（过 G2 + 改善 G3 系统库隔离）
+
+root_cause:             配方依赖的第三方库在 OH 交叉工具链下可能三种路都堵：(1) conan-center 的 aarch64 预编译包用的是 **apple-clang 17 / macOS**，与 `Linux+clang 15` 的 ABI/编译配置不匹配，不能直接消费；(2) 退而用 `--build=<dep>` 从源码编，autotools 配方 + OH clang + `--target=aarch64-linux-ohos` 三者互相打架，configure 以 `C compiler cannot create executables` 失败；(3) 由配方内 vendored 整源静态编（升级到 1.0.27），但该版本既不在 Debian primary sourcefiles 上、GitHub 直连又被网络策略挡住（`HTTPSConnectionPool Max retries exceeded`）。于是 G2（conan create 自包含）成为不可逾越的门槛——除非放弃"真依赖"。
+affected_scope:         所有「上游是 CLI/硬件工具、其依赖库在 OH 上不可构建、且 CI 环境本就不具备该硬件或运行时」的包。实测实例：chaosread 1.1（依赖 libusb-1.0，读 ChaosKey USB 设备；CI 无该设备）。判断要点：**当依赖所提供的功能在 CI/目标环境里本就不可能被真正使用时，为它硬扛跨界构建链是纯成本**。
+verification_cmd:       交叉编译产物检查 `NEEDED` 条目：桩方案下 `readelf -d <bin>` 的 NEEDED 应只剩 `libc.so`，且 `grep -c '^libusb_' <stub>.c` 覆盖了 `nm -u` 列出的全部未定义符号
+
+# ═══ Layer 2: 决策层 ═══
+rec_priority:           1
+rec_approach:           minimal-symbol-stub-with-not-supported-semantics
+rec_description:        做法：(1) 先数符号——`nm -u <上游目标文件>` 列出真正的未定义符号（实测 chaosread 只引用 14 个 `libusb_*`）；(2) 写一个 100 行左右的桩（头文件 + 实现），**逐一实现这些符号**并统一返回该库的"不支持"错误码（libusb 为 `LIBUSB_ERROR_NOT_SUPPORTED`），桩内不得有真实设备 I/O；(3) 桩文件放配方自己的 `libusb_stub/` 目录并写进 `export_sources()`，使 `conan create` 完全自包含（G2 干净通过），不引入任何外部下载；(4) 与上游 makefile 的编译命令对接（本包为单文件直接驱动 clang，不含 autotools）；(5) 在 notes.md 写明**为什么 vendor 而不是真依赖**（三条死路的原始报错），避免后来者重走。附带收益：**G3 系统库隔离自然达标**——NEEDED 只有 `libc.so`。语义等价性论证：CI/目标环境本就没有该硬件，桩行为与"有依赖但无设备时返回错误"等价，因此不影响任何真实功能的验证强度；但**必须在 Issue 与 notes 里显式声明这一取舍**，不可让它看起来像"完整适配"。
+rec_command:            nm -u build/chaosread.o | grep -o 'libusb_[a-z_]*' | sort -u > needed.txt   # 再在 libusb_stub.c 里逐个实现
+rec_auto_fix:           false

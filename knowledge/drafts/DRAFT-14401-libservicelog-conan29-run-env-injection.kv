@@ -1,0 +1,42 @@
+#====================================================================
+# DRAFT-14401-libservicelog-conan29-run-env-injection - conan 2.29 下 test()/build() 子进程环境变量注入：run(env=list) 不传播、environment_append 已移除，唯一可用 API 是 Environment.vars(self, scope="run").apply()
+#====================================================================
+
+id:                     DRAFT-14401-libservicelog-conan29-run-env-injection
+trigger_tool:           conan|create|test
+phase:                  test-execution
+error_signature:        env argument to ConanFile.run() should be a list|AttributeError: module 'conan.tools.env' has no attribute 'environment_append'|ImportError: cannot import name 'environment_append'|(silent: child process environ variable unset)
+
+severity:               2
+category:               conan|api|environment|test
+match_keywords:         run(env, environment_append, env.vars, scope=run, Environment, conan 2.29, conan 2.x, test(), 环境变量注入, SERVICELOG_DB, XDG_RUNTIME_DIR, QT_QPA_PLATFORM, TMPDIR, os.environ, apply
+title:                  conan 2.29 下给 test() 子进程注入环境变量：run(env=...) 只接受列表且不实际传播，environment_append 上下文管理器已移除；唯一可用 API 是 Environment.vars(self, scope="run").apply()
+
+root_cause:             conan 2.x 的 ConanFile.run(cmd, env=...) 语义变迁：2.29.1 中 env 参数只接受列表（传字符串直接报 "env argument to ConanFile.run() should be a list"），但传入的列表仅是形参占位，不会把变量注入子进程环境；conan 1.x 教程通用的 environment_append 上下文管理器在 2.29 已移除（ImportError）。结果：test() 里 self.run("./probe") 的子进程看不到任何注入变量（libservicelog 真机实测：SERVICELOG_DB 未设置 → 库按默认 /var/lib/servicelog/servicelog.db 打开 → 打开失败，返回非零）。该问题静默性极强：列表形式不报错但变量根本不生效，只有子进程行为异常才暴露，且手动执行同一命令又正常（shell 环境有变量）→ 极易误判为库缺陷。
+affected_scope:         所有在 conan 2.29 下需要给测试/构建子进程注入运行时环境变量的配方：test() 中的 DB 路径（SERVICELOG_DB 类）、QPA 平台变量（QT_QPA_PLATFORM）、XDG 目录、TMPDIR、LD_LIBRARY_PATH 等场景；conan 2.28 及更早版本的 API 行为不同，不可照搬；conan 1.x 的 environment_append 写法在 2.29 直接崩溃。
+verification_cmd:       最小复现：test() 里 self.run("python3 -c 'import os;print(os.environ.get(\"FOO\"))'", env=["FOO=bar"]) → 输出 None（变量未注入）；改为 env = Environment(); env.define("FOO", "bar"); with env.vars(self, scope="run").apply(): self.run(...) → 输出 bar。本配方真机实跑：SERVICELOG_DB 注入后 probe 全过 + 上游 6 场景 SUITE PASS 6/6（conan-verify 迭代 11）。
+rec_priority:           1
+rec_approach:           use-conan-env-vars-api
+rec_description:        在 test()（或需要注入的 build() 段）用 conan.tools.env.Environment 构造变量集，通过 env.vars(self, scope="run").apply() 上下文管理器包裹 self.run() 调用：scope="run" 表示注入范围是 run 命令子进程（可选 "build"）；apply() 将变量导入 os.environ 并返回上下文管理器，退出后自动恢复原值，可嵌套。变量值动态（临时目录 DB 路径）时在 define 前先 mkdtemp 即可。
+rec_command:            from conan.tools.env import Environment; env = Environment(); env.define("SERVICELOG_DB", db); with env.vars(self, scope="run").apply(): self.run("./probe")
+rec_auto_fix:           false
+rec_impl:               conan-env-vars-apply
+
+fallback_priority:      2
+fallback_approach:      inline-shell-prefix
+fallback_description:   若配方需要兼容更老的 conan 2.x（无 .vars(scope=) API 的版本），可在命令前内联变量：self.run("SERVICELOG_DB={} ./probe".format(db))；但含空格路径需引号处理、多条命令无法复用、且逃逸处理易错，仅作降级手段。
+fallback_command:       self.run("SERVICELOG_DB='{db}' ./probe".format(db=db))
+fallback_auto_fix:      false
+fallback_impl:          inline-prefix
+
+forbid_1_pattern:       run\(.*env=\[.*\]
+forbid_1_reason:        conan 2.29 的 run(env=list) 不向子进程注入变量（参数仅形参占位），写成列表不报错但测试运行环境缺变量，属静默失败；网上 conan 1.x 的 environment_append 教程均已过时。
+forbid_1_consequence:   测试在配方内失败而手动执行成功，误判为库缺陷反复盲改配方/补丁；或临时放水跳过环境相关断言，丢失真实覆盖。
+
+forbid_2_pattern:       from conan\.tools\.env import environment_append
+forbid_2_reason:        conan 2.29 已移除 environment_append（ImportError/AttributeError），照搬 conan 1.x 写法在导入行即崩溃。
+forbid_2_consequence:   构建/测试崩在 import，排查方向被带偏到依赖或语法问题，浪费迭代。
+
+ref_pr:                 14401
+ref_package:            libservicelog/1.1.19
+ref_ci_run:             真机 conan-verify 迭代 11（2026-09-27，Verdict PASS）

@@ -1,0 +1,72 @@
+#====================================================================
+# DRAFT-easyflash-4.1.0-no-build-direct-compile - 无构建系统 C 库的
+# Conan 2 直编配方 + ef_cfg 空占位宏补值 + RAM 模拟 flash 移植层测试
+#
+# 场景: easyflash 4.1.0（armink/EasyFlash）为嵌入式 flash 键值库，
+#       上游无 configure/make/cmake/meson 任何构建系统（全树清点确认），
+#       头文件 ef_cfg.h 中 EF_ENV_VER_NUM/EF_ERASE_MIN_SIZE/EF_WRITE_GRAN/
+#       EF_START_ADDR/ENV_AREA_SIZE 等宏以空占位符形式存在（@note you must
+#       define it），不补值则任何消费者 include 后无法编译。移植层
+#       ef_port.c（read/erase/write/print）由使用者提供，OHOS PC 无 MCU
+#       flash，需以 RAM 区域模拟 NOR flash 语义（erase 置 0xFF、write 只
+#       翻转 1→0）才能端到端运行 ENV 键值 API。
+# 适用: 所有无构建系统的嵌入式 C 库（flash 存储/键值/KV 类）在 Conan 2 +
+#       OHOS/CI clean 环境下落地配方；以及任何需要给"空占位配置宏"补值的
+#       头文件。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-easyflash-4.1.0-no-build-direct-compile
+source_lib:             easyflash 4.1.0
+trigger_tool:           conan|conan-verify|conan-create|cmake|clang|ar
+phase:                  recipe|packaging|testing|compilation
+error_signature:        no build system|无构建系统|ef_cfg|EF_ERASE_MIN_SIZE|must define it|No files in this package|self.source_folder|self.copy|tools.build:archiver|libeasyflash|ef_port
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan, build-system, packaging, headers, portability
+match_keywords:         无构建系统, no build system, 空占位宏, placeholder macro, ef_cfg.h,
+                        direct compile, 直编, self.source_folder, package(), self.copy,
+                        tools.build:archiver, RAM flash, ef_port, flash 模拟, NOR flash
+title:                  无构建系统的嵌入式 C 库应在 build() 内直编源码并 staging 头文件，
+                        package() 从 build_folder 复制；空占位配置宏需补值；RAM 模拟 flash
+                        移植层使 ENV/KV 类 API 可在无 MCU 的 OHOS PC 端到端测试
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  ① 上游无任何构建系统（无 configure/Makefile/CMake/meson），conan-init 默认
+  autotools 模板无法使用，必须改为 build() 内逐 TU 直编（clang -c + llvm-ar）；
+  ② Conan 2 的 copy() 必须在 package() 中从 self.build_folder 取文件——
+  self.source_folder 在 package() 阶段不可用，且 self.copy 属性不存在（需
+  from conan.tools.files import copy 后以 copy(self,...) 调用），
+  tools.build:archiver 也非合法 conf（应读 AR 环境变量）；
+  ③ 上游头文件把必需配置宏留作空占位（#define EF_ERASE_MIN_SIZE 后无值），
+  消费者直接 include 即编译失败，需在补丁中补具体值；
+  ④ 移植层 ef_port.c 由使用者实现，OHOS PC 无 MCU flash，测试必须提供 RAM
+  模拟（erase→0xFF、write 仅 1→0 的 NOR 语义）移植层才能运行 ENV API。
+affected_scope:         无构建系统的嵌入式 C/C++ 库（flash/KV/键值存储类）在 Conan 2 +
+                        OHOS/CI 环境；任何带空占位必需宏的头文件；任何依赖 package()
+                        复制产物的直编配方。
+verification_cmd:       grep -cE 'EF_ERASE_MIN_SIZE|ENV_AREA_SIZE' <patched>/ef_cfg.h;
+                        conan create <recipe> -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           no-build-direct-compile-stage-headers
+rec_description:        build() 内用 conf/环境 CC 直编各 TU 生成 .o，llvm-ar 打包为
+                        lib<name>.a，并 mkdir include + cp 头文件到 build_folder；
+                        package() 仅从 self.build_folder 用 copy(self,...) 复制
+                        include/*.h 与 *.a；用补丁为空占位配置宏补具体值（EF_ERASE_
+                        MIN_SIZE=4096、EF_WRITE_GRAN=8、EF_START_ADDR=0、ENV_AREA_
+                        SIZE=8192 等 RAM 模拟布局）；test_package 提供 RAM 模拟 flash
+                        移植层（首次 init 置 0xFF、此后保留内容模拟掉电保留），真实调用
+                        公共 API 验证键值读写与持久化。
+rec_command:            for s in *.c; do ${CC:-clang} -fPIC -O2 -I${SRC}/easyflash/inc -c ${SRC}/easyflash/src/$s -o $s.o; done && ${AR:-llvm-ar} rcs libeasyflash.a *.o && mkdir -p include && cp ${SRC}/easyflash/inc/*.h include/
+rec_auto_fix:           false
+
+fallback_priority:      2
+fallback_approach:      upstream-cmake-standalone
+fallback_description:   若上游其实提供 CMake（可通过 CMakeLists.txt 手工创建），优先走
+                        CMake 而非逐 TU 直编；逐 TU 直编仅在确无构建系统时使用。
+fallback_command:       cmake -S . -B build -DCMAKE_INSTALL_PREFIX=... && cmake --build build
+fallback_auto_fix:      false

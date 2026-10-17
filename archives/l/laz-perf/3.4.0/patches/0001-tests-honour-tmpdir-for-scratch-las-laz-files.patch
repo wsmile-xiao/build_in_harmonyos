@@ -1,0 +1,65 @@
+Description: Resolve the per-test scratch file through $TMPDIR instead of hardcoding
+             /var/tmp.  makeTempFileName() feeds the 7 io_tests cases that write a
+             temporary LAS/LAZ file and read it straight back (extrabytes, issue44,
+             can_encode_large_files, variable_chunks,
+             compression_decompression_is_symmetric, writes_bbox_to_header,
+             write_laz_with_no_points_and_read_back), all of which go through
+             encode()/compare().  Measured: with /var/tmp made read-only
+             (mount -t tmpfs -o ro,/var/tmp), the unpatched binary reports
+             "21 ran / 14 PASSED / 7 FAILED", and the 7 named failures are exactly
+             that set.
+             On a system whose root filesystem is read-only, or which has no
+             /var/tmp at all (HarmonyOS/OHOS, minimal containers), mkstemp() fails,
+             its return value is ignored, and the later ofstream open silently
+             produces nothing - the case then fails for reasons unrelated to
+             lazperf.  $TMPDIR is the POSIX way to name the scratch directory; the
+             current directory is the last resort because it is writable by
+             definition.  With the patch the same read-only /var/tmp run reports
+             21/21 PASSED.  Test count, test bodies and assertions are unchanged.
+Origin: https://github.com/hobuinc/laz-perf/tree/3.4.0
+Upstream: not submitted; general POSIX portability fix, upstreamable as-is
+Source-Commit: c9f281490c8ee05391a7ed2a5e16fe0ef2083c7a
+Modification-Layer: 1 (test harness scratch path only; no library source touched)
+Knowledge-Ref: E002, DRAFT-lazperf-3.4.0-tests-hardcoded-var-tmp-readonly-rootfs, P005, P014
+
+diff -ruN a/cpp/test/io_tests.cpp b/cpp/test/io_tests.cpp
+--- a/cpp/test/io_tests.cpp
++++ b/cpp/test/io_tests.cpp
+@@ -44,6 +44,10 @@
+ #include <cstdio>
+ #include "reader.hpp"
+ #include <stdio.h>
++#include <cstdlib>
++#ifndef _WIN32
++#include <unistd.h>
++#endif
+
+ namespace lazperf
+ {
+@@ -60,8 +64,24 @@
+     GetTempPath(MAX_PATH, path);
+     filename = std::string(path) + name;
+ #else
+-    std::string s("/var/tmp/fnXXXXXX");
+-    mkstemp(const_cast<char *>(s.data()));
++    // Scratch files belong in $TMPDIR, which is what POSIX prescribes. A
++    // hardcoded /var/tmp makes every test that writes a temporary LAS/LAZ
++    // file fail on systems whose root filesystem is read-only or which have
++    // no /var/tmp at all (HarmonyOS/OHOS, minimal containers, ...): mkstemp
++    // fails, its return value is ignored, and the subsequent ofstream open
++    // silently yields nothing. Try $TMPDIR, then the current directory, which
++    // is writable by definition.
++    const char *tmpdir = std::getenv("TMPDIR");
++    std::string s = (tmpdir && *tmpdir ? std::string(tmpdir) : std::string(".")) +
++        "/lazperf-fnXXXXXX";
++    int fd = mkstemp(const_cast<char *>(s.data()));
++    if (fd < 0 && tmpdir && *tmpdir)
++    {
++        s = "./lazperf-fnXXXXXX";
++        fd = mkstemp(const_cast<char *>(s.data()));
++    }
++    if (fd >= 0)
++        ::close(fd);
+     filename = s;
+ #endif
+     return filename;

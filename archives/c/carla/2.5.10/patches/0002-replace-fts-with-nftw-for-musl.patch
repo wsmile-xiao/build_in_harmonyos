@@ -1,0 +1,108 @@
+diff --git a/source/modules/ysfx/sources/ysfx_utils_fts.cpp b/source/modules/ysfx/sources/ysfx_utils_fts.cpp
+index 2226a35..97a9e87 100644
+--- a/source/modules/ysfx/sources/ysfx_utils_fts.cpp
++++ b/source/modules/ysfx/sources/ysfx_utils_fts.cpp
+@@ -15,53 +15,71 @@
+ // SPDX-License-Identifier: Apache-2.0
+ //
+ 
+-#if !defined(_WIN32)
+-
+-// fts lacks large file support in glibc < 2.23
+-#if defined(YSFX_FTS_LACKS_LFS_SUPPORT)
+-#   undef _FILE_OFFSET_BITS
++#ifndef _XOPEN_SOURCE
++#define _XOPEN_SOURCE 700
+ #endif
+ 
++#if !defined(_WIN32)
++
+ #include "ysfx_utils.hpp"
+ #ifndef __EMSCRIPTEN__
+-#include <fts.h>
++// HarmonyOS/musl does not provide <fts.h>; use POSIX nftw instead.
++#include <ftw.h>
+ #endif
+ #include <string>
+ #include <cstring>
++#include <algorithm>
++#include <vector>
+ 
+ namespace ysfx {
+ 
+-void visit_directories(const char *rootpath, bool (*visit)(const std::string &, void *), void *data)
+-{
+ #ifndef __EMSCRIPTEN__
+-    char *argv[] = {(char *)rootpath, nullptr};
+-
+-#if !defined(__FreeBSD__)
+-    using compar_arg_t = const FTSENT **;
+-#else
+-    using compar_arg_t = const FTSENT *const *;
+-#endif
++namespace {
++// nftw callback has no user-data parameter, so thread-local globals carry
++// the visitor and stop flag. carla's ysfx only walks directories from a
++// single thread at a time, so this is safe.
++struct walk_state {
++    bool (*visit)(const std::string &, void *);
++    void *data;
++    bool stop;
++    std::vector<std::string> found;
++};
+ 
+-    auto compar = [](compar_arg_t a, compar_arg_t b) -> int {
+-        return strcmp((*a)->fts_name, (*b)->fts_name);
+-    };
++thread_local walk_state g_state{nullptr, nullptr, false, {}};
+ 
+-    FTS *fts = fts_open(argv, FTS_NOCHDIR|FTS_PHYSICAL, +compar);
+-    if (!fts)
+-        return;
+-    auto fts_cleanup = defer([fts]() { fts_close(fts); });
+-
+-    std::string pathbuf;
+-    pathbuf.reserve(1024);
++int nftw_cb(const char *fpath, const struct stat *sb, int typeflag, struct FTW *ftwbuf)
++{
++    (void)sb; (void)ftwbuf;
++    if (typeflag != FTW_D)
++        return 0;
++    g_state.found.emplace_back(fpath);
++    return 0;
++}
++} // namespace
++#endif
+ 
+-    while (FTSENT *ent = fts_read(fts)) {
+-        if (ent->fts_info == FTS_D) {
+-            pathbuf.assign(ent->fts_path);
+-            pathbuf.push_back('/');
+-            if (!visit(pathbuf, data))
+-                return;
+-        }
++void visit_directories(const char *rootpath, bool (*visit)(const std::string &, void *), void *data)
++{
++#ifndef __EMSCRIPTEN__
++    g_state.visit = visit;
++    g_state.data = data;
++    g_state.stop = false;
++    g_state.found.clear();
++    nftw(rootpath, nftw_cb, 32, FTW_PHYS);
++    // Restore lexicographic ordering that the original fts_open comparator
++    // provided (strcmp on fts_name). nftw visits in readdir order, which is
++    // filesystem-dependent and not sorted.
++    std::sort(g_state.found.begin(), g_state.found.end());
++    for (const auto &dir : g_state.found) {
++        std::string p = dir;
++        p.push_back('/');
++        if (!visit(p, data))
++            break;
+     }
++    g_state.visit = nullptr;
++    g_state.data = nullptr;
++    g_state.stop = false;
++    g_state.found.clear();
+ #endif
+ }
+ 

@@ -1,0 +1,111 @@
+#====================================================================
+# DRAFT-dawn-0.0-git20260529-libcxx15-cpp20-compat-ensemble.kv
+# OHOS clang15/libc++15 C++20 兼容全谱: ranges/format/views/spaceship
+# 缺口的系统性处理 + P0960 聚合括号初始化 + structured-binding lambda
+# 捕获 + monolithic bundle 跳过 IMPORTED 依赖
+# 触发事件: dawn 0.0-git20260529.432db5d7 HarmonyOS PC 适配
+#   （archives/d/dawn/0.0-git20260529.432db5d7，0001-0029 补丁族）
+#====================================================================
+
+id:                     DRAFT-dawn-0.0-git20260529-libcxx15-cpp20-compat-ensemble
+source_lib:             dawn 0.0-git20260529.432db5d7
+trigger_tool:           clang|clang++|cmake|conan|ninja
+phase:                  compilation|link|test
+error_signature:        no member named 'copy' in namespace 'std::ranges'|
+                         no member named 'reverse' in namespace 'std::ranges'|
+                         no member named 'views' in namespace 'std'|
+                         no member named 'format' in namespace 'std'|
+                         no member named 'lexicographical_compare_three_way' in namespace 'std'|
+                         missing 'typename' prior to dependent type name|
+                         reference to local binding .* declared in enclosing function|
+                         no matching constructor for initialization of '.*::overloaded'|
+                         archive member 'libabsl_.*\.a' is neither ET_REL nor LLVM bitcode|
+                         no matching constructor for initialization of 'std::span<char>'
+
+severity:               3
+category:               libcxx, toolchain, compat, cxx20, portability, clang15, conan, monolithic-bundle, gtest
+match_keywords:         std::ranges, std::views, std::format, lexicographical_compare_three_way,
+                         P0960, parenthesized aggregate, structured binding, lambda capture,
+                         overloaded deduction guide, span CTAD, BundleLibraries, IMPORTED,
+                         nested archive, gtest TMPDIR, read-only /tmp, dawn, webgpu
+title:                  OHOS clang15/libc++15 的 C++20 兼容缺口需全谱替换, 大库聚合场景还需处理 P0960/结构化绑定捕获/IMPORTED bundle 嵌套
+
+root_cause:             OHOS SDK26 自带 clang15 + libcxx-ohos15:
+                        (1) 未实现 std::ranges 算法与 std::views (ranges 仅部分,
+                        <format> 为空 stub, spaceship 部分缺失);
+                        (2) 不支持 C++20 聚合括号初始化 P0960 (TableAndExpected{...}
+                        可, (a, b) 不可);
+                        (3) lambda 无法按引用捕获结构化绑定 (auto [a,b] 后 [&] 引用);
+                        (4) span 无法从 string_view 直接 CTAD;
+                        (5) 依赖类型上下文 (模板内 Base::reference / Sha3<T>::Output /
+                        Traits::MutexType / ForwardToServerHelper<F>::Userdata) 需要
+                        explicit typename;
+                        (6) 编译器不生成 overloaded{} 的 deduction guide
+                        (聚合 CTAD + lambda 成员);
+                        (7) CMake bundle_libraries 遇到 conan IMPORTED 静态库时把
+                        .a 文件作为成员嵌入 webgpu_dawn.a, lld 无法解析嵌套 archive
+                        → undefined absl symbols; E236 是 libtool .la 场景, 此为其
+                        CMake/conan 静态库场景;
+                        (8) OHOS /tmp 只读导致 gtest captured-stream 失败 (E002 族),
+                        gtest 通用分支硬编码 /tmp.
+
+affected_scope:         C++20/Chromium 生态大型库在 OHOS PC 适配; 使用 std::ranges/
+                        std::format/std::views/spaceship 或 CMake bundle 静态库 +
+                        conan 注入依赖的包; gtest 测试在只读 /tmp 环境运行的包
+
+verification_cmd:       "conan create archives/d/dawn/0.0-git20260529.432db5d7
+                        -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=同 --build=missing
+                        → PASS; ./tint_unittests 44484/44484; ./dawn_end2end_tests
+                        292/292 (Null backend)"
+
+rec_priority:           1
+rec_approach:           systematic-libcxx15-cpp20-compat-ensemble
+rec_description:        >
+  ① ranges/format/views/spaceship: 逐个替换为经典算法等价
+  (std::ranges::copy→std::copy(b,e), std::ranges::reverse→std::reverse(b,e),
+  std::ranges::equal→std::equal(b,e,b2), std::ranges::search→std::search,
+  std::format→std::to_string/流拼接, lexicographical_compare_three_way→手工
+  strong_ordering 三路循环, std::views::filter/values→直接循环);
+  ② P0960: 聚合体 (Type(a, b)) 改为大括号 Type{a, b};
+  ③ 结构化绑定+lambda: 改为显式中间变量 (auto item = ...; auto& x=item.first);
+  ④ span CTAD: string_view 构造用 (reinterpret_cast<const byte*>(data), size);
+  ⑤ typename: 依赖类型前补 explicit typename;
+  ⑥ overloaded: 补模板 deduction guide;
+  ⑦ BundleLibraries.cmake: 收集对象时跳过 IMPORTED 目标 (is_imported), 由消费者
+  链接 conan 提供的 abseil; 同时 conanfile requirements 用 visible=False,
+  package_info ignored_requires, test_package 链接 libabsl_*.a 全库;
+  ⑧ gtest-port.cc: 通用分支尊重 TMPDIR 环境变量 (E002 族).
+  CMake 无 OHOS 平台模块: generate() 设 CMAKE_SYSTEM_NAME=Linux +
+  CMAKE_SYSTEM_PROCESSOR=aarch64, 显式关闭 X11/GLFW/Vulkan 等 (E092 已有).
+
+rec_command:            "见 archives/d/dawn/0.0-git20260529.432db5d7/patches/0001-0029"
+rec_auto_fix:           false
+rec_impl:               manual-edit
+
+causes:
+caused_by:              E130 (OHOS libc++ 需 C++17 最低), E092 (CMake 无 OHOS 平台),
+                        E002 (/tmp 只读)
+similar_to:             DRAFT-ohos-libcxx15-missing-cpp20-ranges-algorithms,
+                        DRAFT-ohos-libcxx15-format-ranges-capability-gap,
+                        DRAFT-libcxx15-missing-cpp20-spaceship,
+                        DRAFT-ohos-libcxx-missing-std-views,
+                        DRAFT-graaf-1.1.0-ohos-libcxx-std-ranges-missing,
+                        E236 (libtool .la 嵌套 archive — 触发面不同但 lld 报错同形)
+conflicts_with:
+prerequisite_of:
+
+# 七轴查重 (knowledge-reuse-governance)
+# exact_duplicate: 否 — 无全同条目
+# causal_duplicate: 部分 — ranges/format/views/spaceship 同根因 libcxx15 缺口,
+#   但 P0960/结构化绑定捕获/BundleLibraries-IMPORTED/span-CTAD 根因不同
+# trigger_overlap: 部分 — 编译期 "no member named" 与既有草稿重叠; 链接期
+#   "archive member neither ET_REL" 与 E236 同形但根因不同 (CMake bundle vs libtool)
+# solution_overlap: 部分 — 经典算法替换与既有草稿一致; P0960 大括号/显式变量/
+#   IMPORTED 跳过为新增
+# combination_novelty: 是 — 首个在单一大型 Chromium 生态库 (8 万余文件) 上系统性
+#   应用全谱 libcxx15 兼容 + 聚合 init + bundle 修复的组合
+# boundary_novelty: 是 — 明确 P0960 括号→大括号、结构化绑定→显式变量、bundle
+#   IMPORTED 跳过三条边界; E236 边界仅 libtool
+# test_migration_novelty: 是 — gtest 只读 /tmp 的 TMPDIR 补丁 + 上游 44776 用例
+#   全量运行证据链 (tint 44484 + end2end 292), 非仅编译通过
+# 决定: new_draft (部分覆盖, 新增差异已由真实日志验证且可跨库复用)

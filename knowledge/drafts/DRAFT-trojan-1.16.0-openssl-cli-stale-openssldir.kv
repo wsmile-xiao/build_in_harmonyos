@@ -1,0 +1,76 @@
+# ═══ Draft knowledge entry — 已发布的 openssl 制品内嵌构建期 OPENSSLDIR，消费方调用打包版 openssl CLI 时默认配置缺失 ═══
+# Timestamp: 2026-09-21
+# Software: trojan 1.16.0（通用：任何 test_package/消费者测试里 shell 调用打包版 openssl CLI 的包）
+# Gate: conan-verify 的 test_package 阶段（build() 里的上游冒烟常不复现，见下）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-trojan-1.16.0-openssl-cli-stale-openssldir
+title: 已发布 openssl 包内二进制的 OPENSSLDIR 被烧成构建期 conan 包目录绝对路径，换 CONAN_HOME 或换机器后该路径不存在，消费方调用打包版 openssl req 因默认 openssl.cnf 缺失而失败
+trigger_tool: openssl CLI（conan 包提供）/ conan test_package
+phase: testing
+error_signature: "Can't open \"<OPENSSLDIR>/openssl.cnf\" for reading, No such file or directory|error:80000002:system library:BIO_new_file|error:10000080:BIO routines:BIO_new_file:no such file"
+severity: 2
+category: openssl|conan|packaging|relocatability|testing
+match_keywords: OPENSSLDIR,openssl.cnf,BIO_new_file,OPENSSL_CONF,openssl req,默认配置缺失,制品不可迁移,stale conan home
+keywords: openssl packaged binary, baked OPENSSLDIR, non-relocatable prefix, openssl.cnf missing,
+  consumer test, test_package, conanrun env, OPENSSL_CONF=/dev/null, req -x509
+prescan_pattern: openssl req|openssl x509|OPENSSL_CONF|OPENSSLDIR
+prescan_globs: test_package/*.sh, **/test_package/**, conanfile.py
+safety_boundary: 需要 cnf 提供 req_extensions、distinguished_name 等模板字段时，OPENSSL_CONF=/dev/null
+  不够，必须自备一份最小 cnf 并用 -config 指定；只调用不读默认配置的子命令（如 s_client、
+  version、pkey 全参数形式）不适用本条；上游构建期就用可迁移相对前缀产出 cnf 的包也不适用
+approach: 判据是「同一个 openssl 子命令，在 build() 里跑通、在 test_package 里跑挂」——因为
+  build() 走 VirtualBuildEnv，PATH 命中的是设备自带 openssl（其 OPENSSLDIR 真实存在），
+  而 test() 走 env="conanrun"，PATH 命中的是 conan 包内那份二进制，其内嵌 OPENSSLDIR 指向
+  构建该制品时所在的 conan 包目录。制品被下载/复用到另一个 CONAN_HOME 后，该绝对路径不再存在，
+  未显式给 -config 的 openssl req 在读取默认 cnf 时即失败
+root_cause: openssl 在 Configure 阶段把 --openssldir 解析成一个编译期就写死进二进制的绝对路径
+  （OPENSSLDIR 常量），制品因此不可迁移。ohpcd 已发布的 openssl 二进制是在某个 CONAN_HOME
+  （实测为 ~/.cache/conan2/p/b/opens<hash>/p/ssl）下构建并上传的，消费方无论从远端缓存还是换
+  一个 CONAN_HOME 取包，拿到的都是同一份内嵌路径；该路径在本机不存在，且包内也不附带
+  openssl.cnf（实测 find 包目录无该文件），于是依赖默认配置的子命令直接失败
+affected_scope: 所有在 test_package／消费者脚本里以 shell 方式调用打包版 openssl CLI，且未显式
+  指定 -config 或 OPENSSL_CONF 的包；尤其是 openssl req -x509 自助签测试证书这一常见写法。
+  同一台机器上 PATH 里的系统/brew openssl 不受影响，所以 build() 阶段的上游脚本往往正常
+verification_cmd: cd <test_package> && . ./conanrun.sh && openssl version -d（比对内嵌 OPENSSLDIR 与包实际目录）；OPENSSL_CONF=/dev/null openssl req -x509 -newkey rsa:2048 -keyout k.pem -out c.pem -days 1 -nodes -subj '/CN=t' -batch（修后通过）
+rec_priority: 1
+rec_approach: seed-openssl-conf-for-packaged-cli
+rec_description: 在调用打包版 openssl 的消费者脚本顶部显式导出 OPENSSL_CONF 指向一个存在的
+  空配置（/dev/null），并保证所需字段全部由命令行显式给出（-subj/-batch/-addext 等）；
+  不要依赖包内或设备默认 cnf
+rec_command: export OPENSSL_CONF=/dev/null（放在消费者测试脚本里所有 openssl 调用之前）
+rec_auto_fix: false
+rec_impl: 测试侧（只改自己的 test_package 脚本，不动 openssl 配方与上游源码）
+fallback_priority: 2
+fallback_approach: ship-minimal-cnf-and-pass-config
+fallback_description: 当命令确实需要 cnf 模板字段（req_extensions、keyUsage、distinguished_name
+  等）时，在测试目录内自己生成一份最小 cnf，并用 -config 显式传入；这同时让测试与默认配置彻底解耦
+fallback_command: printf '[req]\ndistinguished_name=dn\n[req_distinguished_name]\n[dn]\nCN=trojan-test\n' > min.cnf && openssl req -config min.cnf -x509 -newkey rsa:2048 -keyout k.pem -out c.pem -days 1 -nodes -batch
+fallback_auto_fix: false
+fallback_impl: 测试侧
+principles: 预编译制品里的编译期绝对路径常量一律视为不可信；测试对默认配置的依赖必须在消费侧被
+  显式化，否则换缓存目录就失效；判症要先区分 PATH 命中的是哪一个同名二进制
+caused_by: 已发布 openssl 制品把 --openssldir 编译成构建期 conan 包目录的绝对路径，且包内不附带 openssl.cnf
+causes: test_package 阶段 openssl req 报 BIO_new_file no such file 并退出码非零，整次 conan create 被判失败（编译链接与打包均已完成，易误判为配方问题）
+similar_to: E006（openssl ARM64 汇编在 RSA-PSS 签名验证上的 bug 及重建绕过，机制是签名校验失败；
+  其构建命令里出现 --openssldir 只是 Configure 参数，与本条的制品路径失效无关）；
+  E235（openssl 默认 OS 随机源 seeding，属随机数路径而非配置文件加载）；
+  DRAFT-openssl-4.0-major-migration（4.0 大版本迁移对 OPENSSLDIR 断言的调整，属版本行为差异）
+  draft-review 实测 TOP3 相似度均远低于 create 阈值 0.30——E235=0.03、E006=0.02、E384=0.01，
+  质量预检 signature/root_cause/rec 三项全过
+conflicts_with:
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-trojan-1.16.0-openssl-cli-stale-openssldir.md
+last_updated: 2026-09-21
+source_event: trojan 1.16.0 消费者测试 test_tls.sh 调 openssl req 自助签证书失败；实测
+  conanrun 下 command -v openssl 命中 home-DS16 包内二进制，其 openssl version -d 报
+  OPENSSLDIR 为 ~/.cache/conan2/p/b/opensf4d50a3c869ab/p/ssl（该目录不存在，find 亦无 cnf）；
+  裸跑 req 退出码 1，加 OPENSSL_CONF=/dev/null 后退出码 0 并产出 1025 字节证书；
+  同一设备上 build() 内上游冒烟 basic.sh 的 openssl req 因走 VirtualBuildEnv 命中系统 openssl 而一直正常
+authors: QOD-BE7
+source_pr: (本 PR)
+source_commit: (待提交后回填)
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 1.0
+metrics_last_used: 2026-09-21

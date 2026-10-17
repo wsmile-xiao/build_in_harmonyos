@@ -1,0 +1,88 @@
+#====================================================================
+# DRAFT — cross_building() 恒为 False：同一 profile 同时作为 -pr:h/-pr:b
+#
+# 场景：HarmonyOS PC (OHOS aarch64) 交叉编译
+# 来源：mapcode 2.5.7 适配（feat/mapcode-2.5.7）
+#====================================================================
+
+id:                     DRAFT-mapcode-2.5.7-cross-building-false
+trigger_tool:           test
+phase:                  testing
+error_signature:        "cross_building\(self\).*False.*aarch64|Could not open '/lib/ld-linux-aarch64.so.1'"
+
+severity:               2
+category:               build-system
+match_keywords:         cross_building, cross_building(self), settings_build, -pr:h, -pr:b,
+                        qemu-aarch64, binfmt_misc, ld-linux-aarch64.so.1, extra_exelinkflags,
+                        -static, OHOS profile, same profile host build
+title:                  "cross_building() 在 OHOS 同 profile 双传时恒为 False，导致 aarch64 产物被当原生执行"
+
+root_cause: >
+  OHOS 适配版 conan 的构建与 CI 一律用同一个 profile 文件同时传给 -pr:h 与 -pr:b
+  （build_and_test.sh: CONAN_CREATE_ARGS+=(-pr:h="$PROFILE_FILE" -pr:b="$PROFILE_FILE")）。
+  conan.tools.build.cross_building() 的实现是「比较 settings_build 与 settings 的 os/arch」，
+  同一个 profile 的两段被解析成完全相同的 os=OHOS arch=armv8，于是
+  build_os == host_os 且 build_arch == host_arch，函数返回 False。
+  但实际构建机是 x86_64 Linux，产物是 aarch64 ELF，根本不能原生执行。
+  惯用写法 `if cross_building(self): self.run(f"qemu-aarch64 {bin}") else: self.run(bin)`
+  于是走 else 分支直接 exec aarch64 产物，命中宿主 binfmt_misc 后报
+  `Could not open '/lib/ld-linux-aarch64.so.1'`（WSL/x86_64 宿主根目录没有 OHOS 动态链接器）。
+affected_scope:         所有「用同一 OHOS profile 同时作为 -pr:h/-pr:b」的配方，
+                        且需要在非 aarch64 构建机上执行自测产物的场景；
+                        典型受害者：conanfile.py 与 test_package/conanfile.py 的 test()/build() 里的
+                        self.run(<产物二进制>) 调用
+verification_cmd:       conan create <recipe> -pr:h=ohos-aarch64-wsl -pr:b=ohos-aarch64-wsl --build=missing
+                        # 在 test_package 里打印 self.settings_build.get_safe("os") 复核：
+                        #   期望看到 Linux（若看到 OHOS 即命中本条）
+
+rec_priority:           1
+rec_approach:           host-cpu-gated-qemu-plus-static-link
+rec_description: >
+  把「是否需要 qemu-user」的决定权交给构建机 CPU，而不是 cross_building()：
+  `platform.machine().lower() not in ("aarch64", "arm64")`，
+  并保留 `cross_building(self)` 作为附加触发条件。
+  同时给 CMakeToolchain 加 `tc.extra_exelinkflags.append("-static")`（仅链接期），
+  让 aarch64 可执行文件不依赖设备根文件系统，qemu-user 可直接执行。
+  两者缺一不可：只改判定不加 -static，qemu 仍会因缺 /lib/ld-linux-aarch64.so.1 失败。
+rec_command:            python: import platform; needs = platform.machine().lower() not in ("aarch64","arm64")
+                        # conanfile.py: tc.extra_exelinkflags.append("-static")
+rec_auto_fix:           false
+rec_impl:               conanfile-host-cpu-emulation-gate
+
+fallback_priority:      2
+fallback_approach:      rely-on-binfmt-misc
+fallback_description: >
+  若构建机已注册 binfmt_misc（/proc/sys/fs/binfmt_misc/ 列出 qemu-aarch64），
+  可以不做任何判定直接 self.run(<静态产物>)。实测 archives/t/tsl-ordered-map/1.1.0
+  正是这样「碰巧」通过的（其 cross_building 分支永不触发）。
+  缺点是依赖宿主 binfmt 配置，CI/换机器即失效，且掩盖了真实意图。
+fallback_command:       cat /proc/sys/fs/binfmt_misc/qemu-aarch64
+fallback_auto_fix:      false
+fallback_impl:          host-binfmt-misc-passthrough
+
+forbid_1_pattern:       if[[:space:]]+cross_building\(self\)[[:space:]]*(:|\))[^\n]*qemu
+forbid_1_reason:        只用 cross_building() 判定的 qemu 分支在本仓 OHOS profile 下永不触发，
+                        等于没有模拟执行，测试会在 x86_64 构建机上直接 exec aarch64 产物而失败
+forbid_1_consequence:   W3 本地 conan create 在 test()/build() 阶段失败，且失败信息
+                        （缺 OHOS 动态链接器）具有误导性，易被误判为平台不兼容
+
+principles:             P001, P003
+similar_to:             E092
+conflicts_with:
+prerequisite_of:
+caused_by:              DRAFT-mapcode-2.5.7-cmake-find-library-m-notfound
+causes:
+requires:
+solved_by:
+
+doc_file:               knowledge/drafts/DRAFT-mapcode-2.5.7-cross-building-false.md
+last_updated:           2026-09-26
+source_event:           mapcode 2.5.7 适配 W3，本地 conan create 首次 test() 阶段失败
+authors:                A7F3
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-26

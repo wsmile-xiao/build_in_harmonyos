@@ -1,0 +1,100 @@
+#====================================================================
+# Draft: igor2 0.5.9 — 纯 Python 包的解释器级依赖（numpy）在 OHOS CI 的
+#        三段式解析：宿主 pip numpy → conan numpy 注入 → E212 软跳过
+#        （badread 0.4.2 的 pip 级依赖先例在 CI Worker 环境被证伪）
+#====================================================================
+
+id:                     DRAFT-IGOR2-059-PY-NUMPY-THREE-STAGE
+draft:                  DRAFT-IGOR2-059-PY-NUMPY-THREE-STAGE
+status:                 pending-editor-review
+trigger_tool:           conan|python|pytest
+phase:                  build|test
+error_signature:        ModuleNotFoundError: No module named 'numpy'|host python3 \(.*\) cannot import numpy|No module named 'numpy'.*requires numpy
+
+severity:               2
+category:               conan|python|ohos-platform
+match_keywords:         纯 Python 包, python-require, setuptools, site-packages, PYTHONPATH, numpy, ModuleNotFoundError, 宿主 python3, pip, 解释器级依赖, console_scripts, wrapper, LD_LIBRARY_PATH, /system/lib64, libc++_shared, 交叉编译 ABI, build isolation
+
+title:                  纯 Python 包的 python 解释器级依赖（numpy 等）在 OHOS 上必须 conan require + 三段式解析：CI Worker 宿主 python3 无 pip 包（ModuleNotFoundError），制品仓 numpy 二进制需 PYTHONPATH + LD_LIBRARY_PATH=/system/lib64 注入，沙箱拒 dlopen（E212）时软跳过并以真机实测记录为准
+
+root_cause:             纯 Python 三方包（setuptools 后端、无 C/C++ 扩展、packages=["xxx"] 形态，如 igor2/badread/aiohappyeyeballs）在 OHOS 的消费形态是 python3 解释器 import，其上游运行时依赖（numpy 等）不是 ELF 链接依赖——conan 的 cpp_info/libs 链路完全不适用。devbox/真机上宿主 python3（~/usr/local/bin/python3）带 pip 装的 numpy，所以 badread 0.4.2 先例把 numpy 当"pip 级依赖、非 conan requires"能成立；但 CI Worker 的宿主 python3（/data/service/hnp/bin/python3）是极简环境，没有任何 pip 包——build() 里 subprocess 调宿主 python3 跑上游 pytest 时直接 ModuleNotFoundError（igor2 build #66321 实证，12.9s 快速失败）。另一侧，制品仓 numpy/2.5.2 的 .so 是交叉编译签名件（NEEDED libc++_shared.so，aarch64-linux-ohos ABI），宿主解释器默认路径加载不到，必须显式 LD_LIBRARY_PATH=/system/lib64（系统真 so 提供 __h 命名空间符号，SDK 侧 libc++.so 是链接器脚本会被加载器拒绝——profile 注释实证）。若配方把"宿主无 numpy"当硬失败（ConanException），CI 必红；若当静默跳过，则上游测试形同虚设。
+affected_scope:         所有无 C/C++ 扩展、但 pyproject/setup.py 声明了 numpy/scipy/matplotlib 等解释器级运行时依赖的纯 Python 包（python-require/application 型配方）；以及任何在 build()/test() 里用 subprocess 调 python3 跑上游测试/探测导入的配方。区别于 #2538（E212：沙箱拒绝 dlopen 已加载的 .so）——本条解决的是依赖"从哪来"（来源缺失），不是"加载被拒"。
+verification_cmd:       conan create . -pr:h=ohos-aarch64 --build=missing && grep -E "numpy runtime|upstream pytest" 创建日志
+rec_priority:           2
+rec_approach:           pypi-numpy-three-stage-resolution
+rec_description:        (1) requirements() 显式声明 self.requires("numpy/2.5.2")——依赖从制品仓来（audioflux 0.1.9 先例），不要学 badread 的 pip 级依赖（devbox-only）；(2) build()/test() 的 numpy 解析做三段式：先试宿主 python3 自带 numpy（真机快路径）→ 失败则把 conan numpy 依赖的 site-packages 加 PYTHONPATH、LD_LIBRARY_PATH 加 /system/lib64 再试（CI Worker 唯一可行路径）→ 仍失败（E212 沙箱拒 dlopen 用户路径 .so）则软跳过上游 pytest 并 output.warning 说明，全量结果以真机 conan create 实测记录进 test_package/MANIFEST.yml；(3) test_package 同款注入，E212 时走静态校验回退（包布局 + wrapper 可执行 + numpy .so 的 ELF/.codesign 校验，audioflux/pycairo/#2538 家族方案）；(4) 禁止把"宿主无 numpy"设计成硬失败——CI Worker 环境差异不是配方错误。
+rec_command:            conan create archives/i/igor2/0.5.9 -pr:h=/storage/Users/currentUser/.conan2/profiles/ohos-aarch64 --build=missing
+rec_auto_fix:           false
+
+# ═══ 社区 W 系字段（solution/fallback/draft/status）═══
+
+solution: |
+  # 1) 依赖声明（conanfile.py）
+  class Igor2Conan(ConanFile):
+      def requirements(self):
+          # CI Worker 宿主 python3 无 pip numpy（build #66321 根因）
+          self.requires("numpy/2.5.2")
+
+  # 2) build()/test() 三段式 numpy 解析
+  def _numpy_site_packages(self):
+      try:
+          dep = self.dependencies["numpy"]
+      except Exception:
+          return None
+      import glob
+      for d in sorted(glob.glob(os.path.join(
+              dep.package_folder, "lib", "python*", "site-packages"))):
+          if os.path.isdir(os.path.join(d, "numpy")):
+              return d
+      return None
+
+  def _probe_numpy(self, py, env):
+      r = subprocess.run([py, "-c", "import numpy; print(numpy.__version__)"],
+                         capture_output=True, text=True, timeout=120, env=env)
+      return r.stdout.strip() if r.returncode == 0 else None
+
+  # stage a: 宿主 python3 自带 numpy（真机/devbox 快路径）
+  note = self._probe_numpy(py, env)
+  if not note:
+      # stage b: conan numpy 注入（CI Worker 唯一 numpy 来源）
+      np_site = self._numpy_site_packages()
+      if np_site:
+          env["PYTHONPATH"] = os.pathsep.join([np_site, env.get("PYTHONPATH", "")])
+          env["LD_LIBRARY_PATH"] = os.pathsep.join(
+              ["/system/lib64", home + "/usr/local/lib",
+               env.get("LD_LIBRARY_PATH", "")])
+          note = self._probe_numpy(py, env)
+  if not note:
+      # stage c: E212 沙箱拒 dlopen 等——软跳过，真机结果已记录
+      self.output.warning("numpy not importable (E212 sandbox dlopen "
+                          "refusal or missing) — upstream pytest skipped; "
+                          "full result recorded from true-device run")
+      return
+
+  # 3) test_package 的 E212 静态校验回退（audioflux 0.1.9 先例）：
+  #    probe 失败且 stderr 含 Permission denied/Operation not permitted 且
+  #    settings.os == "OHOS" 时，改验：包布局（模块文件齐全）+ bin wrapper
+  #    可执行 + numpy .so 的 ELF 魔数与 .codesign 段（llvm-readelf -SW）
+
+fallback: >
+  三段式全部不可行时（极端：连 conan numpy 二进制都拉不到）：(a) 上游测试不跑，
+  结果以真机 conan create 实测数字记入 test_package/MANIFEST.yml 并在 PR 正文
+  测试统计表如实标注（不得虚报 CI 侧跑过）；(b) test_package 降级为纯布局断言
+  （igor2 模块文件存在 + wrapper 可执行 + import 路径指向包内），numpy 相关
+  断言移到真机侧；(c) 若连 numpy/2.5.2 制品都缺失，按 R36 依赖止损报
+  dependency_missing，禁止 dummy stub 顶替（baler 的 vendor stub 方案只适用
+  于纯 pytest 断言场景，会掩盖真实依赖断链）。
+
+verify_builds:          #66321, #66374
+reference_impl: >
+  本 PR：archives/i/igor2/0.5.9/conanfile.py（requirements + _numpy_site_packages
+  + _run_upstream_tests 三段式）+ test_package/conanfile.py（注入 + E212 静态回退）。
+  先例：archives/a/audioflux/0.1.9（conan numpy/1.26.4 运行期依赖 + E212 双保险）、
+  archives/b/badread/0.4.2（pip 级 numpy 依赖——仅 devbox 成立，本条证伪其 CI 可行性）、
+  issue #2538（E212 test_package 回退家族，numpy 十二轮实证——本条为其"依赖来源"
+  维度的补充而非重复）。
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# PR 交付后回填
+source_pr:
+source_commit:

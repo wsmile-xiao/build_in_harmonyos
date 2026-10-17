@@ -19,3 +19,20 @@
 ## 注意事项
 - 构建系统是 cmake，不是 autotools
 - nihtest 未安装，回归测试不可用
+
+---
+
+# Conan 配方补充（2026-07-30）
+
+> 以上为 2026-04 手工编译路径的原始记录，**原样保留**。以下为本次新增的 Conan 配方说明。
+
+# libzip 1.11.4 编译笔记（HarmonyOS PC · 标准 Conan cmake）
+
+## 定位
+- 产出动态 liblibzip.so，供 dlopen 及作依赖。
+
+## 关键适配
+- （填：系统识别 / umask / 子包 / zipfs / 签名等）
+
+## 状态
+built（CI conan create + test 通过）

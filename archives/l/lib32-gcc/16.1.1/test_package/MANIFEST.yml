@@ -1,0 +1,87 @@
+# lib32-gcc 16.1.1 — test_package manifest (CI L0e gate)
+package: lib32-gcc/16.1.1
+homepage: "https://gcc.gnu.org/"
+
+# Upstream GCC ships its own testsuite (gcc.c-torture etc.), which the recipe
+# exercises inside build() before packaging; the entries below document that
+# linkage for the CI gate.
+#
+# Upstream test count (N) is the FULL inventory of the suite the recipe drives,
+# not the subset it executes:
+#   find gcc/testsuite/gcc.c-torture/execute -name '*.c' | wc -l  ->  1685
+# N' = the subset actually executed in build() = 50 sources x {-O0,
+# -O2 -fno-strict-aliasing} = 100 compile+link cases.  The 1585 unexecuted
+# sources carry a concrete technical reason (see the PR body section
+# "上游测试用例执行范围与减少原因" and notes.md section 18).
+upstream_check_command: "make -C gcc selftest"
+upstream_test_in_build: true
+upstream_test_command: "make -C gcc selftest && torture-execute subset runner"
+
+upstream_tests:
+  - name: gcc-selftest
+    command: "make -C gcc selftest"
+    expected: "pass (language-independent + C frontend selftests)"
+  - name: torture-execute-subset
+    command: "50 gcc.c-torture/execute sources x {-O0,-O2 -fno-strict-aliasing}"
+    expected: "pass — cross-compiler口径: compile+link must succeed and
+      llvm-readelf must validate each artifact as a valid ELF (the ELF32/ARM
+      machine type is asserted in the test_package consumer flow;
+      100/100 passed in the local CI run; ARM binaries cannot execute on
+      the aarch64 host)"
+
+# HarmonyOS-specific consumer use case (PC PR review rule 12).  This is ONE
+# complete end-to-end flow driven by the installed Conan package, not a set of
+# isolated assertions: preprocess -> compile TU-A -> compile TU-B ->
+# assemble (packaged GNU ARM gas) -> link (device GNU ld) -> inspect the
+# produced ARM32/OHOS artifacts.  Sources: consumer_probe.c, consumer_lib.{c,h},
+# consumer_main.c, test_gcc.c.
+test_package_tests:
+  - file: consumer_probe.c
+    description: "stage 3 — preprocess-only probe: the packaged driver must
+      expand __OHOS__ (injected via gcc/config/ohos.h) already at the
+      preprocessor stage, leaving the literal arm-linux-ohos-32bit-abi in the
+      gcc -E output."
+    command: "gcc -E consumer_probe.c   # 1 assertion"
+  - file: consumer_lib.c
+    description: "stage 4 — translation unit A compiled on its own to a 32-bit
+      ARM relocatable object; the object must be ELF32/ARM Type REL, carry the
+      .ARM.attributes fingerprint of the packaged GNU ARM gas, and define
+      consumer_compute as a FUNC."
+    command: "gcc -O2 -c consumer_lib.c -o consumer_lib.o   # 8 assertions"
+  - file: consumer_main.c
+    description: "stage 5 — translation unit B compiled on its own; it only sees
+      the declarations, so consumer_compute must be UND at this point (the
+      cross-translation-unit dependency the link step has to resolve)."
+    command: "gcc -O2 -c consumer_main.c -o consumer_main.o   # 5 assertions"
+  - file: "consumer_main.o + consumer_lib.o"
+    description: "stage 6 — link the two objects into a real arm-linux-ohos
+      program with the packaged driver (collect2 -> device GNU ld)."
+    command: "gcc -O2 consumer_main.o consumer_lib.o -o consumer_program"
+  - file: consumer_program
+    description: "stage 7 — inspect the linked artifact: ELF32/ARM, Type EXEC or
+      DYN, non-zero entry point (arm-linux-ohos start files were linked), and
+      main / consumer_compute / consumer_target_abi DEFINED, i.e. the cross-TU
+      references were resolved at link time."
+    command: "llvm-readelf -h/-s consumer_program   # 12 assertions"
+  - file: test_gcc.c
+    description: "stage 8 — target ABI program compiled with -DEXPECT_OHOS=1:
+      __OHOS__ being undefined or the target ABI not being 32-bit fails the
+      compile itself (#error / _Static_assert), then the artifact must be
+      ELF32/ARM."
+    command: "gcc -O2 -DEXPECT_OHOS=1 test_gcc.c -o gcc_test_program   # 3 assertions"
+
+# Consumers: 2 (case 1 = the end-to-end flow above, stages 1-7; case 2 = the
+# target ABI program, stage 8).  Assertions: 31 hard checks in total, counted
+# at runtime:
+#   stage 1 driver identity ........ 1
+#   stage 2 target identity ........ 1
+#   stage 3 preprocess ............. 1
+#   stage 4 compile TU-A + inspect . 8
+#   stage 5 compile TU-B + inspect . 5
+#   stage 6 link (exit code enforced, no separate assertion)
+#   stage 7 inspect program ........ 12
+#   stage 8 target ABI program ..... 3
+#   total .......................... 31
+# The compile/link invocations additionally run with ignore_errors=False, so a
+# non-zero exit code fails the test package outright.
+assertion_count: 31

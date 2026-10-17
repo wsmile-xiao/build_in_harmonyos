@@ -1,70 +1,33 @@
-# 编译记录: lv2 1.18.11-git
+# LV2 1.18.11-git adaptation notes
 
-**编译开始**: 2026-05-25 17:02
-**编译结束**: 2026-05-25 17:19
-**最终状态**: built (100% 测试通过)
+## Scope
 
----
+- Package: `lv2/1.18.11-git`
+- Issue: #594
+- Source commit: `3c57dae`
+- Source: `https://gitlab.com/lv2/lv2/-/archive/3c57dae/lv2-3c57dae.tar.gz`
+- SHA256: `11b70869f1840d7365a884d9a9b3faf16dbe4642bb9171e257a18be63dd027ff`
 
-## 编译环境
+## Adaptation
 
-- 构建系统: meson 1.11.1 + ninja 1.13.1
-- 编译器: clang 15.0.4
-- 目标平台: aarch64 (OpenHarmony)
-- 安装前缀: ~/usr/local
-- 源码位置: ~/tmp/builds/lv2-git (git 3c57dae)
+- Packages the public LV2 headers, specification bundles, and `lv2.pc`.
+- Exposes the package as a Conan header library.
+- The consumer test uses the compiler selected by the Conan profile. A cross
+  build must provide `tools.build:compiler_executables[c]` explicitly.
 
-## 编译步骤
+## Tests
 
-### 1. Meson 配置
-```bash
-cd ~/tmp/builds/lv2-git
-meson setup build --prefix=$HOME/usr/local
-```
+The exact source revision registers 29 Meson cases in the `build`, `unit`, and
+`spec` suites. The native preflight enabled tests with documentation, tools,
+and lint disabled, while retaining every independent runtime test.
 
-### 2. 编译
-```bash
-cd build && ninja
-```
-- 编译目标: 10 个
-- 全部成功 ✓
+The added `test_package` compiles and runs a minimal C consumer and verifies the
+installed header, core bundle manifest, and pkg-config file. It contains one
+consumer scenario with seven assertions.
 
-### 3. 测试
-```bash
-ninja test
-```
-- 总测试: 5
-- 全部通过 ✓
-- 测试内容: headers, atom, forge_overflow 等
+## Local validation
 
-### 4. 安装
-```bash
-ninja install
-```
-
-## 安装产物
-
-### 头文件
-- lv2.h (主头文件)
-- lv2/core/ 目录
-- 总计: 60 个头文件
-
-### LV2 规范文件
-- 安装路径: ~/usr/local/lib/lv2/
-- 扩展包: 25 个 (core, atom, midi, state, ui, worker 等)
-- 规范文件: 82 个
-
-### pkg-config
-- lv2.pc
-- 版本: 1.18.11
-
-## 验证结果
-
-```bash
-$ pkg-config --modversion lv2
-1.18.11
-```
-
----
-
-**编译成功** ✓
+- Upstream Meson suite: 29/29 passed; failed 0; skipped 0.
+- Linux x86_64 `conan create`, Release: passed.
+- Added consumer test: 1/1 passed; 7/7 assertions passed.
+- The local Docker preflight is not an official OHOS armv8 CI result.

@@ -1,0 +1,81 @@
+#====================================================================
+# E576 — 上游 golden 基准随版本语义变更失效：须先证明「非平台漂移」再刷新
+# 场景: `make check`/tests/*.sh 的 golden 比对在**所有平台**上失败，而程序本身正确
+#       先行实例: dawg 1.2（DNA 序列演化模拟器，C++/CMake，上游缺陷追踪 #56）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E576
+trigger_tool:           test
+phase:                  testing
+# 字面子串（| 分隔），不写正则：engine.py 只做字面包含（见 E545/DRAFT-E547 同族口径）
+error_signature:        tests/test0.fasta|TCCTTGACCAGTTAGCAAGACGATATGCATCAAGTGCACTGGC|test0.sh
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               testing,compat,version,upstream-defect,portability
+match_keywords:         stale golden, stale fixture, test oracle, golden refresh, baseline regeneration, RNG semantics change, ILP32, rand_real, deterministic output, upstream issue, test skipped in debian/rules, diff-based test, regression fixture
+title:                  上游 golden 基准随版本语义变更失效（非平台差异）时，须先用「未修改源码在第二平台复现同一输出」证明基准过期，再按实测输出刷新
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             上游在版本演进中改变了影响输出的语义（dawg 1.1 起 rand_real() 由 ILP32 位拼接 union 改为 (double)u/2^32、rand_bool() 由 <= 改为 <），却未重生成 golden 基准 tests/test0.fasta，导致 diff 型测试对**新版本自身**恒失败。上游在换构建系统时（dawg 1.2 由 autotools 迁 CMake）也没有迁移该测试：tests/CMakeLists.txt 为 0 字节、脚本仍读 autotools 的 top_srcdir，因此 ctest 从不注册它，失败被长期隐藏；Debian 则在 debian/rules 用 `|| true` 显式忽略。要点：这是**版本语义漂移**而非平台差异。
+affected_scope:         所有用"固定种子/固定输入 → 与签入基准逐字节 diff"的上游测试（golden/fixture 回归），且上游在版本间改变过 RNG、数值格式、默认输出格式或排序语义却未同步基准者；跨平台验证时同样会误判为 OHOS 平台缺陷。C++/C 的 union 位拼接 ↔ IEEE754 除法、比较边界 <= ↔ < 这类"实现细节改变可观测输出"的改动最易命中。注意与 E401 的分工：E401 是 golden 由另一平台生成、本平台结果正确（改法是加平台 oracle 变体、不动通用 golden）；本条是 golden 相对**上游自身新版本**过期（正解就是刷新该 golden），照搬 E401 的禁止项会推翻正确处置。
+verification_cmd:       ① 判定基准是否过期：用**未修改**的上游源码在第二平台/工具链（或发行版打包记录）复现输出——dawg 实测 OHOS clang15/libc++/musl 与 Debian amd64 glibc/GCC 的输出逐行一致，而与该基准逐字节不同；当前 v1.2 输出与旧基准的最长公共前缀在 A/B/C/D/R 五条序列上全为 0。② 隔离机制：仅把 rand_real()/rand_bool() 还原为旧版本语义重编，LCP 立刻升为 A=2/B=26/C=10/D=50/R=50（最长 50/102，出现在 D 与 R），证明基准归属旧 RNG 语义而非平台。③ 刷新后确认测试转绿且非空跑：**sh tests/test0.sh** 退出码 0，且程序输出条数/比对长度断言成立（dawg 实测 5 条 × 105 列）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           prove-not-platform-drift-then-refresh-golden
+rec_description:        先取「未修改源码 + 第二平台」的复现证据（发行版构建日志/打包补丁/deb 源码包 orig tarball 与 rules 的忽略语句）与「旧语义还原实验」，把基准归属钉死在上游旧版本语义上；确认非平台差异后，用**本版本源码的真实确定性输出**刷新基准，并在 notes.md/PR 正文写明：上游缺陷编号、上游未迁移该测试的证据（0 字节 tests/CMakeLists.txt、ctest 注册数 0）、发行版忽略语句、刷新前后 LCP 量化、以及"本机输出 == 第二平台输出"的逐行比对。外部引证必须把**原始响应字节**入库（逐份记录来源 URL、HTTP 状态码、sha256 与"证明了什么"），优先选离线可复核来源（发行版官方包内文件、邮件列表归档），抓取失败（如某 issue 路径 404 只回 9 字节 Not Found 页，而主机本身 200）也要原样留档并声明"未直接读到该页面"，同一事实的所有出现点同步同一口径；不得把无法复核的外部链接写成既成事实。测试仍需真实执行（不得改为跳过），并把基准刷新补齐为可复核的补丁（整文件替换用 delete-item + add-item 形态 + patch_strip: 0，见仓库既有口径）。
+rec_command:            DAWG=<build>/src/dawg top_srcdir=<src> sh tests/test0.sh   # 刷新基准后应 rc=0；基准刷新补丁在 conandata.yml 的 patches 注册
+rec_auto_fix:           false
+rec_impl:               patch-refresh-fixture
+
+fallback_priority:      2
+fallback_approach:      upstream-baseline-restore-probe
+fallback_description:  若无法取得第二平台复现证据（发行版无打包记录、上游无 issue），则退而做「旧语义还原实验 + 平台无关性双向探针」：把导致输出变化的实现按旧版本语义还原重编，确认输出向旧基准收敛（LCP 显著上升），从而证明基准归属旧版本而非当前平台；仍无法收敛时必须如实申报为未解决（NOT_RUN/失败），不得直接采用本机输出刷新基准掩盖可能的移植缺陷。
+fallback_command:       还原旧语义重编后：<build>/src/<exe> <tests>/test0.dawg > out.old && python3 -c "print(最长公共前缀长度)"   # 与旧基准比较 LCP
+fallback_auto_fix:      false
+fallback_impl:          manual-probe
+
+forbid_1_pattern:       count.*as pass|declare.*PASS.*without golden|skip.*golden.*test.*instead
+forbid_1_reason:        基准过期不等于测试无价值：跳过/删除该入口或把未比对的结果记为 PASS，放弃的正是端到端回归轴，且违反 R51「上游测试必须真实执行」与禁止伪造通过。
+forbid_1_consequence:   唯一的上游端到端入口失效，后续真实的输出回归与移植缺陷将无人拦截，PR 会被判测试申报不实。
+forbid_2_pattern:       refresh.*golden.*(without|no).*(second|other).*platform|introduce.*platform.*macro.*__OHOS__.*golden
+forbid_2_reason:        未经"非平台漂移"证明就直接用本机输出刷新基准，等于把可能的 OHOS 移植缺陷写进基准；而用 __OHOS__ 之类的平台宏分叉基准则是在补丁里引入平台条件编译（R8 默认禁止），且会掩盖真实差异。
+forbid_2_consequence:   基准被污染后任何平台都无法再发现该输出缺陷，属"假绿"；平台条件编译分支还会被审计判返工。
+forbid_3_pattern:       see upstream issue.*without.*archiv|发行版打包记录.*without.*archiv|according to.*mailing list.*(no|without).*raw
+forbid_3_reason:        本模式的正当性依赖外部引证（别的平台/发行版的复现记录），而外链随时可能失效：实测设备访问某 issue 路径返回 404（主机本身 200）、抓取结果只有 9 字节 Not Found 页。若只写叙述而不留原始响应字节，评审者与审计者都无法复核，"排除平台差异"整条论断退化为不可验证的断言。
+forbid_3_consequence:   独立审计判 R52 证据一致性 P1（dawg 实测 P1×2），必须返工补留档或降级表述；同一事实的多个出现点还会因只改一处而继续扩散不一致。
+forbid_4_pattern:       (未能|无法).*(访问|读取).*(issue|page).*(but|yet).*assert.*as fact
+forbid_4_reason:        抓取失败必须原样留档（含失败响应本身）并声明"未直接读到该页面、编号依据是另两条离线来源"，不得把未能复核的内容写成既成事实。
+forbid_4_consequence:   申报不实（R51/R52 同族），且会掩盖证据链的真实强度。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             R51, R34, R8
+
+# ═══ 关系图 (Relations) ═══
+# causes/caused_by 语义：causes=本模式导致的下游错误面；caused_by=本模式的上游根因
+causes:                 []
+caused_by:              []
+similar_to:             E401
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E576.md
+last_updated:           2026-09-11
+source_event:           dawg 1.2 OHOS 适配（C++/CMake 序列演化模拟器）：上游唯一测试入口 tests/test0.sh 的 golden 自 v1.0.0 起未随 v1.1 的 RNG 语义变更重生成，在 OHOS（clang15/libc++/musl）与 Debian amd64（glibc/GCC）上同时失败且输出互相逐行一致；补丁 0001 以实测输出刷新基准后该入口 rc=0，test_package 16/16 断言通过。该适配首轮独立审计（W4）判 fail（P1×2/R52），根因不是补丁造假（审计者用未打补丁源码独立构建复算，golden 与未修改程序输出逐字节相同，明确推翻 R9/R34），而是外部引证未留可复核原始字节（设备网络下该 issue 路径返回 404、抓取仅得 9 字节 Not Found 页，文档却把编号写成既成事实）——该教训已写入本条 rec_description 与 forbid_3/forbid_4。
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: B1A2

@@ -1,0 +1,101 @@
+# ═══════════════════════════════════════════════════════════════════
+# E678 OHOS 工具链 clang-15 不把 LIBRARY_PATH 环境变量翻译成链接器搜索路径：
+#      裸 -l 名称必须用 CMake link_directories 显式给 -L（CPATH 则正常生效）
+# 来源: feat/lapackpp-2024.10.26（build_tests=ON 整改，2026-09-29）
+# 路径: 适配任务 lapackpp/2024.10.26 tester 链接期排障（-lblaspp 找不到）
+# 状态: 草稿（待审核 promote）
+# ═══════════════════════════════════════════════════════════════════
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E678
+trigger_tool:           cmake|conan
+phase:                  link
+error_signature:        ld\.lld: error: unable to find library -l\w+
+                        （且构建环境已 export LIBRARY_PATH 指向该库所在目录）|
+                        clang.*warning: argument unused during compilation: .*LIBRARY_PATH
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               toolchain, linking, cmake, conan, clang, lld
+match_keywords:         LIBRARY_PATH, CPATH, link_directories, target_link_directories,
+                        ld.lld, clang-15, unable to find library, 裸 -l,
+                        -L, 搜索路径, 上游 list(APPEND .*_LIBRARIES),
+                        tc.variables
+title:                  本 OHOS 工具链 clang-15（ld.lld）不把 LIBRARY_PATH 环境
+                        变量翻译成 -L 链接器搜索路径（与 gcc/常规 clang 驱动
+                        行为不同）：上游 CMake 拼出的裸 -l<name> 必须用
+                        link_directories()/tc.variables 显式提供库目录；
+                        头文件的 CPATH 则正常生效，两者别混为一谈
+prescan_pattern:        LIBRARY_PATH|link_directories|list\(APPEND \w+_LIBRARIES "\w+"\)
+prescan_globs:          conanfile.py, cmake/*.cmake, CMakeLists.txt
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             GCC 及部分 clang 驱动会把 LIBRARY_PATH 环境变量透传为
+                        链接器库搜索路径（等价于追加 -L）。本 OHOS 工具链
+                        （/opt/lpk-fixed/clang shim → exec clang-15，ld.lld）
+                        **实测不翻译**：export LIBRARY_PATH=<dir> 后裸
+                        `-lblaspp` 仍报 `ld.lld: error: unable to find
+                        library -lblaspp`（设与不设结果相同，empirical）。
+                        触发场景：上游 CMakeLists 常有
+                        `list(APPEND LAPACK_LIBRARIES "blaspp")` 这类**裸名称**
+                        拼库清单的写法（原生构建靠系统安装前缀的默认路径解析），
+                        Conan 包布局下库名不在默认路径 → 链接失败。同场景里
+                        **头文件**的 CPATH 机制正常生效（clang 同语义），
+                        容易让人误以为"环境变量注入这套在这工具链上好使"而漏掉
+                        库路径的坑。
+affected_scope:         一切在本 OHOS 工具链上构建、且上游 CMake/Make 用裸 -l
+                        名称拼链接行的包（lapackpp、blaspp 族已实证；推定适用
+                        全部经 /opt/lpk-fixed shim 的 clang-15 构建）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           cmake-link-directories-via-toolchain-variables
+rec_description:        裸 -l 名称的解析一律显式给 -L，不依赖环境变量：
+                        (1) 配方 generate() 把包 lib 目录写入 tc.variables
+                            （如 BLASPP_PKG_LIBDIR=…/lib），tc.variables 会以
+                            CACHE 变量形式落进 conan_toolchain.cmake；
+                        (2) 桥接片段（CMAKE_PROJECT_<name>_INCLUDE 或普通
+                            include 文件）里 `link_directories(${BLASPP_PKG_LIBDIR})`
+                            ——目录作用域，早于 add_executable/add_library 生效；
+                        (3) 头文件路径可用 CPATH（build() 里 os.environ 注入，
+                            只作用于本构建会话）或 include_directories——两者
+                            均实测生效。
+                        不要用 LDFLAGS 全局塞 -L（污染所有链接行为、CI 静态闸
+                        视作环境耦合），也不要指望 LIBRARY_PATH。
+rec_command:            tc.variables["BLASPP_PKG_LIBDIR"] = pkg.libdir  # conan_toolchain.cmake 变 CACHE 变量
+                        # 桥接片段: link_directories("${BLASPP_PKG_LIBDIR}")
+rec_auto_fix:           false
+rec_impl:               conanfile-generate-toolchain-variables + cmake-link-directories-bridge
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       export\s+LIBRARY_PATH=|os\.environ\["LIBRARY_PATH"\]\s*=
+forbid_1_reason:        本工具链 clang-15 实测不翻译 LIBRARY_PATH，注入了也
+                        不生效，且制造"已提供库路径"的假象掩盖真实缺失
+forbid_1_consequence:   裸 -l 链接照常失败；排障者误以为路径已给而转向错误方向
+forbid_2_pattern:       LDFLAGS\s*\+?=\s*.*-L
+forbid_2_reason:        全局 LDFLAGS 影响所有链接单元（含不该看到该目录的），
+                        且与 conan 的隔离构建模型相悖
+forbid_2_consequence:   链接面被隐式全局修改，构建不可复现、CI 静态闸报环境耦合
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P014
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             E671（同包族的 CMAKE_PROJECT_INCLUDE 桥接手法）、
+                        E677（同包族测试拓扑）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       conan create archives/l/lapackpp/2024.10.26 -pr:h=ohos-aarch64-wsl -pr:b=ohos-aarch64-wsl
+                        # 期望：tester 链接成功，产物 build/Release/test/tester
+                        # 为 aarch64 ELF 且上游 177 计划项全部 pass
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                ohc-worker <ohc-worker@local>
+source_pr:              # PR 创建后由知识库主编回填
+source_commit:          # 随 PR 合并时由知识库主编回填
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1

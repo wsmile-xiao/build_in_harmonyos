@@ -1,0 +1,59 @@
+#====================================================================
+# DRAFT — HongMeng(OHOS) seccomp 对 io_uring 分 syscall 部分封锁：
+#         io_uring_setup 放行、io_uring_register 即 SIGSYS（不可捕获）
+#         ——用 setup 判"uring 可用"是假阳性；liburing queue_init 必死，
+#         依赖探测必须走 required:false 降级路并默认关闭 uring
+# Timestamp: 2026-09-24
+# Software: plocate 1.1.24（HarmonyOS PC aarch64 实证，HongMeng Kernel 1.12.0）
+# Status: DRAFT — 待复审提升为正式 E 条目
+#====================================================================
+
+id: DRAFT-plocate-1.1.24-io_uring-hongmeng-seccomp-sigsys
+severity: 2
+category: ohos|kernel|io-uring|security|portability
+trigger_tool: meson|cc|clang|liburing|seccomp
+phase: runtime|configuration
+
+keywords: io_uring, io_uring_setup, io_uring_register, IORING_REGISTER_PROBE, liburing, io_uring_queue_init, SIGSYS, Signal 31, seccomp, HongMeng kernel, rc=159, required false, WITHOUT_URING, 降级路径, 能力探测假阳性
+error_signature: 'Signal 31 \(core dumped\)|SIGSYS|exited on signal 31|rc=159'
+match_keywords: io_uring, io_uring_setup 成功, io_uring_register SIGSYS, Signal 31 core dumped, liburing queue_init, seccomp 拦截, HongMeng 1.12.0, meson required false, WITHOUT_URING, uring 能力探测, 假阳性, exit 159
+
+root_cause: HongMeng Kernel 1.12.0 的 app 域 seccomp 对 io_uring 按 syscall 拆分放行：io_uring_setup(425) 返回 fd（实测 fd=3），但 io_uring_register(IORING_REGISTER_PROBE) 触发 SIGSYS(31) 且为 SECCOMP_RET_KILL 不可捕获（rc=159）；liburing 的 io_uring_queue_init 内部即注册 PROBE，故一切常规 liburing 初始化在 OHOS app 域必崩。区别于 E051（未实现 syscall）与 E246（整只 syscall 被拦）：本机制是"同一子系统内 setup 可用、驱动不可用"，凡以 setup 成功推断 uring 可用的探测都会得出假阳性。
+
+rec_approach: layered-capability-probe-and-default-fallback
+rec_description: 打包期对带 io_uring 可选路径（meson dependency required:false 类）的包在 OHOS 一律默认取降级档（如 plocate 配方 with_uring=False），保留 option 供放行内核，不得凭 setup 成功开真值；能力探测必须驱动到 io_uring_register 或一次 submit/enter 往返；降级路必须验到"建库→查询→比对断言"的正确性级别，否则 SIGSYS 前的绿灯全是假通过。反例（勿做）：装 SIGSYS handler 与把 queue_init 当可返回错误均无效，进程在 register 点位已被击杀。
+rec_command: |
+  # 两档分层探针（OHOS clang 编译，真机运行）：
+  # 档1 raw io_uring_setup -> 预期 fd>=0；档2 raw io_uring_register(PROBE) -> 预期 SIGSYS rc=159
+  cat > uring2.cpp <<'EOF'
+  #include <sys/mman.h>
+  #include <sys/syscall.h>
+  #include <unistd.h>
+  #include <stdio.h>
+  #include <string.h>
+  #include <linux/io_uring.h>
+  int main(){
+      char p[120]; memset(p,0,sizeof p);
+      long fd = syscall(__NR_io_uring_setup, 4, p);
+      printf("raw_setup=%ld\n", fd); fflush(stdout);
+      if (fd < 0) return 2;
+      struct io_uring_probe pr; memset(&pr,0,sizeof pr);
+      long r = syscall(__NR_io_uring_register, fd, IORING_REGISTER_PROBE, &pr, 1);
+      printf("raw_register_probe=%ld\n", r); fflush(stdout);
+      return 0;
+  }
+  EOF
+  $CC -Os -o uring2 uring2.cpp && ./uring2; echo rc=$?
+
+rec_auto_fix: false
+rec_impl: recipe-option
+
+affected_scope: 所有含 io_uring 可选加速路径的包（liburing 消费者：plocate/nvme 工具链/高性能存储检索类），以及任何在 OHOS 上以 io_uring_setup 判定 uring 可用性的自研探测逻辑；非 app 域进程策略可能不同，须按本口径分层重测。
+
+verification: plocate 1.1.24（2026-09-24，HarmonyOS PC aarch64，HongMeng Kernel 1.12.0，clang 15.0.4+musl）：裸探针 raw_setup=fd3 打印后同进程 raw_register 即 "Signal 31 (core dumped)" rc=159；直链 liburing/2.15 探针 io_uring_queue_init(4) 同点位死；plocate with_uring=True 构建/签名/--version 全过而真实查询子进程 SIGSYS；with_uring=False（-DWITHOUT_URING）消费者 10/10 检索正确性断言全过。
+
+similar_to: E051, E246, E024
+conflicts_with:
+caused_by:
+
+principles: 能力探测必须打到语义终点（register/enter），入口级成功（setup）不构成可用证明

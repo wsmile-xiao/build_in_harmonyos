@@ -1,0 +1,94 @@
+#====================================================================
+# Draft: local verification traps when changing a recipe mid-flight
+#        -- (a) conan create reuses the existing package folder, so a
+#           package()-only edit (copy keep_path) silently does nothing;
+#        -- (b) ci/conan/build_and_test.sh run BEFORE the branch has a
+#           commit degrades to whole-repo mode and false-reds JC1/JC5
+#           on hidden files that origin/main already tracks.
+#====================================================================
+
+id:                     DRAFT-LOCAL-VERIFY-STALE-PKG-FOLDER-AND-PRECOMMIT-GATE
+trigger_tool:           conan|build_and_test.sh
+phase:                  build|test|verification
+error_signature:        JC1: .* 个运行时状态文件被跟踪|JC5: .* 个 archives 下未登记的隐藏文件|JC_RESULT=fail|full 模式（整仓扫描）|package .* created|copy\(.*keep_path|预期布局未生效|旧文件仍在包内
+
+severity:               2
+category:               process|tooling|conan|ci-gate
+match_keywords:         conan create, stale package folder, keep_path, copy(), conan remove -c, JC1, JC5, 运行时状态文件被跟踪, 隐藏文件白名单, build_and_test.sh, full 模式, 整仓扫描, merge-base, 未提交, 门禁误报, origin/main, residue, metadata
+
+title:                  改配方后的本地复验有两个静默陷阱：`conan create` 会复用已有 package folder（只改 package() 的 copy 语义时新旧文件**叠加**，看着像修复没生效），以及在分支还没有任何提交时跑 `ci/conan/build_and_test.sh` 会退化成整仓扫描、被 origin/main 已跟踪的隐藏文件误判成 JC1/JC5 红
+
+root_cause:            (a) package_id 只由 settings/options/requires 决定，**不含 package() 的实现**。
+                      `copy()` 只往目标目录写文件、从不清理，所以一旦该 package_id 的 package
+                      folder 已存在，改 `keep_path` 之类的打包语义后重跑 `conan create`，新文件会
+                      覆盖同名文件，而**旧位置的同名文件不会被删**——产物目录同时出现新旧两份，
+                      极易误判成「改了没生效」或反过来误判成修复成功。
+                      (b) `ci/conan/build_and_test.sh` 的单软件/整仓模式取决于「相对 merge-base 的
+                      PR diff」。工作区里有未提交的新文件时它拿不到 diff，于是打印
+                      `full 模式（整仓扫描），跳过单软件检`，JC1/JC5 扫全仓，命中的是
+                      `origin/main` **本来就已经跟踪**的隐藏运行时文件（如
+                      `archives/<x>/<pkg>/<ver>/.staging-verified`、`.build-closed`），
+                      与本次改动无关。判据：`git cat-file -e origin/main:<该路径>` 命中即存量问题。
+
+affected_scope:         所有「配方改完要在本地复验再 push」的 Conan 包；尤其是 package() 只调整
+                      文件布局（copy 的 keep_path）、新增/删除打包文件的场景，以及任何在
+                      `git commit` 之前就启动本地 CI 同源门禁的会话。
+
+verification_cmd:       git cat-file -e origin/main:archives/c/cloog/0.21.1/.build-closed && echo STALE_IN_MAIN \
+                      ; ls -d /root/.conan2/p/b/<pkg>*/p  # 对比包内是否有旧位置残留
+
+rec_priority:           1
+rec_approach:           固化三条顺序，不要跳：
+                      ① 先 `git commit`（哪怕内容还没最终定），再跑本地门禁；门禁结果才有意义。
+                      ② 改了 `package()` 就 `conan remove "<name>/<version>" -c` 再 `conan create`，
+                        否则复用旧 package folder 会掩盖改动。
+                      ③ 判 JC1/JC5 之前先 `git cat-file -e origin/main:<被点名路径>`：命中即存量
+                        残留、与本 PR 无关，应在本地按「不是自己引入的」处理，不要为它改别人的目录。
+                      另外：门禁运行期间它会把 `conandata.yml` 临时改写成 `file://.../.build-cache/...`
+                      再在退出时还原。**提交/推送前**必须复核
+                      `grep -c 'file://' <pkg>/conandata.yml` 为 0、`git status --short` 无意外文件
+                      （`.build-cache/` 未被 gitignore，`git add -A` 会把它带进去）。
+rec_description:       先 commit 再跑门禁；改 package() 先 conan remove -c；JC 报警先用 git cat-file -e origin/main 判存量
+rec_command:           conan remove "pd-ggee/0.28" -c && conan create archives/p/pd-ggee/0.28 --name=pd-ggee --version=0.28 -pr:h=ohos-aarch64-wsl -pr:b=ohos-aarch64-wsl --build=missing
+rec_auto_fix:          false
+rec_impl:
+fallback_priority:      2
+fallback_approach:      若不想动 conan 缓存，至少在复验后用 `diff <(git show HEAD:...)` 之外的手段
+                      直接 ls 包目录核对期望布局，并把「包目录内容」逐项写进 PR 的验证结果，
+                      避免只看 `conan create` 的 rc=0。
+fallback_description:   不清缓存时改为逐项核对包目录内容并在 PR 里列明
+fallback_command:
+fallback_auto_fix:     false
+fallback_impl:
+forbid_1_pattern:       (conan create.*(改完 package 后直接重跑)|不清缓存直接复验)
+forbid_1_reason:        package_id 不含 package() 实现，复用旧 package folder 会让「删除的文件」留在包里、或让 keep_path 改动看起来无效，验证结论不成立。
+forbid_1_consequence:  误判修复成功/失败，且残留在制品里；本地验的和 CI 装出来的不一样。
+forbid_2_pattern:       (git commit 之前跑 ci/conan/build_and_test.sh|把 full 模式下的 JC 报警当成自己引入的)
+forbid_2_reason:        没有 PR diff 时门禁只能整仓扫描，报的是 origin/main 存量隐藏文件。
+forbid_2_consequence:  为不存在的缺陷改配方或删别人的归档目录（越权），白烧一轮门禁时间。
+forbid_3_pattern:       git add -A
+forbid_3_reason:        `.build-cache/`（门禁 predl 缓存）与门禁生成物未被 gitignore，`git add -A` 会把它们带进提交；JC3/JC5 会拦，等于白提交一次。
+forbid_3_consequence:  提交里混入二进制缓存，或触发 CI 的 junk 门禁。
+principles:             「本地验证通过」的前提是验证环境与被验证对象一致——缓存命中会让改动不生效，无 diff 会让门禁换判定基准；两者都要先归零再下结论。
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+doc_file:               doc/DRAFT-LOCAL-VERIFY-STALE-PKG-FOLDER-AND-PRECOMMIT-GATE.md
+last_updated:           2026-10-04
+source_event:           pd-ggee 0.28 适配：改 package() 的 keep_path 后 conan create rc=0 但包内新旧文件并存；以及分支未提交时跑本地门禁得 JC1/JC5 红灯，逐条 git cat-file 核实为 origin/main 存量
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-10-04
+
+draft: true
+contributor_id: 4F7A

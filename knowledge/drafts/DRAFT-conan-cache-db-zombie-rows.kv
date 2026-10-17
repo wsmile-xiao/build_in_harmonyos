@@ -1,0 +1,61 @@
+#====================================================================
+# DRAFT-conan-cache-db-zombie-rows - conan cache DB 僵尸行：list 有 create 报 not found
+#====================================================================
+
+draft: DRAFT-conan-cache-db-zombie-rows
+status: pending-editor-review
+title: "conan 2.x cache sqlite 出现'僵尸行'（DB 行在、磁盘目录被清）——conan list 可见但 conan create 报 Cannot load recipe / conanfile.py not found；OHOS 适配版 conan remove 挂死，正解是直接 sqlite 手术"
+category: ci, conan, cache, build-system, ohos-toolchain
+match_keywords: >
+  Cannot load recipe, conanfile.py not found, 'export' folder does not exist,
+  conan remove 挂死, conan remove hangs, cache.sqlite3, recipes 表, packages 表,
+  僵尸条目, zombie, cache 损坏, Recipe seems broken, not Conan 2.0 ready,
+  Already installed 后突然失败
+error_signature: >
+  Cannot load recipe.*not found|Error loading conanfile at.*e/conanfile\.py.*not found|
+  'export' folder does not exist for the reference
+root_cause: >
+  conan 2.x 的包缓存索引在 ~/.conan2/p/cache.sqlite3（recipes 表:
+  reference/rrev/path/timestamp/lru；packages 表: reference/rrev/pkgid/prev/path/
+  build_id/lru）。当磁盘上的 p/<hash>/ 目录被外部清理（CI cleanup.sh 全量重置、
+  磁盘清理、拷贝恢复的 cache 只还原了部分目录）而 DB 行残留时，产生"僵尸行"：
+  conan list / conan info 仍显示包存在（读 DB），但 conan cache path 报
+  "'export' folder does not exist"、conan create/install 解析图时报
+  "Cannot load recipe. Error loading conanfile at .../e/conanfile.py: not found!"
+  并误提示 "Recipe seems broken / not Conan 2.0 ready"（误导方向：看似配方问题，
+  实为 cache 索引失同步）。OHOS 适配版 conan（基线 2.29.1）上 `conan remove
+  <ref>` 对僵尸行会挂死（300s+ 无输出，stdin=/dev/null 也不退出，疑似内部
+  遍历/锁逻辑），两次实测均需 kill。
+solution: |
+  四步 sqlite 手术（比 remove 可靠且秒级）：
+  1) 备份：cp ~/.conan2/p/cache.sqlite3{,.bak-$(date +%Y%m%d-%H%M%S)}；
+  2) python3 只读扫描两表，对每行取 path 字段（即 p/<hash> 相对目录），
+     判断 <CONAN_HOME>/p/<path>/e（配方）或 /p/<path>/p（二进制）目录是否存在；
+  3) 不存在的行 DELETE：DELETE FROM recipes WHERE reference=?；
+     DELETE FROM packages WHERE reference=? AND pkgid=?；commit；
+  4) 重跑 conan create/install --build=missing：conan 会从 ohpcd 远端重取配方
+     与 prebuilt 二进制（大量 Already installed 的依赖不受影响，只有僵尸行
+     对应的包重走远端解析）。
+  验证：conan cache path <pkg>/<ver> 返回真实路径不再报 export folder 不存在。
+  实测量级参考：一次手术清出 2156 条僵尸配方行 + 306 条僵尸二进制行，
+  剩余 649 配方/938 二进制全部磁盘可解析，kshisen 图（35 依赖）一次通过。
+fallback: >
+  若不便直接动 DB：换 CONAN_HOME 环境变量指向新目录全量重建（代价：全部
+  依赖重新下载）；或等待 conan 官方修复 remove 对僵尸行的处理后再清。
+  绝不要按报错提示去"修配方"（Recipe seems broken 是误导——同一配方远端完好）。
+verify_builds: >
+  PR #14229 kshisen 26.04.0：conan create 首跑即报 kcrash/6.18.0 Cannot load
+  recipe（kcras2a4b2932ef5ca/e/conanfile.py not found），扫描发现 karchive/
+  kconfigwidgets/kcoreaddons/kdbusaddons/ki18n/kxmlgui/solid/openal-soft 等
+  19 个直接依赖配方均为僵尸行；手术后 conan create exit=0（movetest 1/1、
+  test_package 四断言 PASS），CI #66420 全绿（L0/L1 + test_package 通过）。
+reference_impl: >
+  #14229 kshisen 26.04.0（本 PR）：DB 手术后全绿；kjumpingcube/knavalbattle
+  同图 KDEGames6 依赖线任务如遇同签名同样适用。
+note: >
+  拟提升编号：由知识库主编确认。与 DRAFT-ci-worker-gate-fork-oom（资源故障）
+  互补：本条是"索引失同步"类，签名相似（create 早期失败）但根因与处理完全
+  不同——先认签名再动手，别被 "Recipe seems broken" 带偏。
+source: >
+  OpenHarmonyPCDeveloper/build_in_harmonyos PR #14229（kshisen 26.04.0
+  HarmonyOS PC 适配），本机 conan 2.29.1-OHOS 修复实战。

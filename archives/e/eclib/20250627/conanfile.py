@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""Conan recipe — eclib 20250627 (autotools)"""
+from conan import ConanFile
+from conan.tools.files import get
+from conan.tools.gnu import Autotools, AutotoolsToolchain
+from conan.tools.files import apply_conandata_patches
+from conan.tools.layout import basic_layout
+from conan.tools.gnu import PkgConfigDeps
+
+
+
+class EclibConan(ConanFile):
+    name = "eclib"
+    version = "20250627"
+    package_type = "library"
+    settings = "os", "arch", "compiler", "build_type"
+    options = {"shared": [True, False], "fPIC": [True, False]}
+    default_options = {"shared": True, "fPIC": True}
+    exports_sources = "patches/*"
+
+    def config_options(self):
+        if self.settings.os == "Windows":
+            self.options.rm_safe("fPIC")
+
+    def configure(self):
+        if self.options.shared:
+            self.options.rm_safe("fPIC")
+
+    def source(self):
+        get(self, **self.conan_data["sources"], strip_root=True)
+
+    def requirements(self):
+        self.requires("pari/2.17.4")
+        self.requires("ntl/11.6.0.2")
+        self.requires("flint/3.6.0")
+        # pari / ntl / flint 三条链分别钉了 gmp/6.3.0 与 gmp/6.3.0.1，图里判冲突；
+        # 显式 force 到新的那个收敛（两者只差打包修订，ABI 相同）。
+        self.requires("gmp/6.3.0.1", force=True)
+
+    def layout(self):
+        basic_layout(self, src_folder=".")
+
+    def generate(self):
+        PkgConfigDeps(self).generate()
+        tc = AutotoolsToolchain(self)
+        tc.configure_args.append("--build=aarch64-unknown-linux-musl")
+        tc.configure_args.append("--host=aarch64-unknown-linux-musl")
+        # eclib 的 configure 不看 pkg-config，只认 --with-<dep>=<前缀>（sage 的 spkg
+        # 也是这么传的：SAGE_CONFIGURE_NTL / SAGE_CONFIGURE_PARI / --with-flint）。
+        # 不给就报 "Could not find NTL, you might want to use --with-ntl=<path>"。
+        tc.configure_args.append("--with-ntl=%s" % self.dependencies["ntl"].package_folder)
+        tc.configure_args.append("--with-pari=%s" % self.dependencies["pari"].package_folder)
+        tc.configure_args.append("--with-flint=%s" % self.dependencies["flint"].package_folder)
+        tc.configure_args.append("--with-boost=no")
+        tc.configure_args.append("--disable-allprogs")
+        # 环境里可能已有 LDFLAGS（设备与 CI worker 的 ~/.zshrc 都导出了
+        # -L$HOME/usr/local/lib）。conan 对 LDFLAGS 用的是 **append**，自己的 -L 排在
+        # 它**后面**；链接器按 -L 顺序取第一个命中的目录，于是 `-lfoo` 可能命中系统的
+        # libfoo.so 而不是 conan 包里的 libfoo.a，configure 的 conftest 运行期就加载不到：
+        #   Error loading shared library libffi.so.8: (needed by ./conftest)
+        #   configure: error: cannot run C compiled programs.
+        # （ecl 24.5.10 实撞；本机 unset LDFLAGS 能过、CI 不 unset 就挂，
+        #   等于用调用方环境掩盖了 recipe 缺陷。）
+        # 把依赖的 libdir **前置**，让 recipe 不再受环境 LDFLAGS 影响，本机与 CI 行为一致。
+        # ⚠️ 必须只取**绝对路径**：被 skip 的传递依赖（无 package_folder）其
+        # cpp_info.libdirs 会退化成相对的 "lib"，原样拼进去就是 `-Llib`，
+        # libtool 链接时直接报：
+        #   ./libtool: cd: lib: No such file or directory
+        #   libtool: error: cannot determine absolute directory name of 'lib'
+        # （m4rie 20250128 实撞。）
+        import os as _os
+        _env = tc.environment()
+        _Lp = " ".join("-L{}".format(_d) for _ref, _dep in self.dependencies.items()
+                       for _d in (_dep.cpp_info.libdirs or []) if _os.path.isabs(_d))
+        if _Lp:
+            _env.prepend("LDFLAGS", _Lp)
+        # eclib 的头文件里直接 `#include <gmp.h>`，而 gmp 是 flint/ntl 的**传递依赖**、
+        # configure 又没有对应的 --with-gmp 开关 —— 只走 PkgConfigDeps 时编译期
+        # 拿不到它的 -I，报 `fatal error: 'gmp.h' file not found`（实撞）。
+        # 把所有依赖（含传递）的 include 目录前置进 CPPFLAGS。
+        _Ip = " ".join("-I{}".format(_d) for _ref, _dep in self.dependencies.items()
+                       for _d in (_dep.cpp_info.includedirs or []) if _os.path.isabs(_d))
+        if _Ip:
+            _env.prepend("CPPFLAGS", _Ip)
+        tc.generate(_env)
+
+    def build(self):
+        apply_conandata_patches(self)
+        autotools = Autotools(self)
+        # 发布 tarball（ftp.gnu.org 那类）里带现成的 configure，直接用；
+        # 但 **GitHub 的 archive tarball 从不含 configure**（它只是 git tree 的快照，
+        # configure 是 autoreconf 的产物、不进版本库），此时必须先自举。
+        # 判在运行期而非生成期：同一份配方两种源都能用。
+        import os as _os
+        if not _os.path.isfile(_os.path.join(self.source_folder, "", "configure")):
+            self.output.info("源码树无 configure（GitHub archive 常见），先 autoreconf 自举")
+            # **必须在源码所在子目录里跑**：判定用的是 SRC_SUBDIR，执行也要一致。
+            # 实测 libmspack/1.11：源码是 `libmspack/configure.ac`，在顶层 autoreconf
+            # 直接报 `autoreconf: error: 'configure.ac' is required`。
+            autotools.autoreconf(build_script_folder=_os.path.join(
+                self.source_folder, ""))
+        # ⚠️ umask / uname 这类对 configure 脚本本身的修补**必须在 autoreconf 之后**：
+        # 自举会重新生成 configure，放在前面等于白改（改的是不存在的文件，
+        # 或改完又被覆盖）。
+        import glob as _glob, os as _os
+        for _cfg in _glob.glob(_os.path.join(self.source_folder, '**', 'configure'), recursive=True):
+            try:
+                with open(_cfg, encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+            except OSError:
+                continue
+            if "umask 077" in text:
+                with open(_cfg, "w", encoding="utf-8") as f:
+                    f.write(text.replace("umask 077", "umask 022"))
+        autotools.configure()
+        autotools.make(args=["-j1"])
+
+    def package(self):
+        autotools = Autotools(self)
+        autotools.install(args=["-j1"])
+        # 【skill: 默认删 .la】libtool 的 .la 里烤死 libdir 绝对路径，
+        # conan 包按 prefix=/ 构建 → 里面写的是 '/lib'，下游 libtool 会去找
+        # `//lib/libxxx.la` 而失败（graphviz 实撞）。链接信息 .pc/cpp_info 已提供。
+        import glob as _glob, os as _os
+        for _la in _glob.glob(_os.path.join(self.package_folder, "lib", "*.la")):
+            _os.remove(_la)
+
+
+
+
+    def package_info(self):
+        self.cpp_info.includedirs = self._detect_include_dirs()
+        self.cpp_info.libs = ['ec']
+        self.cpp_info.set_property("cmake_file_name", "eclib")
+        self.cpp_info.set_property("cmake_target_name", "eclib::eclib")
+        self.cpp_info.set_property("pkg_config_name", "eclib")
+
+
+
+    # 与标准 C/C++ 头同名的文件名。含这类文件的子目录**不能**进 includedirs，
+    # 否则它会被 -isystem 加进搜索路径、抢在真正的系统头前面被找到。
+    _STD_HEADER_NAMES = {
+        "time.h", "math.h", "string.h", "stdio.h", "stdlib.h", "assert.h",
+        "errno.h", "signal.h", "limits.h", "float.h", "locale.h", "setjmp.h",
+        "ctype.h", "wchar.h", "wctype.h", "complex.h", "fenv.h", "inttypes.h",
+        "stdint.h", "stddef.h", "stdarg.h", "stdbool.h", "iso646.h", "uchar.h",
+        "memory", "list", "array", "vector", "string", "map", "set", "queue",
+        "stack", "algorithm", "functional", "utility", "thread", "mutex",
+        "atomic", "chrono", "ranges", "format", "locale",
+    }
+
+    def _detect_include_dirs(self):
+        """扫 include/ 下含头文件的一层子目录，连同 include 本身一起返回。
+
+        很多库把公开头装在版本化子目录（pango-1.0 / glib-2.0 / freetype2 / cspice…），
+        只声明 include 的话，消费方按上游惯用法 #include <pango/pango.h> 就找不到 ——
+        而这个缺陷在**本包构建装包时完全不暴露**，要到下游编译才炸。
+
+        ⚠️ 但展开必须避开**与标准头同名**的子目录，否则修一个缺陷造一个更坏的：
+        fmt 的 include/fmt/ 里有 locale.h，一旦把该目录 -isystem 进去，
+        libc++ 的 <__locale> 执行 #include <locale.h> 时会命中 fmt/locale.h，
+        musl 真正的 locale.h 永远进不来 —— 下游任何 include <sstream> 的
+        翻译单元都报 `use of undeclared identifier 'uselocale'`（spdlog 实撞）。
+        消费方本来就写 #include <fmt/format.h>，只需要 include/ 这一层。
+        """
+        import os as _os
+        base = _os.path.join(self.package_folder, "include")
+        dirs = ["include"]
+        if not _os.path.isdir(base):
+            return dirs
+        for name in sorted(_os.listdir(base)):
+            sub = _os.path.join(base, name)
+            if not _os.path.isdir(sub):
+                continue
+            # 只看子目录**直接**装的头：同名遮蔽只发生在直接被搜索的那一层。
+            try:
+                direct = _os.listdir(sub)
+            except OSError:
+                continue
+            # **大小写不敏感比对**：鸿蒙设备的文件系统不区分大小写，
+            # `#include <string.h>` 会命中 `Poco/String.h`。守卫原先是精确匹配，
+            # POCO 的 CamelCase 头一个都没被认出来，include/Poco 照样进了搜索路径 ——
+            # 于是 libc++ 的 cstring 包含到 Poco/String.h，编译当场崩（poco 1.15.3 实撞）。
+            if any(f.lower() in self._STD_HEADER_NAMES for f in direct):
+                continue
+            for _root, _d, files in _os.walk(sub):
+                if any(f.endswith((".h", ".hpp", ".hh", ".hxx")) for f in files):
+                    dirs.append("include/" + name)
+                    break
+        return dirs
+

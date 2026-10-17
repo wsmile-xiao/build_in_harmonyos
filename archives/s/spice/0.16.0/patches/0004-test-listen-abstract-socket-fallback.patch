@@ -1,0 +1,82 @@
+--- a/server/tests/test-listen.c
++++ b/server/tests/test-listen.c
+@@ -93,16 +93,55 @@
+     basic_event_loop_mainloop();
+ }
+ 
++#ifndef _WIN32
++/* Some filesystems cannot host path-based unix sockets (e.g. HarmonyOS
++   hmdfs-backed home directories fail bind() with EPERM, and /tmp may be a
++   read-only mount).  Probe the working directory and fall back to an
++   abstract socket, which does not involve the filesystem at all. */
++static const char *unix_socket_address(void)
++{
++    static const char path[] = "test-listen.unix";
++    static const char abstract[] = "@test-listen.unix";
++    struct sockaddr_un addr;
++    char probe[] = "test-listen-probe.sock";
++    int sock;
++
++    sock = socket(AF_UNIX, SOCK_STREAM, 0);
++    if (sock < 0) {
++        return abstract;
++    }
++    memset(&addr, 0, sizeof(addr));
++    addr.sun_family = AF_UNIX;
++    strcpy(addr.sun_path, probe);
++    unlink(probe);
++    if (bind(sock, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
++        close(sock);
++        return abstract;
++    }
++    close(sock);
++    unlink(probe);
++    return path;
++}
++#endif
++
+ static BIO *fake_client_connect(const char *hostname, int port, bool use_tls)
+ {
+     if (port < 0) {
+ #ifndef _WIN32
+         int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+         struct sockaddr_un addr;
++        socklen_t addrlen = sizeof(addr);
+         memset(&addr, 0, sizeof(addr));
+         addr.sun_family = AF_UNIX;
+         strcpy(addr.sun_path, hostname);
+-        if (connect(sock, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
++        if (addr.sun_path[0] == '@') {
++            /* abstract socket: a leading NUL selects the abstract namespace;
++               keep the length the '@' address yields, matching the way
++               spice-server's listener binds it (reds_init_socket) */
++            addrlen = SUN_LEN(&addr);
++            addr.sun_path[0] = 0;
++        }
++        if (connect(sock, (struct sockaddr *) &addr, addrlen) < 0) {
+             close(sock);
+             return NULL;
+         }
+@@ -311,6 +350,7 @@
+ {
+     GThread *thread;
+     int result;
++    const char *socket_address = unix_socket_address();
+ 
+     TestEventLoop event_loop = { 0, };
+ 
+@@ -320,12 +360,12 @@
+     SpiceServer *server = spice_server_new();
+     spice_server_set_name(server, "SPICE listen test");
+     spice_server_set_noauth(server);
+-    spice_server_set_addr(server, "test-listen.unix", SPICE_ADDR_FLAG_UNIX_ONLY);
++    spice_server_set_addr(server, socket_address, SPICE_ADDR_FLAG_UNIX_ONLY);
+     result = spice_server_init(server, event_loop.core);
+     g_assert_cmpint(result, ==, 0);
+ 
+     /* fake client */
+-    thread = fake_client_new(check_magic_thread, "test-listen.unix", -1, false, &event_loop);
++    thread = fake_client_new(check_magic_thread, socket_address, -1, false, &event_loop);
+     test_event_loop_run(&event_loop);
+     g_assert_null(g_thread_join(thread));
+ 

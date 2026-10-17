@@ -1,0 +1,47 @@
+id: DRAFT-libebur128-1.2.6-inplace-widening-rewrite-tramples-tail
+draft: true
+contributor_id: codex
+title: test_package 中原地"窄类型转宽类型"改写会踩掉未读样本：向同一缓冲先写 float 再逐元素读 float 写 double，写入偏移(8i)超前于读取偏移(4i)，i>2 后覆盖尚未读取的源数据——DSP/音频库多精度接口测试必须按目标精度直接生成或经第二缓冲中转（libebur128 sample_peak 断言失败实证）
+
+trigger_tool: conan|cmake|clang
+phase: testing
+error_signature: FAIL - sample_peak tracks 0.8 amplitude input|1 check\(s\) FAILED|Error 1 while executing
+severity: 2
+category: testing, portability, dsp, c, test-package
+match_keywords: in place, widening, float to double, sample peak, ebur128, audio, sine, generator, trample, overwrite, not-yet-read, aliasing, cast buffer, test_package, 断言失败, 原地转换, 音频测试
+
+root_cause: 为复用正弦生成器，测试代码向 malloc 的 double* 缓冲以 (float*) 强转写入 float 正弦（占前 4N 字节），随后循环 buf[i]=(double)((float*)buf)[i] 原地拓宽——第 i 次迭代读取偏移 4i、写入偏移 8i，i>2 之后每次写入的字节区间 [8i,8i+8) 落在尚未读取的 float 数据 [4i+4,4N) 内，把后面的源样本踩成 double 位模式垃圾，导致 sample_peak 等依赖完整数据的断言失真。本机交叉编译只能证明"编译链接通过"，这类数据层 bug 只有真机运行断言才暴露（shadow CI r3 11 断言仅 1 挂，其余全过，极易误判为库问题）
+affected_scope: libebur128/1.2.6 真机 shadow CI r3（aarch64-ohos clang 15）；适用于一切提供 short/float/double 多精度输入接口的音频/DSP 库的 test_package 编写（libsndfile、opus、speexdsp 类消费者测试同理）
+verification_cmd: 设备端 sh run-conan-heavy.sh（r3 sample_peak FAIL → 改为直接生成 double 正弦后 r4 11/11 全过；本机 python 复算 max=0.800000000 ∈ 容差）
+
+rec_priority: 1
+rec_approach: generate-directly-in-target-precision
+rec_description: 多精度接口测试不要做任何原地类型拓宽：为每种精度提供独立生成器（或模板/宏），直接以目标类型写入；若必须转换，先 malloc 第二缓冲读旧写新，绝不复用同一块内存读写不同宽度
+rec_command: for (i=0;i<n;++i) buf[i]=0.8*sin(2.0*PI*1000.0*(double)(i/2)/SR); /* double 直接生成 */
+rec_auto_fix: false
+rec_impl: test-source-fix
+
+fallback_priority: 2
+fallback_approach: second-buffer-staging
+fallback_description: 已有窄类型生成器时，经第二缓冲中转：读 src[i]（窄）写 dst[i]（宽），两缓冲不重叠
+fallback_command:
+fallback_auto_fix: false
+fallback_impl: test-source-fix
+
+forbid_1_pattern: 断言失败后放宽容差（如 0.799<peak<0.801 改成 0.5<peak<1.0）让测试"变绿"
+forbid_1_reason: 数据已被踩坏时放宽容差只是掩盖测试自身缺陷，且会同时掩盖库真回归（峰值精度是 ebur128 sample_peak 的核心契约）
+forbid_1_consequence: test_package 失去对库行为的约束力，L1e 破坏性验证虽能过，但数值正确性断言形同虚设
+
+principles: 先怀疑测试数据通路再怀疑库；编译通过≠数据正确，数值断言必须真机运行验证
+causes: 复用生成器时用类型强转在同一缓冲写窄读宽（省一次 malloc 的惯性写法）
+caused_by:
+similar_to: DRAFT-rcheevos-12.2.1-float-to-unsigned-arch-ub
+conflicts_with:
+prerequisite_of:
+
+doc_file: knowledge/drafts/DRAFT-libebur128-1.2.6-inplace-widening-rewrite-tramples-tail.md
+last_updated: 2026-09-29
+source_event: libebur128/1.2.6 真机 shadow CI r3→r4 迭代（job libebur128-1.2.6-20260929，run …-095945-3257 失败 → …-100235-5663 全绿）
+authors: codex-agent
+source_pr:
+source_commit: 382036e771

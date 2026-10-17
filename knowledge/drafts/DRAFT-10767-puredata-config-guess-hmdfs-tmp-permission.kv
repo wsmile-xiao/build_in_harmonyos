@@ -1,0 +1,43 @@
+#====================================================================
+# DRAFT-10767-puredata-config-guess-hmdfs-tmp-permission - config.guess cannot guess build type on OHOS (uname + HMDFS tmp probe)
+#====================================================================
+
+id:                     DRAFT-10767-puredata-config-guess-hmdfs-tmp-permission
+trigger_tool:           autotools|configure
+phase:                  configure
+error_signature:        config.guess: unable to guess system type|cannot guess build type|dummy\.c: Permission denied|UNAME_SYSTEM  = "HarmonyOS"
+
+severity:               3
+category:               autotools|build-system|platform-detection|hmdfs|tmp-permission
+match_keywords:         config.guess, config.sub, cannot guess build type, unable to guess system type, dummy.c, Permission denied, HongMeng Kernel, HarmonyOS, uname, --build, --host, triplet, TMPDIR, HMDFS
+title:                  OHOS 上 config.guess 双重失败：uname -s "HarmonyOS" 不被识别 + 编译探测 dummy.c 在 HMDFS TMPDIR 下 Permission denied，configure 报 cannot guess build type
+
+root_cause:             autotools 的 configure 在未显式传 --build/--host 时会运行 m4/config/config.guess 探测构建平台。该探测在 OHOS worker 上双重失败：(1) config.guess 无法把 uname -s "HarmonyOS"、uname -r "HongMeng Kernel 1.12.0" 映射为已知三元组，输出 "unable to guess system type"；(2) 即使绕过 uname 映射，config.guess 内部的编译器探测会向 TMPDIR（HMDFS 挂载点，如 /data/storage/el2/base/cache 或源码目录）写入 dummy.c 并尝试编译，HMDFS 对该写入/重定向返回 Permission denied（E114 同类），探测同样失败。最终 configure: error: cannot guess build type; you must specify one。纯分析产物：该失败与包源码无关，任何需要 config.guess 探测的 autotools 包在 OHOS 上都会复现（puredata 0.54.1 CI #56266 实测）。
+affected_scope:         HarmonyOS PC CI（aarch64, ohos-aarch64 profile）上所有未显式传 --build/--host、且构建流程中会执行 config.guess 的 autotools 项目；puredata/0.54.1（CI #56266）实测受影响。
+verification_cmd:       修复后 conan create archives/<pkg> -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing 应通过 configure 阶段；configure 输出中不再出现 config.guess 探测与 "cannot guess build type"。
+
+rec_priority:           1
+rec_approach:           explicit-build-host-triplet
+rec_description:        在 configure 调用中显式传入 config.sub 认可的三元组（--build=aarch64-unknown-linux-ohos --host=aarch64-unknown-linux-ohos），使 configure 完全跳过 config.guess 探测，同时规避 uname 不识别与 HMDFS tmp 编译探测两个失败点。这是仓库内多个已合入配方的成熟方案：argp-standalone、abiword-plugin-*（clarisworks/pdb 等）、a52dec、aalib、abiword-plugin-docbook 等。注意 --host 会让 configure 按 cross-compiling 语义处理（交由 OHOS clang 工具链本身无影响）；若上游 config.sub 版本过旧不认识 *-linux-ohos 后缀，可退化为 aarch64-unknown-linux-gnu 或 aarch64-linux（abiword-plugin-docbook/a52dec 用法）。
+rec_command:            conanfile.py build(): self.run("./configure --prefix=/ --build=aarch64-unknown-linux-ohos --host=aarch64-unknown-linux-ohos ...", env="conanbuild", cwd=self.source_folder)；使用 AutotoolsToolchain 的配方则为 tc.configure_args.append("--build=aarch64-unknown-linux-ohos"); tc.configure_args.append("--host=aarch64-unknown-linux-ohos")
+rec_auto_fix:           true
+rec_impl:               conan-recipe-configure-args
+
+fallback_priority:      2
+fallback_approach:      patch-config-guess-ohos
+fallback_description:   若上游构建系统在多处硬编码调用 config.guess、无法通过 --build/--host 全部跳过（如 autogen 生成的子 configure 或 nested configury），可用 OHC_SKILL_ROOT 下的 scripts/patch-autotools-ohos.pl（R15 流程）或手工补丁为 config.guess/config.sub 增加 HarmonyOS 识别分支，使 uname -s HarmonyOS 映射到 aarch64-unknown-linux-ohos。该方案仍需保证 config.guess 的编译探测 TMPDIR 指向可写目录（export TMPDIR=构建目录内普通路径，E114/HMDFS 修复），否则编译探测步骤仍会 Permission denied。
+fallback_command:       for f in $(find . -name config.guess -o -name config.sub); do perl "$OHC_SKILL_ROOT/scripts/patch-autotools-ohos.pl" "$f"; done（并配合 export TMPDIR=<build>/.tmp）
+fallback_auto_fix:      false
+fallback_impl:          patch-autotools-scripts-plus-tmpdir
+
+forbid_1_pattern:       \./configure(?!.*--build=)(?!.*--host=)
+forbid_1_reason:        在 OHOS 上不带 --build/--host 运行 configure 会触发 config.guess 平台探测，而 config.guess 既无法识别 uname -s "HarmonyOS"，其编译探测也会因 HMDFS tmp 权限失败，configure 必然报 "cannot guess build type"。
+forbid_1_consequence:   CI conan-build-test 在 configure 阶段失败（CI #56266, puredata/0.54.1），构建无法进入编译阶段。
+
+forbid_2_pattern:       sed.*config\.guess|rm.*config\.guess
+forbid_2_reason:        删除或盲目改写 config.guess 不能解决平台识别问题（新版 config.guess 同样不认识 HarmonyOS uname），且会破坏 autoreconf 重新生成的脚本一致性。
+forbid_2_consequence:   掩盖真实失败点，后续构建在别的探测路径上再次失败，浪费时间。
+
+ref_pr:                 10767
+ref_package:            puredata/0.54.1
+ref_ci_run:             56266

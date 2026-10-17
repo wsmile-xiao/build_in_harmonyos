@@ -1,0 +1,73 @@
+#====================================================================
+# Draft: lfqueue 1.2.2 (Taymindis) - single-deq immediate free(head)
+#        races with concurrent producer tail-CAS -> livelock in
+#        multi-producer + single-consumer stress test.
+#        R02 (2026-09-24): minimal fix patch 0002 routes the dequeued
+#        node into the delayed __lfq_recycle_free/__lfq_check_free
+#        free-list (aligned with the multi-consumer path); verified
+#        5/5 upstream runs pass, ctest 1/1, consumer regression PASSED.
+#====================================================================
+
+id:                     DRAFT-LFQUEUE-1.2.2-SINGLE-DEQ-RACE
+trigger_tool:           lfqueue-example|ctest|clang|cmake
+phase:                  runtime|testing
+error_signature:        lfqueue-example hang in one_deq_and_multi_enq|one_deq_must_and_multi_enq|liveness|Test\ Pass|timeout.*lfqueue|process sleeps waiting for dequeued item
+
+severity:               2
+category:               runtime|concurrency|lock-free|portability
+match_keywords:         lfqueue, lfstack, lock-free queue, single_deq, free(head), use-after-free, livelock, tail advance, CAS, multi-producer, single-consumer, immediate free, recycle list, __lfq_recycle_free, __lfq_check_free, delayed reclamation, deferred reclamation, Hazard pointer, epoch
+
+title:                  lock-free 队列 "single consumer 立即 free(head)" 与并发多生产者 tail-CAS 竞态：多生产者+单消费者压测挂起及最小修复补丁（Taymindis lfqueue 1.2.2，修复前 5/5 挂起 → 修复后 5/5 通过）
+
+root_cause:             lfqueue.c::_single_dequeue() 在 CAS(head→next) 成功后立即 free(head)，
+                        而并发 _enqueue() 先读 tail 再 CAS(&tail->next, NULL, node) 并采用
+                        best-effort tail 推进（CAS 失败不回补）。队列空/近空时，消费者释放的
+                        head 节点可能仍是生产者持有的 tail 或其 next 链上节点；此后该生产者
+                        CAS 失败重读 tail 会踩已释放内存，单消费者在 lfqueue_sleep(1) 中永远
+                        等不到新项 → 进程 STAT=S 挂起（非 CPU 自旋）。多消费者路径 _dequeue
+                        走延迟 free-list 回收（__lfq_recycle_free + __lfq_check_free 2 秒延迟），
+                        不立即 free，故 one_enq_and_multi_deq / multi_enq_deq 稳定通过——差异
+                        仅在 single_deq 的立即 free。
+affected_scope:         所有在“多生产者 + 单消费者”并发下使用 lock-free 队列且实现采用
+                        “dequeue 后立即 free 节点”或“近空时可能释放仍被并发访问的节点”的库；
+                        Taymindis 系列（lfqueue、lfstack 同源设计）；手写 CAS 队列。
+verification_cmd:       修复前（复现）: cd build && timeout 60 ./lfqueue-example ; echo $?  # 5/5 挂起返回 124
+                        修复后（本 draft 证据）: cd build && timeout 120 ./lfqueue-example ; echo $?  # 5/5 输出 Test Pass! 退出 0
+                        ctest --output-on-failure   # 1/1 Passed
+                        消费者回归: ./test_lfqueue   # PASSED, sum=4999950000, size=0
+
+rec_priority:           1
+rec_approach:           deferred-node-reclamation-aligned-with-existing-multi-consumer-path
+rec_description:        ① 首选修复（本库已实施，patch 0002）：把 _single_dequeue() 出队节点的
+                        立即 free(head) 改为 __lfq_recycle_free(lfqueue, head)，并在循环后追加
+                        __LFQ_SYNC_MEMORY() + __lfq_check_free(lfqueue)，与多消费者路径 _dequeue
+                        完全对齐：节点先进延迟 free-list（带时间戳），__lfq_check_free 仅释放
+                        延迟 >2 时间单位的节点，覆盖并发生产者 tail 引用窗口，公开 API 与语义不变；
+                        ② 若无法补上游补丁：消费者侧改走 lfqueue_deq / lfqueue_deq_must（多消费者
+                        延迟回收路径）规避；single_deq 仅限真正单消费者且队列无空窗的场景；
+                        ③ 测试范式：并发压测用“恰好消费 N 项 + 求和/顺序校验 + lfqueue_size()==0”，
+                        避免依赖立即-free 路径的空窗行为。
+rec_command:            conan create . -pr:h=ci/conan/profiles/ohos-aarch64 --build=missing  # conan create 内 test_package 自动运行；补丁经 conandata.yml 应用
+rec_auto_fix:           false
+
+# ═══ 七轴查重（R02 更新，与 .md 配对审计一致）═══
+exact_duplicate:        false
+causal_duplicate:       false
+trigger_overlap:        false
+solution_overlap:       false
+combination_novelty:    true
+boundary_novelty:       true
+test_migration_novelty: true
+
+# ═══ 关系字段 ═══
+similar_to:             E399
+caused_by:              upstream-lock-free-implementation-defect
+prerequisite_of:        none
+conflicts_with:         none
+
+# ═══ 路径决定 ═══
+path_decision:          path_b_new_draft
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              #12046 (lfqueue-1.2.2，R02 更新)
+source_commit:          42bf614c → 本轮修复 commit（push 后 HEAD）

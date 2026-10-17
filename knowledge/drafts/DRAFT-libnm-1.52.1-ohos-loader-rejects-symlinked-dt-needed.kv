@@ -1,0 +1,113 @@
+# DRAFT: OHOS 动态加载器不解析符号链接形式的 DT_NEEDED（1.52.1 libnm 三处实证）
+id: DRAFT-libnm-1.52.1-ohos-loader-rejects-symlinked-dt-needed
+status: draft
+contributor: libnm 1.52.1 适配任务（openharmony-compile-agent）
+created: 2026-09-20
+
+# Layer 0: 错误面
+trigger_tool:           runtime|ld|conan
+phase:                  runtime
+error_signature:        Error loading shared library [^:]+: \(needed by|\/lib\/ld-musl-aarch64\.so\.1: Error loading shared library
+
+# Layer 1: 识别层
+severity:               3
+category:               ohos, linking, musl, runtime, packaging, conan
+title:                  OHOS 加载器不跟随符号链接解析 NEEDED；符号链接目标存在、文件"看得见"，但进程 exit 127
+match_keywords:         Error loading shared library, needed by, symlink, 符号链接, DT_NEEDED, SONAME,
+  ld-musl-aarch64, exit 127, empty strerror, binary-sign-tool, selfSign, islink, LIBRARY_PATH,
+  materialize, regular file, 实体文件, LD_LIBRARY_PATH
+
+# Layer 2: 诊断层
+root_cause:             OHOS（musl）动态加载器解析 ELF 的 DT_NEEDED 时**拒绝接受符号链接**——即使链接
+  目标确实存在且可读。文件系统层面完全正常（ls 可见、dlopen 之前的路径解析无碍），但加载器在
+  DT_NEEDED 查找阶段就放弃。最坑的是 musl 此处打印的 strerror 为**空字符串**：
+      Error loading shared library libgnutls.so.30: (needed by /path/test_libnm)
+  括号内没有 "No such file or directory"，极易被误判为"缺文件"去反复检查路径/LD_LIBRARY_PATH，
+  而真实原因是"文件是符号链接"。进程统一 exit 127。
+  典型触发面：Conan 包用自己的 soname 链（libX.so → libX.so.N → libX.so.N.M.K）交付共享库时，
+  上游 install 默认生成的是符号链接；同时依赖包（gnutls/libtasn1/libgcrypt/libgpg-error/libidn2/
+  libpsl 等）的 libdir 里保存的也都是符号链接。任何把包目录搬到别的机器/容器运行、或在包内
+  运行测试二进制的场景都会命中。
+affected_scope:         所有在 OHOS 上运行、且依赖链中任一 DT_NEEDED 对应符号链接的场景。特别影响
+  （a）包内上游测试、（b）test_package 消费端、（c）任何"把 Conan 包移动/复制到非原路径后运行"的
+  relocatable 运行时。
+verification_cmd: |
+  # 1) 确认报错括号内为空（不是 No such file）
+  ./test_binary 2>&1 | grep "Error loading shared library"
+  # 2) 看依赖到底是符号链接还是实体
+  find <libdir> -name 'libgnutls.so*' -exec ls -l {} \;
+  # 3) 决定性对照：同一二进制 + 同一 LD_LIBRARY_PATH，只改"实体 vs 符号链接"
+  cp -L <libdir>/libgnutls.so.30 /tmp/rt/libgnutls.so.30      # -L 跟随链接 => 实体
+  ln -sf libgnutls.so.30.40.1 <libdir>/libgnutls.so.30        # 换成符号链接
+  LD_LIBRARY_PATH=/tmp/rt ./test_binary   # 实体 => rc=0；符号链接 => rc=127
+
+# Layer 3: 方案层
+rec_priority:           1
+rec_approach:           materialize-symlinked-shared-libs
+rec_description:        把**每一个**运行时需要的符号链接 .so 复制成实体文件，并让该实体目录在
+  LD_LIBRARY_PATH 中排在依赖包 libdir **之前**（依赖 libdir 里仍是符号链接，次序错了它先被命中
+  就仍然失败）。三处都要做，缺一不可：
+  ① 产物侧：package() 的签名循环不要跳过 islink —— binary-sign-tool 原地签名
+     （-inFile X -outFile X -selfSign 1）本身就会把符号链接解引用成实体文件，跳过 islink 反而
+     让包里的 soname 链保持符号链接；
+  ② 构建期测试侧：在 build_folder 下建私有运行时目录，用 shutil.copy2/`cp -L` 把依赖 libdir 与
+     构建树里所有符号链接 .so 复制成实体，前置到 LD_LIBRARY_PATH；
+  ③ 消费端 test() 侧：同样做实体化，并**自行拼接 LD_LIBRARY_PATH**（不要叠加 conanrun 的
+     环境脚本，它的顺序会把依赖 libdir 排到前面）。
+  三个动作只写 build_folder，不修改任何依赖包。
+rec_command: |
+  # ① package()：不要跳过符号链接
+  for target in targets:
+      self.run(f'"{objcopy}" --remove-section .codesign "{target}"')
+      self.run(f'"{signer}" sign -inFile "{target}" -outFile "{target}" -selfSign 1')
+  # ②/③ 运行时实体化（绝对路径去重后复制，再前置）
+  for src in candidate_libs:
+      if os.path.islink(src):
+          shutil.copy2(os.path.realpath(src), os.path.join(rtdir, os.path.basename(src)))
+  os.environ["LD_LIBRARY_PATH"] = os.pathsep.join([rtdir] + dep_libdirs)
+  # 验证：三个 soname 都应是 islink=False 且字节一致
+  python3 -c "import os,sys;[print(p, os.path.islink(p), os.path.getsize(p)) for p in sys.argv[1:]]" lib/libnm.so lib/libnm.so.0 lib/libnm.so.0.1.0
+rec_auto_fix:           false
+rec_impl:               recipe-package
+
+fallback_priority:      2
+fallback_approach:      copy-realpath-into-private-rtdir-only
+fallback_description:   只做测试侧实体化（不改产物打包）——能救回包内测试与 test_package，但交付包
+  自身的 soname 链仍是符号链接，消费方移动包后仍会炸。仅用于"产物打包逻辑不可改"的场景。
+fallback_command:       LD_LIBRARY_PATH=<private-rtdir>:<dep-libdirs> ./test_binary
+fallback_auto_fix:      false
+fallback_impl:          manual-workaround
+
+forbid_1_pattern:       Error loading shared library.*\(needed by.*\).*-> *结论[:：] *(文件|依赖)?缺失|missing.?file
+forbid_1_reason:        musl 在本场景的 strerror 是空串，看到"括号为空"就断言文件缺失是误诊；文件就
+                        在那儿，只是形态是符号链接。
+forbid_1_consequence:   会在路径/LD_LIBRARY_PATH/依赖包内容上反复绕圈（本次实测因此浪费多轮），
+                        真正的一行修复（复制成实体）迟迟不到位。
+forbid_2_pattern:       if os\.path\.islink\([^)]*\): *continue.*#.*sign
+forbid_2_reason:        签名循环跳过符号链接 = 主动放弃免费的实体化机会；原地签名本身就是解引用。
+forbid_2_consequence:   包内 lib/libX.so、lib/libX.so.N 保持符号链接，消费端 exit 127。
+
+# Layer 4: 原则引用
+principles:
+
+# 关系图
+causes:                 []
+caused_by:              []
+similar_to:             E316, E274, E073, E207
+conflicts_with:         []
+prerequisite_of:        []
+
+# 元数据
+doc_file:               drafts/DRAFT-libnm-1.52.1-ohos-loader-rejects-symlinked-dt-needed.md
+last_updated:           2026-09-20
+source_event:           libnm 1.52.1 适配：23 个上游测试 exit 127；修复实体化后通过数 20/54 -> 40/54
+
+authors:
+source_pr:
+source_commit:
+
+# 质量度量
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-20

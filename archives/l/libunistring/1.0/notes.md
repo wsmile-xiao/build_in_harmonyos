@@ -64,3 +64,16 @@
 
 **编译结束**: 2026-04-15 22:47
 **最终状态**: succes
+
+## 2026-07-25 Conan adaptation
+- Added Conan 2 recipe for `libunistring/1.0` using Autotools.
+- Source URL and sha256 were recorded from GNU upstream tarball.
+- Recipe builds static library by default and applies existing HarmonyOS config patches.
+- Added consumer `test_package` covering `u8_strlen` and `u8_check`.
+- Dependency issue: #1436.
+
+## 2026-07-25 CI iteration
+- Removed `0004-lib-libunistring.sym-t1.patch` from `conandata.yml` because the upstream 1.0 tarball does not contain `lib/libunistring.sym-t1`; CI failed before configure when trying to apply it.
+- Updated recipe to run configure through `CONFIG_SHELL ./configure` because direct execution from HMDFS returned permission denied.
+- Updated recipe to use `/system/bin/sh ./configure` because profile `CONFIG_SHELL=/data/service/hnp/bin/bash` is inaccessible in the CI shell.
+- Recipe now overrides `SHELL` and `CONFIG_SHELL` to `/system/bin/sh` during build so configure does not use inaccessible profile bash.

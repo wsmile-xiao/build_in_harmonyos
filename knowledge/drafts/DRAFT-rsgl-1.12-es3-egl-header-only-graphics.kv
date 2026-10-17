@@ -1,0 +1,88 @@
+# ═══ Draft knowledge entry — header-only C 图形库在 OHOS 的 EGL/GLES3 适配
+# （RSGL_NO_RGFW 独立图形模式 + ES3 shader 变体 + loader VAO + legacy 立即模式编译期排除） ═══
+# Software: rsgl 1.12
+# Gate: conan-verify G1-G4+L2/L4/L5 PASS + test_package 消费者测试实际运行（EGL 1.4 pbuffer + GLES3，
+#        shader 编译成功 + glReadPixels 回读 + RSGL_rectCollidePoint 碰撞验证，exit 0）
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: rsgl-1.12-es3-egl-header-only-graphics
+severity: 2
+category: opengl|ohos|graphics|build-system|portability
+trigger_tool: clang|conan|ld
+phase: configuration|linking|runtime
+
+keywords: RSGL, RGFW, Xlib, RSGL_NO_RGFW, EGL, eglGetProcAddress, GLES3, #version 300 es, glBegin, glEnd, immediate mode, VAO, glGenVertexArrays, loader, OpenGL ES, header-only, graphics library, OHOS
+
+error_signature: X11/Xlib.h not found|undefined symbol: glBegin|undefined symbol: glEnable|Language version '330' unknown|use of undeclared identifier 'RSGL_BackSpace'|deps/RFont.h not found
+
+match_keywords: RGFW, X11, RSGL, header-only graphics, glBegin, immediate mode, GLES3, 300 es, eglGetProcAddress, EGL pbuffer, VAO loader, OHOS, shader compile failed
+
+root_cause: |
+  (1) 捆绑窗口头（如 RGFW.h）的 header-only C 图形库在 unix 上无条件
+      `#define RGFW_X11` 并 `#include <X11/Xlib.h>`；OHOS 既无 X11 头也无 X11 运行时，
+      默认编译必然失败。库若提供"独立图形模式"（如 RSGL_NO_RGFW）+ 外部 loader
+      （eglGetProcAddress），即成为 OHOS 正确适配路径。
+  (2) 渲染头（RSGL_gl.h）的默认逻辑 `#if !21 && !33 && !43` 自动补 `RSGL_OPENGL_33`，
+      未排除 ES2/ES3 —— 定义 RSGL_OPENGL_ES3 后 shader 字符串同时生成 `#version 330`
+      与 `#version 300 es` 两段声明，OHOS GLES 编译器只认到 `320 es`，shader 编译失败。
+  (3) ES3 下若 VAO 函数（glGenVertexArrays/glBindVertexArray/glDeleteVertexArrays）
+      被宏映射到 `*SRC` 指针，则必须也经 loader 加载（`#elif RSGL_OPENGL_ES3` 分支），
+      否则 `*SRC` 为 NULL，`RSGL_initGraphics` 内直接 SIGSEGV。
+  (4) 渲染批处理里的 legacy 固定管线分支（glBegin/glEnd/glVertex3f…）无条件编译，
+      GLES2/3 无立即模式，链接期 `undefined symbol: glBegin`；必须编译期排除。
+  (5) `RSGL_NO_RGFW` 独立模式还要求使用者按上游文档定义按键常量
+      （RSGL_BackSpace/Tab/Left/Right/Up/Down）与两个回调
+      （RSGL_isPressedI / RSGL_window_setMouseStandard），缺失即编译/链接错误。
+
+rec_approach: no-rgfw-standalone-graphics + es3-shader-variant + egl-loader-vao + compile-out-legacy-immediate
+rec_description: |
+  (1) 以库自带的独立图形模式（RSGL_NO_RGFW）适配 OHOS：绕开 RGFW/Xlib；
+      由宿主应用创建 EGL 上下文（无头可用 pbuffer），以 eglGetProcAddress 为 loader。
+  (2) 默认 GL 版本自动补全逻辑排除 ES2/ES3：
+      `#if !defined(RSGL_OPENGL_21)&&!defined(RSGL_OPENGL_33)&&!defined(RSGL_OPENGL_43)&&!defined(RSGL_OPENGL_ES2)&&!defined(RSGL_OPENGL_ES3)`。
+  (3) shader 新增 ES3 变体：`#version 300 es` + precision + in/out 语义 +
+      `texture()` 替代 `texture2D` + `out vec4 finalColor`（片段着色器主分支
+      `#if defined(RSGL_OPENGL_33)||defined(RSGL_OPENGL_ES3)`）。
+  (4) loader 加载分支补 `#elif defined(RSGL_OPENGL_ES3)`（VAO 三函数同样走
+      RSGL_PROC_DEF/EGL loader），避免 NULL 指针调用。
+  (5) legacy 立即模式块用 `#if !defined(RSGL_OPENGL_ES2)&&!defined(RSGL_OPENGL_ES3)`
+      编译期排除（桌面 GL 专属，GLES 无 glBegin）。
+  (6) 消费者测试里补足按键常量 + RSGL_isPressedI/RSGL_window_setMouseStandard
+      两个由使用者实现的回调（headless 下返回明确结果，不伪造输入）。
+  所有守卫用库自身的功能宏（RSGL_OPENGL_ES2/ES3），不使用 __OHOS__ 平台宏
+  （遵守 iron-rules R8 / preflight PF5）。
+rec_auto_fix: false
+
+affected_scope: |
+  捆绑窗口后端（RGFW/X11 类）的 header-only C/C++ 图形库，需从桌面 GL/窗口模式
+  移植到无 X11 的 OHOS/嵌入式平台；典型为 RSGL、raylib 类（其 SDL/GLFW 后端同样
+  依赖 X11/GLFW 而非 OHOS native）。可复用：ES3 shader 变体、EGL loader 的 VAO
+  加载、legacy 立即模式排除三件套。
+
+verification_cmd: |
+  # 消费者测试（必须真实创建 EGL 上下文并调用公开 API 绘制/读取像素）
+  clang --sysroot=<OHOS sysroot> --target=aarch64-linux-ohos test.c \
+    -I<sysroot>/usr/include -I<source>/deps -L<sysroot>/usr/lib/aarch64-linux-ohos \
+    -lEGL -lGLESv3 -lm -o test_rsgl
+  ./test_rsgl   # 期望: EGL 1.4 pbuffer current / shader compile ok / probe pixel / PASS
+  # conan 配方验证（干净构建 + 消费者测试）
+  ohc-run.py conan-verify rsgl 1.12 --profile ohos-aarch64   # G1-G4+L2/L4/L5 PASS
+
+evidence: |
+  rsgl 1.12（OHOS aarch64，clang 15，EGL 1.4 + GLES3）：
+  - 官方 tag 1.12 tarball sha256 c46cf690cdb4b872ff767967377b0ab79974d116ba385423fd3b66eb5a6eaf71；
+    补丁 0001-es3-opengl-es-shader-and-vao-loader.patch 应用前后对比：
+    X11/Xlib.h not found → 编译通过；glBegin undefined → 链接通过；
+    Language version '330' unknown → shader compile successfully（Vertex/Fragment）。
+  - test_package 消费者测试实际运行（EGL 1.4 pbuffer + GLES3）：
+    "PASS: EGL 1.4 pbuffer context current"、"Vertex Shader compile successfully."、
+    "Fragment Shader compile successfully."、"probe pixel at (16,16): R=255 G=255 B=255 A=255"、
+    "PASS: RSGL_rectCollidePoint hit=1 miss=0"、"CONSUMER TEST DONE"，exit 0。
+  - conan-verify：G1 配方完整性 / G2 conan create / G3 系统同名库隔离 /
+    G4 产物完整性 / L2 smoke / L4 checksec / L5 基线对比 全部 PASS。
+
+authors:
+  - atomcode
+source_pr:
+source_commit:
+draft_date: 2026-09-19

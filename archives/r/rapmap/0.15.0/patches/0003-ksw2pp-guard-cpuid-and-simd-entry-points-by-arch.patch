@@ -1,0 +1,153 @@
+From: OpenHarmonyPCDeveloper adaptation <nobody@example.invalid>
+Subject: [PATCH 3/4] Guard x86 cpuid probing and the SSE alignment entry points by architecture
+
+Part of the RapMap 0.15.0 adaptation for HarmonyOS PC (aarch64).
+Generated against upstream tag salmon-v0.15.0.
+
+--- a/src/ksw2pp/KSW2Aligner.cpp
++++ b/src/ksw2pp/KSW2Aligner.cpp
+@@ -19,6 +19,7 @@
+ #define SIMD_AVX2    0x80
+ #define SIMD_AVX512F 0x100
+ 
++#if defined(__i386__) || defined(__x86_64__)
+ #ifndef _MSC_VER
+ // adapted from https://github.com/01org/linux-sgx/blob/master/common/inc/internal/linux/cpuid_gnu.h
+ void __cpuidex(int cpuid[4], int func_id, int subfunc_id)
+@@ -57,6 +58,16 @@
+ 	return flag;
+ }
+ // end of ksw2_dispatch.c here
++#else
++// `cpuid` is an x86 instruction, so the detection helpers above cannot even be
++// assembled on other architectures.  Reporting "no SIMD" keeps haveSSE2 /
++// haveSSE41 at their default false, which is exactly the state the scalar
++// kernels below are selected through.
++int x86_simd(void)
++{
++	return 0;
++}
++#endif // ~x86
+ 
+ unsigned char seq_nt4_table_loc[256] = {
+     0, 1, 2, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+@@ -217,19 +228,27 @@
+   int8_t e = config_.gape;
+   int w = config_.bandwidth;
+   int z = config_.dropoff;
++  // The ksw_extz2_sse* definitions live inside `#ifdef __SSE2__` blocks in
++  // ksw2_extz2_sse.c, so they do not exist off x86; keep only the scalar call
++  // there.  This is the same substitution upstream already performs in its own
++  // non-SIMD fallback branch just below.
++#ifdef __SSE2__
+   if (haveSSE41) {
+     ksw_extz2_sse41(kalloc_allocator_.get(), qlen, query_.data(), tlen,
+                 target_.data(), config_.alphabetSize, mat_.data(), q, e, w, z,
+                 config_.end_bonus, config_.flag, ez);
+-  } else if (haveSSE2) {
++    return ez->score;
++  }
++  if (haveSSE2) {
+     ksw_extz2_sse2(kalloc_allocator_.get(), qlen, query_.data(), tlen,
+                   target_.data(), config_.alphabetSize, mat_.data(), q, e, w, z,
+                   config_.end_bonus, config_.flag, ez);
+-  } else {
+-    ksw_extz(kalloc_allocator_.get(), qlen, query_.data(), tlen,
+-             target_.data(), config_.alphabetSize, mat_.data(), q, e, w, z,
+-             config_.flag, ez);
++    return ez->score;
+   }
++#endif
++  ksw_extz(kalloc_allocator_.get(), qlen, query_.data(), tlen,
++           target_.data(), config_.alphabetSize, mat_.data(), q, e, w, z,
++           config_.flag, ez);
+   return ez->score;
+ }
+ 
+@@ -277,14 +296,22 @@
+   int q = config_.gapo;
+   int e = config_.gape;
+   int w = config_.bandwidth;
+-  ez->score =
+-      (config_.flag & KSW_EZ_SCORE_ONLY)
+-          ? ksw_gg2(kalloc_allocator_.get(), qlen, query_.data(), tlen,
+-                    target_.data(), config_.alphabetSize, mat_.data(), q, e, w,
+-                    0, 0, 0)
+-          : ksw_gg2_sse(kalloc_allocator_.get(), qlen, query_.data(), tlen,
+-                        target_.data(), config_.alphabetSize, mat_.data(), q, e,
+-                        w, &ez->m_cigar, &ez->n_cigar, &ez->cigar);
++  // ksw_gg2() (ksw2_gg2.c) has the same parameter list as ksw_gg2_sse() and
++  // also produces the CIGAR, so it is a drop-in scalar replacement where the
++  // SSE definition is compiled out.
++#ifdef __SSE2__
++  if (!(config_.flag & KSW_EZ_SCORE_ONLY)) {
++    ez->score = ksw_gg2_sse(kalloc_allocator_.get(), qlen, query_.data(), tlen,
++                            target_.data(), config_.alphabetSize, mat_.data(), q,
++                            e, w, &ez->m_cigar, &ez->n_cigar, &ez->cigar);
++    return ez->score;
++  }
++#endif
++  ez->score = ksw_gg2(kalloc_allocator_.get(), qlen, query_.data(), tlen,
++                      target_.data(), config_.alphabetSize, mat_.data(), q, e, w,
++                      (config_.flag & KSW_EZ_SCORE_ONLY) ? 0 : &ez->m_cigar,
++                      (config_.flag & KSW_EZ_SCORE_ONLY) ? 0 : &ez->n_cigar,
++                      (config_.flag & KSW_EZ_SCORE_ONLY) ? 0 : &ez->cigar);
+   return ez->score;
+ }
+ 
+@@ -307,13 +334,19 @@
+   int q = config_.gapo;
+   int e = config_.gape;
+   int w = config_.bandwidth;
+-  ez->score =
+-      (config_.flag & KSW_EZ_SCORE_ONLY)
+-          ? ksw_gg2(kalloc_allocator_.get(), qlen, query_, tlen, target_,
+-                    config_.alphabetSize, mat_.data(), q, e, w, 0, 0, 0)
+-          : ksw_gg2_sse(kalloc_allocator_.get(), qlen, query_, tlen, target_,
+-                        config_.alphabetSize, mat_.data(), q, e, w,
+-                        &ez->m_cigar, &ez->n_cigar, &ez->cigar);
++#ifdef __SSE2__
++  if (!(config_.flag & KSW_EZ_SCORE_ONLY)) {
++    ez->score = ksw_gg2_sse(kalloc_allocator_.get(), qlen, query_, tlen, target_,
++                            config_.alphabetSize, mat_.data(), q, e, w,
++                            &ez->m_cigar, &ez->n_cigar, &ez->cigar);
++    return ez->score;
++  }
++#endif
++  ez->score = ksw_gg2(kalloc_allocator_.get(), qlen, query_, tlen, target_,
++                      config_.alphabetSize, mat_.data(), q, e, w,
++                      (config_.flag & KSW_EZ_SCORE_ONLY) ? 0 : &ez->m_cigar,
++                      (config_.flag & KSW_EZ_SCORE_ONLY) ? 0 : &ez->n_cigar,
++                      (config_.flag & KSW_EZ_SCORE_ONLY) ? 0 : &ez->cigar);
+   return ez->score;
+ }
+ 
+@@ -352,19 +385,23 @@
+   int8_t e = config_.gape;
+   int w = config_.bandwidth;
+   int z = config_.dropoff;
++#ifdef __SSE2__
+   if (haveSSE41) {
+     ksw_extz2_sse41(kalloc_allocator_.get(), qlen, query_, tlen, target_,
+                 config_.alphabetSize, mat_.data(), q, e, w, z, config_.end_bonus, config_.flag,
+                 ez);
+-  } else if (haveSSE2) {
++    return ez->score;
++  }
++  if (haveSSE2) {
+     ksw_extz2_sse2(kalloc_allocator_.get(), qlen, query_, tlen, target_,
+                   config_.alphabetSize, mat_.data(), q, e, w, z, config_.end_bonus, config_.flag,
+                   ez);
+-  } else {
+-    ksw_extz(kalloc_allocator_.get(), qlen, query_, tlen, target_,
+-                   config_.alphabetSize, mat_.data(), q, e, w, z, config_.flag,
+-                   ez);
++    return ez->score;
+   }
++#endif
++  ksw_extz(kalloc_allocator_.get(), qlen, query_, tlen, target_,
++           config_.alphabetSize, mat_.data(), q, e, w, z, config_.flag,
++           ez);
+   return ez->score;
+ }
+ 

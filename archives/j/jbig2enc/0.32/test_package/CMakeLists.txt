@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_jbig2enc CXX)
+
+set(CMAKE_CXX_STANDARD 11)
+
+find_package(jbig2enc REQUIRED)
+add_executable(test_jbig2enc test_jbig2enc.cpp)
+if(TARGET jbig2enc::jbig2enc)
+    target_link_libraries(test_jbig2enc PRIVATE jbig2enc::jbig2enc)
+else()
+    target_include_directories(test_jbig2enc PRIVATE ${jbig2enc_INCLUDE_DIRS})
+    target_link_libraries(test_jbig2enc PRIVATE jbig2enc)
+endif()
+enable_testing()
+add_test(NAME jbig2enc_arith_api COMMAND test_jbig2enc)

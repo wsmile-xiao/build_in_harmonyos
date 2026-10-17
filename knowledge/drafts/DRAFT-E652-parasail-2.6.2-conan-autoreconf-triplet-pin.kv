@@ -1,0 +1,83 @@
+#====================================================================
+# DRAFT-E652-parasail-2.6.2-conan-autoreconf-triplet-pin -
+# GitHub tag 归档 autotools 自举链：无 configure ⇒ tool_requires(automake+
+# libtool)+VirtualBuildEnv 跑 autoreconf -fi；config.guess 不识 HarmonyOS
+# ⇒ conan conf 钉**同值** host/build triplet（aarch64-linux-ohos），
+# 既过 build type 探测又保 cross_compiling=no（parasail 2.6.2 实测）。
+#
+# 场景: 上游只发 GitHub tag 归档（archive/refs/tags/vX.Y.Z.tar.gz），归档内
+#       仅 configure.ac/Makefile.am/m4/，无生成的 configure；conan create 时
+#       AutotoolsToolchain 对 os=OHOS **不自动传 --host/--build**（2.29 实测），
+#       config.guess 2024-07-27 版 uname -s=HarmonyOS 仍 "unable to guess
+#       system type" → "configure: error: cannot guess build type"；且其
+#       编译探针在 HMDFS 上以 "dummy.c: Permission denied" 先行失败
+#       （目录模式位落盘丢失，升级 config.guess 版本不解决）。
+# 适用: 所有「GitHub tag 归档 + autotools（configure.ac + Makefile.am）」形态
+#       的 Conan 配方；同值 triplet 手法适用于任何 config.guess 不识别
+#       HarmonyOS 且需要保住上游 `if CROSS_COMPILING else TESTS +=` 测试面
+#       与 AC_RUN_IFELSE 运行期探测的 autotools 包。
+#
+# 注: 本文件所有字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-E652-parasail-2.6.2-conan-autoreconf-triplet-pin
+source_lib:             parasail 2.6.2
+trigger_tool:           configure
+phase:                  configuration
+error_signature:        cannot guess build type|unable to guess system type|config.guess.*unable to guess|UNAME_SYSTEM.*HarmonyOS|dummy\.c.*Permission denied
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               1
+category:               autotools, conan, cross-compiling, config.guess, HMDFS
+match_keywords:         config.guess, config.sub, cannot guess build type, unable to guess system type, HarmonyOS, HongMeng Kernel, aarch64-linux-ohos, host_triplet, build_triplet, cross_compiling, AC_RUN_IFELSE, TESTS, autoreconf, libtoolize, libtool.m4, LT_INIT, ACLOCAL_PATH, VirtualBuildEnv, tool_requires, automake, m4_esyscmd, version.sh, AC_INIT, egrep, HMDFS, Permission denied, GitHub tag archive, no configure, triplet pin
+title:                  GitHub tag 归档 autotools 自举与 triplet 钉扎：conan conf 钉同值 host/build triplet 过 config.guess 且保 cross_compiling=no
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             三因叠加：① GitHub tag 归档不含生成的 configure（只有 configure.ac/Makefile.am/m4/），conan build() 必须先 autoreconf -fi 自举，而 CI worker PATH 无 automake/libtoolize（/data/service/hnp/bin 只有 autoconf 家族）；② config.guess 对 uname -s=HarmonyOS 无识别分支（2024-07-27 版实测仍失败），且其内部编译探针要在 $TMPDIR 下写 dummy.c 并编译——HMDFS 目录模式位丢失（mkdir 0700 类落盘问题）使探针以 Permission denied 先行失败，所以「换更新的 config.guess」不能完整解；③ conan 2.29 AutotoolsToolchain 对 OHOS 目标不自动传 --host/--build，configure 走 config.guess 即死。另：AC_INIT 用 m4_esyscmd([./version.sh]) 提版本号时，autoreconf 期就会执行 version.sh，要求构建 PATH 内有 egrep/awk/tr（OHOS 的 /data/service/hnp/bin 与 /system/bin 均提供；GNU autoconf 调用 egrep 会打 obsolescent 警告，无害）。
+affected_scope:         所有以 GitHub tag 归档为源、autotools 构建且无生成 configure 的包；所有 config.guess 不识别 HarmonyOS 的 autotools 包（不限于 conan 配方，手工 configure 同理）；上游 Makefile.am 把 TESTS 放在 `if CROSS_COMPILING` else 分支下的包（显式 --host != --build 会让 make check 静默空跑）。
+verification_cmd:       ./build-aux/config.guess（期望失败并打印 UNAME_SYSTEM = "HarmonyOS"）；./build-aux/config.sub aarch64-linux-ohos（期望规范化为 aarch64-unknown-linux-ohos，rc=0）；conan create 日志应含 "checking for ARM NEON support... default" 与 "config.status creating Makefile"
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           conan-conf-triplet-pin-with-equal-host-build
+rec_description:        配方 generate() 里 self.conf.define("tools.gnu:host_triplet", "aarch64-linux-ohos") 与 build_triplet **同值**：AutotoolsToolchain 即会传 --host/--build（跳过 config.guess），config.sub 已接受 ohos 后缀并规范化；两值相同 ⇒ autoconf 判 cross_compiling=no ⇒ AC_RUN_IFELSE 真跑（不落 E007 警告的"误判交叉→错 config.h"）且上游 `if CROSS_COMPILING else TESTS +=` 的测试面保留、make check 可真实执行。前置：build_requirements() 加 tool_requires("automake/1.18")+"libtool/2.5.4"（aclocal/automake/libtoolize 与 LT_INIT 所需 libtool.m4），generate() 里先 VirtualBuildEnv(self).generate()（libtool 的 buildenv 携带 ACLOCAL_PATH）再 AutotoolsToolchain；build() 内 source() 后对无 configure 的源树跑 self.run("autoreconf -fi", cwd=self.source_folder, env="conanbuild")。
+rec_command:            self.conf.define("tools.gnu:host_triplet", "aarch64-linux-ohos") ; self.conf.define("tools.gnu:build_triplet", "aarch64-linux-ohos") ; self.tool_requires("automake/1.18") ; self.tool_requires("libtool/2.5.4") ; self.run("autoreconf -fi", cwd=self.source_folder, env="conanbuild")
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      patch-config-scripts-ohos-branches
+fallback_description:   按 E007 口径用 patch-autotools-ohos.pl 给 config.guess/config.sub 打 ohos 识别分支（输出 aarch64-unknown-linux-ohos）；代价：补丁落在构建期生成物上，须处理时间戳钉扎防 make 重生成，且 HMDFS 探针 Permission denied 仍需 conf 钉 triplet 兜底，两步合成一步不如直接 conf 钉扎。
+fallback_command:       perl ${SKILL_ROOT}/scripts/patch-autotools-ohos.pl <源码目录>
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       --host=[a-z0-9-]+-linux\s+--build=[a-z0-9.+-]*[^-]linux(?!-ohos)|--host=(\S+)\s+--build=(?!\1\s|$)\S+
+forbid_1_reason:        --host 与 --build 取不同值（或只传 --host）会让 autoconf 判 cross_compiling=yes：AC_RUN_IFELSE 运行期探测被跳过、config.h 可能错误，上游把 TESTS 挂在 CROSS_COMPILING 条件下时 make check 静默不跑任何用例（假绿面）
+forbid_1_consequence:   configure 全绿但 config.h 能力宏错误、make check 空跑、包功能静默缺失
+
+principles:             P008
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              [E007, E490]
+similar_to:             [E007, E160, E490]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-E652-parasail-2.6.2-conan-autoreconf-triplet-pin.md
+last_updated:           2026-09-21
+source_event:           parasail 2.6.2 OHOS PC arm64 适配：conan create 实测 config.guess "cannot guess build type" + dummy.c Permission denied；conf 钉同值 triplet 后 configure/NEON 探测/make check 全通过
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                parasail-2.6.2 任务执行体（容器层 Agent）
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-21

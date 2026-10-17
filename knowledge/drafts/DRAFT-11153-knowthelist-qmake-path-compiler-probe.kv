@@ -1,0 +1,106 @@
+#====================================================================
+# DRAFT-11153-knowthelist-qmake-path-compiler-probe
+#   qmake 探测目标编译器走 PATH（clang++），不读 CC/CXX 环境变量
+#   → CI worker 受限 PATH 下 "Cannot run target compiler 'clang++'"
+# 来源: PR #11153 feat(knowthelist): 2.3.1 适配 HarmonyOS PC（qmake/Qt5）
+#       CI 构建 #51439 失败，本地 conan create 通过
+# 路径: Path A（基础适配）期 CI 失败修复
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-11153-knowthelist-qmake-path-compiler-probe
+trigger_tool:           qmake|conan|make
+phase:                  configuration|building
+error_signature:        Project ERROR: Cannot run target compiler 'clang\+\+'|
+                        Maybe you forgot to setup the environment|
+                        Cannot run target compiler|qmake.*src\.pro
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               build-system, qmake, toolchain, env, path
+match_keywords:         qmake, Cannot run target compiler, clang++, PATH, CC, CXX,
+                        compiler probe, toolchain 目录, hnp, 编译器探测, 环境变量
+title:                  qmake 探测目标编译器走 PATH 解析 clang++（不读 CC/CXX 环境变量），CI worker 受限 PATH 下报 "Cannot run target compiler 'clang++'"（输出为空）
+prescan_pattern:        qmake.*(src|.*\.pro)|Project ERROR: Cannot run target compiler
+prescan_globs:          conanfile.py
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             qmake 的 mkspec（common/clang.conf: QMAKE_CXX = $${CROSS_COMPILE}clang++，
+                        交叉构建时 CROSS_COMPILE 为空 → 纯名字 clang++）决定目标编译器，
+                        运行时从 **PATH** 解析并执行探测，**不读 CC/CXX 环境变量**，也
+                        不接受命令行 QMAKE_CXX= 赋值（探测发生在赋值解析之前）。CI worker
+                        （buildbot appspawn 沙箱）的 PATH 受限，不含工具链目录
+                        /data/service/hnp/bin；配方仅靠 conan Environment().vars().apply()
+                        注入 PATH 时，在该类 worker 上注入不可靠（本地 shell PATH 含
+                        hnp/bin 则通过、CI 失败）。探测失败输出为空 → 报
+                        "Cannot run target compiler 'clang++'"（Output 段为空）。
+affected_scope:         所有依赖 qt 包的 qmake 工程在受限 PATH 的 CI worker 上构建；
+                        具象实证：knowthelist 2.3.1（qt/5.15.19）PR #11153 构建 #51439。
+                        与 ELF 签名问题（E318/E486/E511）症状区分：本条 Output 为空、
+                        无 Operation not permitted 字样，纯 PATH 解析失败。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           inline-run-path-prefix
+rec_description:        build()/package() 的 self.run 命令内联 PATH 前缀（posixsignalmanager
+                        先例，同依赖 qt/5.15.19 且 CI 通过）：
+                        PATH=<qt包>/bin:/data/service/hnp/bin:$PATH，与
+                        Environment().vars().apply() 双保险。qt bin 前置保证
+                        qmake/moc/uic/rcc 可达，hnp/bin 前置保证 clang++ 可达，
+                        不依赖 worker 的 PATH 或 conan env 注入是否生效。
+rec_command:            self.run("PATH=%s/bin:/data/service/hnp/bin:$PATH %s QMAKE_PKG_CONFIG=pkg-config src.pro" % (qt_pkg, qmake), cwd=src_dir)
+rec_auto_fix:           false
+rec_impl:               inline-path-prefix
+
+fallback_priority:      2
+fallback_approach:      explicit-cc-cxx-env
+fallback_description:   定义 CC/CXX 环境变量（baka/posixsignalmanager 同款）。注意：
+                        实验证明 qmake 探测编译器**不读** CC/CXX，此方案仅对 make
+                        编译阶段生效，单用它不能解决 qmake 探测失败——需与 PATH
+                        前缀或显式 -spec 组合使用。
+fallback_command:       build_env.define("CC", "/data/service/hnp/bin/clang"); build_env.define("CXX", "/data/service/hnp/bin/clang++")
+fallback_auto_fix:      false
+fallback_impl:          env-cc-cxx
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       把 clang\+\+.*拷到.*系统目录|ln -s.*clang\+\+.*/usr/bin|chmod.*/data/service/hnp
+forbid_1_reason:         禁止改系统工具链目录/权限或全局软链——污染共享环境且 CI worker 每次重建不保留
+forbid_1_consequence:   局部通过、其他包/其他 worker 行为被改，问题推迟到 CI
+forbid_2_pattern:       本机.*PATH.*有.*hnp.*因此.*无问题|本地.*通过.*CI.*失败.*忽略
+forbid_2_reason:         本地 shell PATH 含 hnp/bin 不代表 CI worker 的 PATH 相同；CI worker 环境与本地存在沙箱差异，必须以 CI 式受限 PATH 复现验证
+forbid_2_consequence:   本地 PASS、CI 失败反复发生，浪费构建轮次
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P017
+
+# ═══ 关系图 (Relations) ═══
+# ⚠️ 与 ELF 签名族区分（症状近似但根因不同）：
+#   E318/E486/E511 = HarmonyOS 拒绝执行未签名 ELF（Operation not permitted / Error 126）；
+#   本条 = qmake 从 PATH 找不到 clang++（空输出，无权限字样），PATH 环境问题。
+similar_to:             E318（未签名 ELF exec 拒绝，签名族；症状近似但输出含 Operation not permitted）、
+                        E486（引导构建签名，签名族）、
+                        E511（HMDFS ELF 执行拒绝，签名族）、
+                        E999-draft-0F20（knowthelist 前期 SIGSEGV，env 注入方式问题，同包不同症状）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       CI_PACKAGES="archives/k/knowthelist/2.3.1" zsh ci/conan/build_and_test.sh
+                        # 期望：qmake 阶段无 "Cannot run target compiler"，conan create passed
+                        # 复现用：env PATH="/data/app/bin:/system/bin:/system/sbin:/vendor/bin:<...>" 模拟受限 PATH
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                ohc-worker <ohc-worker@local>
+source_pr:              11153
+source_commit:          2a5964184a
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     1
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-20
+
+draft: true
+contributor_id:         11153-KTL

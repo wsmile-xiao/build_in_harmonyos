@@ -9,7 +9,7 @@
 
 ## 编译步骤
 
-#undefined### 对话 #1 [2026-06-16]
+### 对话 #1 [2026-06-16]
 
 - 问题: `ohc-run.py build advancescan 1.18` 全自动模式因源码目录已有旧配置残留导致 configure 失败 ("source directory already configured")
 - 操作: 重置 work 目录从 orig，手动编译

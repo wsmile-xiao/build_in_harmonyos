@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E545.kv，填写各字段
+# 对应的人类文档: doc/E545.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E545
+trigger_tool: ctest|test|runtime
+phase: testing
+error_signature: ls: /: Permission denied.*wait|ASSERT: sexpect w|child exit status.*fixture|ctest.*failed.*sandbox.*EACCES
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: testing, pty, portability, ohos
+match_keywords: ctest, pty, wait, child exit code, fixture, ls -l /, sandbox, EACCES, TMPDIR, CMAKE_SYSTEM, 假阴性, 退出码透传, 测试夹具
+title: 测试夹具的平台能力缺口会伪装成 PTY 工具功能失败：退出码透传型断言（wait）的识别与最小修法，并如实申报 CMAKE_SYSTEM 守卫用例
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: 通过 PTY 驱动子进程并断言其退出码的测试（expect 类工具的 wait）会把夹具命令依赖的平台能力缺失误报为被测功能失败：sexpect 的 chdir-after-logfile 用 ls -l / 产生日志输出，而 OHOS 沙箱拒绝列目录（EACCES），ls 非零退出被 wait 原样透传，断言失败但被测行为（logfile 在 chdir 前打开）完全正确。
+affected_scope: 所有以子进程退出码为断言的 PTY/交互式测试夹具；以及上游按 CMAKE_SYSTEM 守卫条件注册用例时，OHOS 上少注册的用例需在测试报表中如实归因（上游设计，而非适配裁剪）。
+verification_cmd: 设备实测：原样 ls -l / → sexpect w 断言失败（ls: /: Permission denied）；改为 ls -l $tmpfile 后 25/25 通过；ctest -N 显示 OHOS 注册 25 项，Linux 守卫 spawn-nowait/still-open-after-exit 不注册
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: platform-neutral-fixture-command-and-honest-guard-accounting
+rec_description: 夹具命令换成平台中立的等价物（同 cwd 的 ls -l $tmpfile，语义仍覆盖被测点），不要放宽/注释断言；报表中把 CMAKE_SYSTEM 守卫用例单列并注明上游设计来源，注册数、运行数、通过数分别如实呈现。
+rec_command: patches/0004-tests-chdir-after-logfile.sh.patch（1 行替换）+ MANIFEST.yml 列出 2 个守卫用例与原因
+rec_auto_fix: false
+rec_impl: test-only-patch
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: skip-with-explicit-reason
+fallback_description: 若确实无平台中立等价物，明确 SKIP 并给出技术原因与原始报错；禁止静默跳过或伪造通过。
+fallback_command: (无)
+fallback_auto_fix: false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern: 删断言.*通过|exit 0.*包装|测试.*静默跳过
+forbid_1_reason: 删断言/强制 exit 0/静默跳过会把未验证当通过，平台差异应保留可回退的最小改动。
+forbid_1_consequence: 上游套件失去回归价值，评审拒绝。
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to: E002, DRAFT-pty-driven-interactive-test-traps, DRAFT-E553-ohos-bash-fd3-pipeline-tap-driver
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file: knowledge/drafts/E545-draft-9C4A.md
+last_updated: 2026-09-26
+source_event: sexpect 2.4.0 设备实测：ls -l / 被沙箱拒绝致 wait 断言失败；夹具 1 行替换后 25/25 通过
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors: kasumizawa-miyuu
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 9C4A

@@ -1,0 +1,218 @@
+--- a/stdio.c
++++ b/stdio.c
+@@ -20,20 +20,27 @@
+  * 02110-1301, USA.
+  */ 
+ 
+ #include <config.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <fcntl.h>
+ #include <errno.h>
+ #include <stdarg.h>
+ #include <string.h>
++#if defined(fopen64) || defined(tmpfile64) || defined(freopen64)
++/* musl (OHOS) aliases the *64 stdio functions onto the base names; purelibc
++ * provides its own 64-bit variants, so drop the aliases. */
++#undef fopen64
++#undef tmpfile64
++#undef freopen64
++#endif
+ #include <unistd.h>
+ #include <limits.h>
+ #include <dlfcn.h>
+ #include <pthread.h>
+ 
+ #define PURE_HASHSIZE 64
+ long _pure_debug_printf(const char *format, ...);
+ 
+ struct pure_file {
+ 	int fd;
+@@ -144,20 +151,80 @@
+ 			case 'r':flags=O_RDONLY;break;
+ 			case 'w':flags=O_WRONLY|O_CREAT|O_TRUNC;break;
+ 			case 'a':flags=O_WRONLY|O_CREAT|O_APPEND;break;
+ 			case '+':flags &= ~(O_WRONLY | O_RDONLY); flags |= O_RDWR;break;
+ 		}
+ 		modes++;
+ 	}
+ 	return flags;
+ }
+ 
++#if !defined(__GLIBC__)
++/* OHOS musl's fopencookie deviates from both glibc and vanilla musl:
++ * the registered callbacks fire only at process exit, the close callback
++ * is never invoked and fclose() returns EBADF. FILE virtualization through
++ * fopencookie therefore cannot work, so the stdio overrides fall through
++ * to the libc implementations; the direct syscall capture wrappers remain
++ * fully functional (see notes.md). */
++#include <dlfcn.h>
++
++static FILE *(*_pure_libc_fopen)(const char *, const char *);
++FILE *fopen (const char *filename, const char *modes){
++	if (!_pure_libc_fopen)
++		_pure_libc_fopen = dlsym(RTLD_NEXT, "fopen");
++	return _pure_libc_fopen(filename, modes);
++}
++
++static FILE *(*_pure_libc_fopen64)(const char *, const char *);
++FILE *fopen64 (const char *filename, const char *modes){
++	if (!_pure_libc_fopen64)
++		_pure_libc_fopen64 = dlsym(RTLD_NEXT, "fopen64");
++	return _pure_libc_fopen64(filename, modes);
++}
++
++static FILE *(*_pure_libc_fdopen)(int, const char *);
++FILE *fdopen (int fd, const char *modes){
++	if (!_pure_libc_fdopen)
++		_pure_libc_fdopen = dlsym(RTLD_NEXT, "fdopen");
++	return _pure_libc_fdopen(fd, modes);
++}
++
++static FILE *(*_pure_libc_tmpfile)(void);
++FILE *tmpfile (void){
++	if (!_pure_libc_tmpfile)
++		_pure_libc_tmpfile = dlsym(RTLD_NEXT, "tmpfile");
++	return _pure_libc_tmpfile();
++}
++
++static FILE *(*_pure_libc_tmpfile64)(void);
++FILE *tmpfile64 (void){
++	if (!_pure_libc_tmpfile64)
++		_pure_libc_tmpfile64 = dlsym(RTLD_NEXT, "tmpfile64");
++	return _pure_libc_tmpfile64();
++}
++
++static FILE *(*_pure_libc_freopen)(const char *, const char *, FILE *);
++FILE *freopen (const char *filename, const char *modes, FILE *stream){
++	if (!_pure_libc_freopen)
++		_pure_libc_freopen = dlsym(RTLD_NEXT, "freopen");
++	return _pure_libc_freopen(filename, modes, stream);
++}
++
++static FILE *(*_pure_libc_freopen64)(const char *, const char *, FILE *);
++FILE *freopen64 (const char *filename, const char *modes, FILE *stream){
++	if (!_pure_libc_freopen64)
++		_pure_libc_freopen64 = dlsym(RTLD_NEXT, "freopen64");
++	return _pure_libc_freopen64(filename, modes, stream);
++}
++
++#else /* glibc: upstream fopencookie-based implementation */
++
+ static FILE *_pure_fopen (const char *filename, const char * modes, int flags){
+ 	int fd;
+ 	//_pure_debug_printf("_pure_fopen %s\n",filename);
+ 	if ((fd=open(filename,flags,0666)) < 0)
+ 		return NULL;
+ 	else
+ 		return new_pure_file(fd,modes);
+ }
+ 
+ #ifndef __USE_FILE_OFFSET64
+@@ -195,66 +262,94 @@
+ 	else {
+ 		unlink(template);
+ 		return new_pure_file(fd,"rw");
+ 	}
+ }
+ 
+ static FILE *_pure_freopen (const char *filename, const char *modes, FILE *stream){
+ 	if (stream == NULL) {
+ 		errno=EINVAL;
+ 		return NULL;
+-	} else {
++	}
++#if !defined(__GLIBC__)
++	/* musl (OHOS): standard streams cannot be re-seated (const FILE *
++	 * pointers in read-only memory); redirect the descriptor at OS level
++	 * and keep the original stream object. */
++	if (stream == stdout || stream == stdin || stream == stderr) {
++		int fdtmp=open(filename,_pure_parse_mode(modes),0666);
++		if (fdtmp < 0)
++			return NULL;
++		if (dup2(fdtmp, fileno(stream)) < 0) {
++			close(fdtmp);
++			return NULL;
++		}
++		close(fdtmp);
++		return stream;
++	}
++#endif
++	{
+ 	 FILE *newstream=NULL;
+ 	 int fd=-1;
+ 	 int fdtmp=open(filename,_pure_parse_mode(modes),0666);
+ 	 if (fdtmp >= 0) {
+ 		 if (stream == stdout)
+ 			 fd=STDOUT_FILENO;
+ 		 else if (stream == stdin)
+ 			 fd=STDIN_FILENO;
+ 		 else if (stream == stderr)
+ 			 fd=STDERR_FILENO;
+ 		 fclose(stream);
+ 		 if (fd>=0)
+ 			 fd=dup2(fdtmp,fd);
+ 		 else
+ 			 fd=fdtmp;
+ 		 if (fd>=0) 
+ 			 newstream=fdopen(fd,modes);
+ 		 if (isatty(fd))
+ 			 setlinebuf(newstream);
+ 		 close(fdtmp);
+-		 if (fd==STDOUT_FILENO) {
+-			 stdout=newstream;
+-			 return stdout;
+-		 } else if (fd==STDIN_FILENO) {
+-			 stdin=newstream;
+-			 return stdin;
+-		 } else if (fd==STDERR_FILENO) {
+-			 stderr=newstream;
+-			 return stderr;
+-		 } else
+-			 return newstream;
++		 #if defined(__GLIBC__)
++	 if (fd==STDOUT_FILENO) {
++		 stdout=newstream;
++		 return stdout;
++	 } else if (fd==STDIN_FILENO) {
++		 stdin=newstream;
++		 return stdin;
++	 } else if (fd==STDERR_FILENO) {
++		 stderr=newstream;
++		 return stderr;
++	 } else
++		 return newstream;
++#else
++	 /* musl (OHOS): standard streams cannot be re-seated (const FILE *
++	  * pointers in read-only memory); hand the captured stream to the
++	  * caller without re-seating the global. */
++	 (void)fd;
++	 return newstream;
++#endif
+ 	 }
+ 	 return newstream;
+ 	}
+ }
+ 
+ #ifndef __USE_FILE_OFFSET64
+ FILE *freopen (const char *filename, const char *modes, FILE *stream){
+ 	return _pure_freopen(filename, modes, stream);
+ }
+ #endif
+ 
+ FILE *freopen64 (const char *filename, const char *modes, FILE *stream){
+ 	return _pure_freopen(filename, modes, stream);
+ }
++
++
++#endif /* __GLIBC__ */
+ 
+ int printf (const char *format, ...)
+ {
+ 	va_list arg;
+ 	int done;
+ 
+ 	va_start (arg, format);
+ 	done = vfprintf (stdout, format, arg);
+ 	va_end (arg);
+ 

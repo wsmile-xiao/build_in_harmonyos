@@ -138,6 +138,9 @@ def clean_verify(software: str, version: str, pdir: str | None = None) -> int:
         full_cmd = f"{configure_cmd} --prefix={shlex.quote(str(default_prefix))} {shlex.quote(configure_options)}" if configure_options else f"{configure_cmd} --prefix={shlex.quote(str(default_prefix))}"
         log_file = tmpdir / "g0-configure.log"
         g0_env = os.environ.copy()
+        # v12.6: 验证期无条件禁用 ccache（社区红线：本地缓存不得影响 G0 结果，保证 CI 可复现）
+        from .utils import ccache_disable_env
+        g0_env.update(ccache_disable_env())
         g0_env["TMPDIR"] = str(tmpdir)
         default_prefix = ctx_vars.get("DEFAULT_PREFIX", os.path.expanduser("~/usr/local"))
         g0_env["PKG_CONFIG_PATH"] = f"{default_prefix}/lib/pkgconfig:{default_prefix}/share/pkgconfig:{g0_env.get('PKG_CONFIG_PATH', '')}"

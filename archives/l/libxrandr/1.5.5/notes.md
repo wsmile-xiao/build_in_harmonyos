@@ -1,178 +1,114 @@
 # libxrandr 1.5.5 适配笔记
 
-## 编译环境
-- 构建系统: autotools/meson（源码支持两种构建系统）
-- 编译日期: 2026-05-22
-- 编译器: clang 15.0.4
-- 状态: failed
+## 概述
 
-## 编译步骤
+X.Org RandR 扩展客户端库。提供 `XRR*` API 用于查询和修改屏幕分辨率、
+旋转、反射、显示器热插拔与多显示器布局。产物 `libXrandr.so.2.2.0`
+（`-version-number 2:2:0`，SOVERSION 2）。
 
-1. **下载源码**: 从X.org官方下载libXrandr-1.5.5.tar.gz
-   - URL: https://www.x.org/releases/individual/lib/libXrandr-1.5.5.tar.gz
-   - 版本: 1.5.5（2026-01-26发布）
+## 版本与包名
 
-2. **初始化编译环境**:
-   ```bash
-   python3 $SKILL_ROOT/scripts/ohc-run.py init-build libxrandr 1.5.5 --url=file://$HOME/tmp/libXrandr-1.5.5.tar.gz
-   ```
+- Conan 包名/版本：`libxrandr/1.5.5`（与上游源码版本一致）。
+- 上游源码：`libXrandr-1.5.5.tar.xz`（2026-01-26 发布）。
+- SHA256: `72b922c2e765434e9e9f0960148070bd4504b288263e2868a4ccce1b7cf2767a`。
 
-3. **尝试meson构建**: 遇到依赖缺失问题
-   - meson无法找到x11依赖
-   - 缺少libX11、libXext、libXrender等核心X11库
+## W0 依赖检查（R36）
 
-4. **尝试autotools构建**:
-   ```bash
-   ./configure --prefix=/storage/Users/currentUser/usr/local
-   ```
-   - 首次失败：config.guess无法识别HarmonyOS系统（E007）
-   - 修复config.guess/config.sub后重新运行
-   - 仍然失败：缺少libX11等核心依赖
+在 `ohpcd` 验证（`conan download --only-recipe`）：
 
-## 遇到的问题与解决方案
+| 依赖 | 说明 | 状态 |
+| --- | --- | --- |
+| libx11/6.4.0 | 上游 libX11-1.8.10 源码，已发布 + OHOS armv8 二进制 | ✅ |
+| libxext/6.4.0 | 上游 libXext-1.3.6 源码，已发布 + 二进制 | ✅ |
+| libxrender/0.9.12 | 提供 xrender.pc + Xrender.h，已发布（recipe 钉 libx11/1.8.13） | ✅ |
+| xorgproto/2025.1 | 提供 randrproto/xextproto/renderproto/xproto pc 模块 | ✅ |
 
-| # | 问题 | 根因 | 解决方案 | 状态 |
-|---|------|------|----------|------|
-| 1 | meson无法找到x11依赖 | libX11未安装，cmd-pkgs无预编译包 | 需手动编译libX11 | ❌ 未解决 |
-| 2 | config.guess无法识别HarmonyOS | GNU config.guess不包含__OHOS__检测 | 使用patch-autotools-ohos.pl修复 | ✅ 已解决 |
-| 3 | 缺少libX11依赖链 | X11库依赖链复杂，无预编译包 | 需按顺序编译: libxcb→libX11→libXext→libXrender→libXrandr | ❌ 未解决 |
+> 任务描述的 "xorgproto/2024.1、libX11/1.8.10、libXext/1.3.6" 对应本仓库
+> 已发布的 ABI 轨道包名：xorgproto/**2025.1**（2024.1 未发布）、
+> libx11/**6.4.0**（源码即上游 1.8.10）、libxext/**6.4.0**（源码即上游 1.3.6）。
+> 另需 libxrender/0.9.12：`configure.ac` 的 `PKG_CHECK_MODULES` 硬性要求
+> `xrender` 模块，且源码 10 处 include `X11/extensions/Xrender.h`。
 
-## 核心依赖缺失
+## 依赖轨道（重要陷阱）
 
-### 缺少的依赖库（按编译顺序）
-1. **libxcb** - X C绑定库（libX11的基础依赖）
-   - 进一步依赖: libxau, libxdmcp
-   - cmd-pkgs状态: ❌ 无预编译包
+制品仓 libxrender/0.9.12 的 recipe 钉 libx11/**1.8.13**，而 libxext/6.4.0 钉
+libx11/**6.4.0**（cmd-pkgs 轨道，与已发布 libxi/libxscrnsaver/libxcursor 一致）。
+必须在 recipe 里 `self.requires("libx11/6.4.0", force=True)`，让 libxext 命中
+已发布二进制（免重建），libxrender/0.9.12 则对 6.4.0 重新源码构建（其
+relocatable-libtool-metadata linker view 支持）。切勿改强制 1.8.13：该轨道
+libX11.la 会引用 libxcb.la，而 libxcb/1.16 不带 .la，下游源码构建会报
+`is not a valid libtool archive` 失败。
 
-2. **libX11** - X11客户端库
-   - 依赖: libxcb, xorgproto
-   - xorgproto已通过预编译包安装 ✅
-   - cmd-pkgs状态: ❌ 无预编译包
+## 构建系统与 OHOS 适配
 
-3. **libXext** - X扩展库
-   - 依赖: libX11
-   - cmd-pkgs状态: ❌ 无预编译包
+- **autotools**。1.5.5 发布包自带预生成 `configure`（GNU Autoconf 2.72），
+  XORG 宏（XORG_DEFAULT_OPTIONS / MAN_SUBSTS）已内联 —— **无需 xorg-macros
+  m4**，直接运行 configure（本仓库 `x/xorg-util-macros` 为空不影响）。
+- **config.guess/config.sub**：config.sub (2024-07-27) 已内置
+  `ohos*` / `linux-ohos-*`；config.guess 缺 HarmonyOS 分支，补丁 `0001`
+  在 NetBSD 分支前插入 `*:HarmonyOS:*:*` → `aarch64-unknown-linux-ohos`。
+- **umask**：上游 configure 用 `umask 077`，OHOS/HMDFS 下 config.status 无法
+  在受限临时目录执行，recipe 生成 `configure-ohos`（umask 077→022）。
+- **linker-view**：把依赖包 libdir 的 .a/.la/.so 复制到 build 目录私有
+  linker-view 并改写 .la 的 libdir/dependency_libs（绝对路径 → 相对 -L + -l），
+  规避 libtool 对 Conan 缓存旧 build 路径的解析失败。
+- **shell**：OHOS 用 `/system/bin/sh` 运行 configure/make（`export
+  SHELL/CONFIG_SHELL=/system/bin/sh`）。
+- **configure args**：`--host=aarch64-linux-ohos --enable-shared
+  --disable-static`（shared 默认；静态模式反之）。
+- **make check**：上游无 TESTS/check_PROGRAMS，`make check` 为空目标。
 
-4. **libXrender** - X渲染库
-   - 依赖: libX11
-   - cmd-pkgs状态: ❌ 无预编译包
+## 源码修改（补丁）
 
-### 已安装的依赖
-- **xorgproto 2024.1** ✅ (通过预编译包安装)
-  - 包含randrproto, renderproto, xextproto等协议定义
-  - pkg-config文件位于: /storage/Users/currentUser/usr/local/share/pkgconfig/
+### patches/0001-config.guess.patch
 
-## 失败原因分析
+config.guess 添加 HarmonyOS 检测分支：
 
-**主要原因**: 缺少核心X11库依赖链，且cmd-pkgs中没有这些库的预编译包
+```sh
+case $UNAME_MACHINE:$UNAME_SYSTEM:$UNAME_RELEASE:$UNAME_VERSION in
+    *:HarmonyOS:*:*)
+        case $UNAME_MACHINE in
+            aarch64|arm64) echo aarch64-unknown-linux-ohos; exit ;;
+            *) echo "$0: unsupported HarmonyOS machine $UNAME_MACHINE" >&2; exit 1 ;;
+        esac
+        ;;
+esac
+```
 
-**具体原因**:
-1. libXrandr属于X.org库家族，依赖完整的X11基础设施
-2. X11库在鸿蒙平台上较少使用，因此cmd-pkgs中缺少预编译包
-3. 手动编译需要完整的依赖链（libxcb→libX11→libXext→libXrender），工作量较大
+## 产物
 
-**遵循R18原则**:
-- ✅ 已检查cmd-pkgs预编译包列表（561个包）
-- ✅ 已安装可用的预编译包（xorgproto）
-- ❌ 核心依赖libX11等无预编译包，需手动编译
+```
+lib/libXrandr.so -> libXrandr.so.2.2.0
+lib/libXrandr.so.2 -> libXrandr.so.2.2.0
+include/X11/extensions/Xrandr.h
+lib/pkgconfig/xrandr.pc
+licenses/COPYING
+```
 
-## 源码修改
+`xrandr.pc` 的 prefix 在 package 阶段改写为 `${pcfiledir}/../..`（相对化），
+安装的 `libXrandr.la` 被移除。
 
-### 修改文件
-1. **config.guess** - 添加HarmonyOS/__OHOS__检测分支
-   - 使用patch-autotools-ohos.pl自动修复
+## test_package
 
-2. **config.sub** - 添加ohos-linux三元组支持
-   - 使用patch-autotools-ohos.pl自动修复
+- `api_surface.c`：链接期符号面探测（69 个 XRR* 入口点函数指针引用），
+  无需 X server。
+- `alloc_contract.c`：显示无关 ABI 契约 —— XRRAllocModeInfo/XRRFreeModeInfo、
+  XRRAllocGamma/XRRFreeGamma（连续通道 stride）、RANDR 协议版本宏、
+  XRRScreenSize 布局。
+- OHOS 下对测试可执行文件做 `.codesign` 签名后运行。
 
 ## 验证结果
 
-```bash
-# config.guess修复验证
-$ ./config.guess
-aarch64-unknown-linux-ohos  ✅
+- `conan create`（OHOS aarch64, clang 15, Release）：**通过**，
+  两个测试均 `PASS`。
+- `conan-verify`：G0-G4 / L2/L4/L5 全 **PASS**。
+- 产物基线：`libXrandr.so.2.2.0`（OHOS armv8）。
 
-# proto包验证
-$ export PKG_CONFIG_PATH="/storage/Users/currentUser/usr/local/lib/pkgconfig:/storage/Users/currentUser/usr/local/share/pkgconfig"
-$ pkg-config --modversion randrproto
-1.6.0  ✅
+## 遗留问题
 
-# configure失败信息
-$ ./configure --prefix=/storage/Users/currentUser/usr/local
-...
-checking for RANDR... no
-configure: error: Package requirements (x11 >= 1.6 randrproto >= 1.5 xext xextproto xrender renderproto) were not met:
-No package 'x11' found  ❌
-No package 'xext' found  ❌
-No package 'xrender' found  ❌
-```
-
-## 交付物
-
-无（编译失败）
-**失败原因**: 缺少核心X11库依赖（libX11/libXext/libXrender），cmd-pkgs无预编译包，需手动编译完整依赖链
+- `ohpcd` push 权限受限时，仅发布到本地 Conan 缓存，manifest 标 built；
+  上游 CI 合并后由 release 流水线 upload。
 ---
 
-## cmake 构建尝试（2026-05-22）
-
-### cmake 方式验证
-根据任务要求，必须使用 cmake 编译方式而非 autotools（因 HMDFS SELinux 权限限制）。
-
-**尝试过程**:
-1. 创建 CMakeLists.txt（源码原本无 cmake 支持）
-2. 配置 cmake:
-   ```bash
-   cmake .. -DCMAKE_INSTALL_PREFIX=$DEFAULT_PREFIX -DCMAKE_BUILD_TYPE=Release
-   ```
-3. 结果：失败，缺少 x11 依赖
-   ```
-   CMake Error: The following required packages were not found:
-   - x11>=1.6
-   ```
-
-### meson 构建尝试
-源码自带 meson.build，尝试使用 meson 构建：
-```bash
-meson setup build-meson --prefix=$DEFAULT_PREFIX
-```
-结果：失败，缺少 x11 依赖
-```
-Run-time dependency x11 found: NO
-ERROR: Dependency "x11" not found
-```
-
-### 依赖分析
-**已有依赖**:
-- xcb ✅ (pkg-config 可找到)
-- xcb-proto ✅ (1.17.0)
-- xproto/xorgproto ✅ (7.0.31, randrproto 1.6.0)
-
-**缺失依赖** (需手动编译):
-- libX11 (依赖 xcb, xproto - 已满足)
-- libXext (依赖 libX11)
-- libXrender (依赖 libX11)
-
-**编译顺序建议**:
-```
-1. libX11 1.8.13 (基础)
-2. libXext (扩展库)
-3. libXrender (渲染库)
-4. libXrandr (目标)
-```
-
-### 结论
-- cmake 方式已验证，因依赖缺失失败
-- meson 方式同样失败
-- 需要编译完整的 X11 依赖链（libX11→libXext→libXrender→libXrandr）
-- cmd-pkgs 中无 libX11 系列的预编译包
-
----
-**编译结束**: 2026-05-22 14:55
-**最终状态**: failed
-
-**二次编译结束**: 2026-05-22 17:30
-**最终状态**: failed (依赖缺失)
----
-
-**编译结束**: 2026-05-25 10:53
+**编译结束**: 2026-09-03 12:35
 **最终状态**: built

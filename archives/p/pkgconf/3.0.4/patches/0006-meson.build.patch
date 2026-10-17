@@ -1,0 +1,90 @@
+--- a/meson.build
++++ b/meson.build
+@@ -351,23 +351,52 @@ test_api_serialize_exe = executable('test-api-serialize',
+ test('api-serialize', test_api_serialize_exe)
+ 
+ # Allocation-failure (OOM) tests.  These drive the shared fuzzer/alloc-inject
+-# fault injector through the linker's --wrap, so they are built wherever --wrap
+-# is supported: glibc and musl Linux (GNU ld / lld), and skipped on macOS ld64
+-# and MSVC.
++# fault injector through the linker's --wrap, so they are built wherever the
++# target linker provides working --wrap semantics.
+ #
+ # alloc-inject wraps reallocarray() and so references __real_reallocarray; --wrap
+ # can only bind that to a reallocarray the libc actually provides.  On platforms
+ # too old to have it (e.g. glibc < 2.26) the link would fail, so skip there.
+-build_oom_tests = host_machine.system() == 'linux' \
+-  and cc.has_link_argument('-Wl,--wrap=calloc') \
+-  and have_reallocarray
+-
+ # Allocator set wrapped by fuzzer/alloc-inject.c.
+ oom_wrap_args = [
+   '-Wl,--wrap=malloc', '-Wl,--wrap=calloc', '-Wl,--wrap=realloc',
+   '-Wl,--wrap=reallocarray', '-Wl,--wrap=strdup', '-Wl,--wrap=strndup',
+ ]
+ 
++oom_wrap_probe = '''
++#include <stddef.h>
++#include <stdlib.h>
++
++void *__real_calloc(size_t, size_t);
++
++void *
++__wrap_calloc(size_t nmemb, size_t size)
++{
++  return __real_calloc(nmemb, size);
++}
++
++int
++main(void)
++{
++  void *(*volatile call_calloc)(size_t, size_t) = calloc;
++  void *ptr = call_calloc(1, 1);
++  free(ptr);
++  return ptr == NULL;
++}
++'''
++
++have_oom_wrap = cc.links(
++  oom_wrap_probe,
++  args : ['-Wl,--wrap=calloc'],
++  name : 'linker supports --wrap semantics',
++)
++
++oom_reallocarray_sources = []
++if not have_reallocarray and get_option('test-reallocarray-shim')
++  oom_reallocarray_sources = files('tests/api/reallocarray-shim.c')
++endif
++build_oom_tests = have_oom_wrap and (have_reallocarray or oom_reallocarray_sources.length() == 1)
++
+ if build_oom_tests
+   # Unit test: fault-inject spdxtool's own allocations.  It links libpkgconf
+   # normally (shared); only spdxtool's compiled-in allocations are wrapped,
+@@ -380,6 +409,7 @@ if build_oom_tests
+     'cli/spdxtool/serialize.c',
+     'cli/spdxtool/simplelicensing.c',
+     'cli/spdxtool/util.c',
++    oom_reallocarray_sources,
+     windows_manifest,
+     link_with : libpkgconf,
+     c_args : build_static,
+@@ -408,6 +438,7 @@ if build_oom_tests
+       'fuzzer/replay.c',
+       'fuzzer' / (r[0] + '-fuzzer.c'),
+       'fuzzer/alloc-inject.c',
++      oom_reallocarray_sources,
+       link_with : libpkgconf_fault,
+       c_args : build_static,
+       link_args : oom_wrap_args,
+@@ -416,6 +447,11 @@ if build_oom_tests
+       build_by_default : false)
+     # The exhaustive per-input injection loop is slow under ASAN; give it room.
+     test('fuzz-replay-' + r[0], replay_exe, args : [r[1]], timeout : 120)
++    if r[0] == 'parser'
++      test('fuzz-replay-missing-path', replay_exe,
++        args : [join_paths(meson.current_build_dir(), 'missing-fuzz-corpus')],
++        should_fail : true)
++    endif
+   endforeach
+ endif
+ 

@@ -1,0 +1,53 @@
+id: E586
+title: zsh here-document 用 TMPPREFIX 而非 TMPDIR —— /tmp 只读平台上 CI 脚本 L0 门禁假失败
+trigger_tool: zsh|build_and_test.sh|junk_check.sh|setup.sh
+phase: testing|configuration
+error_signature: can't create temp file for here document|read-only file system
+severity: 2
+category: ohos, testing, filesystem, build-system
+keywords: zsh, TMPPREFIX, TMPDIR, here-document, heredoc, /tmp 只读, erofs, read-only file system, L0 门禁, 本地 CI 模拟, W3
+match_keywords: can't create temp file for here document, read-only file system, TMPPREFIX, heredoc, /tmp 只读, erofs, build_and_test.sh, L0, W3 本地 CI 模拟, zsh
+root_cause: zsh 的 here-document 走的是 TMPPREFIX（默认 /tmp/zsh）创建的临时文件，而不是 TMPDIR。鸿蒙 PC worker 上 /tmp 是只读 erofs 挂载，因此 zsh 脚本中的任何 <<EOF 重定向都立即失败并报 "can't create temp file for here document: read-only file system"。ci/conan/build_and_test.sh 等 CI 脚本内含大量 heredoc 生成预下载/配置片段，于是本地 CI 模拟（W3）会在 L0 阶段假失败，且报错位置与真实构建问题无关，极易被误诊为依赖或配方问题。python 侧（tempfile）遵守 TMPDIR，所以"python 能跑、zsh 脚本挂"的割裂现象正是本条的指纹。
+affected_scope: 所有在 /tmp 只读（erofs/只读挂载/受限容器）的 worker 上运行含 heredoc 的 zsh CI 脚本的任务；尤其在只设置 TMPDIR 而未设置 TMPPREFIX 时。对 bash（用 TMPDIR）无影响，故表现为"同一脚本换 shell 就正常"。
+verification_cmd: zsh -c 'cat <<EOF\nhello\nEOF'（报 can't create temp file for here document）；TMPPREFIX=$HOME/tmp/zsh zsh -c 'cat <<EOF\nhello\nEOF'（输出 hello）
+rec_priority: 1
+rec_approach: export-tmpprefix-writable-dir
+rec_description: 在调用任何会落到 zsh 的长链路命令（finish / build / submit 的 W3 本地 CI 模拟）之前，把 TMPPREFIX 与 TMPDIR 一并指向可写目录再导出。ohc-run.py 的 workflow_checks._run 会复制 os.environ，因此父进程导出即可穿透到子 zsh，无需改框架文件（协作者铁律：不改 scripts/ci）。验证口径不是"命令没报错"，而是 bash 侧 heredoc 与 zsh 侧 heredoc 在同一环境下都能生成临时文件。
+rec_command: |
+  export TMPDIR=$HOME/tmp
+  export TMPPREFIX=$HOME/tmp/zsh
+  mkdir -p "$TMPPREFIX"
+  # 再跑 finish / submit，使 W3 的 zsh 子进程继承：
+  OHC_PROJECT_DIR=$PWD python3 $SKILL_ROOT/scripts/ohc-run.py finish <pkg> <ver> built
+rec_auto_fix: false
+rec_impl: env
+fallback_priority: 2
+fallback_approach: wrapper-preflight-probe
+fallback_description: 若不便全局导出，可先做一次探针：用 zsh 试写一个 heredoc，失败则判定本 worker 属只读 /tmp 环境，再决定是否绕过或改为在可写目录下执行。探针放在长链路之前，避免跑了几分钟才在 L0 挂掉。
+fallback_command: zsh -c 'cat <<EOF >/dev/null\nprobe\nEOF' || echo "TMPPREFIX not writable -> export TMPPREFIX=$HOME/tmp/zsh"
+fallback_auto_fix: false
+fallback_impl: shell
+forbid_1_pattern: mount -o remount.*tmp|chmod.*\s/tmp$|sudo.*tmp
+forbid_1_reason: /tmp 的可写性是宿主/容器挂载策略，worker 无权也不应改动只读 mount；改挂载会污染他人任务并可能损坏平台。
+forbid_1_consequence: 越权修改宿主挂载，任务环境不可复现，且违反协作边界。
+forbid_2_pattern: 认为.*依赖.*未发布|dependency_missing.*heredoc
+forbid_2_reason: heredoc 失败的信息与依赖缺失完全不同，误判为 dependency_missing 会导致错误止损上报（R41 口径要求证据可复核）。
+forbid_2_consequence: 把可修复的环境问题上报成依赖缺失，浪费一次任务并污染依赖缺口统计。
+principles: P003, P007
+causes: []
+caused_by: []
+similar_to: []
+conflicts_with: []
+prerequisite_of: []
+doc_file: doc/E586.md
+last_updated: 2026-09-25
+source_event: ld2410-ble 0.2.0 适配 —— finish 的 W3 本地 CI 模拟因 zsh heredoc 无法在只读 /tmp 建临时文件而假失败
+authors: AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:
+source_commit:
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 1.0
+metrics_last_used: 2026-09-25
+draft: true
+contributor_id: 9F3C

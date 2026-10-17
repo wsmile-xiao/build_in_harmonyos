@@ -1,0 +1,113 @@
+# test_package/MANIFEST.yml
+# 上游官方测试声明文件
+# CI 脚本 (build_and_test.sh L0e) 强制要求此文件存在
+# 详见: docs/TEST_QUALITY_SPEC.md
+
+package: sobjectizer/5.7.4
+homepage: "https://github.com/Stiffstream/sobjectizer"
+
+# 上游测试套件存在性（经审计官方源码 tar 包确认）
+upstream_tests_exist: true
+upstream_test_total: 319
+upstream_test_count_method: "ctest -N（实测 'Total Tests: 319'）"
+
+# 上游测试命令：CTest，由 CMake 在 -DBUILD_TESTS=ON 时 enable_testing() 注册
+upstream_check_command: "ctest --test-dir <build> --output-on-failure --no-tests=error"
+upstream_test_in_build: true
+upstream_test_command: >-
+  配方 build() 末尾直接执行 `ctest --test-dir <build> --output-on-failure
+  --no-tests=error --timeout 900 -j1`（用户态模拟器下附加
+  -E "_unit.test.spinlocks.llvm_inspired_test"），调用的是上游自己的测试套件，
+  未替换任何用例。
+
+# 上游测试套件审计结论
+# 源码: sobjectizer v.5.7.4.tar.gz（GitHub Stiffstream/sobjectizer，
+#       sha256 f032d071579d80fb423171d411ae0e33af0da46776ca0db7eb1d933c69fb0726）
+upstream_test_audit:
+  source_tarball: "v.5.7.4.tar.gz (https://github.com/Stiffstream/sobjectizer/archive/v.5.7.4.tar.gz)"
+  source_sha256: "f032d071579d80fb423171d411ae0e33af0da46776ca0db7eb1d933c69fb0726"
+  build_system: "CMake（仓库根无 CMakeLists.txt，工程根在 dev/ 子目录）"
+  scanned_for:
+    - "enable_testing()/add_test() 注册（上游 dev/CMakeLists.txt + dev/test/so_5/**）"
+    - "CTest 属性（ctest -N 实测注册数）"
+    - "上游自带测试框架（dev/test/3rd_party/utest_helper）"
+  scan_result: >-
+    上游 dev/CMakeLists.txt 在 BUILD_ALL 或 BUILD_TESTS 为 ON 时调用
+    enable_testing() 并 add_subdirectory(test/so_5)，共注册 319 个 ctest 用例
+    （cmake 生成 376 个 CTestTestfile.cmake，ctest -N 汇总为 319 个 add_test）。
+    用例为 _unit.test.<模块>.<名> 形式的独立可执行文件，覆盖 agent/coop/mbox/
+    mchain/disp/timer_thread/state/enveloped_msg/msg_tracing/message_limits/
+    env_infrastructure/testing(so_5::testing v1) 等全部子系统；另有
+    _test.bench.* 基准程序（不注册为 ctest 用例）。
+  reason: >-
+    上游自带完整 CTest 套件，故 test_package 不重复跑（避免双倍耗时），
+    上游测试在配方 build() 内真实执行并汇报通过率。
+
+# 上游实际运行的测试程序
+upstream_tests:
+  - name: "CTest 套件（319 个 _unit.test.* 可执行文件）"
+    framework: "上游自带 dev/test/3rd_party/utest_helper + CTest"
+    command: "ctest --test-dir <build> --no-tests=error --timeout 900 -j1"
+    registered: 319
+    executed: 318
+    passed: 318
+    excluded: 1
+    exclusion_reason: >-
+      _unit.test.spinlocks.llvm_inspired_test 是纯用户态 TATAS 自旋锁压力测试
+      (8 线程 x 64K 迭代)。qemu【用户态】模拟器没有 guest 内核调度器，自旋线程
+      会饿死同 guest 其它线程形成活锁（实测 10 线程 8 秒墙钟烧掉 62 秒 CPU 仍不
+      结束）。三条证据表明这是模拟器局限而非库在 aarch64 上的缺陷：
+      (1) 同一份 main.cpp 原生 x86-64 g++ -O2 编译后 60 秒内通过；
+      (2) qemu-aarch64 下把 kIters 从 64K 降到 1024 即通过（证明实现正确）；
+      (3) 真机 DAYU200 (OpenHarmony 6.0.0.47, aarch64) 上该用例正常通过。
+      配方仅在检测到【用户态 qemu】时用 ctest -E 精确排除该用例；qemu-system
+      全系统模拟与真机/CI 不受影响，319 个用例完整执行。
+
+# test_package 中自带的测试（消费者视角验证，真实调用库 API）
+test_package_tests:
+  - file: test_sobjectizer.cpp（目标 test_sobjectizer，经 Conan CMakeDeps 的 sobjectizer::SharedLib 链接）
+    description: >-
+      Part 1 版本断言：SO_5_VERSION 必须等于打包版本 "5.7.4"。
+      Part 2 环境生命周期闭环：launch -> introduce_coop -> make_agent ->
+      so_direct_mbox -> 立即消息(so_5::send) -> 延迟消息(so_5::send_delayed，
+      经真实 timer_thread) -> 处理器回调计数 -> so_environment().stop()，
+      断言 immediate==1 且 delayed==1。
+      Part 3【rule 12 消费者端到端】两个 agent 订阅同一个真实 mbox 做
+      ping/pong 往返 1000 次（msg_ping/msg_pong 经 SObjectizer 运行时派发），
+      断言 pinger 收到 pongs==1000 且 ponger 收到 pings==1000。
+      输出 HMBS_TEST_PACKAGE_RESULT={"checks":N,"failed":M} 并断言 failed==0。
+    command: >-
+      ./test_sobjectizer（由 test_package/conanfile.py test() 经 self.run 实际执行；
+      aarch64 目标经 profile 的 CMAKE_CROSSCOMPILING_EMULATOR 运行）
+    assertions: 8
+  - file: test_sobjectizer_static.cpp（目标 test_sobjectizer_static，经 CMakeDeps 的 sobjectizer::StaticLib 链接）
+    description: >-
+      静态库消费者的独立验证：直接链接打包产物 libso_s.a（该目标 PUBLIC 定义
+      SO_5_STATIC_LIB，是与共享库不同的编译配置），跑一遍
+      launch -> introduce_coop -> make_agent -> 消息 -> stop，
+      断言 SO_5_VERSION=="5.7.4" 且消息往返计数==1。
+      输出 HMBS_TEST_STATIC_RESULT={"version_ok":...,"roundtrip_ok":...}。
+    command: "./test_sobjectizer_static"
+    assertions: 3
+
+upstream_tests_exist_note: >-
+  上游自带 319 个 ctest 用例并在配方 build() 内执行（318 通过 + 1 在用户态模拟器下
+  排除）；test_package 另做消费者视角验证（共享库 8 项 + 静态库 3 项断言）。
+
+harmonyos_specific_tests:
+  - name: "SObjectizer actor 消息往返（OHOS aarch64 消费者端到端）"
+    file: "test_package/test_sobjectizer.cpp (Part 3)"
+    what: >-
+      通过打包后的库在鸿蒙 aarch64 上跑通完整消费者流程：so_5::launch 建立
+      SO Environment 与 dispatcher -> introduce_coop 注册两个 agent ->
+      env.create_mbox() 建立公共邮箱 -> so_5::send<msg_ping>/send<msg_pong>
+      经运行时派发 1000 次往返 -> 计数校验 -> so_environment().stop() 优雅退出。
+      Part 2 另验证延迟消息走真实 timer_thread（send_delayed -> 定时器 ->
+      处理器回调）。这是真实调用库 API 的完整流程，而非纯断言。
+    evidence: >-
+      本地验证（profile ohos-aarch64-run，二进制经 qemu-aarch64 执行）：
+      test_package 阶段实际执行 test_sobjectizer 与 test_sobjectizer_static，
+      由 test_package/conanfile.py test() 经 self.run 调用并采集退出码。
+    device_evidence:
+      serial: "450100445634303332018f3e7d2dba00"
+      system: "OpenHarmony 6.0.0.47 (API20, aarch64, 64bit)"

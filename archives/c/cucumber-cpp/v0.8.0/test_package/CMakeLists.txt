@@ -1,0 +1,13 @@
+cmake_minimum_required(VERSION 3.16)
+project(cucumber_cpp_test_package CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+find_package(CucumberCpp REQUIRED)
+add_executable(test_package test.cpp)
+target_link_libraries(test_package PRIVATE CucumberCpp::cucumber-cpp)
+# Ensure pthread on OHOS/Linux
+if(UNIX)
+    find_package(Threads REQUIRED)
+    target_link_libraries(test_package PRIVATE Threads::Threads)
+endif()

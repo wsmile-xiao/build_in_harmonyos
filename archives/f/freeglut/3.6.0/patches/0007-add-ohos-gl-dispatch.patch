@@ -1,0 +1,172 @@
+--- /dev/null
++++ b/src/ohos/fg_gl_dispatch_ohos.c
+@@ -0,0 +1,169 @@
++/*
++ * fg_gl_dispatch_ohos.c
++ *
++ * GL entry-point dispatch and GLES1 compatibility layer for OpenHarmony.
++ *
++ * Why this file exists
++ * --------------------
++ * 1) Dispatcher stubs.  On OHOS, the GL symbols exported directly by
++ *    libGLESv2.so are dispatcher stubs, not the driver functions.  Verified on
++ *    device: in a process with a current GLES2 context,
++ *
++ *        glGetString(GL_VERSION)               -> NULL      (direct symbol)
++ *        eglGetProcAddress("glGetString")(...) -> "OpenGL ES 3.2 B301"
++ *
++ *    and glClear()+glReadPixels() through the direct symbols reports no error
++ *    yet leaves the framebuffer untouched.  The same entry points obtained via
++ *    eglGetProcAddress() are the real driver functions and do render.
++ *
++ *    freeglut calls GL functions directly, so without this layer every GL call
++ *    made *inside* the library would silently hit a stub and do nothing.
++ *    The wrappers below re-route the affected entry points through
++ *    eglGetProcAddress().  They are compiled into libfreeglut and bound
++ *    locally (-Wl,-Bsymbolic) so that freeglut's own calls resolve here
++ *    instead of to libGLESv2's stubs.
++ *
++ * 2) GLES1 fixed-function stubs.  OHOS ships only GLESv2/GLESv3 headers and
++ *    libraries -- there is no GLES1 (GLESv1_CM) -- yet freeglut's core still
++ *    references fixed-function entry points (immediate mode, vertex arrays)
++ *    from fg_font.c, fg_menu.c and fg_geometry.c.  Those functions have no
++ *    implementation anywhere on OHOS, so they are provided here as no-ops and
++ *    reported once.  Consequently, the GLES1-only drawing paths inside freeglut
++ *    (bitmap fonts, menu rendering, quadrics/NURBS immediate-mode output) do
++ *    not render on OHOS.  Everything else -- window/context lifetime, state
++ *    queries, buffers, and any GLES2 shader-based rendering performed by the
++ *    application -- works normally.  Use GLU over OSMesa or application-side
++ *    shaders if immediate-mode geometry output is required.
++ */
++#include <stdio.h>
++
++#include <EGL/egl.h>
++#include <GLES2/gl2.h>
++
++/* ------------------------------------------------------------------------- */
++/* 1) GLES2 dispatcher wrappers (resolve through eglGetProcAddress)          */
++/* ------------------------------------------------------------------------- */
++
++typedef const GLubyte *(*PFN_GLGETSTRING)(GLenum);
++typedef GLenum         (*PFN_GLGETERROR)(void);
++typedef void           (*PFN_GLGETINTEGERV)(GLenum, GLint *);
++typedef void           (*PFN_GLGETFLOATV)(GLenum, GLfloat *);
++typedef void           (*PFN_GLVIEWPORT)(GLint, GLint, GLsizei, GLsizei);
++typedef void           (*PFN_GLFLUSH)(void);
++
++const GLubyte *glGetString(GLenum name)
++{
++    static PFN_GLGETSTRING real;
++    if (!real)
++        real = (PFN_GLGETSTRING)eglGetProcAddress("glGetString");
++    return real ? real(name) : NULL;
++}
++
++GLenum glGetError(void)
++{
++    static PFN_GLGETERROR real;
++    if (!real)
++        real = (PFN_GLGETERROR)eglGetProcAddress("glGetError");
++    return real ? real() : GL_NO_ERROR;
++}
++
++void glGetIntegerv(GLenum pname, GLint *params)
++{
++    static PFN_GLGETINTEGERV real;
++    if (!real)
++        real = (PFN_GLGETINTEGERV)eglGetProcAddress("glGetIntegerv");
++    if (real)
++        real(pname, params);
++    else if (params)
++        *params = 0;
++}
++
++void glGetFloatv(GLenum pname, GLfloat *params)
++{
++    static PFN_GLGETFLOATV real;
++    if (!real)
++        real = (PFN_GLGETFLOATV)eglGetProcAddress("glGetFloatv");
++    if (real)
++        real(pname, params);
++    else if (params)
++        *params = 0.0f;
++}
++
++void glViewport(GLint x, GLint y, GLsizei width, GLsizei height)
++{
++    static PFN_GLVIEWPORT real;
++    if (!real)
++        real = (PFN_GLVIEWPORT)eglGetProcAddress("glViewport");
++    if (real)
++        real(x, y, width, height);
++}
++
++void glFlush(void)
++{
++    static PFN_GLFLUSH real;
++    if (!real)
++        real = (PFN_GLFLUSH)eglGetProcAddress("glFlush");
++    if (real)
++        real();
++}
++
++/* ------------------------------------------------------------------------- */
++/* 2) GLES1 fixed-function no-op stubs (no implementation exists on OHOS)    */
++/* ------------------------------------------------------------------------- */
++
++static void fg_ohos_gles1_unsupported(const char *fn)
++{
++    static int warned = 0;
++    if (!warned) {
++        warned = 1;
++        fprintf(stderr,
++                "[freeglut/OHOS] GLES1 fixed-function entry point '%s' called, "
++                "but OHOS provides no OpenGL ES 1.x implementation; the call is "
++                "ignored. Bitmap fonts / menu rendering / immediate-mode "
++                "geometry inside freeglut will not render.\n", fn);
++    }
++}
++
++void glBegin(GLenum mode)          { (void)mode; fg_ohos_gles1_unsupported("glBegin"); }
++void glEnd(void)                   { fg_ohos_gles1_unsupported("glEnd"); }
++/*
++ * glColor4f is special among the GLES1 fixed-function entries: on OHOS it IS
++ * resolvable through eglGetProcAddress() (measured: of the seven fixed-function
++ * entries used by freeglut, only glColor4f returns non-NULL).  So try the real
++ * entry point first and only fall back to a no-op when it is unavailable --
++ * silently discarding a call that the driver can actually service would make
++ * the GLES1 gap look wider than it is.
++ */
++void glColor4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a)
++{
++    typedef void (*PFN_GLCOLOR4F)(GLfloat, GLfloat, GLfloat, GLfloat);
++    static PFN_GLCOLOR4F real;
++    static int probed = 0;
++
++    if (!probed) {
++        real = (PFN_GLCOLOR4F)eglGetProcAddress("glColor4f");
++        probed = 1;
++    }
++
++    if (real)
++        real(r, g, b, a);
++    else
++        fg_ohos_gles1_unsupported("glColor4f");
++}
++
++void glColor4fv(const GLfloat *v)  { (void)v; }
++void glNormal3fv(const GLfloat *v) { (void)v; }
++void glTexCoord2fv(const GLfloat *v) { (void)v; }
++void glVertex3fv(const GLfloat *v) { (void)v; }
++
++/* ------------------------------------------------------------------------- */
++/* 3) Serial-port (dial & button box) stubs -- no such device on OHOS        */
++/* ------------------------------------------------------------------------- */
++
++typedef struct _serialport SERIALPORT;
++
++SERIALPORT *fg_serial_open ( const char *device ) { (void)device; return NULL; }
++void fg_serial_close ( SERIALPORT *port ) { (void)port; }
++int  fg_serial_getchar ( SERIALPORT *port ) { (void)port; return EOF; }
++int  fg_serial_putchar ( SERIALPORT *port, unsigned char ch ) { (void)port; (void)ch; return 0; }
++void fg_serial_flush ( SERIALPORT *port ) { (void)port; }

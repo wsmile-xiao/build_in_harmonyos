@@ -1,0 +1,50 @@
+# DRAFT - mpich（--disable-romio）缺 MPI-IO 声明时给消费库补 stdio 兼容头
+# 与同 stem 的 E-new-mpich-noromio-mpio-compat.md 成对（同字段/同主题）
+# 来源：combblas 2.0.0 适配（PR #9161，2026-09-09）
+
+id: DRAFT-MPICH-NOROMIO-MPIO-COMPAT
+stem: E-new-mpich-noromio-mpio-compat
+severity: 3
+category: mpi, mpich, romio, portability, conan-recipe, cmake
+tools: clang, mpich, mpi.h, cmake, conan
+stage: compile, link
+
+error_signature: |
+  use of undeclared identifier 'MPI_MODE_CREATE'|use of undeclared identifier 'MPI_MODE_WRONLY'|
+  use of undeclared identifier 'MPI_File_open'|use of undeclared identifier 'MPI_File_close'|
+  use of undeclared identifier 'MPI_File_read_at'|MPI_File_write|MPI_File_set_view|
+  typedef redefinition with different types .*MPI_File|member access into incomplete type 'struct ADIOI_FileD'
+
+root_cause: |
+  ohpcd 的 mpich/4.0.3 配方 --disable-romio（ROMIO=MPI-IO 实现被禁用）：
+  1) mpi.h 缺 MPI_MODE_CREATE/WRONLY/RDONLY 宏（仅剩 NOCHECK/NOSTORE/NOPUT/NOPRECEDE/
+     NOSUCCEED）；
+  2) MPI_File_open/close/read_at/write/write_all/set_view 函数声明缺失；
+  3) MPI_File 类型有 typedef（typedef struct ADIOI_FileD *MPI_File）但 ADIOI_FileD
+     结构未定义（不完整类型）。
+  消费 MPI-IO 的库（combblas SpParHelper/FullyDistSpVec/SpParMat 读 Matrix Market、
+  DebugPrintKeys 写临时文件）直接编译报 undeclared identifier。
+  MPI-IO 由 ROMIO 提供，--disable-romio 后类型保留但函数/宏缺失，且无法用链接
+  libromio 解决（库也没编）。
+
+recommendation: |
+  stdio-mpio-compat-header（在消费库公共主头 patch stdio 实现的 MPI-IO 兼容头）：
+  (1) 补全不完整类型：struct ADIOI_FileD { FILE * f; };（mpi.h 只 typedef 了指针，
+      补结构体即可，不重复 typedef——重复报 "typedef redefinition with different
+      types"）；
+  (2) stdio 实现：MPI_File_open→fopen（CREATE 用 "wb+" 否则 "rb"）、close→fclose、
+      set_view→fseek(SEEK_SET)、write/write_all→fwrite、read_at→fseek+fread；
+  (3) MPI_Status 兼容：mpich 的 MPI_Status 是 {count_lo, count_hi_and_cancelled,
+      MPI_SOURCE, MPI_TAG, MPI_ERROR}（无 count 字段）→ read_at 写 st->count_lo；
+      MPI_Get_count 已在 mpi_proto.h 声明，不要重复定义；
+  (4) 单进程语义：等价单进程场景（每 rank 独立 fopen/fseek），多进程并行 I/O 语义
+      不保真，适配时明确标注适用范围。
+  插入位置：主头 #include <mpi.h> 之后（保证 MPI_File 类型可用）。
+
+verification: |
+  conan create archives/c/combblas/2.0.0 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+  # 预期：configure 无 MPI_File/MPI_MODE 未声明错误，EXIT=0，test_package 输出 combblas OK
+
+keywords: |
+  mpich, romio, MPI-IO, MPI_File, MPI_MODE_CREATE, ADIOI_FileD, mpi.h, disable-romio,
+  mpio compat, stdio, fopen, fseek, MPI_Status, count_lo, combblas, OHOS, clang

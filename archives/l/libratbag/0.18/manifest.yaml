@@ -1,0 +1,175 @@
+package: libratbag
+version: "0.18"
+homepage: "https://github.com/libratbag/libratbag"
+license: MIT
+status: built
+build_system: meson
+build_date: "2026-09-20"
+
+source:
+  url: "https://github.com/libratbag/libratbag/archive/refs/tags/v0.18.tar.gz"
+  sha256: "8a7f8bf00c21ef5ad534e2804ed537f2fc6521a3932dd822c438e561a85a1bcd"
+  tar_format: tar.gz
+  notes: >-
+    上游 releases 页只有 GitHub 自动生成的 Source code 归档，没有手工上传的
+    libratbag-0.18.tar.gz 资产（/releases/download/v0.18/... 实测 404），因此用
+    tag archive URL。解出目录 libratbag-0.18/，配方用 strip_root=True 拉平。
+    仓库不复用 git submodule，subprojects/ 为空，wrap_mode=nodownload 不会联网。
+
+build:
+  system: meson
+  configure_options:
+    - "default_library=shared"
+    - "wrap_mode=nodownload"
+    - "documentation=false"
+    - "tests=true"
+    - "systemd=false"
+    - "python-bindings=false"
+  dependencies:
+    - glib/2.84.0.1
+    - eudev/3.2.14
+    - libevdev/1.13.7
+    - json-glib/1.10.6
+    - libunistring/1.0
+    - systemd/261
+  tool_requires:
+    - meson/1.11.0
+  test_requires:
+    - check/0.15.2
+
+patches_applied:
+  - file: patches/0001-meson-make-python-bindings-optional.patch
+    type: portability
+    description: >-
+      把 swig 生成的 Python 绑定（需要 swig + libpython）改成可选：
+      meson_options.txt 新增 option('python-bindings', ...)，meson.build 里把
+      libpython 查找与 swig 块（swig = find_program('swig') 到
+      ratbag-command 的 custom_target）整体包进 if enable_python_bindings。
+      OHOS 上没有 swig、也没有 libpython，运行时用 -Dpython-bindings=false。
+  # 注：musl 无 glibc 的 program_invocation_short_name 一事**不再走补丁**。
+  # 旧 0002 在 5 个源文件里插 #ifdef __OHOS__ 平台条件块（并把程序名硬编码成
+  # 安装名字面量），违反 .gitcode/review-memory.md R8（patches/ 默认不得引入
+  # 平台宏）。现改为配方层 feature detection：shim/progname_shim.h 用
+  # #ifndef __GLIBC__ 把该标识符别名到 musl 的 __progname，由 conanfile.py 的
+  # _progname_shim_args() 以 -include 强制注入，上游源码零改动（同
+  # archives/k/kbd/2.9.0 做法）。
+
+knowledge_gained:
+  - "★ meson 只给「在 dependencies: 里显式声明了该 dependency 的目标」注入它的 -I/-L —— 公共头里 #include 的第三方头，若某个目标没声明对应 dependency，就不会拿到 -I。libratbag 的 src/libratbag-util.h:34 `#include <libudev.h>`，而 meson.build 里 libhidpp（deps_libhidpp = [dep_lm]，:108）、libasus（[]，:120）、liblur（:138）都没声明 dep_udev ⇒ 编译行里一个 eudev 的 -I 都没有。Linux 上没人发现是因为发行版 libudev-dev 把 libudev.h 装进 /usr/include（编译器默认搜索路径）；Conan 包的头在 <pkg>/include，不在默认路径，于是必然 'libudev.h' file not found。修法与上游自己的 add_project_arguments(cflags, language: 'c')（meson.build:45）同语义：MesonToolchain.extra_cflags 里加项目级 -I<eudev>/include，一次覆盖全部目标，不改上游 meson.build、不加补丁。"
+  - "★ Conan 的 MesonToolchain 在 buildtype != debug 时硬编码 b_ndebug=true（meson_toolchain.py），写进 native file 的 [built-in options]，使每条编译行都带 -DNDEBUG；而 meson 自己的 b_ndebug 默认是 false。上游若像 libratbag 那样用 `#ifdef NDEBUG / #error relies on assert(). Do not define NDEBUG` 硬拒，就会全量编译失败。修法：MesonToolchain(self) 之后显式 toolchain.b_ndebug = 'false' 恢复上游语义（同时保住 meson test 里断言的有效性）。判据：报错来自上游源码里的 #error NDEBUG 保护且每条 .c 都中招时，先怀疑 Conan 塞的 -DNDEBUG。"
+  - "已发布的 systemd 包的 lib/pkgconfig/ 可能是空目录（其 build() 只构建 libsystemd 目标、不走 meson.install()，meson pkg.generate() 的产物没落盘），而 PkgConfigDeps 生成的是按包名的 systemd.pc —— 两处叠加使 dependency('libsystemd') 报 not found。消费者侧兜底：在 generators_folder（meson 的 pkg_config_path 首位）写一份最小 libsystemd.pc，prefix 指向真实包目录（原包是 --prefix=/ + DESTDIR 装的，直接复制会让 -I 落到根目录）；Version 取自 dependency.ref.version 以满足上游 >= 版本约束。"
+  - "OHOS 上 glib 与子项目 proxy-libintl 一起构建，g_libintl_* 在 glib 包里，但 glib 的 package_info 没声明 intl 系统库 ⇒ PkgConfigDeps 生成的 glib-2.0.pc 缺 -lintl ⇒ 消费者 undefined reference to 'g_libintl_*'。修法：就地增补生成的 .pc 并把 -lintl 加进 meson 的 c_link_args（同思路见 archives/a/accountsservice/26.27.3 的 _prepare_systemd_stub()）。"
+  - "★ program_invocation_short_name / program_invocation_name 是 **glibc 扩展**：<errno.h> 只在 _GNU_SOURCE 下声明它们，OHOS 的 musl 头文件不声明 ⇒ 编译期 `use of undeclared identifier`。它们是 C 运行时在 main 之前按 argv[0] 的 basename 填好的全局量，上游只是拿它打 usage 的程序名，属交互细节而非功能。三种修法里只有一种对：①加 extern 声明（赌 musl 是否导出该符号，链接期才炸）✗；②改用 getprogname()（BSD 专有，glibc 没有）✗；③**`#ifndef __GLIBC__` 下 `#define program_invocation_short_name __progname`** ✓ —— musl 的动态加载器明确提供语义完全相同的 __progname（同为 argv[0] 的 basename，非「赌」。★ 早期版本用 `#ifdef __OHOS__` 做平台宏并在 5 个源文件里各插一段，被 AI 检视判 🟠 High（违反 .gitcode/review-memory.md R8：patches/ 补丁默认禁止引入平台条件宏，libc 差异应在配方层用 feature detection 解决）——正解是把 shim 头放进 recipes 的 shim/、`exports = [...]` 导出、generate() 里以 `-include` 强制注入，上游源码零改动；仓库先例 archives/k/kbd/2.9.0/shim/progname_shim.h（src 里 10 处同一符号）。判据用 libc 家族（__GLIBC__）而非 OS（__OHOS__）。★ 这类符号往往是**分批暴露**的：编译到第一个出错目标就停，修好后再往下编才看到后面还有。libratbag 就是先只扫到 tools/ 的 4 个 CLI，tools/ 修好后 CI 才走到 ratbagd/ratbagd.c 又报同一个符号（ratbagd 与 ratbagd.devel 各一遍）。修此类报错时不要只按首轮的报错文件清单收口，应全树 grep 该符号，一次覆盖。"
+  - "★ cc.find_library('X') 只探库、不探头：它返回的是裸库对象，**不携带 include 目录**，meson 因此不会为它注入 -I。上游若靠发行版把 X 的头装进 /usr/include（默认搜索路径）而侥幸编过，搬到 Conan 包（头在 <pkg>/include）就会 fatal error: 'xxx.h' file not found。判据：configure 阶段有 `Library X found: YES`，但编译行里一个 -I 都没有。修法与 dependency() 缺 -I 的情形同构：把该依赖的 cpp_info.includedirs 作为项目级 -I 注入（MesonToolchain.extra_cflags）。libratbag 两处同源：meson.build:68 的 cc.find_library('unistring') ⇒ ratbagd/ratbagd-profile.c:34-35 的 <unistr.h>/<uniconv.h> 找不到。"
+  - "★ 《Error loading shared library <name>: (needed by <owner>)》里**冒号后为空**（无 strerror）要读成「库被找到了、但载不进」，不是「找不到」（后者会打印 No such file or directory）。最常见的来源是**已发布依赖包的 .so 带一段旧工具链产出的 .codesign**，当前 OHOS 内核拒绝映射它——缺签名可以（eudev/libevdev 的 .so 无 .codesign 段，同样的符号链接 soname 却载得进），**签名失效不行**。修法（消费者侧、缓存只读）：realpath 解开 soname 符号链接 → 把真文件 copyfile 进自己的构建目录（chmod 755）→ llvm-objcopy --remove-section .codesign → binary-sign-tool sign -selfSign 1 重签 → 把该目录**前置**到 LD_LIBRARY_PATH。只物化载不进的这一个，别把全部 soname 抄一遍。libratbag 实例：json-glib/1.10.6 的 libjson-glib-1.0.so.0，先例 archives/g/gxr/0.15.1 备注表第 10 行。"
+
+notes: |
+  meson 项目，**一个 portability 补丁**：0001 只动 meson 构建脚本（不动 C 源码）。
+  另有配方层的 C 运行时 shim（shim/progname_shim.h，见下），不走补丁。
+
+  0) program_invocation_short_name。tools/ 下 4 个工具的 usage() 用它打程序名，
+     ratbagd/ratbagd.c 的 log_error() 也用它打错误前缀，它是 glibc 扩展
+     （<errno.h> 只在 _GNU_SOURCE 下声明），OHOS 的 musl 头文件不声明 ⇒
+     `error: use of undeclared identifier`。修法：shim/progname_shim.h 里
+     `#ifndef __GLIBC__` 时 `#define program_invocation_short_name __progname`
+     （musl 动态加载器提供的等价量，同为 argv[0] 的 basename），配方用
+     -include 强制注入，5 个使用点零改动。与 archives/k/kbd/2.9.0 同一做法。
+     不用 getprogname()（BSD 专有，glibc 没有）。ratbagd 那一处是 tools/ 修好
+     后编译继续推进才暴露的（同一份 ratbagd.c 编 ratbagd 与 ratbagd.devel 两遍，
+     各报一次）。
+
+  1) swig / libpython。上游 meson.build 无条件 find_program('swig') 并生成
+     ratbag-command（swig 绑定）。OHOS 上没有 swig，也没有 libpython（Python
+     只作为 worker 上的普通解释器存在，不带 embed 开发库），因此补丁新增
+     -Dpython-bindings 开关（默认 true，保持上游行为），关闭后既不找 swig 也不
+     找 libpython。同一思路在仓库里有先例（graphviz 的 --disable-swig）。
+     py3 = pymod.find_installation() 保持无条件——meson 自身与剩下 3 个纯 Python
+     数据校验测试都需要它，OHOS worker 上有 python3。
+
+  2) systemd（两处 entry 要分清）。上游 meson.build:73 的
+     dependency('libsystemd', version : '>=227')（= dep_logind）是**无条件**
+     求值的，ratbagd 的 sd-bus/sd-event/sd_notify 都靠它；受 -Dsystemd 控制的
+     是 meson.build:78 的 dependency('systemd')（unit 目录查询）。OHOS 上不以
+     systemd 为 init，配方只关后者（-Dsystemd=false），systemd/261 仍作为
+     visible=False 的私有依赖存在。
+     另外已发布的 systemd/261 包里 lib/pkgconfig/ 是**空**的（它的 build() 只
+     构建 libsystemd 目标、不走 meson.install()，meson pkg.generate() 的产物就
+     没落盘），而 PkgConfigDeps 生成的是按**包名**的 systemd.pc——两处叠加使
+     meson.build:73 报 Dependency "libsystemd" not found。配方
+     _alias_dependency_pc() 按包内真实布局（include/systemd/sd-*.h +
+     lib/libsystemd.so）合成一份最小 libsystemd.pc 放进 generators_folder
+     （meson 的 pkg_config_path 首位），Version 取自 dependency.ref.version。
+
+  3) shared=False 不可用。上游 liblur 用 shared_library() 硬编码，静态构建会直接
+     失败。配方 validate() 显式拒绝 shared=False，不静默产出坏包。
+
+  4) libudev 的提供者。上游 dependency('libudev')；本仓库里 systemd/261 只装
+     libsystemd（见 archives/s/systemd/261），libudev 由 eudev/3.2.14 提供，
+     其 pkg_config_name 正好是 libudev。
+     另：eudev 的头必须**项目级**注入。上游只在 libutil（:87）与 ratbagd 等少数
+     目标上声明了 dep_udev，承载 `#include <libudev.h>` 的公共头
+     src/libratbag-util.h 却被没有声明它的 libhidpp/libasus/liblur 包含，meson
+     因此不给这些目标加 -I；Linux 靠 /usr/include 默认路径蒙混过关，Conan 包的
+     头在 <pkg>/include 就会 'libudev.h' file not found。配方用
+     _project_include_args() 把 eudev 的 includedirs 作为项目级 -I 塞进
+     MesonToolchain.extra_cflags（同上游 add_project_arguments 语义，见 notes.md
+     §4.7）。
+     同一方法也覆盖 libunistring：上游 meson.build:68 的
+     cc.find_library('unistring') 只探库不探头，ratbagd/ratbagd-profile.c:34-35
+     的 <unistr.h>/<uniconv.h> 在 Conan 包的 include/ 下、不在任何默认路径，
+     报 'unistr.h' file not found（见 notes.md §4.4）。
+
+  5) glib 的 proxy-libintl。OHOS 上 glib 与子项目 proxy-libintl 一起构建，
+     g_libintl_* 就在 glib 包里，但 glib 配方的 package_info 没声明 intl 系统库，
+     PkgConfigDeps 生成的 glib-2.0.pc 缺少 -lintl，消费者会 undefined reference
+     到 g_libintl_*（libratbag-util.c 用到字符串转换）。配方就地增补生成的 .pc
+     并把相应 -L/-rpath 加进 meson 的 c_link_args，同时加 -L/-rpath 以解析
+     cc.find_library('unistring')（这只是**库**那一半；头那一半见 4））。
+
+  6) meson 机器文件里的 ar/ranlib/pkg-config。MesonToolchain 生成的
+     conan_meson_native.ini 的 [binaries] 段在 OHOS worker 上缺这三项，配方
+     从 conf/已知 SDK 路径补注入。
+
+  7) b_ndebug：Conan 的 MesonToolchain 强塞 -DNDEBUG，而上游硬拒。Conan 的
+     meson_toolchain.py 在 buildtype != debug 时硬编码 `self.b_ndebug =
+     "true"`，写进 native file 的 [built-in options]，于是每条编译行都带
+     -DNDEBUG；上游 src/libratbag-private.h:37 是
+       #ifdef NDEBUG
+       #error "libratbag relies on assert(). Do not define NDEBUG"
+       #endif
+     全部 .c 因此编译失败（CI 实测，每个 FAILED 都是这一条 error）。meson 自己
+     的 b_ndebug 默认就是 false（从不在 release 里定义 NDEBUG），上游的 #error
+     正是按这个前提写的。配方在 MesonToolchain(self) 之后显式
+     toolchain.b_ndebug = "false"，恢复上游默认语义；同时保住下方 meson test
+     的有效性（断言被关掉的话那几个 check 程序就成了空壳）。
+
+
+  上游测试：顶层 meson.build 里用 test() 注册 10 个测试程序——3 个纯 Python
+  数据校验（data-parse-test / duplicate-test / receiver-id-test）、4 个 check
+  框架的 C 程序（test-context 6 + test-device 23 + test-util 2 +
+  test-iconv-helper 4 = 35 个用例）、ratbagctl-test（D-Bus 端到端）与
+  python-black-check / python-ruff-check。配方在 build() 内全量执行
+  `meson test`，并**回读** meson-logs/testlog.txt 的汇总块做硬断言——不吃退出码，
+  因为 SKIP 与「用例根本没注册」同样以退出码 0 结束。
+
+  其中 4 个 C 程序全部走内存内的 ratbag_test_device 夹具（test-device.c 里
+  ratbag_test_device_new 建的是纯软件设备），因此**不需要插鼠标**，在 OHOS 上
+  可全绿。ratbagctl-test 需要拉起 ratbagd 并连系统总线（OHOS 沙箱拒绝 AF_UNIX
+  bind，且已发布的 dbus 包不含 dbus-daemon），python-black-check /
+  python-ruff-check 需要 pip 安装的 black/ruff（OHOS worker 无 pip 网络访问），
+  这三个必然失败。它们仍被构建、被执行（不是 SKIP），配方显式「允许其失败但必须
+  核对失败身份」——只有失败集合恰好等于这三者时才放行，否则抛异常，避免真实
+  回归伪装成已声明的平台限制。
+
+  适配后实测口径：上游 10 个程序 / 35 个 check 用例；本平台 7 个程序通过
+  （3 个 Python 数据校验 + 4 个 check 程序，共 35 个用例全过），3 个程序因上述
+  平台限制失败。程序口径 70%，用例口径 35/35 = 100%，均在规则要求的 50% 以上。
+
+  8) test_package 运行期：已发布的 json-glib/1.10.6 里
+     libjson-glib-1.0.so.0 的来源文件带一段旧工具链产出的 .codesign，当前
+     OHOS 内核拒绝映射 ⇒ musl 报 `Error loading shared library
+     libjson-glib-1.0.so.0: (needed by ./test_lur)`（**冒号后为空**，
+     即「找得到但载不进」）⇒ ConanException: Error 127。测试配方
+     _stage_json_glib_soname() 把真文件物化进构建目录、去掉旧签名重签、
+     再把该目录前置到 LD_LIBRARY_PATH（Conan 缓存保持只读）。详见 notes.md
+     §5.6，先例 archives/g/gxr/0.15.1。

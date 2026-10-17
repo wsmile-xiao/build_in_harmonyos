@@ -1,0 +1,144 @@
+#====================================================================
+# DRAFT-inputlirc-34-hardcoded-usr-include-uapi-path-resolved-via-clang-M
+#   上游把内核 UAPI 头写成绝对 /usr/include（Makefile 前置条件 + 源码尖括号
+#   绝对包含），而 OHOS 本机 /usr/include 整棵不存在（头在 SDK sysroot）
+#   ⇒ 参数化成可覆盖变量，并「问编译器」用 clang -M 反解真实目录。
+# 对应文档: knowledge/drafts/DRAFT-inputlirc-34-hardcoded-usr-include-uapi-path-resolved-via-clang-M.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+# 证据来源: inputlirc 34 适配（HarmonyOS PC aarch64 / B 机实测），
+#   W4 r1 判决 conditional_pass 的 P1-C2 条件由主窗裁定按 create 落盘。
+#====================================================================
+
+id:                     DRAFT-inputlirc-34-hardcoded-usr-include-uapi-path-resolved-via-clang-M
+trigger_tool:           make|clang|cc
+phase:                  compilation
+prescan_globs:          Makefile, GNUmakefile, makefile, *.c, *.h, configure.ac
+severity:               2
+category:               kernel-headers, uapi, absolute-include, makefile-prerequisite, sysroot, porting
+title:                  上游把内核 UAPI 头写成绝对 /usr/include 路径（Makefile 前置条件
+                        与源码尖括号绝对包含两处），OHOS 本机 /usr/include 整棵不存在——
+                        须参数化为可覆盖变量并用 clang -M 问编译器反解真实 sysroot
+
+error_signature:        '(No rule to make target ''/usr/include/linux/input-event-codes.h'', needed by|fatal error: ''/usr/include/linux/input.h'' file not found)'
+match_keywords:         /usr/include, 绝对路径头, UAPI, linux/input.h, linux/input-event-codes.h,
+                        No rule to make target, needed by, file not found, KERNELINC,
+                        clang -M, 反解 sysroot, 前置条件, prerequisite, gennames
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause: |
+  两台环境的头文件布局不同，而上游把布局写死在**两个不同层面**：
+  (1) `Makefile` 把 `/usr/include/linux/input-event-codes.h` 写成生成物
+      `names.h` 的**前置条件**，还把它当参数喂给生成器（`names.h: /usr/include/… gennames`、
+      `./gennames $< > $@`）——make 会先要求该文件存在且有规则，于是断在
+      `No rule to make target …, needed by 'names.h'`，**与 CC/CFLAGS 无关**；
+  (2) C 源码里 `#include </usr/include/linux/input.h>`——尖括号包住绝对路径，
+      预处理阶段按字面路径硬解析，于是断在 `fatal error: … file not found`。
+  HarmonyOS PC 本机 **`/usr/include` 整个不存在**（`ls -d /usr/include` →
+  No such file or directory），内核 UAPI 头其实在 OHOS SDK sysroot 内且**路径含 SDK
+  版本号**（本机实测形如 `…/ohos-sdk_26.0.0.18/ohos/native/sysroot/usr/include/linux/`）。
+  clang 的**默认搜索路径已含它**，所以相对尖括号包含 `<linux/input.h>` 是通的——
+  缺的不是头，是"头在 /usr/include"这个假设。写死 SDK 版本路径会在换 SDK/换 CI 机
+  时立刻失效，且属 R33 禁止的"依赖环境特定值"。
+affected_scope: |
+  手写 Makefile（无 configure/无 pkg-config）且把内核 UAPI 头写成绝对路径的项目，
+  尤其是把该路径同时用作 **make 前置条件** 的生成器型上游（`names.h` 一类码表生成）。
+  不适用：①头目录可由 `--with-linux-headers=` 之类 configure 选项指定；②只需追加
+  `-I<sysroot>/usr/include` 的 CPPFLAGS 场景；③补丁直接删掉硬编码路径即可的场景
+  （这三类是本机制的**同族前例**，处置面不同，见 related_drafts 与 .md 的定位表）。
+verification_cmd: |
+  ls -d /usr/include; echo rc=$?                       # 期望 No such file or directory
+  printf '#include <linux/input-event-codes.h>\n' > _uapi_probe.c
+  clang -M _uapi_probe.c                               # 依赖行里即真实绝对路径
+  make -n <生成物> 2>&1 | grep 'No rule to make target'
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           parameterize-plus-ask-the-compiler
+rec_description: |
+  三件套，全在同一 PR 内落地：
+  (1) 上游 `Makefile` 引入可覆盖变量 `KERNELINC ?= /usr/include`，两处绝对路径改
+      `$(KERNELINC)/linux/…`（前置条件与生成器参数都改）；
+  (2) 源码里 `#include </usr/include/linux/input.h>` 改成相对尖括号
+      `#include <linux/input.h>`，交给编译器自己的搜索路径；
+  (3) 配方在 build 期**问编译器要目录**，不猜也不写死——用
+      `subprocess.run([cc, "-M", stub])` 解析 `_uapi_probe.c` 的依赖行，挑出以
+      `linux/input-event-codes.h` 结尾的 token、截掉 `/linux/…` 得到目录，作为
+      `make … KERNELINC=<dir>` 传入。`cc` 取
+      `self.conf_info["tools.build:compiler_executables"]["c"]`（R33，禁读裸 shell
+      变量）。装有内核头的 Linux CI 上该反解自然回到 `/usr/include` ⇒ **无需平台分支、
+      无 #ifdef（R8）**。
+  注意 `install` 目标的 Makefile 前置条件仍指向 `$(KERNELINC)/linux/*.h`，
+  所以 KERNELINC 在 `make install` 时**必须重复传**。
+rec_command: |
+  # 配方侧（Conan 2）
+  save(self, os.path.join(self.build_folder, "_uapi_probe.c"),
+       "#include <linux/input-event-codes.h>\n")
+  out = subprocess.run([self._cc, "-M", stub], capture_output=True,
+                       text=True, cwd=self.build_folder).stdout
+  ki = next(t for t in out.replace("\\\n", " ").split()
+            if t.endswith("linux/input-event-codes.h")).split("/linux/")[0]
+  self.run("make -j1 all KERNELINC=%s" % ki)
+rec_auto_fix:           false
+rec_impl:               parameterize-plus-ask-the-compiler
+
+fallback_priority:      2
+fallback_approach:      sysroot-glob-probe
+fallback_description: |
+  编译器不可调用 `-M`（或输出被包管理脚本污染）时，退化为在 SDK sysroot 池里找
+  `*/sysroot/usr/include/linux/input-event-codes.h` 并取**唯一命中**；命中 0 或 >1
+  即停下报环境错，不得静默回落 `/usr/include`（回落方向恰是本机制要绕开的路径，
+  会把失败从 build 期推到 make 期、报错更不可读）。
+fallback_command:       find <sdk>/ohos/native/sysroot/usr/include/linux -name input-event-codes.h
+fallback_auto_fix:      false
+fallback_impl:          sysroot-glob-probe
+
+forbid_1_pattern:       把 SDK 绝对路径（含版本号）写死进配方|用 os.symlink 造 /usr/include|给 (CPP|C)FLAGS 追加 -I.*usr/include 就以为够了
+forbid_1_reason:        写死 SDK 版本号换 SDK/换 CI 机即失效（R33）；`os.symlink /usr/include`
+                        要 root 且污染共享系统前缀（R49 三禁止之一）；只追加 `-I` 治不了
+                        **make 前置条件**那一处——症状仍是 `No rule to make target`，
+                        与预处理搜索路径无关，这是本机制与"同族前例"的分水岭。
+forbid_1_consequence:   构建在别的机器/别的 SDK 版本上复发同一断链，或修了 include
+                        仍卡在 names.h，诊断被误导成"缺内核头"。
+forbid_2_pattern:       用 -E 预处理输出去喂码表生成器
+forbid_2_reason: |
+  `-E` 会把所有 define 行消掉，生成器拿不到 KEY_* 名字表 ⇒ 生成的头是**空表**——
+  症状从编译错变成运行期"未知按键名"，更难归因。
+forbid_2_consequence:   生成物静默退化（表为空/缺项），编译能过而功能错。
+
+principles:             ask-the-compiler-not-the-shell, no-hardcoded-sdk-version,
+                        upstream-compat-evidence, platform-truth-over-silent-fix
+
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ★drafts 里 E 编号会被复用 ⇒ 一律按**文件名**引用，不写 E 号。
+related_drafts:         DRAFT-ohos-musl-glibc-specific-symbols,
+                        raul-2.0.0-af-unix-bind-blocked-meson-skip
+same_family_precedents: bridge-utils/1.5（--with-linux-headers=<sysroot>/usr/include，configure 选项层）、
+                        bird/3.1.6 与 bird2（-I$SYSROOT/usr/include，CPPFLAGS 追加层）、
+                        aliki/0.3.0 与 audtty/0.1.12（补丁删硬编码 /usr/include，源码改写层）
+differentiation:        上述 6 个前例都发生在"头目录可作为编译选项增删"的层面，症状是
+                        file not found；本机制的症状多一处 **make 前置条件**
+                        （No rule to make target … needed by 'names.h'）且处置是
+                        **参数化 + 问编译器反解**，两者既不同症状签名也不同解法。
+
+doc_file:               knowledge/drafts/DRAFT-inputlirc-34-hardcoded-usr-include-uapi-path-resolved-via-clang-M.md
+last_updated:           2026-09-25
+source_event:           inputlirc 34 适配（HarmonyOS PC aarch64，B 机 HongMeng Kernel 1.12.0，
+                        clang 15 / OHOS SDK 26.0.0.18 sysroot）；补丁 0001-uapi-headers-not-under-usr-include.patch
+
+authors:                主理-32
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-25
+
+draft:                  true
+contributor_id:         主理-32

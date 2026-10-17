@@ -1,0 +1,176 @@
+--- a/config.guess
++++ b/config.guess
+@@ -191,6 +191,17 @@
+ # Note: order is significant - the case branches are not exclusive.
+ 
+ case $UNAME_MACHINE:$UNAME_SYSTEM:$UNAME_RELEASE:$UNAME_VERSION in
++    *:HarmonyOS:*:*)
++	case "$UNAME_MACHINE" in
++	    aarch64|arm64) MACHINE=aarch64 ;;
++	    armv7*|armv8*) MACHINE=arm ;;
++	    x86_64|amd64) MACHINE=x86_64 ;;
++	    i?86) MACHINE=i686 ;;
++	    *) MACHINE="$UNAME_MACHINE" ;;
++	esac
++	GUESS=${MACHINE}-unknown-linux-ohos
++	;;
++
+     *:NetBSD:*:*)
+ 	# NetBSD (nbsd) targets should (where applicable) match one or
+ 	# more of the tuples: *-*-netbsdelf*, *-*-netbsdaout*,
+--- a/config.sub
++++ b/config.sub
+@@ -152,6 +152,10 @@
+ 			android-linux)
+ 				basic_machine=$field1-unknown
+ 				basic_os=linux-android
++				;;
++			ohos-linux)
++				basic_machine=$field1-unknown
++				basic_os=linux-ohos
+ 				;;
+ 			*)
+ 				basic_machine=$field1-$field2
+@@ -1723,7 +1727,7 @@
+ 	# Now accept the basic system types.
+ 	# The portable systems comes first.
+ 	# Each alternative MUST end in a * to match a version number.
+-	gnu* | android* | bsd* | mach* | minix* | genix* | ultrix* | irix* \
++	gnu* | android* | ohos* | bsd* | mach* | minix* | genix* | ultrix* | irix* \
+ 	     | *vms* | esix* | aix* | cnk* | sunos | sunos[34]* \
+ 	     | hpux* | unos* | osf* | luna* | dgux* | auroraux* | solaris* \
+ 	     | sym* |  plan9* | psp* | sim* | xray* | os68k* | v88r* \
+@@ -1771,7 +1775,7 @@
+ # As a final step for OS-related things, validate the OS-kernel combination
+ # (given a valid OS), if there is a kernel.
+ case $kernel-$os in
+-	linux-gnu* | linux-dietlibc* | linux-android* | linux-newlib* \
++	linux-gnu* | linux-dietlibc* | linux-android* | linux-ohos* | linux-newlib* \
+ 		   | linux-musl* | linux-relibc* | linux-uclibc* )
+ 		;;
+ 	uclinux-uclibc* )
+--- a/configure.ac
++++ b/configure.ac
+@@ -603,4 +603,29 @@
+ AC_CONFIG_FILES([Makefile libpolyml/Makefile libpolyml/polyml.pc libpolymain/Makefile modules/Makefile modules/IntInfAsInt/Makefile])
+ AC_CONFIG_FILES([polyc], [chmod +x polyc])
+ 
++# HarmonyOS exposes /tmp as read-only, while HMDFS does not preserve private
++# directory modes.  Put config.status data in the app-private cache instead.
++m4_define([AS_TMPDIR],
++[# Create a (secure) tmp directory for tmp files.
++case "`uname -s 2>/dev/null`" in
++  HarmonyOS)
++    ohos_tmp_base=/data/storage/el2/base/cache
++    test -d "$ohos_tmp_base" && test -w "$ohos_tmp_base" ||
++      AS_ERROR([private HarmonyOS cache directory is unavailable])
++    tmp=$ohos_tmp_base/$1$$-$RANDOM
++    (umask 077 && mkdir "$tmp") && test -d "$tmp" ||
++      AS_ERROR([cannot create a private HarmonyOS temporary directory])
++    ;;
++  *)
++    {
++      tmp=`(umask 077 && mktemp -d "./$1XXXXXX") 2>/dev/null` &&
++      test -d "$tmp"
++    }  ||
++    {
++      tmp=./$1$$-$RANDOM
++      (umask 077 && mkdir "$tmp")
++    }
++    ;;
++esac || AS_ERROR([cannot create a secure temporary directory])])
++
+ AC_OUTPUT
+--- a/libpolyml/sighandler.cpp
++++ b/libpolyml/sighandler.cpp
+@@ -395,6 +395,28 @@
+ #endif
+ }
+ 
++// Disable an alternate signal stack in its owning thread before that thread
++// exits and the backing allocation can be released after pthread_join.
++void releaseThreadSignals(TaskData *taskData)
++{
++#if defined(SA_ONSTACK) && defined(HAVE_SIGALTSTACK)
++    if (taskData->signalStack != 0)
++    {
++#ifdef HAVE_STACK_T
++        stack_t ex_stack;
++#else
++        struct sigaltstack ex_stack;
++#endif
++        memset(&ex_stack, 0, sizeof(ex_stack));
++        ex_stack.ss_flags = SS_DISABLE;
++        if (sigaltstack(&ex_stack, NULL) != 0)
++            taskData->signalStack = 0; // Avoid an unsafe free; leak only on disable failure.
++    }
++#else
++    (void)taskData;
++#endif
++}
++
+ 
+ /* General purpose function to set up a signal handler. */
+ #if (!defined(_WIN32))
+--- a/libpolyml/sighandler.h
++++ b/libpolyml/sighandler.h
+@@ -42,6 +42,7 @@
+ extern bool setSignalHandler(int sig, signal_handler_type func);
+ // Set up per-thread signal data: basically signal stack.
+ extern void initThreadSignals(TaskData *taskData);
++extern void releaseThreadSignals(TaskData *taskData);
+ 
+ #endif /* ! _WIN32 */
+ 
+--- a/libpolyml/processes.cpp
++++ b/libpolyml/processes.cpp
+@@ -836,6 +836,7 @@
+     sigemptyset(&block_sigs);
+     sigaddset(&block_sigs, SIGVTALRM);
+     pthread_sigmask(SIG_BLOCK, &block_sigs, NULL);
++    releaseThreadSignals(taskData);
+     // Remove the thread-specific data since it's no
+     // longer valid.
+     pthread_setspecific(tlsId, 0);
+--- a/libpolyml/basicio.cpp
++++ b/libpolyml/basicio.cpp
+@@ -1002,16 +1002,18 @@
+     case 67: /* Return a temporary file name. */
+         {
+             const char *template_subdir =  "/MLTEMPXXXXXX";
++            const char *tmpdir = getenv("TMPDIR");
++            if (tmpdir == NULL || tmpdir[0] == '\0')
++            {
+ #ifdef P_tmpdir
+-            TempString buff((char *)malloc(strlen(P_tmpdir) + strlen(template_subdir) + 1));
+-            if (buff == 0) raise_syscall(taskData, "Insufficient memory", NOMEMORY);
+-            strcpy(buff, P_tmpdir);
++                tmpdir = P_tmpdir;
+ #else
+-            const char *tmpdir = "/tmp";
++                tmpdir = "/tmp";
++#endif
++            }
+             TempString buff((char *)malloc(strlen(tmpdir) + strlen(template_subdir) + 1));
+             if (buff == 0) raise_syscall(taskData, "Insufficient memory", NOMEMORY);
+             strcpy(buff, tmpdir);
+-#endif
+             strcat(buff, template_subdir);
+ #if (defined(HAVE_MKSTEMP) && ! defined(UNICODE))
+             // mkstemp is present in the Mingw64 headers but only as ANSI not Unicode.
+--- a/Tests/Succeed/Test193.ML
++++ b/Tests/Succeed/Test193.ML
+@@ -9,7 +9,12 @@
+ val name = OS.FileSys.tmpName();
+ OS.FileSys.remove name handle OS.SysErr _ => ();
+ 
+-Socket.bind(x, UnixSock.toAddr name);
++(Socket.bind(x, UnixSock.toAddr name)
++    handle exn as OS.SysErr(_, SOME error) =>
++        if OS.errorName error = "EPERM"
++        then (Socket.close x; Socket.close y; raise NotApplicable)
++        else raise exn
++    | exn => raise exn);
+ Socket.listen(x, 5);
+ 
+ Socket.connect(y, UnixSock.toAddr name);

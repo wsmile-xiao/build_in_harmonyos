@@ -1,0 +1,40 @@
+# DRAFT — OHOS GNUInstallDirs 将 CMake 库包装进 lib/<triplet> 子目录导致 CMakeDeps 找不到库
+#
+# 基于 json11 1.0.0 R01 真实证据（dropbox/json11，CMake 单翻译单元库）
+# 格式: key: value（冒号后一个空格）；多行值续行以空格开头；列表逗号分隔
+# 查重: 无既有 E/DRAFT 条目覆盖本主题（DRAFT-bambootracker-qt6-executable-conan 仅同症状、根因不同，见同名 .md 查重表）
+
+id:                     DRAFT-json11-1.0.0-cmake-library-architecture-triplet-install
+trigger_tool:           conan|conan-verify|conan create|CMakeDeps|CMakeToolchain|GNUInstallDirs
+phase:                  package|testing|validation
+error_signature:        Library '.*' not found in package|cmakedeps_macros.cmake.*conan_package_library_targets|lib/[a-z0-9-]*linux-ohos|CMAKE_LIBRARY_ARCHITECTURE
+
+severity:               2
+category:               conan, cmake, packaging, porting, libdirs, install-path
+match_keywords:         CMAKE_LIBRARY_ARCHITECTURE, GNUInstallDirs, libdirs, triplet, aarch64-linux-ohos, CMakeDeps, not found in package, conan_package_library_targets, install path, flatten, package(), cmake.install, library architecture
+
+title:                  OHOS CMakeToolchain/GNUInstallDirs 把 CMake 库包装进 lib/<triplet> 子目录，CMakeDeps 从 lib/ 找不到库（find_package 失败）的识别与配方级修复
+
+root_cause:             OHOS Conan 的 CMakeToolchain/GNUInstallDirs 在交叉编译时把 CMAKE_LIBRARY_ARCHITECTURE 计算为 OHOS GNU triplet（如 aarch64-linux-ohos）。若上游 CMakeLists 用 `install(TARGETS <t> DESTINATION lib/${CMAKE_LIBRARY_ARCHITECTURE})`（Debian 风格 multiarch 写法），即使配方在 generate() 传入 `-DCMAKE_LIBRARY_ARCHITECTURE=""`，安装产物仍落到 `lib/<triplet>/` 与 `include/<triplet>/`。CMakeDeps 默认从 `lib/`、`include/` 生成 `-L`/`-I` 与 target，找不到 `libjson11.a` → test_package `find_package(json11)` 报 `Library 'json11' not found in package`（cmakedeps_macros.cmake 的 conan_package_library_targets）。
+
+affected_scope:         上游 CMakeLists 使用 `lib/${CMAKE_LIBRARY_ARCHITECTURE}` / `include/${CMAKE_LIBRARY_ARCHITECTURE}` 安装路径的 CMake 库包，在 OHOS aarch64 交叉编译 + Conan 2 CMakeDeps 下构建时适用；同类先例 json11 1.0.0（R01）。
+
+verification_cmd:       conan-verify 后 test_package find_package 通过（G2→G4 + L2/L4/L5 PASS）；`conan create ... --build=missing` 产物位于 lib/libjson11.a 而非 lib/aarch64-linux-ohos/。
+
+rec_priority:           1
+rec_approach:           flatten-triplet-install-dirs
+rec_description:        在 conanfile.py 的 package() 中，cmake.install() 之后遍历 self.package_folder 下 lib/、include/ 内所有 triplet 子目录，把其中文件 rename 到 lib/、include/ 顶层并删除空子目录，使 CMakeDeps 能从默认 lib/ 找到库。不动上游源码，配方级通用修复。
+rec_command:            在 package() 内用 pathlib 遍历 lib/ include/ 下子目录并 rename 到顶层（见 archives/j/json11/1.0.0/conanfile.py）
+rec_auto_fix:           true
+rec_impl:               recipe-package-flatten
+
+fallback_priority:      2
+fallback_approach:      patch-upstream-install-path
+fallback_description:   若不宜在 package() 内改目录（如多 arch 产物），可改用补丁把上游 CMakeLists 的 install 路径改为 lib/ include/ 并登记 conandata patches；但优先推荐配方级 flatten（无需改上游、跨版本稳定）。
+fallback_command:       patches/<NNNN>-cmake-install-paths.patch + conandata.yml patches 登记
+fallback_auto_fix:      false
+fallback_impl:          manual-patch
+
+forbid_1_pattern:       把 cpp_info.libs 写成空壳绕过|删除 lib/<triplet> 产物只留头文件|伪造 find_package 结果
+forbid_1_reason:        必须让真实库产物可被 CMakeDeps 解析，禁止空壳/伪造消费者验证（R34/PF3）。
+forbid_1_consequence:   CI L1e 破坏性反向验证失败、test_package 空壳被 PF3 拦截。

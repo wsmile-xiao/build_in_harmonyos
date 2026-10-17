@@ -59,7 +59,7 @@ Indianapolis, IN  46206
 $ ~/usr/local/bin/rig --help
 USAGE: rig [-f | -m ] [ -d datadir ] [ -c num ]
        datadir - Directory where data files can be found.
-       If datadir is not specified, /storage/Users/currentUser/usr/local/share/rig is used.
+       If datadir is not specified, /usr/local/share/rig is used.
        num - print num identities.
        -f and -m specify gender of generated identities.
 ```

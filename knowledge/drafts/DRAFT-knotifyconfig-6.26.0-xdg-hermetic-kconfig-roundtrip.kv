@@ -1,0 +1,102 @@
+# ══════════════════════════════════════════════════════════════════════
+# Draft knowledge entry — KConfig 系部件的消费者测试要自己做两件事：把 XDG
+# 根钉死，并让被测程序自己播种输入（否则 ctest 重跑必失败）
+# Software: knotifyconfig 6.26.0 (KDE Frameworks 6)
+# Gate: conan create 全绿 + test_package 往返测试通过
+# Status: DRAFT — same-stem .md/.kv pair
+# ══════════════════════════════════════════════════════════════════════
+
+id:                     DRAFT-knotifyconfig-6.26.0-xdg-hermetic-kconfig-roundtrip
+trigger_tool:           conan|cmake|ctest|clang
+phase:                  testing
+
+severity:               1
+category:               testing, portability, environment, build-system
+match_keywords:         KConfig, GenericConfigLocation, writableLocation, XDG_CONFIG_HOME, XDG_CONFIG_DIRS, XDG_DATA_DIRS, locateAll, notifyrc, QStandardPaths, test_package, ctest, self.run, cmake.test, QT_QPA_PLATFORM offscreen, idempotent test, changed(bool) signal, seed file
+
+error_signature:        ctest .* Failed|Assertion .* failed|Sound is .*, expected "bell\.ogg"|Action is .*, expected "Popup"|seed Action entry did not survive|test_knotifyconfig.*FAIL
+
+title:                  KConfig 部件的往返测试：XDG 根要钉死，种子文件要由被测程序自己写（否则 cmake.test() 的第二次运行必挂）
+
+root_cause: |
+  KConfig 的落盘位置不是"当前目录"，而是
+  QStandardPaths::writableLocation(GenericConfigLocation)（= $XDG_CONFIG_HOME，
+  未设时 ~/.config）拼上文件名。所以消费者测试若不钉死 XDG 环境，就会读写
+  测试机上真实的 ~/.config，结果既不确定（取决于 worker 预置内容）又互相污染。
+
+  更隐蔽的是这一类部件的"输入来源不止一个"：KNotifyEventList::fill() 除了
+  打开 $XDG_CONFIG_HOME/<app>.notifyrc（可写），还会
+  QStandardPaths::locateAll(GenericDataLocation, "knotifications6/<app>.notifyrc")
+  去 $XDG_DATA_DIRS 扫只读源并 addConfigSources()。只钉 XDG_CONFIG_HOME 而
+  放任 XDG_DATA_DIRS 默认值（/usr/local/share:/usr/share），测试结果就仍然
+  依赖宿主。
+
+  第二个坑在测试驱动方式上：conan 的 test_package 里
+  `cmake.test()` 与随后直跑可执行文件会**各跑一次同一个二进制**。如果种子
+  文件是 Python 侧写好的、C++ 侧只做"读-改-写"，那么第一次运行已经把
+  Action 从 Sound|Popup 改成 Popup，第二次运行进来时前置断言（"种子应当是
+  Sound|Popup"）必然失败——而且报出来像是功能坏了，其实只是测试不幂等。
+
+affected_scope:         所有用 KConfig / QSettings(XDG 后端) / 任何
+  QStandardPaths 定位读写文件的库的消费者测试；KDE Frameworks 全家族，
+  以及任何 test_package 里同时存在 ctest 与直跑两个入口的包。
+
+verification_cmd:        grep -n "XDG_CONFIG_HOME\|XDG_DATA_DIRS" \
+                           archives/k/knotifyconfig/6.26.0/test_package/conanfile.py ; \
+                         ctest --test-dir <build_folder> --output-on-failure
+
+rec_priority:           1
+rec_approach:           pin-xdg-roots-and-self-seed-in-binary
+rec_description: |
+  两条硬规则，加一条可观测性技巧：
+
+  1) 钉死全部 XDG 根，指向构建目录下的临时树，并**先 mkdir**。
+     KDE 消费测试至少设这五个：HOME、XDG_CONFIG_HOME、XDG_CONFIG_DIRS、
+     XDG_DATA_HOME、XDG_DATA_DIRS。判据：在 CI 日志里看不出任何
+     ~/.config 或 /usr/share 的痕迹；把宿主 $HOME 换成一个空目录重跑，
+     结果不变。（XDG_CONFIG_HOME 指向的目录要先建出来，
+     QStandardPaths::writableLocation 对不存在的路径行为依实现而定，
+     建出来最省事。）
+  2) 种子文件由**被测程序自己写**，不放在 Python 侧。
+     C++ 测试开头用自己的路径逻辑覆盖写一份 `[Event/...]` 配置，然后再
+     构造部件。这样无论被跑几次都是同一个前置状态，ctest 与直跑两个入口
+     都对测试驱动方式免疫——测试是幂等的，不依赖"上一次运行留下了什么"。
+  3) 找可观测信号，别只看文件。
+     这类部件的内部状态（选中了哪个事件、文本框里是什么）大多不可从外部
+     读取。knotifyconfig 的 KNotifyConfigWidget 只暴露一个
+     `changed(bool)` 信号，但足够把流程钉住：
+       - `disableAllSounds()` 只在与事件真的存在且带 Sound 时才发
+         `changed(true)` → 用它证明"种子事件确实被解析进了事件表"，
+         否则整个往返会因为"什么也没选中"而空转通过；
+       - `save()` 固定发 `changed(false)` → 用它证明写盘真的发生了。
+     文件内容断言负责证明"值对不对"，信号断言负责证明"流程真的走了"。
+     缺了信号断言，一个 `selectEvent()` 静默失配（事件 id 写错、或
+     customwidget 降级把 currentElement 弄丢）会让测试变成永远通过的空壳。
+
+fallback:               若部件连 changed 类信号都没有，退化方案是断言
+  "往返前后文件的其他键未被破坏"（如本例中同组的 Name 仍为 Round Trip）
+  ——至少能证明写回的是同一个文件、KConfig 的 group 没被整体重写。
+
+rec_command:            conan create archives/k/knotifyconfig/6.26.0 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing
+rec_auto_fix:           false
+rec_impl:               ""
+
+verify_builds:          test_package/conanfile.py 设 HOME + 4 个 XDG_* 变量；
+                        test_package/test_knotifyconfig.cpp 自播种 + 9 条断言；
+                        ctest 与直跑两次执行均通过（幂等性验证）
+
+upstream_refs:          knotifyconfig 6.26.0 src/knotifyeventlist.cpp
+                        （fill() 里 KConfig(app+".notifyrc", NoGlobals) 与
+                        locateAll(GenericDataLocation, "knotifications6/...")）、
+                        src/knotifyconfigwidget.cpp（changed(bool) 的三处
+                        Q_EMIT）；kconfig 6.26.0 src/core/kconfig.cpp
+                        （GenericConfigLocation 拼路径）
+
+related_rules:          R51, R34
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              11634
+source_commit:          077b171b8
+draft:                  true
+contributor_id:         2301_76770579
+last_updated:           2026-09-21

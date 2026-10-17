@@ -1,0 +1,131 @@
+# ═══ Draft knowledge entry — header-only 库的「多棵 include 根并排」安装范式 + configure 期联网拉 gtest 的 Conan 替换 + 朴素扫描 N 与实际注册用例数的口径差 ═══
+# Timestamp: 2026-09-20
+# Software: tiny-dnn 1.0.0a3
+# Gate: G2 (conan create)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-tiny-dnn-1.0.0a3-header-only-triple-include-root-and-network-gtest-substitution
+trigger_tool:           cmake|conan|clang|c++
+phase:                  package|configure|test
+error_signature:        cereal/cereal.hpp.*file not found|third_party/.*file not
+                         found|DownloadProject.*googletest|GIT_TAG.*master.*clone
+                         fail|C\+\+ versions less than C\+\+14 are not
+                         supported|resolve_path.*testimage
+severity:               3
+category:               header-only-packaging|include-root-layout|test-harness|rule4-counting
+match_keywords:         header-only, INTERFACE library, install(DIRECTORY),
+                         multi-tree include root, cereal, third_party,
+                         angle-bracket include, DownloadProject, GIT_TAG master,
+                         offline CI worker, test_requires gtest, C++14 minimum,
+                         resolve_path relative cwd, naive text scan vs registered
+                         test count, #ifdef CNN_USE_NNPACK, #ifdef CNN_USE_AVX
+title:                  header-only 库的「多棵 include 根并排」安装范式；上游
+                         configure 期 DownloadProject 联网拉 gtest → Conan
+                         test_requires 替换；以及朴素文本扫描 N 与实际注册
+                         gtest 用例数的口径差（rule4 归因）
+
+root_cause: >
+  (a) 上游 install(DIRECTORY .../tiny_dnn) 只装一棵目录，但库内部同时使用
+  角括号 <cereal/...> 与相对 include 根的 "third_party/..." —— 那两棵目录在
+  仓库内 add_subdirectory 时靠"仓库根在 include 路径上"这一隐含假设工作，
+  install 之后该假设不成立，消费者必然 file not found。(b) 上游 test 走的
+  CMake DownloadProject 在 configure 期 git clone googletest master，CI worker
+  不联网且 master 不可复现。(c) 上游测试用相对路径 resolve_path() 找 testimage/，
+  cwd 不对即 file not found。(d) 朴素 grep "TEST(" 会把 #ifdef CNN_USE_NNPACK /
+  CNN_USE_AVX 分支里（aarch64 上永不启用）与被注释掉的宏一起数进来，与真正
+  注册进 gtest 的用例数差 68/267。
+affected_scope: >
+  所有 header-only 且 install(DIRECTORY ...) 只发运部分包含树的库；所有
+  CMake DownloadProject / FetchContent / ExternalProject 在 configure 期联网的
+  上游（CI worker 不可联网）；以及所有做 rule4 用例计数需要区分"朴素扫描"与
+  "实际注册"的 PR。
+verification_cmd: >
+  grep -rn '#include <' tiny_dnn/ | grep -v '<[a-z_]*\.h>'   # 角括号包含本仓库另一棵树
+  grep -n 'install(DIRECTORY' CMakeLists.txt                 # 只装一棵
+  grep -n 'DownloadProject\|FetchContent\|ExternalProject' test/CMakeLists.txt
+  clang++ --target=aarch64-linux-ohos --sysroot=$SYSROOT -std=c++17 -E -P \
+    -I<src> -I<gtest>/include -I<src>/test <src>/test/test.cpp \
+    | grep -cE 'class [A-Za-z_0-9]+_Test : public ::testing::Test'
+rec_priority:           1
+rec_approach:           triple-include-root-plus-conan-gtest-substitution
+rec_description: >
+  三步：(a) package() 把**每一棵被库内部包含的顶层目录**（不只 install 规则
+  里那一棵）并排拷进同一个 include 根；test_package 里显式用角括号拉入这些树
+  把布局变成编译期断言。(b) requirements() 用 self.test_requires("gtest/…")
+  替换 DownloadProject，build() 内 self.run() 直接编译上游测试 TU；同时把
+  -std 提到 c++17（gtest 1.15+ 的硬要求，上游源码零改动），并在 build() 内
+  实跑、对 gtest 汇总行做 hard check（failed==0 且 passed==ran 且
+  ran >= MIN_UPSTREAM_TESTS）。(c) 上游测试若用相对路径读数据，self.run() 的
+  cwd 必须设成源码根而非 build_folder。
+rec_command: >
+  from conan.tools.files import copy
+  include_root = os.path.join(self.package_folder, "include")
+  for sub in ("tiny_dnn", "cereal", "third_party"):
+      copy(self, "*", src=os.path.join(self.source_folder, sub),
+           dst=os.path.join(include_root, sub))
+  # build(): -std=c++17 ... -L<gt_lib> -lgtest -pthread -o <exe>
+  #          self.run('<exe> > gtest.log 2>&1', cwd=self.source_folder)
+rec_auto_fix:           true
+rec_impl:               recipe-side-build
+
+fallback_priority:      2
+fallback_approach:      vendor-gtest-into-package
+fallback_description: >
+  若 ohpcd 上没有可用的 gtest 版本（或 test_requires 的 revision 拉不到），
+  退而把 gtest 源码 vendored 进仓库、在 build() 内与测试 TU 一起编译。
+  代价是多发运一份第三方源码，且 gtest 自身的 revision 要自己维护，
+  不如 test_requires 干净。
+fallback_command:       clang++ -std=c++17 -Ivendor/googletest/googletest/include \
+                          vendor/googletest/googletest/src/gtest-all.cc test.cpp
+fallback_auto_fix:      false
+fallback_impl:          recipe-side-build
+
+forbid_1_pattern:       install\(DIRECTORY.*tiny_dnn.*\)$|只拷 tiny_dnn/ 一棵
+forbid_1_reason:        上游 install 规则只装库本体那一棵（或更糟：只写
+                          cpp_info.includedirs 而根本不拷 cereal/、third_party/），
+                          库内部却用 <cereal/...> 角括号与 "third_party/..."
+                          相对包含 —— 消费者一编译就 file not found。
+forbid_1_consequence:   test_package / 任何消费者都在第一个 include 行失败，
+                          误判为库自身缺陷。
+
+forbid_2_pattern:       走上游 test/CMakeLists.txt(DownloadProject|GIT_TAG
+                         master)
+forbid_2_reason:        DownloadProject 在 configure 期 git clone GitHub
+                          googletest master；CI worker 不联网，且 master 不可
+                          复现。绕这一段还得自带 toolchain file 与子工程。
+forbid_2_consequence:   CI 在 configure 阶段失败，白跑一轮；即使联网，
+                          不同时间的 master 让"上游用例数"不可复现。
+
+forbid_3_pattern:       -std=c\+\+11.*gtest|-std=gnu\+\+11.*gtest
+forbid_3_reason:        上游 CMake 声明 C++11，但 gtest 1.15+ 在 gtest-port.h
+                          里硬性报 "C++ versions less than C++14 are not
+                          supported"。提标准是纯编译参数变更，不必改上游源码。
+forbid_3_consequence:   编译期硬报错，且报错点在 gtest 头而不是被测库，
+                          容易误判成"上游源码与 gtest 不兼容"。
+
+forbid_4_pattern:       grep -c "TEST(" .*|wc -l 直接当上游用例数声明
+forbid_4_reason:        朴素文本扫描会把 #ifdef CNN_USE_NNPACK / CNN_USE_AVX
+                          分支内（aarch64 上永不启用）与被 // 注释掉的 TEST 宏
+                          一起数进来：tiny-dnn 钉版 267 → 实际注册 199，差 68。
+                          同时评审的"上游实测 N"扫的是**默认分支 master**，
+                          不是钉版 tag（本包 346 vs 267）。
+forbid_4_consequence:   声明值要么偏高导致通过率难看，要么偏低触发 rule4
+                          「少报」FAIL；未执行数也无法归因。
+
+principles:             P001
+similar_to:             DRAFT-tinyusb-0.18.0-source-library-template-port-hook-contract
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-tiny-dnn-1.0.0a3-header-only-triple-include-root-and-network-gtest-substitution.md
+last_updated:           2026-09-20
+source_event:           archives/t/tiny-dnn/1.0.0a3
+
+authors:                2301_76770579
+source_pr:              11301
+source_commit:          6c1a732906db913a892951af509b2fc83df9050c
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20

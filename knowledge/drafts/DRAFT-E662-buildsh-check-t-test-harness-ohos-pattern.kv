@@ -1,0 +1,102 @@
+id: DRAFT-E662-buildsh-check-t-test-harness-ohos-pattern
+status: pending-editor-review
+title: "Build.sh 自带构建器软件（mksh 形态）适配套路：TARGET_OS 必须显式传 Linux、check.pl 不透传 TMPDIR、fgrep 弃用告警污染 stderr、-C regress:no-ctty 无终端豁免、-h 即 smoke 探针"
+category: custom-build, shell, mksh, check-t, test-harness, tmpdir, perl
+build_system: custom
+phase: build, test
+trigger_tool: conan-create
+severity: 2
+match_keywords: >
+  mksh, Build.sh, check.t, check.pl, test.sh, 自带构建器, 无 configure 无 make,
+  conftest, TARGET_OS, HarmonyOS unknown, _GNU_SOURCE, setresuid, setresgid,
+  隐式声明, TMPDIR, /tmp 只读, here-doc, here-string, 临时文件,
+  can't find tty fd, need-ctty, regress:no-ctty, fgrep obsolescent,
+  perl 运行器, HNP perl, --version 不存在, smoke 探针, KSH_VERSION
+error_signature: >
+  implicit declaration of function 'setresuid'|
+  implicit declaration of function 'setresgid'|
+  can't create.*temporar|mksh: .*can't find tty fd: No such device or address|
+  fgrep: warning: fgrep is obsolescent|
+  Cannot find a working Perl interpreter, aborting|
+  it may or may not work
+error_excerpt: >
+  ① 不设 TARGET_OS（uname -s=HarmonyOS 落 Build.sh unknown 分支）构建：
+    Warning: mksh has not yet been ported to or tested on your
+    operating system 'HarmonyOS'; it may or may not work.
+    首次构建另现（复跑未复现，unknown 分支 conftest 判定轮间波动）：
+    misc.c:267:13: warning: call to undeclared function 'setresgid';
+    misc.c:284:13: warning: call to undeclared function 'setresuid';
+    （clang 15 仅告警，clang>=16 成硬错误）
+  ② check.t 首跑 85 例假失败（TMPDIR 未透传，mksh 建不了 here-doc 临时文件）：
+    FAIL ./check.t:arith-compound / unexpected exit status 256 (exit-code 1), expected 0
+    stderr 首字符为 '/'（mksh 报错行以 argv[0] 绝对路径开头）
+  ③ need-ctty 用例（无 ctty 环境 32 例）：
+    /path/mksh: can't find tty fd: No such device or address
+    /path/mksh: warning: won't have full job control
+  ④ GNU grep>=3.8 宿主（regression-63/pipeline-3 两例）：
+    fgrep: warning: fgrep is obsolescent; using grep -F
+    （expected-stderr 为空 ⇒ 意外失败）
+  （逐字日志：$HOME/tmp/mksh-59c/src/mksh/test-run.log、test-run2.log、
+  test-run3.log；修后全绿 test-run5.log）
+root_cause: >
+  mksh 不走 configure/make，自带 ksh 语法构建器 Build.sh：conftest 特性探测 →
+  编译链接 → **构建期生成**回归入口 test.sh（shebang 指向本次新构建的 mksh，
+  内部找 $PERL/perl5/perl 执行 check.pl 解析 check.t）。四个独立坑叠加：
+  ① TARGET_OS 缺省取 uname -s；OHOS 的 "HarmonyOS" 落 unknown 分支仅打
+     "; it may or may not work" 警告继续，**丢失 Linux 分支的 -D_GNU_SOURCE**，
+     musl 系 setresuid/setresgid 走隐式声明（首次构建实测出现；clang 15 告警、
+     clang>=16 硬错误。unknown 分支 conftest 判定有轮间波动，复跑未复现该告警；
+     TARGET_OS=Linux 配置三次构建全部 0 告警且结果稳定）；
+     Build.sh 只在 TARGET_OS 为空时才回退 uname，显式传值即被尊重。
+  ② OHOS /tmp 只读，mksh 的 here-doc/here-string 临时文件走 $TMPDIR
+     （main.c: MKSH_DEFAULT_TMPDIR "/tmp"）；而 check.pl 给用例子进程的环境是
+     **白名单**（HOME/LD_LIBRARY_PATH/LOCPATH/LOGNAME/PATH/PERLIO/SHELL/
+     UNIXMODE/UNIXROOT/USER，不含 TMPDIR），check.pl 自己的 -T 只管它自身
+     临时文件 ⇒ 全部 here-doc/here-string 用例因 mksh 建不了临时文件假失败
+     （实测 85 例）。上游预留的唯一环境注入开关是 check.pl `-e e=v`
+     （test.sh 转发 `-e TMPDIR=…`）。
+  ③ history/job-control 类用例带 `need-ctty: yes`，无控制终端必失败
+     （实测 32 例）；check.t 自述的官方豁免是 `-C regress:no-ctty`
+     （check.pl category_check 对 need-ctty 的处理路径，跳过不计入分母）。
+  ④ test.sh 把 Build.sh 运行期的 PATH **冻结**进自身——测试宿主工具的
+     替换/shim 必须在跑 Build.sh 之前就位于 PATH，事后改 PATH 无效。
+     GNU grep>=3.8 的 fgrep 弃用告警会污染 expected-stderr 为空的用例
+     （实测 2 例），用 `exec grep -F "$@"` shim 恢复 fgrep 历史契约即可。
+affected_scope: >
+  所有"自带 Build.sh/自写构建器 + 构建期生成测试入口"的软件（mksh 家族；
+  同形：lksh 构建即 Build.sh -L）。判读信号：①包内无 configure/Makefile 而有
+  Build.sh；②test.sh 由构建器生成（不在 tarball 里）；③测试运行器是 perl。
+  TMPDIR 白名单坑同样适用于一切"perl 测试运行器 + fork 子进程"的套件；
+  fgrep 坑适用于一切 expected-stderr 为空且用 fgrep 的老套件。
+rec_priority: 1
+rec_approach: inline-toolchain-vars-drive-buildsh-plus-testsh-e-and-C-switches
+rec_description: >
+  配方四件事：①build() 用 AutotoolsToolchain.vars() 取交叉 CC 后内联驱动
+  `sh Build.sh -r -j -Q`，CC/CFLAGS/LDFLAGS/TARGET_OS=Linux 全部经环境显式传
+  （ refusing PATH 偶遇 clang 的 smstools 同款口径）；CFLAGS 补
+  -fstack-protector-strong -fPIE、LDFLAGS 补 -pie -Wl,-z,relro -Wl,-z,now
+  （Build.sh 默认仅 -O2，L4 需要 PIE/RELRO/BIND_NOW）。②跑 ./test.sh 前建
+  可写临时目录并以 `-e TMPDIR=<dir>` 注入用例环境；③自动化环境固定加
+  `-C regress:no-ctty` 并在 manifest/notes 按 need-ctty 逐名归因 SKIP；
+  ④若宿主 grep>=3.8：建 `fgrep → exec grep -F "$@"` shim 目录并**在跑
+  Build.sh 之前**前置进 PATH（test.sh 冻结构建期 PATH）。mksh 无
+  --version/--help/-V（全 rc=1），smoke 探针用 `-h`（合法旗标 hashall，空
+  stdin rc=0），版本取证用 `mksh -c 'echo $KSH_VERSION'`（59c 自报
+  @(#)MIRBSD KSH R59 2020/10/31，sh.h MKSH_BUILD_R=593 三处同源）。
+  perl 依赖由设备/CI worker PATH 的 /data/service/hnp/bin/perl（HNP）满足，
+  不经 conan tool_requires（避开 conan perl XS ABI 冲突坑）。
+prescan_pattern: "Build\\.sh|check\\.t|check\\.pl|MKSH_VERSION|need-ctty"
+verification_cmd: >
+  TASK_DIR=$HOME/tmp/mksh-59c; sh "$TASK_DIR/repro-e662-buildsh-pattern.sh"
+  （打印 ①无/有 TARGET_OS=Linux 的编译告警数对比 ②无/有 -e TMPDIR 的
+  here-string 行为对比 ③fgrep shim 前后 stderr 对比 ④check.t name: 静态计数
+  与 604=530+0+74 归因闭环）
+doc_file: knowledge/doc/DRAFT-E662-buildsh-check-t-test-harness-ohos-pattern.md
+verify_builds: >
+  mksh 59c（任务 mksh-59c，2026-09-22，分支 feat/mksh-59c）：
+  conan create 干净轮全绿——上游 check.t 604 = PASS 530 + FAIL 0 + SKIP 74
+  （39 need-ctty 经 -C regress:no-ctty 关闭 + 35 静态类别不适用）+ 消费者
+  断言 10/10；修前对照：85 例失败（TMPDIR）→ 32（need-ctty）→ 2（fgrep）
+  → 0。逐字日志 $HOME/tmp/mksh-59c/src/mksh/test-run{,2,3,5}.log 与
+  $HOME/tmp/mksh-59c/probe-conan-create.log。
+last_updated: 2026-09-22

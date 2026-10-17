@@ -1,0 +1,113 @@
+--- a/src/threads.cpp
++++ b/src/threads.cpp
+@@ -46,32 +46,34 @@
+ 
+ void *reading_thread(void *arg) {
+ 	MeterMap *mapping = static_cast<MeterMap *>(arg);
+ 	Meter::Ptr mtr = mapping->meter();
+ 	time_t aggIntEnd;
+ 	const meter_details_t *details;
+ 	size_t n = 0;
+ 	bool first_reading = true;
+ 
+ 	// Only allow cancellation at safe points
++#if defined(HAVE_PTHREAD_CANCEL)
+ 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+ 	pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, NULL);
++#endif
+ 
+ 	details = meter_get_details(mtr->protocolId());
+ 	std::vector<Reading> rds(details->max_readings, Reading(mtr->identifier()));
+ 
+ 	print(log_debug, "Number of readers: %d", mtr->name(), details->max_readings);
+ 	print(log_debug, "Config.local: %d", mtr->name(), options.local());
+ 
+ 	try {
+ 		aggIntEnd = time(NULL);
+-		do { /* start thread main loop */
++		while (!mapping->stopRequested()) { /* start thread main loop */
+ 			_safe_to_cancel();
+ 			do {
+ 				aggIntEnd += mtr->aggtime(); /* end of this aggregation period */
+ 			} while ((aggIntEnd < time(NULL)) && (mtr->aggtime() > 0));
+ 			do { /* aggregate loop */
+ 				_safe_to_cancel();
+ 				int interval = mtr->interval();
+ 				if (interval > 0 && !first_reading) {
+ 					print(log_info, "waiting %i seconds before next reading", mtr->name(),
+ 						  interval);
+@@ -166,42 +168,41 @@
+ 					add_ch_to_localbuffer(*(*ch)); // add this ch data to the local buffer
+ 				}
+ #endif
+ #ifdef ENABLE_MQTT
+ 				// update mqtt values as well:
+ 				if (mqttClient) {
+ 					Buffer::Ptr buf = (*ch)->buffer();
+ 					Buffer::iterator it;
+ 					buf->lock();
+ 					for (it = buf->begin(); it != buf->end(); ++it) {
+-						if (&*it) { // this seems dirty. see issue #427
+-									// the lock()/unlock() should avoid it.
+-							Reading &r = *it;
+-							if (!r.deleted()) {
+-								mqttClient->publish((*ch), r, true);
+-							}
++						// note: inside the loop the iterator is always valid,
++						// so `&*it` would be tautological (clang -Werror).
++						Reading &r = *it;
++						if (!r.deleted()) {
++							mqttClient->publish((*ch), r, true);
+ 						}
+ 					}
+ 					buf->unlock();
+ 				}
+ #endif
+ 
+ 				/* notify webserver and logging thread */
+ 				(*ch)->notify();
+ 
+ 				/* debugging */
+ 				if (options.verbosity() >= log_debug) {
+ 					// print(log_debug, "Buffer dump (size=%i): %s", (*ch)->name(),
+ 					//(*ch)->size(), (*ch)->dump().c_str());
+ 				}
+ 			}
+-		} while (true);
++		} while (!mapping->stopRequested());
+ 	} catch (std::exception &e) {
+ 		std::stringstream oss;
+ 		oss << e.what();
+ 		print(log_alert, "Reading-THREAD - reading got an exception : %s", mtr->name(), e.what());
+ 		pthread_exit(0);
+ 	}
+ 
+ 	print(log_debug, "Stopped reading. ", mtr->name());
+ 
+ 	pthread_exit(0);
+@@ -236,22 +237,24 @@
+ 		// try to use volkszaehler api anyhow:
+ 
+ 		// default == volkszaehler
+ 		api = vz::ApiIF::Ptr(new vz::api::Volkszaehler(ch, ch->options()));
+ 		print(log_debug, "Using default volkszaehler api.", ch->name());
+ 	}
+ 
+ 	do { /* start thread mainloop */
+ 		try {
+ 			ch->wait();
++			if (ch->stopRequested())
++				break;
+ 			api->send();
+ 		} catch (std::exception &e) {
+ 			print(log_alert, "Logging thread failed due to: %s", ch->name(), e.what());
+ 		}
+ 
+-	} while (true); // endless?!
++	} while (!ch->stopRequested()); // endless?!
+ 
+ 	print(log_debug, "Stopped logging.", ch->name());
+ 	pthread_exit(0);
+ 
+ 	return NULL;
+ }

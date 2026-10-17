@@ -1,0 +1,328 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 12dbfa2..d006880 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,24 +1,11 @@
+ [build-system]
+-requires = ["setuptools", "wheel"]
++requires = ["setuptools>=61.0"]
+ build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "gsan"
+ version = "5.0.0"
+-dependencies = ["typer", "rich", "pyasn1", "cryptography", "pyOpenSSL"]
++dependencies = []
+ 
+ [project.optional-dependencies]
+ dev = ["black"]
+-
+-[project.scripts]
+-gsan = "gsan.main:app"
+-
+-[tool.setuptools.packages.find]
+-where = ["src"]
+-
+-[tool.black]
+-line-length = 90
+-
+-[tool.pyright]
+-venvPath = "."
+-venv = ".venv"
+diff --git a/src/gsan/__init__.py b/src/gsan/__init__.py
+index c28a133..ba7be38 100644
+--- a/src/gsan/__init__.py
++++ b/src/gsan/__init__.py
+@@ -1 +1 @@
+-from .main import main
++__version__ = "5.0.0"
+diff --git a/src/gsan/main.py b/src/gsan/main.py
+index 0ff2be0..eb5f5a5 100644
+--- a/src/gsan/main.py
++++ b/src/gsan/main.py
+@@ -1,44 +1,15 @@
+-import ssl
++import argparse
++import ipaddress
+ import json
++import sys
+ import socket
+-import ipaddress
++import ssl
+ from concurrent.futures import ThreadPoolExecutor, as_completed
+ 
+-import typer
+-from rich import print as rprint
+-from rich.progress import track
+-from OpenSSL import crypto
+-from pyasn1.codec.der import decoder
+-from pyasn1.type import univ, char, namedtype, tag
+-
+-app = typer.Typer(add_completion=False)
+-
+-
+-class GeneralName(univ.Choice):
+-    componentType = namedtype.NamedTypes(
+-        namedtype.NamedType(
+-            "dNSName",
+-            char.IA5String().subtype(
+-                implicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 2)
+-            ),
+-        ),
+-        namedtype.NamedType(
+-            "iPAddress",
+-            univ.OctetString().subtype(
+-                implicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 7)
+-            ),
+-        ),
+-    )
+-
+-
+-class GeneralNames(univ.SequenceOf):
+-    componentType = GeneralName()
++VERSION = "5.0.0"
+ 
+ 
+ def allow_unsigned_certificate() -> ssl.SSLContext:
+-    """
+-    Creates and returns an SSL context that allows the use of unsigned certificates.
+-    """
+     context = ssl.create_default_context()
+     context.check_hostname = False
+     context.verify_mode = ssl.CERT_NONE
+@@ -46,83 +17,60 @@ def allow_unsigned_certificate() -> ssl.SSLContext:
+ 
+ 
+ def clean_domains(domains: list) -> list:
+-    """
+-    Cleans a list of domains by removing any leading "*. " or "www." prefixes.
+-    """
+     cleaned_domains = set(
+         domain.removeprefix("*.").removeprefix("www.") for domain in domains
+     )
+-    return list(cleaned_domains)
++    return sorted(cleaned_domains)
+ 
+ 
+ def get_certificate(
+     hostname: str, port: int, timeout: float, context: ssl.SSLContext
+-) -> crypto.X509:
+-    """
+-    Retrieves the X.509 certificate from the specified hostname and port.
+-    """
++) -> dict:
+     try:
+         with socket.create_connection((hostname, port), timeout=timeout) as sock:
+             with context.wrap_socket(sock, server_hostname=hostname) as ssl_sock:
+-                cert = ssl_sock.getpeercert(binary_form=True)
+-                x509 = crypto.load_certificate(crypto.FILETYPE_ASN1, cert)
+-                return x509
+-    except Exception as e:
+-        raise ValueError(f"SSL certificate retrieval failed for {hostname}: {str(e)}")
+-
+-
+-def extract_subdomains(x509: crypto.X509) -> list:
+-    """
+-    Extracts subdomains and IP addresses from the certificate's subjectAltName extension.
+-    """
+-    try:
+-        subdomains = []
+-        for extension_id in range(x509.get_extension_count()):
+-            ext = x509.get_extension(extension_id)
+-            ext_name = ext.get_short_name().decode("utf-8")
+-            if ext_name == "subjectAltName":
+-                ext_data = ext.get_data()
+-                decoded_dat = decoder.decode(ext_data, asn1Spec=GeneralNames())
+-                for name in decoded_dat:
+-                    if isinstance(name, GeneralNames):
+-                        for entry in range(len(name)):
+-                            component = name.getComponentByPosition(entry)
+-                            if "dNSName" in component:
+-                                subdomains.append(str(component.getComponent()))
+-                            elif "iPAddress" in component:
+-                                ip_address = str(
+-                                    ipaddress.ip_address(component.getComponent())
+-                                )
+-                                subdomains.append(ip_address)
+-        return subdomains
+-    except Exception as e:
+-        raise ValueError(f"Error extracting subdomains from the certificate: {str(e)}")
+-
+-
+-def process_domain(domain: str, port: int, timeout: float, context: ssl.SSLContext, print_results: bool):
+-    """
+-    Processes the domain by retrieving the certificate and extracting subdomains.
+-    """
++                return ssl_sock.getpeercert()
++    except Exception as error:
++        raise ValueError(
++            f"SSL certificate retrieval failed for {hostname}: {error}"
++        ) from error
++
++
++def extract_subdomains(cert_dict: dict) -> list:
++    subdomains = []
++    for name_type, value in cert_dict.get("subjectAltName", ()):
++        if name_type == "DNS":
++            subdomains.append(value)
++        elif name_type == "IP Address":
++            subdomains.append(str(ipaddress.ip_address(value)))
++    return subdomains
++
++
++def process_domain(
++    domain: str,
++    port: int,
++    timeout: float,
++    context: ssl.SSLContext,
++    print_results: bool,
++):
+     try:
+-        x509 = get_certificate(domain, port, timeout, context)
+-        subdomains = clean_domains(extract_subdomains(x509))
++        certificate = get_certificate(domain, port, timeout, context)
++        subdomains = clean_domains(extract_subdomains(certificate))
+ 
+-        # Skip if no subdomains are found
+         if not subdomains:
+             return None
+ 
+-        # Skip if only one subdomain exists and it is equal to the main domain
+         if len(subdomains) == 1 and subdomains[0] == domain:
+             return None
+ 
+         if print_results:
+-            rprint(f"\n[bold green]{domain}[/bold green] [{len(subdomains)}]:")
++            print(f"\n{domain} [{len(subdomains)}]:")
+             for subdomain in subdomains:
+-                rprint(f"- {subdomain}")
++                print(f"- {subdomain}")
+ 
+         return domain, subdomains, None
+-    except Exception as e:
+-        return domain, None, str(e)
++    except Exception as error:
++        return domain, None, str(error)
+ 
+ 
+ def process_domains(domains_with_ports, timeout, max_workers, print_results):
+@@ -131,9 +79,14 @@ def process_domains(domains_with_ports, timeout, max_workers, print_results):
+     failed_domains = []
+ 
+     with ThreadPoolExecutor(max_workers=max_workers) as executor:
+-        futures = [executor.submit(process_domain, domain, port, timeout, context, print_results) for domain, port in domains_with_ports]
+-
+-        for future in track(as_completed(futures), description="Checking certificates...", transient=True):
++        futures = [
++            executor.submit(
++                process_domain, domain, port, timeout, context, print_results
++            )
++            for domain, port in domains_with_ports
++        ]
++
++        for future in as_completed(futures):
+             result = future.result()
+             if result is None:
+                 continue
+@@ -149,38 +102,77 @@ def process_domains(domains_with_ports, timeout, max_workers, print_results):
+ def output_results(results, failed_domains, output_format, output_file):
+     if output_format == "json":
+         output_data = {"results": results, "failed_domains": failed_domains}
+-        rprint(json.dumps(output_data, indent=2))
++        print(json.dumps(output_data, indent=2))
+     elif output_file:
+-        with open(output_file, 'w') as f:
++        with open(output_file, "w", encoding="utf-8") as output_stream:
+             for subdomains in results.values():
+-                f.writelines(f"{subdomain}\n" for subdomain in subdomains)
++                output_stream.writelines(f"{subdomain}\n" for subdomain in subdomains)
++
++
++def _parse_port(port_str: str, raw: str) -> int:
++    try:
++        return int(port_str)
++    except ValueError:
++        raise ValueError(
++            f"invalid port {port_str!r} in {raw!r}: port must be a number"
++        ) from None
++
++
++def parse_domain(value: str) -> tuple[str, int]:
++    if value.startswith("[") and value.endswith("]"):
++        return value[1:-1], 443
++    if value.startswith("[") and "]:" in value:
++        host, port_str = value[1:].rsplit("]:", 1)
++        return host, _parse_port(port_str, value)
++    if value.count(":") == 1:
++        host, port_str = value.rsplit(":", 1)
++        return host, _parse_port(port_str, value)
++    return value, 443
+ 
+ 
+-@app.command()
+ def main(
+-    domains: list[str] = typer.Argument(..., help="List of domains to check (e.g. 'example.com', '127.0.01:443')"),
+-    timeout: float = typer.Option(10.0, help="Connection timeout in seconds"),
+-    max_workers: int = typer.Option(10, help="Number of concurrent workers"),
+-    output_format: str = typer.Option("txt", "--format", help="Output format: 'txt' or 'json'"),
+-    output_file: str = typer.Option(None, "--output", help="File to write the results to")
++    domains: list[str],
++    timeout: float = 10.0,
++    max_workers: int = 10,
++    output_format: str = "txt",
++    output_file: str | None = None,
+ ):
+-    """
+-    Check the subdomains and IP addresses present in the certificates of the specified domains.
+-    """
+-    parsed_domains = []
+-    for domain in domains:
+-        if ':' in domain:
+-            host, port = domain.split(':')
+-            port = int(port)
+-        else:
+-            host = domain
+-            port = 443  # default port
+-        parsed_domains.append((host, port))
+-
+-    print_results = output_file is None
+-    results, failed_domains = process_domains(parsed_domains, timeout, max_workers, print_results)
++    parsed_domains = [parse_domain(domain) for domain in domains]
++    print_results = output_file is None and output_format != "json"
++    results, failed_domains = process_domains(
++        parsed_domains, timeout, max_workers, print_results
++    )
+     output_results(results, failed_domains, output_format, output_file)
+ 
+ 
++def app(argv=None):
++    parser = argparse.ArgumentParser(
++        prog="gsan",
++        description="Check certificate subject alternative names for domains.",
++    )
++    parser.add_argument("domains", nargs="*", help="Domains to check")
++    parser.add_argument("--timeout", type=float, default=10.0)
++    parser.add_argument("--max-workers", type=int, default=10)
++    parser.add_argument(
++        "--format", dest="output_format", choices=("txt", "json"), default="txt"
++    )
++    parser.add_argument("--output", dest="output_file")
++    parser.add_argument("--version", action="version", version=f"gsan {VERSION}")
++    arguments = parser.parse_args(argv)
++    if not arguments.domains:
++        parser.error("at least one domain is required")
++    try:
++        main(
++            arguments.domains,
++            timeout=arguments.timeout,
++            max_workers=arguments.max_workers,
++            output_format=arguments.output_format,
++            output_file=arguments.output_file,
++        )
++    except ValueError as error:
++        print(f"gsan: error: {error}", file=sys.stderr)
++        sys.exit(2)
++
++
+ if __name__ == "__main__":
+     app()

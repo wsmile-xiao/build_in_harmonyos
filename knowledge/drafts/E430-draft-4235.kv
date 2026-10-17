@@ -1,0 +1,117 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E430.kv，填写各字段
+# 对应的人类文档: doc/E430.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E430
+trigger_tool: conan
+phase: build
+error_signature: aarch64-binfmt-P: Could not open '/lib/ld-musl-aarch64.so.1': No such file or directory  (make check 全部 FAIL)
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: autotools, build-system, portability, ohos
+match_keywords: libtool, -static, -all-static, ld-musl-aarch64.so.1, INTERP, readelf -l, make check, cross compile, QEMU, binfmt, extra_ldflags
+title: libtool 吞掉裸 -static：交叉编译下程序仍是动态，OHOS 无设备端加载器导致 make check 全挂；须改用 libtool 的 -all-static
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: 上游用 libtool 作链接驱动时，LDFLAGS 里的裸 -static 会被 libtool 当成自身参数消费、不转发给编译器，程序实际仍是动态链接（readelf -l 可见 INTERP = /lib/ld-musl-aarch64.so.1）。而 OHOS SDK 不随附设备端 musl 动态加载器，本机 QEMU/binfmt 无法执行该产物，上游 make check 的 18 个测试二进制全部报 Could not open '/lib/ld-musl-aarch64.so.1' 并 FAIL。xz 5.8.1 实测复现。
+affected_scope: 所有用 libtool 链接程序的 autotools 项目在交叉编译环境下跑上游 make check 的场景（xz 已实测；同名问题会影响 xz/5.8.3 等既有配方）
+verification_cmd: readelf -l <bin> | grep INTERP    # 有 INTERP 输出即仍为动态；改用 -all-static 后应无输出
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: extra-ldflags
+rec_description: 在 conanfile.py 的 generate() 中，仅当 cross_building(self) 为真时向 AutotoolsToolchain 追加 libtool 的正确开关 -all-static，使程序真正静态链接；设备端原生构建不加该标志，保持上游默认行为（与已发布配方一致）。
+rec_command: tc.extra_ldflags.append("-all-static")  # 仅 if cross_building(self)
+rec_auto_fix: false
+rec_impl: build-flag
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: per-binary-ldflags
+fallback_description: 若不便全局改 LDFLAGS，可只对 tests/ 的链接规则追加 -all-static（例如在 build() 里 make check LDFLAGS=...），保证上游测试可执行；CLI 程序仍动态。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:
+forbid_1_reason:
+forbid_1_consequence:
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+principle: 交叉编译产物要在本机执行，必须先确认它是否需要设备端动态加载器；判定用 readelf -l 看 INTERP。
+doc_file:               doc/E430.md
+last_updated: 2026-09-21
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 4235

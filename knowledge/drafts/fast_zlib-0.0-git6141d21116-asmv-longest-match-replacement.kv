@@ -1,0 +1,51 @@
+id:                     fast_zlib-0.0-git6141d21116-asmv-longest-match-replacement
+title:                  zlib>=1.2.13 移除 ASMV 后接入自定义 longest_match 的三段式模式（+ Conan copy dst 空包坑）
+trigger_tool:           conan|clang|patch|apply_conandata_patches
+phase:                  compilation|packaging|patch-generation
+error_signature:        local uInt longest_match|ASMV.*removed|longest_match.*static|No files in this package|Library '[a-z]+' not found in package
+severity:               2
+category:               platform, portability, conan, packaging
+match_keywords:         zlib, ASMV, longest_match, deflate_stub, match.h, 1.2.13, 替换协议, conan create, No files in this package, copy, package_folder, dst, strip:1, original/deflate.c, patched/deflate.c
+root_cause:             zlib 1.2.13（2022-10）上游将 longest_match 改为 local（文件内静态），移除 ASMV
+                        替换协议；第三方 deflate 内部优化无法再直接替换，必须恢复 ASMV 守卫。
+                        附带坑：Conan 2 copy() 的 dst 是相对/当前目录语义，package() 阶段 CWD 为
+                        build 目录，dst="lib" 会把产物复制到 build/lib 而非 package/lib → 空包。
+affected_scope:         所有替换 zlib deflate 内部函数（longest_match）的第三方优化/修改（zlib-ng 式
+                        优化、ARM 汇编匹配器、硬件加速 deflate），及所有手写 package() 用
+                        conan.tools.files.copy 的 Conan 2 配方。
+verification_cmd:       |
+  # ① 补丁恢复 ASMV 守卫后，deflate.c 中 longest_match 声明变为 extern 可见
+  grep -n 'ASMV' zlib/deflate.c
+  # ② deflate_stub 编译接入（ASMV + include deflate.c + include match.h）
+  clang -c -I zlib Test/deflate_stub.c
+  # ③ 对比测试：同数据 level 下 NewC 与 Orig 压缩 size 一致且吞吐更高
+  obj/bin/test-C-linux <data> --level=9; obj/bin/test-Orig-linux <data> --level=9
+  # ④ 空包修复后产物必须落在包目录
+  ls "$(conan cache path fast_zlib/0.0-git6141d21116)"  # 含 lib/libz.a include/zlib.h
+rec_priority:           1
+rec_approach:           asmv-guard-restore-plus-deflate-stub
+rec_description:        ①应用上游官方补丁恢复 #ifndef ASMV 守卫（conandata 补丁条目带
+                        strip:1，因上游补丁路径带 original//patched/ 前缀）；②以
+                        Test/deflate_stub.c（#define ASMV; #include "deflate.c";
+                        #include "match.h"）编译接入自定义匹配；③package() 中 copy 的
+                        dst 必须用 os.path.join(self.package_folder, "lib"/"include")。
+rec_command:            |
+  # 补丁注册（conandata.yml）
+  patches:
+    - patch_file: "patches/zlib_1.2.13.patch"
+      base_path: "zlib"
+      strip: 1
+  # deflate_stub.c（编译进库）
+  #define ASMV
+  #include "deflate.c"
+  #undef local
+  #define local
+  #include "../Sources/match.h"
+  void match_init() {}
+  # package() 空包修复
+  copy(self, "libz.a", dst=os.path.join(self.package_folder, "lib"), src=self.build_folder)
+rec_auto_fix:           false
+rec_verify:             test-C/Orig 对比 + conan-verify G2/G4 通过
+pr_notes:               fast_zlib 0.0-git6141d21116 适配（知识库扩展）：zlib>=1.2.13 ASMV
+                        移除后以官方补丁+deflate_stub+match.h 三段式接入快速 longest_match；
+                        Conan 2 copy dst 必须 package_folder 绝对路径。

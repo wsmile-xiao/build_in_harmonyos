@@ -1,0 +1,193 @@
+--- a/awscli/customizations/s3/factory.py
++++ b/awscli/customizations/s3/factory.py
+@@ -12,16 +12,26 @@
+ # language governing permissions and limitations under the License.
+ import logging
+ 
+-import awscrt.s3
++try:
++    import awscrt.s3
++    from s3transfer.crt import (
++        BotocoreCRTCredentialsWrapper,
++        BotocoreCRTRequestSerializer,
++        CRTTransferManager,
++        acquire_crt_s3_process_lock,
++        create_s3_crt_client,
++    )
++
++    _CRT_S3_AVAILABLE = True
++except ImportError:
++    # [OHOS 守护] awscrt 未发布到 ohpcd：CRT S3 传输客户端不可用，
++    # 自动解析回退到 classic（纯 Python s3transfer）客户端；显式
++    # preferred_transfer_client=crt 也降级为 classic 并告警。
++    # 功能边界=CRT 高速传输/CRC 组合不可用，如实记录。
++    awscrt = None
++    _CRT_S3_AVAILABLE = False
+ from botocore.client import Config
+ from botocore.httpsession import DEFAULT_CA_BUNDLE
+-from s3transfer.crt import (
+-    BotocoreCRTCredentialsWrapper,
+-    BotocoreCRTRequestSerializer,
+-    CRTTransferManager,
+-    acquire_crt_s3_process_lock,
+-    create_s3_crt_client,
+-)
+ from s3transfer.manager import TransferManager
+ 
+ from awscli.compat import urlparse
+@@ -82,9 +92,28 @@
+         )
+         if preferred_transfer_client == constants.AUTO_RESOLVE_TRANSFER_CLIENT:
+             return self._resolve_transfer_client_type_for_system()
++        if (
++            preferred_transfer_client == constants.CRT_TRANSFER_CLIENT
++            and not _CRT_S3_AVAILABLE
++        ):
++            # [OHOS 守护] 显式请求 crt 但 awscrt 缺失：降级为 classic，
++            # 避免在创建客户端时失败。
++            LOGGER.warning(
++                'aws s3 crt transfer client requested but awscrt (CRT) '
++                'is not available on this platform; falling back to the '
++                'classic transfer client'
++            )
++            return constants.CLASSIC_TRANSFER_CLIENT
+         return preferred_transfer_client
+ 
+     def _resolve_transfer_client_type_for_system(self):
++        if not _CRT_S3_AVAILABLE:
++            # [OHOS 守护] awscrt 缺失：auto 解析直接选 classic 传输客户端。
++            LOGGER.debug(
++                'awscrt (CRT) not available; auto-resolved s3 transfer '
++                'client to classic'
++            )
++            return constants.CLASSIC_TRANSFER_CLIENT
+         transfer_client_type = constants.CLASSIC_TRANSFER_CLIENT
+         is_optimized_for_system = awscrt.s3.is_optimized_for_system()
+         LOGGER.debug(
+@@ -113,6 +142,12 @@
+         return acquire_crt_s3_process_lock(self._CRT_PROCESS_LOCK_NAME)
+ 
+     def _create_crt_transfer_manager(self, params, runtime_config):
++        if not _CRT_S3_AVAILABLE:
++            # [OHOS 守护] 无 CRT 时显式创建 CRT 传输管理器：如实报错。
++            raise RuntimeError(
++                'CRT transfer client is not supported: awscrt (CRT) is '
++                'not available on this platform'
++            )
+         self._acquire_crt_s3_process_lock()
+         return CRTTransferManager(
+             self._create_crt_client(params, runtime_config),
+--- a/awscli/s3transfer/checksums.py
++++ b/awscli/s3transfer/checksums.py
+@@ -4,7 +4,12 @@
+ import logging
+ from collections import namedtuple
+ 
+-from awscrt import checksums as crt_checksums
++try:
++    from awscrt import checksums as crt_checksums
++except ImportError:
++    # [OHOS 守护] awscrt 未发布到 ohpcd。S3 下载的 FULL_OBJECT CRC
++    # 校验和组合不可用；其余 s3 cp/sync（classic 传输）路径不受影响。
++    crt_checksums = None
+ from botocore.httpchecksum import _CHECKSUM_CLS
+ from s3transfer.exceptions import S3DownloadChecksumError
+ 
+@@ -22,11 +27,13 @@
+ )
+ 
+ 
+-_CRC_COMBINE_FUNCTIONS = {
+-    'crc32': CrcCombineInfo(crt_checksums.combine_crc32, 4),
+-    'crc32c': CrcCombineInfo(crt_checksums.combine_crc32c, 4),
+-    'crc64nvme': CrcCombineInfo(crt_checksums.combine_crc64nvme, 8),
+-}
++_CRC_COMBINE_FUNCTIONS = {}
++if crt_checksums is not None:
++    _CRC_COMBINE_FUNCTIONS.update({
++        'crc32': CrcCombineInfo(crt_checksums.combine_crc32, 4),
++        'crc32c': CrcCombineInfo(crt_checksums.combine_crc32c, 4),
++        'crc64nvme': CrcCombineInfo(crt_checksums.combine_crc64nvme, 8),
++    })
+ 
+ 
+ _CHECKSUM_KEY_TO_ALGORITHM = {
+@@ -57,6 +64,13 @@
+         self._algorithm = algorithm
+         self._expected_b64 = expected_b64
+         self._num_parts = num_parts
++        if algorithm not in _CRC_COMBINE_FUNCTIONS:
++            # [OHOS 守护] awscrt 缺失时无 CRC 组合函数：如实报错，
++            # 功能边界=FULL_OBJECT CRC 校验不可用。
++            raise S3DownloadChecksumError(
++                f'Checksum algorithm {algorithm} requires awscrt (CRT), '
++                'which is not available on this platform'
++            )
+         self._combine_info = _CRC_COMBINE_FUNCTIONS[algorithm]
+         self._parts = {}
+         self._combined_bytes = None
+--- a/awscli/s3transfer/crt.py
++++ b/awscli/s3transfer/crt.py
+@@ -15,30 +15,40 @@
+ import threading
+ from io import BytesIO
+ 
+-import awscrt.http
++try:
++    import awscrt.http
++    from awscrt.auth import (
++        AwsCredentials,
++        AwsCredentialsProvider,
++        AwsSigningAlgorithm,
++        AwsSigningConfig,
++    )
++    from awscrt.io import (
++        ClientBootstrap,
++        ClientTlsContext,
++        DefaultHostResolver,
++        EventLoopGroup,
++        TlsContextOptions,
++    )
++    from awscrt.s3 import (
++        S3Client,
++        S3FileIoOptions,
++        S3RequestTlsMode,
++        S3RequestType,
++        S3ResponseError,
++        get_recommended_throughput_target_gbps,
++    )
++except ImportError:
++    # [OHOS 守护] awscrt 未发布到 ohpcd：本模块（CRT 传输管理器）整体
++    # 不可用。唯一入口 customizations/s3/factory.py 已守卫该导入并在无
++    # CRT 时降级到 classic 传输客户端；直接导入本模块会得到明确的报错
++    # 而非裸 ModuleNotFoundError（功能边界=无 CRT 传输）。
++    raise ImportError(
++        's3transfer.crt requires awscrt (CRT), which is not available '
++        'on this platform; use the classic transfer client instead'
++    )
+ import botocore.awsrequest
+ import botocore.session
+-from awscrt.auth import (
+-    AwsCredentials,
+-    AwsCredentialsProvider,
+-    AwsSigningAlgorithm,
+-    AwsSigningConfig,
+-)
+-from awscrt.io import (
+-    ClientBootstrap,
+-    ClientTlsContext,
+-    DefaultHostResolver,
+-    EventLoopGroup,
+-    TlsContextOptions,
+-)
+-from awscrt.s3 import (
+-    S3Client,
+-    S3FileIoOptions,
+-    S3RequestTlsMode,
+-    S3RequestType,
+-    S3ResponseError,
+-    get_recommended_throughput_target_gbps,
+-)
+ from botocore import UNSIGNED
+ from botocore.compat import urlsplit
+ from botocore.config import Config

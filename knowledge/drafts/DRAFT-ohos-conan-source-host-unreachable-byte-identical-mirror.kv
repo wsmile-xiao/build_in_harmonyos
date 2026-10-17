@@ -1,0 +1,110 @@
+#====================================================================
+# DRAFT-ohos-conan-source-host-unreachable-byte-identical-mirror —
+#   Conan source() 官方源码 host 在 CI 沙箱内 TCP 整机不可达（ConnectTimeout）
+#   + CI 镜像 fallback 白名单不覆盖该 host → 字节一致归档托管到 CI 可达
+#   平台（api/v5 raw + 固定 commit sha），host-only 换源、sha256 不变
+# 触发事件: siril/1.2.3 HarmonyOS PC 适配（archives/s/siril，PR #8366）
+# 主从明确: 官方源不可达 ≠ 418 反爬 ≠ 哈希错误，是"host 不可达 + 白名单未覆盖"
+#   这一独立问题层；修复必须保证字节一致（R37 换 host 语义等价）
+#====================================================================
+
+id:                     DRAFT-ohos-conan-source-host-unreachable-byte-identical-mirror
+trigger_tool:           conan|curl|python
+phase:                  download
+error_signature:        ConnectTimeoutError|
+                         Connection to .* timed out\. \(connect timeout=\d+\)|
+                         Max retries exceeded with url:.*(Caused by ConnectTimeoutError)|
+                         Error downloading file .*:.*HTTPSConnectionPool|
+                         \[fail\].*conan create failed
+severity:               3
+category:               network|conan|download|source
+match_keywords:         gitlab.com, ConnectTimeoutError, connect timeout, Max retries exceeded,
+                         source download, conandata.yml, sources.url, mirror fallback whitelist,
+                         byte-identical, host-only, sha256 unchanged, api/v5 raw, pinned commit,
+                         CI sandbox unreachable, R37, 官方源不可达, 镜像白名单
+title:                  Conan source() 官方源码 host 在 CI 沙箱内 TCP 不可达
+                         （ConnectTimeout），且 CI 镜像 fallback 白名单不覆盖该
+                         host → 把字节一致官方归档托管到 CI 可达平台
+                         （api/v5 raw + 固定 commit sha 锚定），host-only 换源、
+                         sha256 不变（R37 语义等价）
+
+root_cause: >
+  CI 沙箱网络策略使 gitlab.com 整机不可达：TCP 连接 30s 超时
+  （ConnectTimeoutError，非 418 反爬、非 404、非哈希错误）。ci/conan/
+  build_and_test.sh 的镜像回退与 pre-download 共用同一份受限白名单
+  （github.com、GNU、GNOME/gitlab.gnome.org、SourceForge、kernel.org、
+  boost、curl.se、xorg 等），gitlab.com 不在其中 → conandata.yml 的
+  sources.url 不被改写、pre-download 也不兜底，conan create 在 source()
+  阶段 get() 直连超时直接失败。全库 57 个配方以 gitlab.com 为源，均有
+  同类风险。本机可达不能代表 CI 可达（siril 本机 curl 200、CI 超时）。
+
+affected_scope: >
+  所有 conandata.yml sources.url 指向 gitlab.com（及任何 CI 沙箱内不可达
+  且镜像白名单未覆盖的 host）的 Conan 配方 source() 阶段。
+
+verification_cmd: >
+  # CI 沙箱内（或等价受限网络）验证官方源不可达：
+  curl -fsSL --connect-timeout 10 <官方url> -o /dev/null   # 期望超时/失败
+  # 换镜像 URL 后验证字节一致：
+  curl -fsSL <镜像url> -o /tmp/t.tar.bz2 && sha256sum /tmp/t.tar.bz2
+  # 期望与 conandata.yml 的 sha256 完全相同
+
+rec_priority:           1
+rec_approach:           byte-identical-mirror-on-ci-reachable-host
+rec_description: >
+  把官方归档（位级相同、sha256 不变、文件名不变）托管到 CI 可达平台
+  （atomgit.com / gitee.com / gitcode.com 的 api/v5 repos/.../raw 端点，
+  以固定 commit sha 经 ?ref= 锚定，防内容漂移），conandata.yml 仅替换
+  host：R37 "换 host 但文件名+sha 相同" 视为源身份未变更，不触发版本
+  冲突。托管分支与 PR 分支分离，PR diff 仅含 conandata.yml 一行 URL
+  变化（+注释），无大文件入 diff。
+rec_command: >
+  # 1) 字节校验：官方归档 sha256sum 与 conandata 一致
+  # 2) 托管：fork 专用分支（如 mirror/siril-1.2.3）提交 tar 包并推送
+  # 3) conandata.yml:
+  #    url: "https://<platform>/api/v5/repos/<owner>/<repo>/raw/<path>?ref=<pinned-sha>"
+  #    sha256: "<不变>"
+  # 4) 复核：新 URL 下载 sha256sum 与官方归档一致
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      gitee-mirrors-regenerated-archive
+fallback_description: >
+  若目标项目存在于 gitee.com/mirrors/<repo>，可改用其 repository/archive
+  再生归档（rocksdb/6.4.6 先例，已 published）；但再生归档与官方 gitlab
+  归档位级不同，必须重算 sha256 并本地复验构建——属"真实源变更"，
+  不再满足 R37 语义等价，且要求该版本未发布（已发布会触发版本冲突）。
+fallback_command:       url: "https://gitee.com/mirrors/<repo>/repository/archive/<tag>.tar.gz"
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       raw\.atomgit\.com|/raw/[^?]*$|/raw/[^?]+\?ref=main
+forbid_1_reason: >
+  atomgit 的 /raw/ 路径返回 SPA 页面而非文件；无 ?ref= 锚定或锚定滚动分支
+  （main/master）的 raw 直链会随分支更新漂移，破坏 sha256 可信度与 R39
+  合规。必须用 api/v5 raw 端点 + 固定 commit sha 锚定。
+forbid_1_consequence:   来源不可审计、内容可能漂移，CI 复现性与 SHA256
+                        可信度失效；误用 /raw/ 路径则下载到 HTML 页面，
+                        conan 哈希校验必失败。
+
+principles:             R37
+similar_to:             E017, E299, E335, E347, E372
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-ohos-conan-source-host-unreachable-byte-identical-mirror.md
+last_updated:           2026-09-05
+source_event:           archives/s/siril/1.2.3 PR #8366 权威 CI 连续失败：
+                        gitlab.com ConnectTimeout（connect timeout=30），
+                        本机 curl 200 但 CI 不可达；镜像托管后 sha256
+                        47dcaa34... 三方一致
+
+authors:                SnowTT <SnowTT@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-05

@@ -1,0 +1,48 @@
+# ═══ Draft knowledge entry — 共享真机断联恢复：nohup runner 必死 + mkdir 锁 stale 判据与安全清理 ═══
+# Software: 通用（真机 shadow CI 运维，ndppd 0.2.6 实证，两次设备失联）
+# Gate: 恢复流程后 r7 轮全门禁 pass（exit 0）
+# Status: DRAFT — path B candidate, same-stem .md/.kv pair
+
+id: shadow-ci-device-outage-runner-stale-lock-recovery
+severity: 3
+category: ci|ohos|operations|filesystem
+trigger_tool: ohos-test-runner|nohup|ssh
+phase: runtime|recovery
+
+keywords: banner exchange, connection timed out, device offline, reboot, nohup, runner died, 0 bytes log, device-global.lock.d, holder.txt empty, stale lock, rm -rf lock.d, mkdir lock, no lease, kill -0, wait loop, double runner, queue stuck, LOCK_HELD no holder
+
+error_signature: banner exchange: Connection to UNKNOWN port -1: Connection timed out|zsh: can't open input file|holder\.txt.*empty|lock\.d.*(residual|stale)
+
+match_keywords: banner exchange, nohup, runner died, device-global.lock.d, holder.txt, stale lock, 设备断联, 锁残留
+
+root_cause: |
+  (1) nohup 只屏蔽 SIGHUP，设备断电/重启/OOM 强杀直接带走 runner 与监控——排队循环中的
+  进程死亡时连一行日志都不写（stdout/stderr 均 0 字节），无法从 job 日志区分"排队中"与"已死"。
+  (2) ohos-test-runner.sh 的全局锁用 mkdir device-global.lock.d 原子实现、退出 rmdir 释放，
+  无租约机制：持锁进程被杀 → 锁目录永久残留 → 恢复后所有会话排队等一个不存在的持有者。
+  (3) holder.txt 在持锁后才写：进程死在写入前则文件为空——"holder.txt 为空"成为
+  stale 无主锁的可靠判据；有内容时需 kill -0 比对 holder_pid 存活性。
+
+rec_approach: stale-lock-triage-then-restart-single-runner
+rec_description: |
+  设备恢复 SSH 后三步：(1) holder.txt 为空 → 直接 rm -rf lock.d；非空 → kill -0 比对
+  holder_pid，死进程才清（只删 lock.d，不动 ohos-test-runs/）。(2) ps 确认旧 runner 真死
+  后再 nohup 重启（防双活排队抢锁）。(3) 状态判定读 ~/ohos-test-runs/<最新run>/logs/
+  exit-code.txt——job/logs/stdout.log 恒 0 字节不可作判据。本地侧：ssh 失败不高频重试，
+  每 2 分钟端口探测等恢复；设备时间与本地可能差数小时，对日志先校准时区。
+rec_command: |
+  [ ! -s ~/ohos-test-locks/device-global.lock.d/holder.txt ] && rm -rf ~/ohos-test-locks/device-global.lock.d
+  ps -ef | grep run-conan | grep -v grep   # 确认无幸存
+  nohup sh $HOME/ohos-users/codex/<job>/run-conan-heavy.sh > ... 2> ... &
+  RUN=$(ls -dt ~/ohos-test-runs/*<库名>* | head -1); cat "$RUN/logs/exit-code.txt"
+rec_auto_fix: false
+
+affected_scope: 所有在共享真机上跑长时 shadow CI / 重任务排队的会话（设备失联后必踩；也影响同机其它会话的队列恢复）。
+
+verification_cmd: 清锁后 ls -d ~/ohos-test-locks/device-global.lock.d 2>/dev/null || echo NOW_LOCK_FREE；重启 runner 后 sleep 20 查看 ~/ohos-test-runs 新 run 的 runner.log
+
+authors:
+  - codex
+source_pr: TBD
+source_commit: f3ea8f7cf6
+draft_date: 2026-09-30

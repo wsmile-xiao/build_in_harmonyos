@@ -1,0 +1,72 @@
+diff --git a/driver/others/blas_server.c b/driver/others/blas_server.c
+--- a/driver/others/blas_server.c
++++ b/driver/others/blas_server.c
+@@ -344,7 +344,15 @@
+ static int increased_threads = 0;
+ 
+ #ifdef OS_LINUX
+-extern int openblas_get_num_threads(void);  
++#include <sys/syscall.h>
++extern int openblas_get_num_threads(void);
++
++/* Pool workers (slots 0..N-2) record their kernel TID at startup; slot
++   N-1 is the calling thread. The public affinity API addresses them with
++   sched_setaffinity()/sched_getaffinity(), which every Linux libc
++   provides (pthread_setaffinity_np()/pthread_getaffinity_np() are
++   glibc-only and absent from musl). */
++static pid_t blas_worker_tids[MAX_CPU_NUMBER];
+ 
+ int openblas_setaffinity(int thread_idx, size_t cpusetsize, cpu_set_t* cpu_set) {
+   const int active_threads = openblas_get_num_threads();
+@@ -354,11 +362,15 @@
+     return -1;
+   }
+ 
+-  pthread_t thread = (thread_idx == active_threads - 1)
+-      ? pthread_self()
+-      : blas_threads[thread_idx];
++  if (thread_idx == active_threads - 1)
++    return sched_setaffinity(0, cpusetsize, cpu_set) ? errno : 0;
+ 
+-  return pthread_setaffinity_np(thread, cpusetsize, cpu_set);
++  const pid_t tid = blas_worker_tids[thread_idx];
++  if (tid <= 0)
++    return ESRCH;
++  if (sched_setaffinity(tid, cpusetsize, cpu_set))
++    return errno;
++  return 0;
+ }
+ int openblas_getaffinity(int thread_idx, size_t cpusetsize, cpu_set_t* cpu_set) {
+   const int active_threads = openblas_get_num_threads();
+@@ -368,11 +380,15 @@
+     return -1;
+   }
+ 
+-  pthread_t thread = (thread_idx == active_threads - 1)
+-      ? pthread_self()
+-      : blas_threads[thread_idx];
++  if (thread_idx == active_threads - 1)
++    return sched_getaffinity(0, cpusetsize, cpu_set) ? errno : 0;
+ 
+-  return pthread_getaffinity_np(thread, cpusetsize, cpu_set);
++  const pid_t tid = blas_worker_tids[thread_idx];
++  if (tid <= 0)
++    return ESRCH;
++  if (sched_getaffinity(tid, cpusetsize, cpu_set))
++    return errno;
++  return 0;
+ }
+ #endif
+ 
+@@ -389,6 +405,11 @@
+   unsigned long start, stop;
+ #endif
+ 
++#if defined(OS_LINUX)
++  /* Record this worker's kernel TID for openblas_setaffinity/getaffinity. */
++  blas_worker_tids[cpu] = (pid_t)syscall(SYS_gettid);
++#endif
++
+ #if defined(OS_LINUX) && !defined(NO_AFFINITY)
+   if (!increased_threads)
+     thread_status[cpu].node = gotoblas_set_affinity(cpu + 1);

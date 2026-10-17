@@ -1,0 +1,171 @@
+# ═══ Draft knowledge entry — meson 的 `not_installed` 不是「不执行」而是「不安装元数据」；`meson test` 退出码 0 同样不代表用例都跑了（判据是 meson-logs/testlog.txt 的汇总块） ═══
+# Timestamp: 2026-09-20
+# Software: libgmobile 0.7.2 (meson + gnome 测试框架)
+# Gate: L1 (meson test) / rule4 真实通过率 / rule12 鸿蒙特有测试
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-libgmobile-0.7.2-meson-not-installed-is-not-skipped-and-exit-code-is-not-coverage
+trigger_tool:           meson|ninja|conan|sh
+phase:                  test|build
+error_signature:        Ok:\s+0|# TOTAL:  0|no tests defined|not_installed|
+                         Test.*SKIP.*\d|meson test.*Exit status: 0|
+                         testlog\.txt|installed-tests|suite summary
+severity:               2
+category:               testing,meson,false-pass,coverage-gap,counting-semantics
+match_keywords:         meson test, testlog.txt, Ok: / Fail: / Timeout: / Skipped:,
+                        not_installed, installed_tests, template.test.in,
+                        gnome 测试, meson-logs, 退出码 exit code, 汇总块 summary block,
+                        空跑 vacuous suite, rule4 上游 N, both_libraries,
+                        g_test_add_func, test() 程序数 vs 用例数
+
+title:                  读 meson 测试结果有两处会数错：`not_installed` 是**只跳过安装
+                        .test 元数据**、程序照样构建并执行（误读会少报上游 N）；
+                        而 `meson test` 的退出码 0 只说明「没有失败」，
+                        SKIP / 用例根本没注册同样得 0 —— 判据必须是回读
+                        meson-logs/testlog.txt 的汇总块
+
+root_cause: >
+  两件事都源于「用错层级的信号回答统计问题」。
+
+  (a) **`not_installed` 这个变量名与它的实际作用不符。** libgmobile 0.7.2 的
+  tests/meson.build 里：
+
+      tests = ['cutout', 'display-panel', 'mcc-mnc', 'svg-path',
+               'timeout', 'utils', 'device-tree']
+      # These need data not available on the installed system:
+      not_installed = ['test-device-tree']
+
+      foreach test : tests
+        test_name = 'test-@0@'.format(test)
+        ...
+        if get_option('installed_tests') and test_name not in not_installed
+          configure_file(input: files('template.test.in'), ...)   # 只影响这个
+        endif
+        t = executable(test_name, [...])                          # 一律构建
+        test(test, t, env: test_env)                              # 一律注册执行
+      endforeach
+
+  `not_installed` 唯一的用途是「要不要生成 .test 元数据以便装完之后还能被
+  `gnome-desktop-testing-runner` 之类发现」。它**不**从 `tests` 里剔除、也不
+  影响 `executable()` / `test()`。把它当成「这些用例不跑」，会把上游 N 少报
+  7 个程序里的 1 个（也就是 1 个用例）。
+
+  (b) **`meson test` 的退出码不含覆盖率信息。** 退出码 0 的语义是「没有用例
+  失败」。用例被 SKIP、或者 `test()` 调用因为条件分支根本没注册，同样得到 0。
+  这与 automake 并行测试框架把 SKIP 计入 TOTAL 是同一类问题的 meson 版本：
+  **退出码是「有没有坏事发生」，不是「跑了几条」。** 真正的判据在
+  `meson-logs/testlog.txt` 末尾的汇总块：
+
+      Ok:                    7
+      Expected Fail:         0
+      Fail:                  0
+      Unexpected Pass:       0
+      Skipped:               0
+      Timeout:               0
+
+  其中 `Ok:` 才是「真跑过并通过的程序数」。只吃退出码，就无法区分
+  「7 个程序全绿」与「7 个程序里 5 个被跳过、2 个通过」。
+
+  第三个容易混的口径是「程序数 vs 用例数」：meson 的 `test()` 注册的是**程序**，
+  一个程序里可以有任意多个 g_test 用例。libgmobile 是 7 个程序 / 14 个
+  `g_test_add_func`。把 7 当用例数会少报，把 14 当程序数会混掉「有几个程序
+  真的被执行」。
+
+affected_scope: >
+  所有用 meson 注册测试的项目；所有把「安装期元数据」与「是否执行」混为一谈的
+  测试注册表（meson 的 `not_installed`、autotools 的 `noinst_PROGRAMS` 与
+  `check_PROGRAMS` 的区别、CMake 的 `EXCLUDE_FROM_ALL` 与 `add_test` 的区别）；
+  以及所有以退出码表达测试结论的框架。特别地：**上游测试 N 的口径必须写清楚是
+  程序数还是用例数**，因为评估侧会拿它去比对。
+
+verification_cmd: >
+  # (a) 判据一：不要看退出码，回读汇总块
+  meson test -C <builddir>
+  sed -n '/^Ok:/,/^Timeout:/p' <builddir>/meson-logs/testlog.txt
+  #     → Ok: 7 才是「跑过并通过的程序数」
+  # (b) 判据二：程序数 vs 用例数分别数
+  grep -n 'tests = \[' -A2 <src>/tests/meson.build          # 程序数
+  grep -h 'g_test_add_func' <src>/tests/test-*.c | wc -l    # 用例数
+  # (c) 判据三：确认 not_installed 只影响元数据
+  grep -n 'not_installed' -B4 -A12 <src>/tests/meson.build
+  #     → 出现的唯一位置应当是 configure_file(install_dir: ...) 的那个 if
+  # (d) 负向复现：把 tests 选项关掉，退出码照样 0，但汇总块是空跑
+  meson setup _b <src> -Dtests=false && meson test -C _b ; echo $?   # → 0
+
+rec_priority:           1
+rec_approach:           read-back-the-suite-summary-and-pin-the-expected-program-count
+rec_description: >
+  在配方的 build() 里跑完上游套件后**回读** `meson-logs/testlog.txt` 的汇总块
+  并硬断言，而不是吃 `meson test` 的退出码：
+    · `Fail` / `Timeout` / `Unexpected Pass` 任一非零即抛异常；
+    · `Ok` 必须 >= 从上游 `tests/meson.build` 的 `tests` 列表**数出来**的条数
+      （本包 7），并把这个数字钉成模块级常量，避免「套件被静默截断」；
+    · 汇总块取不到（文件缺失或格式变了）同样抛异常——「读不到结论」不等于
+      「结论是好」。
+  统计口径在 body/notes/MANIFEST 里一律写明**两个数**：7 个测试程序 /
+  14 个 g_test_add_func 用例，并注明上游默认分支与钉版 tag 一致（无版本差），
+  避免评估侧按另一个口径判少报。
+rec_command:            >
+  # conanfile.py build() 内
+  Meson(self).test()
+  log = os.path.join(self.build_folder, "meson-logs", "testlog.txt")
+  summary = {k: int(m.group(1)) for k in (...)
+             for m in [re.search(rf"^{k}:\s+(\d+)$", open(log).read(), re.M)] if m}
+  for k in ("Fail", "Timeout", "Unexpected Pass"):
+      if summary.get(k, 0): raise ConanException(...)
+  if summary.get("Ok", 0) < UPSTREAM_TEST_PROGRAMS: raise ConanException(...)
+rec_auto_fix:           true
+rec_impl:               recipe-side-hard-assertion
+
+fallback_priority:      2
+fallback_approach:      declare-both-counts-and-say-which-you-could-not-run
+fallback_description:   >
+  若某个测试程序在平台上确实无法执行（需要设备节点、需要真实 DT），不要把它
+  从 `tests` 列表里删掉、也不要把它 SKIP 掉当作通过——在上游套件层面保持原样，
+  在 body 的验证结果段里把口径拆开写：「上游 7 个程序 / 14 个用例；适配后执行
+  集 X/X（100%）；未执行 Z 个，理由如下」。删列表或加 skip 会让「退出码 0」
+  变成假通过，且 rule4 会判少报/造假。
+fallback_command:       sed -n '/^Ok:/,/^Timeout:/p' <builddir>/meson-logs/testlog.txt
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       把 not_installed 里的条目.*从 tests 列表删掉|
+                        因为 not_installed 就宣布该用例不执行
+forbid_1_reason:        not_installed 只门控 template.test.in 的 generate/install，
+                        程序照样 executable() + test()。删掉它属于改上游测试注册表，
+                        等于少跑一个用例还把它说成「上游本来就不跑」。
+forbid_1_consequence:   上游 N 少报（rule4 FAIL），并且真的丢掉一个用例的回归保护。
+forbid_2_pattern:       只看 meson test.*退出码.*断言.*全绿|if .*meson test.*rc == 0
+forbid_2_reason:        退出码 0 = 「没有失败」，不覆盖 SKIP 与「用例根本没注册」。
+forbid_2_consequence:   把「只跑了 2/7」当成「7/7 全绿」，上游回归套件价值归零。
+forbid_3_pattern:       用 --suite / --no-suite 过滤掉不想要的那几个程序|
+                        meson test --no-suite 让报表好看
+forbid_3_reason:        适配的目标是让库在 OHOS 上跑对，不是让报表好看；被过滤掉的
+                        往往正是暴露平台问题的那些。
+forbid_3_consequence:   伪造通过率，评审判不实；真实回归被永久掩盖。
+
+principles:             P-BUILD-001, P012（边界与反例：退出码层面的「看起来够了」）
+causes:                 []
+caused_by:              meson 把「测试注册」与「安装期元数据」分成两件事，
+                        而变量名 not_installed 暗示了后者以外的语义
+similar_to:             DRAFT-mpsolve-3.2.3-make-check-green-is-not-deliverable-green
+                        （同一失效模式在 autotools 侧：`make check` 退出 0 而 SKIP
+                        计入 TOTAL；本条是 meson 侧，且多了一层「变量名误导」）、
+                        DRAFT-box2d-2.4.1-ctest-empty-suite-false-pass（ctest 空套件
+                        假通过——CMake 侧的同一族）、E265
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-libgmobile-0.7.2-meson-not-installed-is-not-skipped-and-exit-code-is-not-coverage.md
+last_updated:           2026-09-20
+source_event:           archives/l/libgmobile/0.7.2 适配（tests/meson.build 7 程序 /
+                        14 用例，其中 test-device-tree 在 not_installed 里）
+
+authors:                2301_76770579
+source_pr:              11556
+source_commit:          b3bbdd4352
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20

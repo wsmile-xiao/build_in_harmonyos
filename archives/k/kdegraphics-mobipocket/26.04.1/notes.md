@@ -36,7 +36,7 @@ cmake -DCMAKE_INSTALL_PREFIX=/storage/Users/currentUser/usr/local \
 ## 依赖版本
 
 - Qt6: 6.11.1
-- ECM: 6.26.0
+- ECM: 6.20.0
 
 ## 验证结果
 
@@ -58,5 +58,5 @@ cmake -DCMAKE_INSTALL_PREFIX=/storage/Users/currentUser/usr/local \
 - 库依赖于 Qt6Core 和 Qt6Gui
 ---
 
-**编译结束**: 2026-06-05 14:44
+**编译结束**: 2026-08-07 02:03
 **最终状态**: built

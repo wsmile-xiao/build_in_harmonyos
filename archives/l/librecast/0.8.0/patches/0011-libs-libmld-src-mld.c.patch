@@ -1,0 +1,326 @@
+--- a/libs/libmld/src/mld.c
++++ b/libs/libmld/src/mld.c
+@@ -1,24 +1,46 @@
+ /* SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only */
+ /* Copyright (c) 2020-2023 Brett Sheffield <bacs@librecast.net> */
+ 
+ #define _GNU_SOURCE /* required for struct in6_pktinfo */
+ #include "config.h"
+ #include "mld_pvt.h"
+ #include "log.h"
+ 
++#if defined(__linux__) && !defined(__GLIBC__)
++/* RFC 3542 §10 hop-by-hop / destination option API.  glibc implements it;
++ * musl (used by OpenHarmony) does not, and neither the OHOS sysroot nor the
++ * device libc export these symbols, so libmld cannot be relocated at load
++ * time without them.  The MLD query builder below calls them directly.
++ * Definitions are at the end of this file. */
++int inet6_opt_init(void *extbuf, socklen_t extlen);
++int inet6_opt_append(void *extbuf, socklen_t extlen, int offset, uint8_t type,
++                     socklen_t len, uint8_t align, void **databufp);
++int inet6_opt_finish(void *extbuf, socklen_t extlen, int offset);
++int inet6_opt_set_val(void *databuf, int offset, void *val, socklen_t vallen);
++#endif
++
+ #ifdef __linux__
++/* musl libc's <sys/socket.h> already defines struct sockaddr_storage, which
++ * collides with the kernel UAPI copy pulled in by <linux/netlink.h>; rename
++ * the kernel one during these includes (it is unused in this translation unit). */
++# ifndef __GLIBC__
++#  define sockaddr_storage __linux_sockaddr_storage
++# endif
+ # include <linux/netlink.h>
+ # include <linux/rtnetlink.h>
+ # include <linux/filter.h>
+ # include <linux/if_packet.h>
+ # include <linux/if_ether.h>
++# ifndef __GLIBC__
++#  undef sockaddr_storage
++# endif
+ #endif
+ #if HAVE_ASM_TYPES_H
+ # include <asm/types.h>
+ #endif
+ #if HAVE_SYS_PARAM_H
+ #include <sys/param.h>
+ #endif
+ #if HAVE_SYS_SOCKET_H
+ # include <sys/socket.h>
+ #endif
+@@ -1093,23 +1115,24 @@
+ 	iov[0].iov_len = sizeof ethh;
+ 	iov[1].iov_base = ipv6;
+ 	iov[1].iov_len = sizeof ipv6;
+ 	iov[2].iov_base = buf;
+ 	iov[2].iov_len = sizeof buf;
+ 	msg.msg_name = &sll;
+ 	msg.msg_namelen = sizeof sll;
+ 	msg.msg_iov = iov;
+ 	msg.msg_iovlen = sizeof iov / sizeof iov[0];
+ 	msg.msg_flags = 0;
+-	while (1) {
++	while (!mld->stop) {
+ 		byt = recvmsg(sock, &msg, 0);
+ 		if (byt == -1) {
++			if (mld->stop) break; /* socket closed by mld_stop() */
+ 			ERROR("read/recvmsg");
+ 			goto err_close_sock;
+ 		}
+ 		mldh = (struct mld_hdr *)(buf);
+ 		ip6h = (struct ip6_hdr *)&ipv6;
+ 		ifx = (unsigned int)sll.sll_ifindex;
+ 		DEBUG("received type %u on %u (%zi bytes)\n", mldh->mld_icmp6_hdr.icmp6_type, ifx, byt);
+ 		if (ifx) mld_msg_handler(mld, ifx, ip6h, mldh);
+ 	}
+ 	rc = 0;
+@@ -1158,21 +1181,24 @@
+ 	if (!fds) { err = errno; rc = -1; goto err_free_buf; }
+ 	mld_iface_t *iface = mld->iface;
+ 	for (int i = 0; i < nfds; i++) {
+ 		fds[i].fd = iface->bpf;
+ 		fds[i].events = POLLIN;
+ 		iface = iface->next;
+ 	}
+ 
+ 	while (nfds > 0) {
+ 		rc = poll(fds, (nfds_t) nfds, 1000);
++#if !(defined(__linux__) && !defined(__GLIBC__))
+ 		pthread_testcancel();
++#endif
++		if (mld->stop) break;
+ 		if (rc > 0) {
+ 			for (int i = 0; i < nfds; i++) {
+ 				if (fds[i].revents & POLLIN) {
+ 					byt = read(fds[i].fd, buf, (size_t)blen);
+ 					if (byt > 0) {
+ 						bpfh = (struct bpf_hdr *)buf;
+ 						ip6h = (struct ip6_hdr *)(buf + bpfh->bh_hdrlen + 14);
+ 						mldh = (struct mld_hdr *)(buf + bpfh->bh_hdrlen + 62);
+ 						inet_ntop(AF_INET6, &(mldh->mld_addr), straddr, sizeof straddr);
+ 						DEBUG("%u: %s(%zi bytes)", mldh->mld_icmp6_hdr.icmp6_type, straddr, byt);
+@@ -1242,53 +1268,60 @@
+ }
+ 
+ static void *mld_thread_netlink(void *arg)
+ {
+ 	mld_t *mld = (mld_t *)arg;
+ 	/* 8192 to avoid message truncation on platforms with page size > 4096 */
+ 	struct nlmsghdr buf[8192/sizeof(struct nlmsghdr)];
+ 	struct iovec iov = { buf, sizeof(buf) };
+ 	struct nlmsghdr *nh;
+ 	struct sockaddr_nl sa;
+-	struct msghdr msg = { &sa, sizeof(sa), &iov, 1, NULL, 0, 0 };
++	struct msghdr msg = {
++		.msg_name = &sa,
++		.msg_namelen = sizeof(sa),
++		.msg_iov = &iov,
++		.msg_iovlen = 1,
++	};
+ 	ssize_t len;
+ 	int fd;
+ 
+ 	memset(&sa, 0, sizeof(sa));
+ 	sa.nl_family = AF_NETLINK;
+ 	sa.nl_groups = RTMGRP_LINK;
+ 	if ((fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE)) == -1) return NULL;
+ 	if (bind(fd, (struct sockaddr *) &sa, sizeof(sa)) == -1) {
+ 		close(fd);
+ 		return NULL;
+ 	}
++	/* published so mld_stop() can close it and release recvmsg() */
++	mld->netlink_fd = fd;
+ 
+ 	sem_post(&mld->sem_netlink);
+-	while (1) {
++	while (!mld->stop) {
+ 		len = recvmsg(fd, &msg, 0);
+-		if (len == -1) continue;
++		if (len == -1) break; /* fd closed by mld_stop() */
+ 		for (nh = (struct nlmsghdr *)buf; NLMSG_OK(nh, (size_t)len); nh = NLMSG_NEXT(nh, len)) {
+ 			/* The end of multipart message */
+ 			if (nh->nlmsg_type == NLMSG_DONE) continue;
+ 			if (nh->nlmsg_type == NLMSG_ERROR) ERROR("NLMSG_ERROR\n");
+ 			else mld_handle_netlink_msg(mld, nh);
+ 		}
+ 	}
+ 
+ 	return arg;
+ }
+ #endif
+ 
+ static void *mld_thread_timer(void *arg)
+ {
+ 	mld_t *mld = (mld_t *)arg;
+-	while (1) {
++	while (!mld->stop) {
+ 		sleep(1);
+ 		/* we use a semaphore to ensure we only queue a maximum of one
+ 		 * job at a time, even when STATE thread is busy */
+ 		if (sem_trywait(&mld->sem_state) == -1) continue;
+ 		job_push_new(mld->q[MLD_STATE], &mld_state_timer_check, mld, sizeof(*mld), NULL, 0);
+ 	}
+ 	return arg;
+ }
+ 
+ mld_t *mld_init(int flags)
+@@ -1318,31 +1351,41 @@
+ err_sem_mld_destroy:
+ 	sem_destroy(&mld->sem_mld);
+ err_free_mld:
+ 	free(mld);
+ 	if (err) errno = err;
+ 	return NULL;
+ }
+ 
+ void mld_stop(mld_t *mld)
+ {
++	/* Cooperative shutdown: OHOS/musl provides no working pthread_cancel(),
++	 * so every worker is released by closing the file descriptor it blocks on
++	 * (or by a stop flag), then joined via job_queue_destroy(). */
++	mld->stop = 1;
+ #ifdef __linux__
+ 	if (mld->listen_sock >= 0) {
+ 		close(mld->listen_sock);
+ 		mld->listen_sock = -1;
+ 	}
+ #else
+ 	for (mld_iface_t *iface = mld->iface; iface; iface = iface->next) {
+ 		if (iface->bpf >= 0) {
+ 			close(iface->bpf);
+ 			iface->bpf = -1;
+ 		}
++	}
++#endif
++#if HAVE_NETLINK
++	if (mld->netlink_fd > 0) {
++		close(mld->netlink_fd);
++		mld->netlink_fd = -1;
+ 	}
+ #endif
+ 	for (int i = 0; i < MLD_THREADS; i++) if (mld->q[i]) job_queue_destroy(mld->q[i]);
+ }
+ 
+ mld_t *mld_start(mld_t *mld)
+ {
+ 	struct timespec ts;
+ 	const int opt = 1;
+ 	int err = 0;
+@@ -1382,10 +1425,118 @@
+ 	if (sem_post(&mld->sem_state) == -1) goto err_mld_stop;
+ 	/* start timer thread */
+ 	if (job_push_new(mld->q[MLD_TIMER], &mld_thread_timer, mld, sizeof(*mld), NULL, 0))
+ 		return mld;
+ err_mld_stop:
+ 	err = errno;
+ 	mld_stop(mld);
+ 	errno = err;
+ 	return NULL;
+ }
++
++#if defined(__linux__) && !defined(__GLIBC__)
++/* RFC 3542 §10 hop-by-hop / destination option builders.
++ *
++ * These are only needed by libcs that do not implement the API (musl, as used
++ * by OpenHarmony).  Semantics follow RFC 3542 §10 and the KAME/BSD reference
++ * implementation (lib/libc/net/ip6opt.c) on which the glibc and FreeBSD
++ * implementations are based, so the option bytes produced here are identical
++ * to those the platform would have produced.
++ */
++
++#ifndef IP6OPT_PAD1
++#define IP6OPT_PAD1 0
++#endif
++#ifndef IP6OPT_PADN
++#define IP6OPT_PADN 1
++#endif
++
++int inet6_opt_init(void *extbuf, socklen_t extlen)
++{
++	struct ip6_ext *ext = (struct ip6_ext *)extbuf;
++
++	if (ext) {
++		if (extlen <= 0 || (extlen % 8))
++			return -1;
++		ext->ip6e_len = (uint8_t)((extlen >> 3) - 1);
++	}
++
++	/* length of the next-header and header-ext-length fields */
++	return 2;
++}
++
++int inet6_opt_append(void *extbuf, socklen_t extlen, int offset, uint8_t type,
++                     socklen_t len, uint8_t align, void **databufp)
++{
++	int currentlen = offset, padlen = 0;
++
++	/* option types 0 and 1 are reserved for Pad1 and PadN */
++	if (type < 2)
++		return -1;
++	/* the option data length is carried in a single octet */
++	if (len > 255)
++		return -1;
++	if (align != 1 && align != 2 && align != 4 && align != 8)
++		return -1;
++	if (align > len)
++		return -1;
++
++	currentlen += 2 + (int)len;	/* 2 == type + len octets */
++	if (align && currentlen % align)
++		padlen = align - (currentlen % align);
++	currentlen += padlen;
++
++	if (extlen && currentlen > (int)extlen)
++		return -1;
++
++	if (extbuf) {
++		uint8_t *optp = (uint8_t *)extbuf + offset;
++
++		if (padlen == 1) {
++			/* a single Pad1 covers the alignment */
++			*optp++ = IP6OPT_PAD1;
++		}
++		else if (padlen > 0) {
++			*optp++ = IP6OPT_PADN;
++			*optp++ = (uint8_t)(padlen - 2);
++			memset(optp, 0, padlen - 2);
++			optp += (padlen - 2);
++		}
++		*optp++ = type;
++		*optp++ = (uint8_t)len;
++		if (databufp) *databufp = optp;
++	}
++
++	return currentlen;
++}
++
++int inet6_opt_finish(void *extbuf, socklen_t extlen, int offset)
++{
++	/* pad the header out to a multiple of 8, as IPv6 requires */
++	int updatelen = offset > 0 ? (1 + ((offset - 1) | 7)) : 0;
++
++	if (extbuf) {
++		uint8_t *padp;
++		int padlen = updatelen - offset;
++
++		if (updatelen > (int)extlen)
++			return -1;
++		padp = (uint8_t *)extbuf + offset;
++		if (padlen == 1) {
++			*padp = IP6OPT_PAD1;
++		}
++		else if (padlen > 0) {
++			*padp++ = IP6OPT_PADN;
++			*padp++ = (uint8_t)(padlen - 2);
++			memset(padp, 0, padlen - 2);
++		}
++	}
++
++	return updatelen;
++}
++
++int inet6_opt_set_val(void *databuf, int offset, void *val, socklen_t vallen)
++{
++	memcpy((uint8_t *)databuf + offset, val, vallen);
++	return offset + (int)vallen;
++}
++#endif /* musl / non-glibc Linux */

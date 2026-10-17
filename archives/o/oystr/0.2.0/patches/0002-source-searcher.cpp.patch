@@ -1,0 +1,138 @@
+--- a/source/searcher.cpp
++++ b/source/searcher.cpp
+@@ -17,41 +17,37 @@
+ #ifndef _FILE_OFFSET_BITS
+ #  define _FILE_OFFSET_BITS 64
+ #endif
+ 
+ #include <errno.h>
+ 
+ #ifndef _GNU_SOURCE
+ #  define _GNU_SOURCE
+ #endif
+ 
+-#include <ftw.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <time.h>
+ #include <unistd.h>
+ 
+ /* POSIX.1 says each process has at least 20 file descriptors.
+  * Three of those belong to the standard streams.
+  * Here, we use a conservative estimate of 15 available;
+  * assuming we use at most two for other uses in this program,
+  * we should never run into any problems.
+  * Most trees are shallower than that, so it is efficient.
+  * Deeper trees are traversed fine, just a bit slower.
+  * (Linux allows typically hundreds to thousands of open files,
+  *  so you'll probably never see any issues even if you used
+  *  a much higher value, say a couple of hundred, but
+  *  15 is a safe, reasonable value.)
+  */
+-#ifndef USE_FDS
+-#  define USE_FDS 15
+-#endif
+ 
+ namespace search
+ {
+ std::string_view::const_iterator needle_search(
+     std::string_view needle,
+     std::string_view::const_iterator haystack_begin,
+     std::string_view::const_iterator haystack_end)
+ {
+   if (haystack_begin != haystack_end) {
+     return std::search(
+@@ -300,57 +296,56 @@
+   for (const auto& ignored_dir : ignored_dirs) {
+     // if path contains ignored dir, ignore it
+     if (strstr(path, ignored_dir) != nullptr) {
+       return true;
+     }
+   }
+ 
+   return false;
+ }
+ 
+-int handle_posix_directory_entry(const char* filepath,
+-                                 const struct stat* info,
+-                                 const int typeflag,
+-                                 struct FTW* pathinfo)
+-{
+-  static const bool skip_fnmatch =
+-      searcher::m_filter == std::string_view {"*.*"};
+-
+-  if (typeflag == FTW_DNR) {
+-    // directory not readable
+-    return FTW_SKIP_SUBTREE;
+-  }
+-
+-  if (typeflag == FTW_D || typeflag == FTW_DP) {
+-    // directory
+-    if (exclude_directory(filepath)) {
+-      return FTW_SKIP_SUBTREE;
+-    } else {
+-      return FTW_CONTINUE;
+-    }
+-  }
+-
+-  if (typeflag == FTW_F) {
+-    if ((skip_fnmatch && is_whitelisted(filepath))
+-        || fnmatch(searcher::m_filter.data(), filepath, 0) == 0)
+-    {
+-      searcher::m_ts->push_task(
+-          [pathstring = std::string {filepath}]()
+-          { searcher::read_file_and_search(pathstring.data()); });
+-    }
+-  }
+-
+-  return FTW_CONTINUE;
+-}
+-
+ void searcher::directory_search(const char* path)
+ {
+   /* Invalid directory path? */
+   if (path == NULL || *path == '\0')
+     return;
+ 
+-  nftw(
+-      path, handle_posix_directory_entry, USE_FDS, FTW_PHYS | FTW_ACTIONRETVAL);
++  static const bool skip_fnmatch =
++      searcher::m_filter == std::string_view {"*.*"};
++  std::error_code error;
++  fs::recursive_directory_iterator current(
++      fs::path(path), fs::directory_options::skip_permission_denied, error);
++  const fs::recursive_directory_iterator end;
++  if (error)
++    return;
++
++  for (; current != end; current.increment(error)) {
++    if (error) {
++      error.clear();
++      continue;
++    }
++
++    const fs::path entry_path = current->path();
++    std::string path_string = entry_path.string();
++    std::error_code entry_error;
++    if (current->is_directory(entry_error)) {
++      std::string directory_string = path_string;
++      if (directory_string.empty() || directory_string.back() != '/')
++        directory_string += '/';
++      if (exclude_directory(directory_string.c_str()))
++        current.disable_recursion_pending();
++      continue;
++    }
++    if (entry_error || !current->is_regular_file(entry_error) || entry_error)
++      continue;
++
++    if ((skip_fnmatch && is_whitelisted(path_string))
++        || fnmatch(searcher::m_filter.data(), path_string.c_str(), 0) == 0) {
++      searcher::m_ts->push_task(
++          [pathstring = std::move(path_string)]()
++          { searcher::read_file_and_search(pathstring.data()); });
++    }
++  }
+   searcher::m_ts->wait_for_tasks();
+ }
+ 
+ }  // namespace search

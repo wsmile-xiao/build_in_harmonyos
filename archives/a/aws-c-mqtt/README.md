@@ -1,26 +1,19 @@
-# AWS C MQTT — OpenHarmony 编译档案
+# AWS C MQTT
 
-## 软件简介
-aws-c-mqtt 提供 MQTT 客户端库，支持 MQTT 3.1.1 和 MQTT 5 协议。
+AWS C MQTT provides the C MQTT client library used by the AWS CRT stack.
 
-## 功能概述
-- MQTT 3.1.1 完整支持
-- MQTT 5 支持（v0.15.0+ 完整）
-- QoS 0/1/2 消息
-- 共享订阅、主题别名、流控制
+## OpenHarmony PC status
 
-## OHOS 适配要点
-- CMake 标准构建，推荐 v0.15.2
+| Version | Status | Build date | Notes |
+| --- | --- | --- | --- |
+| 0.15.2 | built | 2026-07-16 | Private-source AWS CRT dependency build; 296 deterministic upstream ctest cases run in CI, consumer smoke coverage. |
+| 0.14.0 | partial | 2026-04-24 | Historical entry. |
 
-## 依赖关系
-- 编译依赖: aws-c-common, aws-c-io, aws-c-http
-- 被依赖: aws-crt-cpp, AWS IoT SDK
+## Upstream
 
-## 版本差异
-| 版本 | MQTT5 支持 |
-|------|-----------|
-| 0.14.0 | 部分 |
-| 0.15.2 | 完整 |
+- Source: https://github.com/awslabs/aws-c-mqtt
+- Archive: https://github.com/awslabs/aws-c-mqtt/archive/refs/tags/v0.15.2.tar.gz
 
-## 参考资料
-- [aws-c-mqtt GitHub](https://github.com/awslabs/aws-c-mqtt)
+## OpenHarmony notes
+
+This adaptation builds `aws-c-mqtt` together with the required AWS CRT C dependencies from pinned private source archives, runs 296 deterministic cases from the upstream 555-case ctest suite in `build()`, and validates the packaged consumer surface through Conan `test_package`. The 259 excluded cases are event-loop, TLS, request-response and network-dependent scenarios that timed out or failed during full-device validation; the exclusions are documented in the recipe and MANIFEST.

@@ -1,0 +1,112 @@
+#====================================================================
+# DRAFT-go-no-vendor-module-closure-goproxy.kv
+# 无 vendor/ 的 Go 模块在 conan/OHOS CI 构建必须显式拉取模块闭包
+# （GOPROXY+-mod=mod），否则 import 解析硬失败
+#====================================================================
+# Exxx 编号由知识库主编定稿时分配；草稿期 id 使用 DRAFT slug。
+
+id:                     DRAFT-go-no-vendor-module-closure-goproxy
+trigger_tool:           go|go build|go mod|conan
+phase:                  compilation
+error_signature:        module lookup disabled by GOPROXY=off|
+                         cannot find module providing package|
+                         missing go\.sum entry
+
+severity:               3
+category:               build-system, go, dependency, network
+match_keywords:         go build, GOPROXY, vendor, go mod download,
+                         module lookup, -mod=mod, -mod=readonly,
+                         goproxy.cn, GOSUMDB, module closure, conan,
+                         GOMODCACHE
+title:                  无 vendor/ 的 Go 模块在 conan/OHOS CI 构建必须显式拉取模块闭包（GOPROXY+-mod=mod），否则 import 解析硬失败
+
+root_cause:             Go 1.16+ 默认 -mod=readonly 且编译需要完整模块图;
+                         conan 源码包只含上游 tarball(无 vendor/ 目录),
+                         CI worker 的 GOMODCACHE 为空, import 解析被迫发起
+                         模块查找; GOPROXY 缺省/off 或代理与 sumdb 不可达
+                         (中国网络访问 proxy.golang.org/sum.golang.org 受限)
+                         时查找硬失败, 构建在第一个 import 处即阻塞
+affected_scope:         任何无 vendor/ 目录的 Go 模块在 OHOS conan CI 的
+                         conan 配方构建(实例: kubeaudit 0.22.2, k8s.io
+                         依赖闭包 53 模块; vendor/ 在 Go 生态可选且非默认)
+verification_cmd:       # PROBE1(预期硬失败, 输出 >0 行):
+                         cd <src-of-no-vendor-go-module> && env
+                         GOMODCACHE=/tmp/probe-empty-gomodcache GOPROXY=off
+                         GOFLAGS=-mod=mod GOTOOLCHAIN=local go build ./...
+                         2>&1 | grep -c "module lookup disabled by GOPROXY=off"
+                         # PROBE2B(预期成功, 产物存在):
+                         env CGO_ENABLED=0 GOOS=linux GOARCH=arm64
+                         GOTOOLCHAIN=local GOFLAGS=-mod=mod
+                         GOPROXY=https://goproxy.cn,direct
+                         GOSUMDB=sum.golang.google.cn
+                         GOMODCACHE=<writable-ws>/go-mod-cache
+                         GOCACHE=<writable-ws>/go-build-cache
+                         GOTMPDIR=<writable-ws>/tmp go build -o
+                         <writable-ws>/link-out/<bin> ./cmd
+                         # 完整自包含脚本见同名 .md
+
+rec_priority:           1
+rec_approach:           fetch-module-closure-goproxy
+rec_description:        conan 配方 build() 内先显式拉取模块闭包再构建:
+                         `go mod download` + 环境 GOFLAGS=-mod=mod +
+                         GOPROXY=https://goproxy.cn,direct +
+                         GOSUMDB=sum.golang.google.cn(CN 镜像选择与 E250
+                         的 SDK 下载先例对齐), GOTOOLCHAIN=local 防工具链
+                         自动下载; GOCACHE/GOMODCACHE/GOTMPDIR 路由到
+                         可写 go-workspace, 链接输出单遍 -o 到
+                         go-workspace/link-out 后签名拷回(E124/E134/E166
+                         面, 见 E318/P017 签名约束)
+rec_command:            conanfile.py build():
+                         env GOPROXY=https://goproxy.cn,direct
+                         GOSUMDB=sum.golang.google.cn GOFLAGS=-mod=mod;
+                         subprocess: go mod download
+                         && go build -trimpath -mod=mod -ldflags "..." -o
+                         <workspace>/link-out/<bin> ./cmd
+                         (实例: archives/k/kubeaudit/0.22.2/conanfile.py)
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      pre-go-mod-vendor-offline
+fallback_description:   离线兜底: 构建树内预执行 `go mod vendor` 把闭包
+                         固化进 vendor/ 后改用 -mod=vendor; 诚实权衡: 这是
+                         把网络依赖前移并掩盖而非消除, 且把构建树与 go.mod
+                         绑死, 仅当 CI 环境完全无外网时使用
+fallback_command:       go mod vendor && go build -trimpath -mod=vendor -o
+                         <bin> ./cmd
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       GOPROXY=off
+forbid_1_reason:        无 vendor/ 的 Go 模块没有任何闭包来源, off 下
+                         import 解析必硬失败
+forbid_1_consequence:   module lookup disabled by GOPROXY=off 逐包硬失败
+                         (PROBE1 实测 40 行, kubeaudit 0.22.2)
+forbid_2_pattern:       -mod=vendor
+forbid_2_reason:        源码树内无 vendor/ 目录时 vendor 模式无闭包可用,
+                         与 GOPROXY=off 同样必失败
+forbid_2_consequence:   go: vendor/ 目录缺失或 vendoring 不一致, 构建失败
+
+principles:             P017
+
+causes:
+caused_by:
+similar_to:             E250(CI 新环境缺失资源→显式拉取同族: Go SDK 自举),
+                        E318(测试 ELF 签名后运行), E124, E134, E166(HMDFS
+                        链接落地与签名面)
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-go-no-vendor-module-closure-goproxy.md
+last_updated: 2026-09-23
+source_event:           kubeaudit-0.22.2 conan create 构建期模块解析探针
+                        (2026-09-23, PROBE1 硬失败/PROBE2B 拉通 53 模块)
+
+authors:                GoliWie
+source_pr:
+source_commit:
+
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.8
+metrics_last_used: 2026-09-23

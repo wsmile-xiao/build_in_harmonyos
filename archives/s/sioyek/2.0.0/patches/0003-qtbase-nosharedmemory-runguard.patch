@@ -1,0 +1,76 @@
+--- a/pdf_viewer/RunGuard.h
++++ b/pdf_viewer/RunGuard.h
+@@ -1,10 +1,18 @@
+ #ifndef SINGLE_INSTANCE_GUARD_H
+ #define SINGLE_INSTANCE_GUARD_H
+ 
+-#include <QSharedMemory>
+-
+ #include <QtNetwork/QLocalServer>
+ #include <QtNetwork/QLocalSocket>
++
++// OHOS: qt5-qtbase was built without the sharedmemory/systemsemaphore
++// features (QT_NO_SHAREDMEMORY/QT_NO_SYSTEMSEMAPHORE are defined in
++// qtcore-config.h), so the QSharedMemory class does not exist in this
++// Qt build. Feature fallback: an empty placeholder type keeps this
++// header compilable; RunGuard.cpp degrades to primary-only under the
++// same macro and keeps the QLocalServer IPC channel.
++#ifdef QT_NO_SHAREDMEMORY
++class QSharedMemory {};
++#endif
+ 
+ /**
+  * This is an control to guarantee that only one application instance exists at
+--- a/pdf_viewer/RunGuard.cpp
++++ b/pdf_viewer/RunGuard.cpp
+@@ -20,6 +20,23 @@
+     key(key),
+     memoryKey(generateKeyHash(key, "_sharedMemKey"))
+ {
++#ifdef QT_NO_SHAREDMEMORY
++    // OHOS: QSharedMemory is not available in this Qt build. Degrade to
++    // always-primary: start the QLocalServer IPC channel directly and skip
++    // the shared-memory single-instance probe. isPrimary()/isSecondary()
++    // keep working via server != nullptr.
++    QLocalServer::removeServer(key);
++    server = new QLocalServer;
++    server->setSocketOptions(QLocalServer::UserAccessOption);
++    if (server->listen(key)) {
++        qDebug() << "IPC server started (shared-memory fallback, always primary).";
++    } else {
++        qCritical() << "Cannot start IPC server.";
++        QCoreApplication::exit();
++    }
++    QObject::connect(server, &QLocalServer::newConnection,
++        this, &RunGuard::onNewConnection);
++#else
+     // By explicitly attaching it and then deleting it we make sure that the
+     // memory is deleted even after the process has crashed on Unix.
+     memory = new QSharedMemory{memoryKey};
+@@ -65,10 +82,18 @@
+             this, &RunGuard::onNewConnection);
+     }
+     memory->unlock();
++#endif
+ }
+ 
+ RunGuard::~RunGuard()
+ {
++#ifdef QT_NO_SHAREDMEMORY
++    if (server) {
++        server->close();
++        delete server;
++        server = nullptr;
++    }
++#else
+     memory->lock();
+     if (server) {
+         server->close();
+@@ -76,6 +101,7 @@
+         server = nullptr;
+     }
+     memory->unlock();
++#endif
+ }
+ 
+ bool RunGuard::isPrimary()

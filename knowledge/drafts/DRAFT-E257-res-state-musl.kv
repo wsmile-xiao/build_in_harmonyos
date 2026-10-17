@@ -1,0 +1,24 @@
+id: E257
+error_signature: use of undeclared identifier '_res'|undeclared identifier.*_res
+match_keywords: _res, resolv.h, musl, HAVE_RESOLV_RES, glibc, res_search, res_init, resolver, dns
+category: libc, musl, portability, headers
+severity: medium
+root_cause: glibc 的 <resolv.h> 导出全局解析器状态 _res（struct __res_state），大量网络软件直接读写 _res.retrans/_res.retry/_res.nscount/_res.options 调整解析器行为；musl 的 <resolv.h> 仅声明 struct __res_state 类型，不导出 _res 全局实例，直接引用即在编译期报 use of undeclared identifier '_res'。当上游以无条件编译宏（如 kamailio 的 -DHAVE_RESOLV_RES）包裹此类代码时，musl 目标无法仅靠平台宏分支排除，须显式撤销该宏。
+rec_approach: 构建配置层面撤销包裹宏（不改源码）：若宏经编译行中位于 C_DEFS 之后的独立变量注入（如 kamailio 的 $(DEFS)），用环境变量后置 -U 撤销（后置标志胜出）；若宏无条件写死在 C_DEFS 内且无后置变量，则退回最小补丁：给相关代码块追加反向守卫宏（glibc 默认不定义 → 行为不变，目标平台经 extra_defs 定义 → 走上游 #else 回退分支）。
+solution_cmds: |
+  # kamailio core 6.1.3 实测（OHOS/musl aarch64）：
+  # Makefile.defs L729 无条件 -DHAVE_RESOLV_RES；编译行 (Makefile.rules L46)
+  #   $(CC) $(CFLAGS) ... $(C_DEFS) $(DEFS) -c
+  # $(DEFS) 在 C_DEFS 之后 → 环境变量 DEFS 的后置 -U 胜出：
+  env DEFS=-UHAVE_RESOLV_RES make -j4 extra_defs='<平台宏集>'
+  # 两条不可行路径（实测）：
+  #   make ... DEFS=-UHAVE_RESOLV_RES  → 命令行变量锁定，吞掉 main.o 目标特定
+  #       DEFS+=-DMODS_DIR，main.c 报 MODS_DIR 未声明
+  #   extra_defs='... -UHAVE_RESOLV_RES' → extra_defs 在 C_DEFS 头部，
+  #       被 L729 的 -D 覆盖
+verification: 撤销宏后重新编译应命中上游 #else 回退分支（如 kamailio resolve.c 的 "no resolv options support" 警告分支）；产物运行正常。kamailio core 6.1.3 实测：conan create 全绿，NEEDED 仅 libc.so，kamailio -v 正常输出版本与 flags。
+fallback: 若上游无 #else 回退分支且宏无法撤销，最小补丁：为引用 _res 的代码块追加 #ifdef 反向守卫（守卫宏默认不定义，保持 glibc 行为；目标平台注入守卫宏后回退到 res_* API 或不调整解析器参数）。补丁不得引入平台宏（如 __OHOS__），须在 PR 说明理由。
+doc_refs: E429
+applies_to: kamailio, any-network-software-using-glibc-res-state
+last_updated: 2026-09-29
+draft: true

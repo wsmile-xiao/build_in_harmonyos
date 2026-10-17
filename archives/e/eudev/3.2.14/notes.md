@@ -61,7 +61,7 @@
 | 4 | program_invocation_short_name 未定义 | musl libc 不提供 glibc 特有变量 | 在 15 个源文件中添加宏定义替代 |
 | 5 | get_current_dir_name 未定义 | musl libc 不提供 glibc 特有函数 | 在 path-util.c 中提供替代实现 |
 | 6 | config.status 临时文件权限问题 | umask 077 导致 HMDFS 权限不足 | 修改 config.status 中的 umask（临时方案） |
-| 7 | make check 测试失败 | 测试脚本 udev-test.pl 缺失 | 跳过测试，记录原因 |
+| 7 | make check 无法执行 | 见下方「上游测试」小节：`udev-test.pl` 需 `mount(MS_BIND)` 构造假 sysfs，该 syscall 在本沙箱被禁（**实测 SIGSYS 信号 31**）| 运行可跑的那一半（`rules-test.sh` → 规则语法检查），另一半如实申报不可跑 |
 | 8 | G4 质量门禁失败 | manifest.yaml 格式错误、无预编译包 | 修复 manifest、执行 package 命令 |
 
 ## 源码修改
@@ -149,7 +149,12 @@ ELF shared object, 64-bit LSB arm64, dynamic (/lib/ld-musl-aarch64.so.1), not st
 
 1. **musl libc 兼容性**: eudev 原为 glibc 设计，需处理 glibc 特有函数缺失
 2. **sockaddr_storage 冲突**: 需在包含 linux/netlink.h 时使用宏守卫避免重定义
-3. **测试跳过**: 原测试套件 udev-test.pl 未包含在 tarball 中，跳过 make check
+3. **上游测试**: 上游 `test/Makefile.am` 的 `TESTS = udev-test.pl rules-test.sh`。
+   两者**都在 tarball 里**（`test/udev-test.pl` 66993 B）。可跑的是
+   `rules-test.sh`（→ `rule-syntax-check.py`，已纳入 `build()`）；
+   `udev-test.pl` 不可跑，原因是它依赖 `mount(MS_BIND)` 构造假 sysfs，
+   该 syscall 在本沙箱被禁（**实测进程被 SIGSYS 信号 31 杀死**），
+   且其期望值含 `root:mail:0660` 这类需真机特权的属主断言。
 4. **root 权限限制**: udevd 运行和设备管理功能需要 root 权限
 5. **ELF 签名**: 预编译包中所有二进制已完成 ELF 签名，可直接在鸿蒙执行
 

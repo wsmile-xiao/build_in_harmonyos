@@ -1,0 +1,160 @@
+--- a/tests/general/mem_fd_helper.hpp
++++ b/tests/general/mem_fd_helper.hpp
+@@ -38,44 +38,43 @@
+ class MemFdFile
+ {
+ public:
+     MemFdFile() = default;
+ 
+     ~MemFdFile()
+     {
+ #if defined(OMATH_TEST_USE_MEMFD)
+         if (m_fd >= 0)
+             ::close(m_fd);
+-#else
++#endif
++        // A memfd that cannot be re-opened through /proc/self/fd falls back to a
++        // named temp file, so both members may be live in the same object.
+         if (!m_temp_path.empty())
+             std::filesystem::remove(m_temp_path);
+-#endif
+     }
+ 
+     MemFdFile(const MemFdFile&) = delete;
+     MemFdFile& operator=(const MemFdFile&) = delete;
+ 
+     MemFdFile(MemFdFile&& o) noexcept
+         : m_path(std::move(o.m_path))
+ #if defined(OMATH_TEST_USE_MEMFD)
+           ,
+           m_fd(o.m_fd)
+-#else
++#endif
+           ,
+           m_temp_path(std::move(o.m_temp_path))
+-#endif
+     {
+ #if defined(OMATH_TEST_USE_MEMFD)
+         o.m_fd = -1;
+-#else
++#endif
+         o.m_temp_path.clear();
+-#endif
+     }
+ 
+     [[nodiscard]] bool valid() const
+     {
+         return !m_path.empty();
+     }
+ 
+     [[nodiscard]] const std::filesystem::path& path() const
+     {
+         return m_path;
+@@ -85,33 +84,45 @@
+     {
+         return create(data.data(), data.size());
+     }
+ 
+     static MemFdFile create(const std::uint8_t* data, std::size_t size)
+     {
+         MemFdFile f;
+ 
+ #if defined(OMATH_TEST_USE_MEMFD)
+         f.m_fd = static_cast<int>(::memfd_create("test_bin", 0));
+-        if (f.m_fd < 0)
+-            return f;
+-
+-        if (!write_all(f.m_fd, data, size))
+-        {
+-            ::close(f.m_fd);
+-            f.m_fd = -1;
+-            return f;
+-        }
+-        f.m_path = "/proc/self/fd/" + std::to_string(f.m_fd);
+-
+-#else
++        if (f.m_fd >= 0)
++        {
++            if (!write_all(f.m_fd, data, size))
++            {
++                ::close(f.m_fd);
++                f.m_fd = -1;
++            }
++            else
++            {
++                f.m_path = "/proc/self/fd/" + std::to_string(f.m_fd);
++                // Some kernels refuse open() on /proc/self/fd/<memfd> (OHOS answers
++                // EACCES, verified with a raw open() probe), which would hand every
++                // scan an unreadable file. Probe the path once and fall through to the
++                // named temp file below when it cannot be re-opened.
++                const std::fstream probe(f.m_path, std::ios::binary | std::ios::in);
++                if (probe.is_open())
++                    return f;
++                ::close(f.m_fd);
++                f.m_fd = -1;
++                f.m_path.clear();
++            }
++        }
++#endif
+         // Portable fallback: write to a uniquely-named temp file and delete on destruction
++        {
+         const auto tmp_dir = std::filesystem::temp_directory_path();
+         std::mt19937_64 rng(std::random_device{}());
+         const auto unique_name = "omath_test_" + std::to_string(rng()) + ".bin";
+         f.m_temp_path = (tmp_dir / unique_name).string();
+         f.m_path = f.m_temp_path;
+ 
+         std::ofstream out(f.m_temp_path, std::ios::binary | std::ios::trunc);
+         if (!out.is_open())
+         {
+             f.m_temp_path.clear();
+@@ -119,21 +130,21 @@
+             return f;
+         }
+         out.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+         if (!out)
+         {
+             out.close();
+             std::filesystem::remove(f.m_temp_path);
+             f.m_temp_path.clear();
+             f.m_path.clear();
+         }
+-#endif
++        }
+         return f;
+     }
+ 
+ private:
+     std::filesystem::path m_path;
+ 
+ #if defined(OMATH_TEST_USE_MEMFD)
+     int m_fd = -1;
+ 
+     static bool write_all(int fd, const std::uint8_t* data, std::size_t size)
+@@ -141,23 +152,24 @@
+         std::size_t written = 0;
+         while (written < size)
+         {
+             const auto n = ::write(fd, data + written, size - written);
+             if (n <= 0)
+                 return false;
+             written += static_cast<std::size_t>(n);
+         }
+         return true;
+     }
+-#else
++#endif
++    // Present in both modes: a memfd whose /proc/self/fd path cannot be re-opened
++    // (OHOS answers EACCES) falls back to a uniquely-named temp file.
+     std::string m_temp_path;
+-#endif
+ };
+ 
+ // ---------------------------------------------------------------------------
+ // Build a minimal PE binary in-memory with a single .text section.
+ // Layout (all offsets compile-time):
+ //   0x00: DOS header (64 B)   0x40: pad   0x80: NT sig   0x84: FileHeader (20 B)
+ //   0x98: OptionalHeader (0xF0 B)   0x188: SectionHeader (44 B)   0x1B4: section data
+ // ---------------------------------------------------------------------------
+ inline std::vector<std::uint8_t> build_minimal_pe(const std::vector<std::uint8_t>& section_bytes)
+ {

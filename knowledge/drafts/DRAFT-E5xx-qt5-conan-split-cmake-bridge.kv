@@ -1,0 +1,90 @@
+id: DRAFT-E5xx-qt5-conan-split-cmake-bridge
+title: "Qt5 Conan 拆包后伞形 find_package(Qt5 COMPONENTS ...) 的跨包桥接"
+category: cmake, cross-compile
+severity: important
+last_updated: 2026-09-24
+
+error_signature: |
+  CMake Error at */Qt5Core/Qt5CoreConfig.cmake:14 (message):
+    The imported target "Qt5::Core" references the file
+    ".../p/../b//mkspecs/linux-clang" but this file does not exist.
+  --
+  CMake Error at CMakeLists.txt (target_link_libraries):
+    Target "<target>" links to: Qt5::Qml (or Qt5::QuickControls2 / Qt5::Svg /
+    Qt5::QuickTest / Qt5::GuiPrivate) but the target was not found.
+  --
+  CMake Error at *Qt5Qml-Target-release.cmake (set_property):
+    The link interface of target "qt5-qtdeclarative_DEPS_TARGET" contains:
+    Qt5::Network but the target was not found.
+  --
+  ld.lld: error: undefined symbol: QTest::setMainSourcePath(char const*, char const*)
+  --
+  file://*/qml/QtTest/TestCase.qml: No such file or directory
+    Type TestCase unavailable
+
+match_keywords:
+  - Qt5::Qml target was not found
+  - Qt5::QuickControls2 target was not found
+  - references the file .../p/../b//mkspecs
+  - qt5-qtdeclarative_DEPS_TARGET
+  - QTest::setMainSourcePath
+  - QtTest/TestCase.qml: No such file or directory
+  - Qt5QuickTest not found
+  - Qt5::GuiPrivate target was not found
+
+root_cause: |
+  OHPCD 的 Qt5 链按 Qt 模块拆成多个 Conan 包（qt5-qtbase / qt5-qtdeclarative /
+  qt5-qtquickcontrols2 / qt5-qtsvg / qt5-qtgraphicaleffects），且全部由 qmake
+  原生构建。由此产生四个系统性断点，任何用伞形 find_package(Qt5 COMPONENTS
+  ...) 的 KF5/Qt5 消费件（kirigami2/kirigami-app/ki18n QML 模块等）都会撞上：
+
+  1. qt5-qtbase 的 Qt5CoreConfigExtrasMkspecDir.cmake 残留构建期路径
+     "${_qt5Core_install_prefix}/../b//mkspecs/linux-clang"，指向包外的
+     conan 构建目录——imported Qt5::Core 校验即死。
+  2. CMakeDeps 只为 qt5-qtdeclarative 生成单一 Qt5QmlConfig.cmake
+     （package_info 只声明 cmake_file_name=Qt5Qml）；Qt5Quick/Qt5QuickTest/
+     Qt5QmlModels 等组件没有 config，伞形 find 无法分发跨包组件；qtbase 的
+     原生 Qt5Config 也只在自己包前缀内找组件。
+  3. CMakeToolchain 会在 project-top-level includes 之后把 generators 目录
+     PREPEND 到 CMAKE_PREFIX_PATH——CMakeDeps 生成的包级 Qt5Config.cmake
+     （无组件分发）永远抢在任何桥接目录之前命中。
+  4. QTest::setMainSourcePath（QUICK_TEST_MAIN_WITH_SETUP 需要）定义在
+     qtbase 的 libQt5Test，而 libQt5QuickTest 只引用不定义；且
+     qt5-qtdeclarative 包的 qml/QtTest/ 只装了 qmldir+libqmltestplugin.so，
+     qmldir 声明的 TestCase.qml/SignalSpy.qml 没进包（源码在包内
+     src/imports/testlib/）。
+
+rec_approach: |
+  在消费件配方的 generate() 里搭 Qt5 桥（详见 kirigami2/5.116.0 conanfile.py）：
+
+  1. staged-fixed qtbase config 树：复制 qtbase 的 lib/cmake（~0.9MB）到
+     generators/qt5base-cmake-fixed/，用 symlink 镜像整包布局
+     （include/mkspecs/bin/plugins/lib 非 cmake 部分），regex 修掉
+     MkspecDir 文件的 ../b/ 段；staged 根排 CMAKE_PREFIX_PATH 最前。
+  2. Qt5Config 桥：生成组件分发桥（base 组件 include 原生 qtbase
+     Qt5Config；Qml/Quick/QuickTest 走 Qt5QmlConfig+ALIAS；
+     QuickControls2/QuickTemplates2/Svg 走各自 config；GuiPrivate 用
+     find_package(Qt5Gui COMPONENTS Private) 重探测物化）——**必须在
+     tc.generate() 之后覆写 generators/Qt5Config.cmake**（toolchain 的
+     PREPEND 使任何外部目录都无法抢先）。
+  3. 预物化基础组件：find Qt5Core/Qt5Gui/Qt5Network/Qt5Concurrent 先于
+     find_package(Qt5Qml)（其 DEPS_TARGET 链接接口引用 Qt5::Network）。
+  4. Qt5QuickTestConfig.cmake + ConfigVersion shim 写进 generators/：
+     上游 find_package(Qt5QuickTest 5.15.2 CONFIG QUIET) 找的是 config 文件
+     名；shim 建 Qt5::QuickTest 别名，链接 qt5-qtdeclarative 包级 target +
+     Qt5::Test（setMainSourcePath 在后者）。
+  5. QtTest QML payload stage：从 qtdeclarative 包 src/imports/testlib/
+     拷 TestCase.qml/SignalSpy.qml/testlogger.js + qmldir/plugins.qmltypes +
+     plugin symlink 到 <build>/qttest-qml-stage/QtTest，把该根目录
+     prepend 到 QML2_IMPORT_PATH（排在包的 qml/ 目录之前）。
+
+fallback: |
+  若不桥接：只能改上游 CMakeLists 为逐组件 find_package（侵入源码）；
+  或等 qt5-qtdeclarative 包补发含完整 qml payload 的版本（.N 后缀）、
+  qtbase 修复 MkspecDir 可重定位性。
+
+verify_builds:
+  - kirigami2 5.116.0 PR #12191 CI（两 Worker 确定性复现 TestCase.qml 缺失
+    失败→stage 修复后本地 CI 等价模拟 19/19 执行、非 Accessible 7/7 通过）
+
+prescan_pattern: "Qt5CoreConfigExtrasMkspecDir|qt5-qtdeclarative_DEPS_TARGET|QtTest/TestCase.qml"

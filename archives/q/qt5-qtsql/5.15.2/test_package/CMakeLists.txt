@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(QtSqlConsumer LANGUAGES CXX)
+find_package(Qt5Sql 5.15.2 CONFIG REQUIRED)
+add_executable(test_qtsql test.cpp)
+target_compile_features(test_qtsql PRIVATE cxx_std_17)
+target_link_libraries(test_qtsql PRIVATE Qt5::Sql)

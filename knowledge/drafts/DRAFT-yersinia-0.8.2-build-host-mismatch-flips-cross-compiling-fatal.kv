@@ -1,0 +1,92 @@
+# ═══ Draft knowledge entry — OHOS 本机即目标机：--build 与 --host 不一致会翻转 autoconf 的 cross_compiling，使包内 AC_TRY_RUN 探测直接 fatal ═══
+# Timestamp: 2026-09-22
+# Software: yersinia 0.8.2（通用：任何 configure 内含 AC_TRY_RUN 型运行探测、且该探测既无 ac_cv_* 缓存变量也无 --disable 开关的 autotools 包）
+# Gate: 配方 generate() 内经 AutotoolsToolchain 显式传交叉三元组
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-yersinia-0.8.2-build-host-mismatch-flips-cross-compiling-fatal
+title: 为绕过老 config.guess 而把 --build 写成 gnu、--host 写成 ohos，会让 autoconf 判 cross_compiling=yes，包内 AC_TRY_RUN 运行探测随即硬失败；本机即目标机时应让 build 与 host 一致
+trigger_tool: autoconf|automake|autoreconf|conan
+phase: configuring
+error_signature: "configure: error: cannot run test program while cross compiling（前一行是包自身的运行型探测，如 checking for BPF device sending support...）"
+severity: 2
+category: autotools|cross-compile|triplet|autoconf-probe
+match_keywords: cannot run test program while cross compiling, AC_TRY_RUN, cross_compiling, --build, --host, triplet, 运行探测, 无 ac_cv 缓存变量, BPF device sending support
+keywords: 交叉三元组, cross_compiling, AC_TRY_RUN, 运行期探测, ac_cv 预设, 离线探测, --build gnu 的代价,
+  本机即目标机, aarch64-unknown-linux-ohos, config.sub 新旧, 判定翻转
+prescan_pattern: AC_TRY_RUN|cannot run test program while cross compiling
+prescan_globs: configure.in, configure.ac, **/configure.ac, configure
+safety_boundary: 仅适用于"构建机与目标机同为 aarch64 OHOS、产物可直接执行"的鸿蒙 PC 适配形态。
+  反例一：真交叉（x86 宿主出 aarch64 产物、产物跑不了）时 build 与 host 必须不同，本条不适用，
+  应逐条预设 ac_cv_*；反例二：极老的自带 config.sub 不识 `*-linux-ohos`（E007/E160 场景）时，
+  先经 tool_requires automake/1.18 的 `autoreconf -fi` 换掉辅助件再让 build==host，
+  否则退回 configure 无法识别主机类型；反例三：包内探测全是编译期（无 AC_TRY_RUN）时，
+  写 build=gnu 不会暴露本症状，无需改
+approach: 交叉编译参数最少化的直觉是 `--build=<宿主> --host=<目标>`，仓内经验条目也给了
+  "通常 `--build=aarch64-unknown-linux-gnu --host=aarch64-unknown-linux-ohos`" 的写法。
+  但在鸿蒙 PC 上构建就发生在目标机本身：把 build 写成非 OHOS 值会让 autoconf 的
+  `cross_compiling` 从 no 翻成 yes，此后**所有** AC_TRY_RUN 型运行探测不再"编出来跑一下"，
+  而是走 else 分支——若上游没为它准备 ac_cv_* 缓存变量或 --disable 开关，else 分支就是
+  as_fn_error 硬失败。正解是让 build 与 host 一致（都用 aarch64-unknown-linux-ohos），
+  并依靠 tool_requires(automake) 的新 config.sub 保证 `*-linux-ohos` 可被接受
+root_cause: autoconf 的 cross_compiling 判定只看 build 三元组与 host 三元组是否相同，与"实际能否执行"
+  无关。OHOS 适配里两者本应相同（设备本机编译本机运行），为绕开老 config.guess 而强行写 gnu
+  属于把判定条件改坏；老包（本例 yersinia 2015 年 configure.in）里的运行探测普遍不配缓存变量，
+  于是判定翻转直接转化为 fatal
+affected_scope: configure/configure.in 内含无缓存变量兜底的 AC_TRY_RUN 探测的 autotools 包。
+  已知实例：yersinia 0.8.2（`checking for BPF device sending support` 探测）。
+  高危族群：老式网络设备/协议工具、需探测 send/recv/ioctl 行为支持的包
+verification_cmd: 改前（build=gnu）日志出现 `checking whether we are cross compiling... yes` 之外的
+  形态并 fatal；改后（build==host）同一位置为 `checking whether we are cross compiling... no`，
+  且紧随其后的包内运行探测正常给出 found/not found 结果而不是 fatal。
+  复算命令：grep -n "cross compiling" reports/conan-create.log 与
+  grep -n "cannot run test program while cross compiling" reports/conan-create.log
+rec_priority: 1
+rec_approach: align-build-triplet-with-host-on-ohos-native-target
+rec_description: generate() 内两个三元组都写 OHOS（`--build=aarch64-unknown-linux-ohos` 与
+  `--host=aarch64-unknown-linux-ohos`），并 tool_requires automake（新 config.sub）以吸收
+  "OHOS 不被老辅助件识别"的问题；只有确认包内没有需要执行的探测时，才允许 build 写非 OHOS 值
+rec_command: 配方 generate()：`tc.configure_args.append("--build=aarch64-unknown-linux-ohos")`
+  与 `tc.configure_args.append("--host=aarch64-unknown-linux-ohos")` 成对出现；
+  改前先 grep 一遍 AC_TRY_RUN 决定是否真的需要
+rec_auto_fix: false
+rec_impl: 配方侧（configure 参数），不改上游源码
+fallback_priority: 2
+fallback_approach: preseed-ac_cv-cache-variables
+fallback_description: 若因其它原因必须保留 build≠host（例如宿主确为 x86 的真交叉），则逐条为该探测
+  预设缓存变量（`ac_cv_*=`）或补 `--disable` 开关，并把每条取值理由写进 notes；代价是每个探测都要
+  单独举证，包内探测多时成本高且易漏
+fallback_command: ./configure ... ac_cv_<符号>=<值>
+fallback_auto_fix: false
+fallback_impl: 配方侧参数注入
+principles: 三元组不是"骗过脚本的咒语"，它是给 autoconf 的**语义声明**；声明与事实不符时，
+  autoconf 会按声明换掉一整类探测的执行方式。判据看 `checking whether we are cross compiling` 的读数，
+  而不是看它有没有立刻报错
+caused_by: 沿用"绕过老 config.guess"的 `--build=gnu` 写法 + 上游老包运行探测无缓存变量兜底
+causes: configure 在包自身的运行探测处 fatal 中断，构建无法进入编译阶段；
+  易被误判为"OHOS 平台能力缺失"而错误止损
+similar_to: draft-review 实测 TOP3（均低于 0.30 create 阈值）——最接近的是 E467（score 0.24，
+  sig 0.41）：那条的根因是 AutotoolsDeps 导出 LIBS 让 autoconf **最早期**的 run 探针链接整个依赖
+  闭包而失败，签名是 "cannot run C compiled programs"，修法在依赖导出面；本条签名是
+  "cannot run test program while cross compiling"（发生在包自己中后段的 AC_TRY_RUN 探测上），
+  根因是三元组声明把 cross_compiling 翻成 yes，修法在三元组本身，两者互不替代。
+  E159（score 0.20）是 CMake TRY_RUN 在交叉模式下不支持，同族但不同构建系统。
+  E007（cannot guess build type|unable to guess system type）正是本条所讨论写法的**动因**，
+  本条补的是该写法的代价与适用边界。另与仓内经验"交叉参数通常 --build=gnu --host=ohos"存在
+  口径冲突，已在 conflicts_with 字段写明
+conflicts_with: 仓内经验"交叉参数通常 `--build=aarch64-unknown-linux-gnu --host=aarch64-unknown-linux-ohos`"
+  （本条不否定它在真交叉下的正确性，但给出反例：本机即目标机时它会翻转 cross_compiling 判定）
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-yersinia-0.8.2-build-host-mismatch-flips-cross-compiling-fatal.md
+last_updated: 2026-09-22
+source_event: 'yersinia 0.8.2 配方 generate() 首轮按仓内经验写 `--build=aarch64-unknown-linux-gnu`
+  与 `--host=aarch64-unknown-linux-ohos`，conan-verify G2 失败于
+  `checking for BPF device sending support... configure: error: cannot run test program while
+  cross compiling`（该包 configure.in 里的探测没有 ac_cv_* 兜底、也没有 --disable-bpf 开关）；
+  改回 `--build=aarch64-unknown-linux-ohos` 后同一位置读数为
+  `checking whether we are cross compiling... no`，configure 通过并进入编译阶段'
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors: QC-10
+source_pr:
+source_commit:

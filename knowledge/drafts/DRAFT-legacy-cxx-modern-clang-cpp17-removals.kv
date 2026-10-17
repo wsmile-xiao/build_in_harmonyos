@@ -1,0 +1,71 @@
+#====================================================================
+# DRAFT-legacy-cxx-modern-clang-cpp17-removals.kv
+# 2000 年代初的 C++ 代码在现代 clang + strict -std=c++17 下的三类硬错误：
+#   register 存储类被移除 / 列表初始化窄化 / friend 声明不再进入外层命名空间
+# 触发事件: smpeg 0.4.5-cvs20030824 HarmonyOS PC 适配
+#           （archives/s/smpeg/0.4.5-cvs20030824，2003 年 CVS 快照）
+#====================================================================
+
+id:                     DRAFT-legacy-cxx-modern-clang-cpp17-removals
+trigger_tool:           clang|clang++|c++|make
+phase:                  compiling
+error_signature:        ISO C++17 does not allow 'register' storage class specifier|
+                        constant expression evaluates to -1 which cannot be narrowed to type 'unsigned int' [-Wc++11-narrowing]|
+                        use of undeclared identifier 'Decode_MPEGaudio'（该名字只在类内以 friend 声明过）|
+                        note: insert an explicit cast to silence this issue
+
+severity:               2
+category:               compat|language|c++|portability
+match_keywords:         register storage class, C++17, ISO C++17 does not allow register,
+                        -Wc++11-narrowing, list-initialization, narrowing conversion,
+                        friend declaration scope, undeclared identifier, legacy C++,
+                        cppstd=17, 0-1 sentinel, unsigned field, pre-C++11 codebase
+title:                  2000 年代初的 C++ 代码在现代 clang + -std=c++17 下的三类硬错误：register 被移除、
+                        列表初始化窄化、friend 声明不再引入外层命名空间
+
+root_cause: >
+  OHOS profile 的 compiler.cppstd=17 让 clang 以严格 -std=c++17 编译 C++ 源码，
+  而 1995-2005 年代的代码普遍依赖"旧编译器接受、现代标准禁止"的写法。实测三类：
+    * register 存储类：C++11 起弃用、**C++17 被移除**，任何残留的 `register` 都是硬错误
+      （smpeg 13 个文件 87 处）。旧编译器只当提示，所以上游从没清理过。
+    * 列表初始化窄化：C++11 起 `= {...}`/`{...}` 初始化不允许"常量表达式无法用目标类型表示"，
+      典型是拿 `0-1`（-1）当无符号字段的哨兵，clang 直接报 -Wc++11-narrowing 且是 error。
+    * friend 声明的作用域：C++98 的非标准行为把类内 `friend void f();` 视为在**外层命名空间**
+      声明了 f（gcc 旧行为），现代 clang 不再这样处理——于是同一编译单元的其它位置调用 f
+      报 "use of undeclared identifier"。
+  三者共同特征：**只与语言标准版本有关，与平台/依赖无关**，所以任何老 C++ 库在 cppstd=17
+  的 profile 上都会命中同一类失败，且报错信息互不相似，容易逐个当"新问题"排查。
+affected_scope: >
+  所有 2011 年前编写的 C/C++ 三方库在 OHOS（cppstd=17）上的适配：smpeg 是本条的实例；
+  任何含 `register`、聚合初始化里的负数哨兵、或 friend 函数在类外被直接调用的老代码
+  都会命中。影响面：编译期硬错误（不是警告），且三处报错位置分散在不同文件，
+  逐条处理会重复消耗构建周期。
+verification_cmd: >
+  # 1) 一次性盘点三类写法（在源码树执行）
+  grep -rnE '(^|[^A-Za-z0-9_])register[[:space:]]' --include=*.cpp --include=*.h .
+  grep -rnE '\[-Wc++11-narrowing\]|0-1' --include=*.cpp --include=*.h . | head
+  grep -rn 'friend ' --include=*.h . | head       # friend 函数若在类外被调用即需补声明
+  # 2) 改完后复验
+  conan create archives/s/smpeg/0.4.5-cvs20030824 -pr:h=ci/conan/profiles/ohos-aarch64 \
+    -pr:b=ci/conan/profiles/ohos-aarch64         # 期望 rc=0
+
+rec_priority:           1
+rec_approach:           source-patch
+rec_description: >
+  按"最小语义改动"逐类改写（不引入平台宏，R8）：
+    * register：直接删除该关键字（`s/(?<![A-Za-z0-9_])register\s+//g`），语义完全不变；
+      注意只对 .cpp/.h 做，别动 C 源码里的同名文本，也不要匹配标识符（需前置词边界）。
+    * 窄化：给哨兵加显式转型，例如 `0-1` → `(unsigned int)(0-1)`；不要改成 `-1`
+      （仍然窄化），也不要改字段类型（会动 ABI/语义）。
+    * friend 声明：在类定义**之前**补一条命名空间级原型
+      （`void Play_MPEGaudioSDL(void *udata, Uint8 *stream, int len);`），
+      `#ifdef` 包住的 friend（如 THREADED_AUDIO）也要同样处理；类内 friend 声明保留。
+  三条都只改源码不动构建选项——**不要**用 `-std=gnu++98/14` 之类的降标绕过：
+  平台 profile 的 cppstd=17 是统一口径，降标会掩盖真实兼容性。
+rec_command: >
+  python3 -c "import re,pathlib;[p.write_text(re.sub(r'(?<![A-Za-z0-9_])register\\s+','',p.read_text())) for p in pathlib.Path('.').rglob('*.cpp')]"
+  # 窄化与 friend 声明按上面 rec_description 手工精确替换后重跑 conan create
+principles:             P004
+doc_file:               knowledge/drafts/DRAFT-legacy-cxx-modern-clang-cpp17-removals.md
+last_updated:           2026-10-04
+source_event:           archives/s/smpeg/0.4.5-cvs20030824

@@ -1,0 +1,72 @@
+# ═══ Draft knowledge entry — HMDFS 拒绝脚本直接 exec（configure Error 126），ELF 不受影响 ═══
+# Software: libdisasm 0.23
+# Gate: device build on 10.62.178.77 (isolated conan job)
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: libdisasm-0.23-hmdfs-script-exec-denied-sh-configure
+severity: 2
+category: environment|build-system
+trigger_tool: conan
+phase: build
+
+keywords: configure, Permission denied, Error 126, HMDFS, script exec, execve, binfmt_script, os.chmod ineffective, sh configure, autotools, install-sh, ELF
+
+error_signature: sh: .*/configure: Permission denied|Error 126 while executing|autotools\.configure\(\)
+
+match_keywords: configure permission denied, error 126, hmdfs exec, chmod ignored, script not executable, sh ./configure, execve eacces, autotools configure
+
+root_cause: |
+  HMDFS 挂载的用户目录（/storage/Users/<user>，含 conan 的 CONAN_HOME/build 目录）对**脚本文件的
+  直接 execve 一律拒绝**（binfmt_script 路径被拒），即使 mode 已含 owner 执行位（rwxr-x---）：
+  HMDFS 的权限判定把当前进程归入 others 类，而 others 位无 x；chmod 无法补 o+x——实测 umask(0)
+  下以 0o755 创建文件，HMDFS 强制钳到 0770（剥 o+x 加 g+w），随后 chmod 755 也被静默忽略。
+  **ELF 二进制不受影响**：同目录下 mode 750 的 ELF 可正常直接执行（clang/make/ar/测试二进制全部可跑）。
+  conan.tools.gnu.Autotools.configure() 直接 exec "<build>/configure" 脚本路径，因此在
+  HMDFS 上的 CONAN_HOME 必然 Error 126。config.guess/config.sub/config.status/libtool 由
+  configure 与 automake Makefile 以 $SHELL 前缀调用（$SHELL config.sub 等），不受影响。
+
+rec_approach: invoke-configure-through-shell
+rec_description: |
+  1) build() 中不用 Autotools.configure()，改为显式 shell 调用，参数从重建的
+     AutotoolsToolchain 读取（与 helper 生成的完全一致，含 prefix/bindir/shared 等）：
+       tc = AutotoolsToolchain(self)
+       args = tc.configure_args + <recipe 自定义三元组>
+       self.run('sh "{}" {}'.format(os.path.join(self.source_folder, "configure"),
+                                    " ".join(args)))
+  2) 环境设 SHELL=/bin/sh、CONFIG_SHELL=/bin/sh、TMPDIR 指向可写目录（clang 也要 TMPDIR，
+     /tmp 只读时编译报 unable to make temporary file）。
+  3) make 阶段无需改动：make/编译器/链接器都是 ELF；libtool 以 $(SHELL) 调用。
+  4) 与 dirb 2.22 的 os.chmod 修复互补：那台 worker chmod 可置位且 750 即可 exec；
+     本类 worker chmod 完全无效，唯一通用解是 sh 调用（CI/Linux 上同样成立）。
+rec_command: |
+  # 诊断指纹（真机）：
+  #   ls -la configure        # rwxr-x--- 已有执行位
+  #   ./configure --version   # 仍 Permission denied（脚本）
+  #   clang -o /tmp/h /dev/null 不适用——用 ELF 探针对照
+  # 修复即 rec_description 的 self.run('sh ...') 形态
+rec_auto_fix: false
+
+affected_scope: |
+  所有在 HMDFS 用户目录下用 Autotools/AutotoolsToolchain 构建的配方（CONAN_HOME 或 work 目录
+  落在 /storage/Users/<user> 的真机/worker）。同机 CI worker 若 chmod 可置位则不触发。
+
+verification_cmd: |
+  grep -E "RUN: .*configure|Permission denied" <conan create log> | head
+  # 修复后日志应为: RUN: sh "<abs>/configure" --disable-shared --enable-static ... 且无 Error 126
+
+evidence: |
+  libdisasm 0.23 真机（10.62.178.77:2222，isolated CONAN_HOME=$HOME/tmp/.../conan-home）：
+  - 首跑 conan create：/system/bin/sh: .../b/configure: Permission denied → ConanException Error 126，
+    此时 configure mode 已是 rwxr-x---。
+  - chmod +x / chmod 755 均不改变 mode；python umask(0)+os.open(O_CREAT|O_EXCL, 0o755) 重建后
+    mode 被钳为 0770，仍 denied。
+  - ELF 探针：clang 编译的 hello（mode 0750）直接 exec 输出正常；shell 脚本直 exec denied、
+    sh 调用正常。
+  - 配方改 self.run('sh "<configure>" ...') 后 conan create 全绿（libdisasm.a + x86dis 打包成功，
+    package id 21b17f8b2bc0e9511e276e3d57a23893067cefe5），test_package 21/21。
+
+authors:
+  - gcw_6YxinkyD
+source_pr:
+source_commit: 8ed2cdb66c
+draft_date: 2026-09-16

@@ -33,16 +33,22 @@ libid3tag 是一个 C 语言库，用于解析和操作 ID3 标签——MP3 音�
 
 ## 功能验证
 
-通过编写 C 测试程序进行真实验证，覆盖 9 项测试、67 个断言，全部通过：
-- 库版本号验证 ✅
-- ID3v2 标签创建与写入 ✅
-- ID3v2 标签解析读取 ✅
-- ID3v2 标签修改（添加/删除帧） ✅
-- 原始字节渲染与解析 ✅
-- 头文件与共享库链接 ✅
-- 流派接口 ✅
+### 上游测试
 
-详见版本级 `reports/test-report.md`。
+上游 tarball 不含测试套件（`ctest` 报告 "No tests were found"），官方 CI 仅执行 configure/build/install。**上游无正式测试**。
+
+### test_package (Conan 消费者测试)
+
+`test_package/` 真实调用安装后的 libid3tag API，覆盖完整读写闭环（18 项断言，全部 PASS）：
+- 库版本号验证 ✅
+- ID3v2 标签创建与 TIT2 帧挂载 ✅
+- UTF-8 编码设置与 UCS-4 字符串添加 ✅
+- 两遍 render（长度查询 + 写入）✅
+- query/parse 回读 ✅
+- findframe 检索与 UTF-8 duplicate 比对 ✅
+- ID3 magic 校验 ✅
+
+另有版本级 `reports/test-report.md`（早期 9 项测试、67 断言记录）。
 
 ## 参考
 

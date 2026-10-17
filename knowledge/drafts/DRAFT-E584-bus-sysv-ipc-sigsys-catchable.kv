@@ -1,0 +1,92 @@
+#====================================================================
+# DRAFT-E584-bus-sysv-ipc-sigsys-catchable
+#   OHOS 应用沙箱对 System V IPC（semget/shmget/msgget）返回 SIGSYS
+#   且该 SIGSYS 可被 sigaction 捕获（seccomp TRAP）；不可改写库的
+#   适配验证与平台限制通告方案
+# 来源: PR feat/bus-3.1.11（bus 3.1.11 适配，task bus-3.1.11-r01-pc2-21）
+#       设备实测：HongMeng Kernel 1.12.0 aarch64，OHOS AppSpawn 沙箱
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-E584-bus-sysv-ipc-sigsys-catchable
+trigger_tool:           bus|runtime|semget|shmget|msgget|conan|test_package
+phase:                  runtime
+error_signature:        Signal 31|SIGSYS|exit code 159|core dumped|Bad system call|
+                        semget.*SIGSYS|shmget.*SIGSYS|msgget.*SIGSYS|System V IPC|
+                        (bus|shm|sem).*killed.*signal 31
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               compat, kernel, ipc, syscall, security
+match_keywords:         SIGSYS, signal 31, exit 159, semget, shmget, msgget, shmat,
+                        semop, semctl, shmctl, SysV IPC, System V, seccomp, TRAP,
+                        sigaction, 可捕获, catchable, bus, 共享内存, 信号量,
+                        消息队列, AppSpawn, 沙箱
+title:                  OHOS 应用沙箱对 System V IPC（semget/shmget/msgget）触发 SIGSYS，且该 SIGSYS 可被 sigaction 捕获（seccomp TRAP）；SysV IPC 为公开 API 的库应"编译链接交付 + 如实通告平台限制 + 捕获 SIGSYS 区分平台限制与真实缺陷"
+prescan_pattern:        \b(semget|shmget|msgget|semop|shmat|shm_open)\b
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OHOS AppSpawn 沙箱采用白名单式 seccomp 策略，白名单不包含
+                        System V IPC 三个入口（shmget/semget/msgget）及其配套调用。
+                        命中即由内核发 SIGSYS（signal 31，exit 159，core dump），
+                        不返回 -1/errno。与 E051（未实现 syscall，setreuid/setregid
+                        类 SIGSYS 不可捕获）不同：本场景是 seccomp TRAP 语义，
+                        sigaction 注册处理器后 SIGSYS 可捕获，进程可存活并继续执行。
+                        POSIX 面（sem_open/shm_open/mmap(MAP_SHARED)）不受阻。
+verification_cmd:       # 探针：clang probe.c 后执行；观察 Signal 31
+                        # sigtest：sigaction(SIGSYS)+siglongjmp 捕获成功后打印
+                        #   "SIGSYS CAUGHT" 并继续；sem_open 返回 ENOENT 而非 SIGSYS
+rec_priority:           1
+rec_approach:           compile-link-deliver-plus-platform-limitation-disclosure
+rec_description:        SysV IPC 为库公开 API 且无 POSIX 等价分支时，无法沿
+                        DRAFT-E577 的"迁移 POSIX"路线改写：库可编译、可链接、可
+                        打包交付（零源码补丁）；运行期业务需在启用 SysV IPC 的
+                        上下文（非 AppSpawn 沙箱/系统服务/支持 SysV 的内核）执行。
+                        验证策略：①消费者用例走不触发受限 syscall 的公开 API 路径
+                        （如 bus_open 打开不存在的文件→-1/ENOENT）；②鸿蒙专项测试
+                        安装 SIGSYS handler 后尝试真实往返，捕获 SIGSYS 即如实打印
+                        PLATFORM_LIMITATION 与恢复条件，区别"平台限制"与"真实缺陷"；
+                        ③CLI 冒烟用不触发受限 syscall 的参数组合（如无参→文档规定
+                        退出码）；④上游测试全量枚举台账，运行期 SIGSYS 计"未运行/
+                        平台阻塞"而非通过。禁止把 SIGSYS 当作 errno 失败处理
+                        （不返回 -1，errno 分支永不触发）。
+rec_command:            # test_ohos.c 核心模式:
+                        #   struct sigaction sa; sa.sa_handler=on_sigsys;
+                        #   sigaction(SIGSYS,&sa,NULL);
+                        #   if (sigsetjmp(jb,1)==0) { r=bus_create(path,0,NULL); ... }
+                        #   else { printf("PLATFORM_LIMITATION: SysV IPC SIGSYS, "
+                        #               "recovery: non-sandbox/khieric+IPC kernel"); }
+rec_auto_fix:           false
+rec_impl:               test-strategy + disclosure（无源码补丁）
+
+forbid_1_pattern:       '#if(n?def)?\s*__OHOS__|defined\s*\(\s*__OHOS__\s*\)'
+forbid_1_reason:        R8/PF5 禁止平台宏补丁
+forbid_2_pattern:       'if\s*\(\s*(semget|shmget)[^)]*\)\s*<[^}]*errno'
+forbid_2_reason:        seccomp 拦截不返回 -1/errno，errno 分支永不触发，"回退无效"假象
+forbid_2_consequence:   把不回读的 SIGSYS 写成"已处理"，实际进程直接死亡
+forbid_3_pattern:       '(timeout|sleep)[^;]*;\s*(bus|.*sem).*(> /dev/null|\|\| true)'
+forbid_3_reason:        用 timeout/管道吞掉 SIGSYS 得到"假通过"，掩盖核心功能不可用
+
+principles:             P004, P005
+
+similar_to:             E051, E220, E246, DRAFT-E577
+caused_by:
+prerequisite_of:
+conflicts_with:
+
+doc_file:               knowledge/drafts/DRAFT-E584-bus-sysv-ipc-sigsys-catchable.md
+last_updated:           2026-09-19
+source_event:           任务卡 bus 3.1.11（积分赛知识库扩展，分支 feat/bus-3.1.11）；
+                        探针 semprobe/sigtest 设备实测；conan-verify 8 门禁全过；
+                        消费者/test_ohos/CLI 冒烟 exit 0；上游示例 23/23 编译、
+                        运行 SIGSYS 平台阻塞（台账）
+authors:                pc2-21 适配任务
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-19

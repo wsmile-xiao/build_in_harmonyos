@@ -1,0 +1,209 @@
+--- a/source/STRUCTURE/assignBondOrderProcessor.C
++++ b/source/STRUCTURE/assignBondOrderProcessor.C
+@@ -14,23 +14,23 @@
+ #include <BALL/KERNEL/forEach.h>
+ #include <BALL/DATATYPE/hashGrid.h>
+ #include <BALL/SYSTEM/path.h>
+ #include <BALL/FORMAT/parameters.h>
+ #include <BALL/FORMAT/parameterSection.h>
+ #include <BALL/STRUCTURE/geometricProperties.h>
+ #include <BALL/QSAR/ringPerceptionProcessor.h>
+ #include <BALL/QSAR/aromaticityProcessor.h>
+ #include <BALL/KERNEL/expression.h>
+ 
+-// Qt
+-#include <QtXml/QtXml>
+-#include <QtXml/qdom.h>
++// Qt (OHOS: qt5-qtbase 无 QtXml 模块，用 QtCore 的 QXmlStreamReader)
++#include <QtCore/QXmlStreamReader>
++#include <QtCore/QFile>
+ 
+ #include <BALL/STRUCTURE/BONDORDERS/AStarBondOrderStrategy.h>
+ #include <BALL/STRUCTURE/BONDORDERS/branchAndBoundBondOrderStrategy.h>
+ #include <BALL/STRUCTURE/BONDORDERS/FPTBondOrderStrategy.h>
+ #include <BALL/STRUCTURE/BONDORDERS/KGreedyBondOrderStrategy.h>
+ #ifdef BALL_HAS_LPSOLVE
+ # include <BALL/STRUCTURE/BONDORDERS/ILPBondOrderStrategy.h>
+ #endif
+ 
+ //#define DEBUG 1
+@@ -630,111 +630,102 @@
+ 	{
+ 		// Open parameter file
+ 		Path    path;
+ 		String  inifilename(path.find(options[Option::INIFile]));
+ 
+ 		if (inifilename == "")
+ 		{
+ 			throw Exception::FileNotFound(__FILE__, __LINE__, options[Option::INIFile]);
+ 		}
+ 
+-		QString errorStr;
+-		int errorLine;
+-		int errorColumn;
+-
+ 		QFile file((inifilename.c_str()));
+ 		if (!file.open(QFile::ReadOnly | QFile::Text))
+ 		{
+ 			Log.error() << "Error: cannot read file " << inifilename <<" " << __FILE__ << " " << __LINE__ << std::endl;
+ 			Log.error() << "Reason was: " << file.errorString().toStdString() << std::endl;
+ 			return 1;
+ 		}
+ 
+-		// read the document
+-		QDomDocument domDocument;
+-		if (!domDocument.setContent(&file, true, &errorStr, &errorLine,
+-					&errorColumn))
+-		{
+-			Log.error() << "Parse error in line " << errorLine << " column " << errorColumn <<  " of file " << inifilename << endl;
+-			Log.error() << "Reason was: " << errorStr.toStdString() << std::endl;
+-			return 1;
+-		}
+-
+-		// get the root element...
+-		QDomElement root = domDocument.documentElement();
+-
+-		// ... and get all entries
+-		QDomNodeList entries = domDocument.elementsByTagName("entry");
+-		for (unsigned int i= 0; i < entries.length(); i++)
+-		{
+-			pair<String, String> tmp;
+-			int start_valence;
+-			QDomNodeList penalties;
+-			Position start_idx;
+-
+-			// get the element type (tag elementstring) 
+-			// NOTE: each entry should have just ONE element tag)
+-			QDomNodeList elementstrings = entries.item(i).toElement().elementsByTagName("elementstring");
+-			if (elementstrings.length() ==1)
++		// OHOS 适配：qt5-qtbase 不含 QtXml 模块，改用 QtCore 的 QXmlStreamReader 解析
++		QXmlStreamReader xml(&file);
++		// OHOS: 用 readNext() 显式遍历 token，避免 readNextStartElement()
++		// 在文档 EOF 边界误报 "Premature end of document"（Qt 5.15.2 行为）
++		while (!xml.atEnd())
++		{
++			QXmlStreamReader::TokenType tok = xml.readNext();
++			if (tok == QXmlStreamReader::StartElement && xml.name() == "entry")
+ 			{
+-				// read the element type
+-				QDomNode element = elementstrings.item(0);
+-				tmp.first = element.firstChild().nodeValue().toLatin1().constData();
+-
+-				// read the SMARTS-string
+-				QDomNodeList smartstring =  entries.item(i).toElement().elementsByTagName("smartstring");
+-				if (smartstring.length() == 1)
+-				{
+-					tmp.second = smartstring.item(0).toElement().firstChild().nodeValue().toLatin1().constData();
+-				}
+-				else if (smartstring.length() == 0)
+-				{
+-					Log.warn() << "In file " << inifilename << " : no SMARTS-string found for element " << element.firstChild().nodeValue().toStdString() << endl;
+-				}
+-				else
+-				{
+-					Log.error() <<  "Parse error in file " << inifilename << " : more than on3 SMARTS-string for element " << element.firstChild().nodeValue().toStdString() << endl;
++				pair<String, String> tmp;
++				int start_valence = 0;
++				Position start_idx = 0;
++				vector<int> penalties;
++
++				while (!xml.atEnd())
++				{
++					QXmlStreamReader::TokenType tok2 = xml.readNext();
++					if (tok2 == QXmlStreamReader::StartElement)
++					{
++						if (xml.name() == "elementstring")
++						{
++							tmp.first = xml.readElementText().toLatin1().constData();
++						}
++						else if (xml.name() == "smartstring")
++						{
++							tmp.second = xml.readElementText().toLatin1().constData();
++						}
++						else if (xml.name() == "penalty")
++						{
++							if (penalties.empty())
++							{
++								start_valence = xml.attributes().value("valence").toInt();
++								start_idx = penalties_.size();
++							}
++							penalties.push_back(xml.readElementText().toInt());
++						}
++						else
++						{
++							xml.skipCurrentElement();
++						}
++					}
++					else if (tok2 == QXmlStreamReader::EndElement && xml.name() == "entry")
++					{
++						break;
++					}
++					else if (tok2 == QXmlStreamReader::EndDocument)
++					{
++						break;
++					}
++				}
++
++				if (tmp.first == "" || penalties.empty())
++				{
++					Log.error() << "Parse error in file " << inifilename << endl;
+ 					return false;
+ 				}
+ 
+-				// now read the penalties
+-				penalties =  entries.item(i).toElement().elementsByTagName("penalty");
+-				if (penalties.length() > 0)
+-				{
+-					start_valence = (penalties.item(0).toElement().attribute("valence")).toInt();
+-					start_idx = penalties_.size();
+-					for (unsigned int k = 0; k < penalties.length(); k++)
+-					{
+-						// NOTE: we assume, that the valences come "en block" 
+-						// without any leftouts 
+-						penalties_.push_back((penalties.item(k).toElement().firstChild().nodeValue()).toInt());
+-					}
+-				}
+-				else
+-				{
+-					Log.error() << "In file " << inifilename << " : no penalties found for element " << element.firstChild().nodeValue().toLatin1().constData() << endl;
+-					return false;
++				// now store the entry
++				block_definition_.push_back(tmp);
++				block_to_length_.push_back(penalties.size());
++				block_to_start_idx_.push_back(start_idx);
++				block_to_start_valence_.push_back(start_valence);
++				for (unsigned int k = 0; k < penalties.size(); k++)
++				{
++					penalties_.push_back(penalties[k]);
+ 				}
+ 			}
+-			else
+-			{
+-				Log.error() << "Parse error in file " << inifilename << endl;
+-				return false;
+-			}
+-
+-			// now store the entry
+-			block_definition_.push_back(tmp);
+-			block_to_length_.push_back(penalties.length());
+-			block_to_start_idx_.push_back(start_idx);
+-			block_to_start_valence_.push_back(start_valence);
+-
+-		} // next block
++		}
++
++		if (xml.hasError())
++		{
++			Log.error() << "Parse error in file " << inifilename << ": " << xml.errorString().toStdString() << endl;
++			return false;
++		}
+ 
+ 		return true;
+ 	}
+ 
+ 	bool AssignBondOrderProcessor::precomputeBondLengthPenalties_()
+ 	{
+ #if defined DEBUG || defined DEBUG_ESTIMATE
+ cout << " AssignBondOrderProcessor::precomputeBondLengthPenalties_:   " << endl;
+ #endif
+ 

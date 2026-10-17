@@ -1,0 +1,74 @@
+# ═══ Draft knowledge entry — cd-hit 4.8.1 make 型库 conan 配方要点 ═══
+# Timestamp: 2026-09-05
+# Software: cd-hit 4.8.1
+# Gate: conan create（G2）失败链（Error -11 SIGSEGV → No makefile → 链接丢 -o）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-cd-hit-4.8.1-make-conan-recipe
+trigger_tool:           conan|conan create|conan-verify|make|g++
+phase:                  generate|build|link
+error_signature:        ConanException: Error -11 while executing|
+                         ERROR: cd-hit/4.8.1@ohpcd/stable: Error in build\(\) method|
+                         make: \*\*\* No targets specified and no makefile found\.  Stop\.|
+                         clang-15: error: no such file or directory: 'cd-hit'|
+                         save_script\("conanbuild"\)|Environment\(\)|basic_layout|self\.source_folder
+
+severity:               2
+category:               conan|makefile|ohos|toolchain|build-system
+match_keywords:         save_script, conanbuild, aggregated env, SIGSEGV, Error -11,
+                         self-reference, basic_layout, source_folder, build_folder,
+                         jobserver mkfifo, CC=g++, hardcoded CC, LDFLAGS +=, -o missing,
+                         Environment, make CC=clang++, cwd=source_folder, no makefile found
+title:                  make 型库（纯 Makefile、无 configure、硬编码 CC=g++）的 conan 配方四要点：保留聚合 env 名冲突致 SIGSEGV、basic_layout 下 cwd 用 source_folder、LDFLAGS 命令行覆盖丢 +='-o'、命令行覆盖硬编码编译器
+
+root_cause: >
+  1) generate() 里 env.vars(self).save_script("conanbuild") 与 conan 保留聚合脚本名 conanbuild
+     冲突：生成自引用的 conanbuild.sh（内容为 ". conanbuild.sh && . conanbuildenv-*.sh"），
+     self.run(env="conanbuild") 或手动 source 时无限递归直到 SIGSEGV，Conan 报
+     "ConanException: Error -11 while executing"（-11 = SIGSEGV）。必须用唯一脚本名
+     （如 cdhit_build_env），仓库内其他配方用 conanbuild_runpath/hmos_env 等同型命名。
+  2) basic_layout() 下 make 型项目源码经 get() 落在 source_folder，而 self.run 的默认
+     cwd 是 build_folder（如 build-release/）：直接 make 报 "No targets specified and
+     no makefile found"。需 self.run(..., cwd=self.source_folder)。
+  3) upstream Makefile 用 `LDFLAGS += -lz -o` 的累加式写法把 -o 藏在 LDFLAGS 里；
+     若在 make 命令行传 LDFLAGS="..."，命令行变量优先且 makefile 的 += 被整体忽略，
+     链接命令变成 ... -L<zlib> cd-hit，clang 把输出名当输入文件报
+     "no such file or directory: 'cd-hit'"。正确做法：generate() 用 Environment()
+     定义 LDFLAGS/CPPFLAGS 并 save_script(唯一名)，self.run 时 env="<唯一名>"，
+     makefile 的 += 会对 env 值正常追加。
+  4) 硬编码 CC=g++ 的 Makefile：命令行 `make CC=clang++ CXX=clang++ AR=llvm-ar
+     RANLIB=llvm-ranlib` 覆盖即可（R33：工具链来自明确命令行而非未定义 shell 变量）；
+     zlib 等依赖注入用 -I/-L 指向 self.dependencies[...].package_folder（R49，不碰共享前缀）。
+
+rec_approach: >
+  make-conanfile-quad: ① save_script 唯一名（禁 conanbuild）+ self.run(env=唯一名, cwd=self.source_folder)；
+  ② 依赖标志走 generate() 的 Environment() 注入（由 makefile 的 += 累加），不传命令行 LDFLAGS=；
+  ③ make 命令行覆盖 CC/CXX/AR/RANLIB；④ tool 包用 package_type="application" + commands.json（R38）。
+
+verification: >
+  本地 .work 探索性编译通过（6 个二进制可运行、冒烟聚类 2/2 正确）；
+  conan create 通过（G2 PASS，test_package 内真实调用 cd-hit 聚类并断言 .clstr 含 2 簇）；
+  W3 本地 CI（build_and_test.sh）L0 全通过、JC/KC pass、L5 bin/ 有产物。
+
+apply_boundary: >
+  适用于纯 Makefile（无 configure）的 C/C++ 命令行工具库；不适用于 cmake/autotools/meson
+  工程；若上游已有 Configure 或 CMake 则应走对应工具链生成器。cd-hit 4.8.1 的
+  `LDFLAGS += -lz -o` 是特有写法，其他项目需先读 Makefile 确认 LDFLAGS/CPPFLAGS 用法。
+
+counter_examples: >
+  save_script 名若非保留名（如 cdhit_build_env/hmos_env）不会崩溃；
+  若 Makefile 用 `LDFLAGS = ...`（不追加）则命令行覆盖是安全的；
+  若构建系统自带 configure（autotools 模板）则 AutotoolsToolchain/autotools 流程适用，
+  本条目不适用。
+
+limitations: >
+  E540（shadow-ci runner-path-prepend）与本条目维度不同：E540 处理 OHOS profile 把
+  CC/CXX 指向 /data/service/hnp/bin 导致环境路径问题；本条目处理 make 型配方本身的
+  写法问题。本机到 github.com 直连超时需经 gh-proxy 镜像拉取源码（E017 有镜像注入），
+  与本配方写法无关。

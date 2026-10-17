@@ -1,0 +1,203 @@
+diff --git a/src/network/socket/qlocalserver_unix.cpp b/src/network/socket/qlocalserver_unix.cpp
+index ea7e8e1..182e827 100644
+--- a/src/network/socket/qlocalserver_unix.cpp
++++ b/src/network/socket/qlocalserver_unix.cpp
+@@ -41,6 +41,7 @@
+ #include "qlocalserver_p.h"
+ #include "qlocalsocket.h"
+ #include "qlocalsocket_p.h"
++#include "qlocalsocket_unix_p.h"
+ #include "qnet_unix_p.h"
+ #include "qtemporarydir.h"
+ 
+@@ -63,6 +64,11 @@ void QLocalServerPrivate::init()
+ 
+ bool QLocalServerPrivate::removeServer(const QString &name)
+ {
++#if defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
++    if (!name.startsWith(QLatin1Char('/')))
++        return true;
++#endif
++
+     QString fileName;
+     if (name.startsWith(QLatin1Char('/'))) {
+         fileName = name;
+@@ -80,12 +86,38 @@ bool QLocalServerPrivate::listen(const QString &requestedServerName)
+ {
+     Q_Q(QLocalServer);
+ 
+-    // determine the full server path
+-    if (requestedServerName.startsWith(QLatin1Char('/'))) {
+-        fullServerName = requestedServerName;
+-    } else {
+-        fullServerName = QDir::cleanPath(QDir::tempPath());
+-        fullServerName += QLatin1Char('/') + requestedServerName;
++    bool useAbstractAddress = false;
++    sockaddr_un addr;
++    QT_SOCKLEN_T addressLength = sizeof(addr);
++#if defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
++    quint64 effectiveUid = 0;
++    if (!requestedServerName.startsWith(QLatin1Char('/'))) {
++        if (socketOptions != QLocalServer::NoOptions) {
++            errorString = QLocalServer::tr("QLocalServer::listen: Permission options are not supported for abstract sockets");
++            error = QAbstractSocket::UnsupportedSocketOperationError;
++            return false;
++        }
++
++        effectiveUid = static_cast<quint64>(::geteuid());
++        if (!qt_harmonyos_local_socket_address(requestedServerName, &addr,
++                                               &addressLength, &fullServerName, true)) {
++            errno = ENAMETOOLONG;
++            setError(QLatin1String("QLocalServer::listen"));
++            return false;
++        }
++        useAbstractAddress = true;
++        listenUsesManagedAbstractSocket = true;
++        listenEffectiveUid = effectiveUid;
++    } else
++#endif
++    {
++        // determine the full server path
++        if (requestedServerName.startsWith(QLatin1Char('/'))) {
++            fullServerName = requestedServerName;
++        } else {
++            fullServerName = QDir::cleanPath(QDir::tempPath());
++            fullServerName += QLatin1Char('/') + requestedServerName;
++        }
+     }
+     serverName = requestedServerName;
+ 
+@@ -112,37 +144,57 @@ bool QLocalServerPrivate::listen(const QString &requestedServerName)
+         return false;
+     }
+ 
+-    // Construct the unix address
+-    struct ::sockaddr_un addr;
+-    addr.sun_family = PF_UNIX;
+-    if (sizeof(addr.sun_path) < (uint)encodedFullServerName.size() + 1) {
+-        setError(QLatin1String("QLocalServer::listen"));
+-        closeServer();
+-        return false;
+-    }
+-
+-    if (socketOptions & QLocalServer::WorldAccessOption) {
+-        if (sizeof(addr.sun_path) < (uint)encodedTempPath.size() + 1) {
++    if (!useAbstractAddress) {
++        // Construct the pathname unix address
++        addr.sun_family = PF_UNIX;
++        if (sizeof(addr.sun_path) < (uint)encodedFullServerName.size() + 1) {
+             setError(QLatin1String("QLocalServer::listen"));
+             closeServer();
+             return false;
+         }
+-        ::memcpy(addr.sun_path, encodedTempPath.constData(),
+-                 encodedTempPath.size() + 1);
+-    } else {
+-        ::memcpy(addr.sun_path, encodedFullServerName.constData(),
+-                 encodedFullServerName.size() + 1);
++
++        if (socketOptions & QLocalServer::WorldAccessOption) {
++            if (sizeof(addr.sun_path) < (uint)encodedTempPath.size() + 1) {
++                setError(QLatin1String("QLocalServer::listen"));
++                closeServer();
++                return false;
++            }
++            ::memcpy(addr.sun_path, encodedTempPath.constData(),
++                     encodedTempPath.size() + 1);
++        } else {
++            ::memcpy(addr.sun_path, encodedFullServerName.constData(),
++                     encodedFullServerName.size() + 1);
++        }
+     }
+ 
+     // bind
+-    if (-1 == QT_SOCKET_BIND(listenSocket, (sockaddr *)&addr, sizeof(sockaddr_un))) {
++#if defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
++    if (useAbstractAddress) {
++        if (static_cast<quint64>(::geteuid()) != effectiveUid) {
++            errorString = QLocalServer::tr("QLocalServer::listen: Effective uid changed while preparing abstract socket");
++            error = QAbstractSocket::SocketAccessError;
++            closeServer();
++            return false;
++        }
++    }
++#endif
++
++    const QT_SOCKLEN_T bindAddressLength = useAbstractAddress
++            ? addressLength : QT_SOCKLEN_T(sizeof(sockaddr_un));
++    if (-1 == QT_SOCKET_BIND(listenSocket, (sockaddr *)&addr, bindAddressLength)) {
+         setError(QLatin1String("QLocalServer::listen"));
+         // if address is in use already, just close the socket, but do not delete the file
+-        if (errno == EADDRINUSE)
++        if (errno == EADDRINUSE) {
+             QT_CLOSE(listenSocket);
+-        // otherwise, close the socket and delete the file
+-        else
++            listenSocket = -1;
++#if defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
++            listenUsesManagedAbstractSocket = false;
++            listenEffectiveUid = 0;
++#endif
++        } else {
++            // otherwise, close the socket and delete the file
+             closeServer();
++        }
+         listenSocket = -1;
+         return false;
+     }
+@@ -152,7 +204,7 @@ bool QLocalServerPrivate::listen(const QString &requestedServerName)
+         setError(QLatin1String("QLocalServer::listen"));
+         closeServer();
+         listenSocket = -1;
+-        if (error != QAbstractSocket::AddressInUseError)
++        if (error != QAbstractSocket::AddressInUseError && !useAbstractAddress)
+             QFile::remove(fullServerName);
+         return false;
+     }
+@@ -195,6 +247,11 @@ bool QLocalServerPrivate::listen(qintptr socketDescriptor)
+ {
+     Q_Q(QLocalServer);
+ 
++#if defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
++    listenUsesManagedAbstractSocket = false;
++    listenEffectiveUid = 0;
++#endif
++
+     // Attach to the localsocket
+     listenSocket = socketDescriptor;
+ 
+@@ -250,7 +307,13 @@ void QLocalServerPrivate::closeServer()
+         QT_CLOSE(listenSocket);
+     listenSocket = -1;
+ 
+-    if (!fullServerName.isEmpty())
++    bool removeSocketFile = !fullServerName.isEmpty();
++#if defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
++    removeSocketFile = removeSocketFile && !listenUsesManagedAbstractSocket;
++    listenUsesManagedAbstractSocket = false;
++    listenEffectiveUid = 0;
++#endif
++    if (removeSocketFile)
+         QFile::remove(fullServerName);
+ }
+ 
+@@ -275,6 +338,19 @@ void QLocalServerPrivate::_q_onNewConnection()
+     } else {
+         socketNotifier->setEnabled(pendingConnections.size()
+                                    <= maxPendingConnections);
++#if defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
++        if (listenUsesManagedAbstractSocket) {
++            struct ucred credentials {};
++            QT_SOCKLEN_T credentialsLength = sizeof(credentials);
++            if (::getsockopt(connectedSocket, SOL_SOCKET, SO_PEERCRED,
++                             &credentials, &credentialsLength) == -1
++                    || credentialsLength != sizeof(credentials)
++                    || static_cast<quint64>(credentials.uid) != listenEffectiveUid) {
++                QT_CLOSE(connectedSocket);
++                return;
++            }
++        }
++#endif
+         q->incomingConnection(connectedSocket);
+     }
+ }

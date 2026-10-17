@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_libcvd LANGUAGES CXX)
+find_package(libcvd CONFIG REQUIRED)
+add_executable(test_libcvd test.cpp)
+target_link_libraries(test_libcvd PRIVATE libcvd::libcvd)
+target_compile_features(test_libcvd PRIVATE cxx_std_17)

@@ -1,0 +1,765 @@
+--- /dev/null
++++ b/pugl/pugl_ohos.c
+@@ -0,0 +1,762 @@
++/*
++  robtk -- HarmonyOS (OpenHarmony) backend for pugl.
++
++  Copyright (C) 2026 robtk OHOS port.
++
++  Permission to use, copy, modify, and/or distribute this software for any
++  purpose with or without fee is hereby granted, provided that the above
++  copyright notice and this permission notice appear in all copies.
++
++  THIS SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++  WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++  MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++  ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++  ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++  OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++
++  ---------------------------------------------------------------------------
++
++  HarmonyOS has no X11/Wayland/Quartz/Win32 desktop compositor, so the X11
++  backend of pugl cannot be used.  This backend presents the UI with the
++  native HarmonyOS graphics stack:
++
++    * EGL 1.4 (libEGL.so) for the display/context/surface,
++    * OpenGL ES 3.x (libGLESv3.so) for drawing,
++    * OHNativeWindow (native_window/external_window.h) as the drawable that
++      an ArkUI/XComponent based host application hands over.
++
++  Two presentation modes are supported, selected by the `parent` argument of
++  puglCreate():
++
++    parent != 0  ->  on-screen: the value is a `OHNativeWindow*` owned by the
++                     host (XComponent surface).  EGL renders into a window
++                     surface and every frame is published with
++                     eglSwapBuffers().
++    parent == 0  ->  offscreen: rendering goes to an EGL pbuffer of the same
++                     size, so UIs can be built, exercised and verified
++                     without a compositor (headless tools, test suites).
++
++  Because an HarmonyOS application owns the event loop, input events are
++  pushed into the view by the host with puglSendMouse(), puglSendMotion(),
++  puglSendScroll(), puglSendSpecial() and puglSendEnterLeave(); they are
++  dispatched from puglProcessEvents() exactly like the X11 backend dispatches
++  XEvents.  puglGrabFrame() reads the current drawable back into memory,
++  which is useful for host-side snapshots and for automated pixel checks.
++*/
++
++#include <assert.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++#include <GLES3/gl3.h>
++#include <native_window/external_window.h>
++
++/* HarmonyOS only implements OpenGL ES; tell the platform independent part of
++ * pugl (pugl_internal.h) not to use the legacy fixed-function pipeline. */
++#define PUGL_GLES_BACKEND 1
++
++#include "pugl_internal.h"
++#include "pugl_ohos.h"
++
++#define PUGL_OHOS_EVENT_QUEUE 128
++
++enum {
++	PUGL_OHOS_EV_MOTION = 1,
++	PUGL_OHOS_EV_BUTTON,
++	PUGL_OHOS_EV_SCROLL,
++	PUGL_OHOS_EV_SPECIAL,
++	PUGL_OHOS_EV_KEYBOARD,
++	PUGL_OHOS_EV_ENTER,
++	PUGL_OHOS_EV_LEAVE,
++	PUGL_OHOS_EV_CLOSE
++};
++
++typedef struct {
++	int      type;
++	int      x;
++	int      y;
++	int      button;
++	bool     press;
++	float    dx;
++	float    dy;
++	uint32_t key;
++	int      mods;
++} PuglOhosEvent;
++
++struct PuglInternalsImpl {
++	EGLDisplay      display;
++	EGLConfig       config;
++	EGLContext      ctx;
++	EGLSurface      surface;
++
++	OHNativeWindow* window;      /* NULL when rendering offscreen */
++	bool            offscreen;
++	bool            doubleBuffered;
++	bool            visible;
++
++	int             min_width;
++	int             min_height;
++	bool            aspect;
++
++	PuglOhosEvent   queue[PUGL_OHOS_EVENT_QUEUE];
++	int             qhead;
++	int             qcount;
++};
++
++static PuglInternals*
++puglOhosImpl(PuglView* view)
++{
++	return view->impl;
++}
++
++static EGLint
++puglOhosEglError(const char* what)
++{
++	const EGLint err = eglGetError();
++	fprintf(stderr, "pugl: %s failed (EGL error 0x%04x)\n", what, (unsigned)err);
++	return err;
++}
++
++static uint32_t
++puglOhosTimestamp(void)
++{
++	struct timespec ts;
++	clock_gettime(CLOCK_MONOTONIC, &ts);
++	return (uint32_t)((ts.tv_sec * 1000) + (ts.tv_nsec / 1000000));
++}
++
++/*****************************************************************************
++ * Input events (pushed by the host application)
++ */
++
++static void
++puglOhosPush(PuglView* view, const PuglOhosEvent* ev)
++{
++	PuglInternals* impl = puglOhosImpl(view);
++	if (impl->qcount >= PUGL_OHOS_EVENT_QUEUE) {
++		/* drop oldest event, the UI cannot keep up with the input stream */
++		impl->qhead = (impl->qhead + 1) % PUGL_OHOS_EVENT_QUEUE;
++		--impl->qcount;
++	}
++	impl->queue[(impl->qhead + impl->qcount) % PUGL_OHOS_EVENT_QUEUE] = *ev;
++	++impl->qcount;
++}
++
++PUGL_API void
++puglSendMotion(PuglView* view, int x, int y, int mods)
++{
++	PuglOhosEvent ev;
++	memset(&ev, 0, sizeof(ev));
++	ev.type = PUGL_OHOS_EV_MOTION;
++	ev.x = x;
++	ev.y = y;
++	ev.mods = mods;
++	puglOhosPush(view, &ev);
++	view->event_timestamp_ms = puglOhosTimestamp();
++}
++
++PUGL_API void
++puglSendMouse(PuglView* view, int button, bool press, int x, int y, int mods)
++{
++	PuglOhosEvent ev;
++	memset(&ev, 0, sizeof(ev));
++	ev.type = PUGL_OHOS_EV_BUTTON;
++	ev.button = button;
++	ev.press = press;
++	ev.x = x;
++	ev.y = y;
++	ev.mods = mods;
++	puglOhosPush(view, &ev);
++	view->event_timestamp_ms = puglOhosTimestamp();
++}
++
++PUGL_API void
++puglSendScroll(PuglView* view, int x, int y, float dx, float dy, int mods)
++{
++	PuglOhosEvent ev;
++	memset(&ev, 0, sizeof(ev));
++	ev.type = PUGL_OHOS_EV_SCROLL;
++	ev.x = x;
++	ev.y = y;
++	ev.dx = dx;
++	ev.dy = dy;
++	ev.mods = mods;
++	puglOhosPush(view, &ev);
++	view->event_timestamp_ms = puglOhosTimestamp();
++}
++
++PUGL_API void
++puglSendSpecial(PuglView* view, bool press, PuglKey key, int mods)
++{
++	PuglOhosEvent ev;
++	memset(&ev, 0, sizeof(ev));
++	ev.type = PUGL_OHOS_EV_SPECIAL;
++	ev.press = press;
++	ev.key = (uint32_t)key;
++	ev.mods = mods;
++	puglOhosPush(view, &ev);
++	view->event_timestamp_ms = puglOhosTimestamp();
++}
++
++PUGL_API void
++puglSendKeyboard(PuglView* view, bool press, uint32_t key, int mods)
++{
++	PuglOhosEvent ev;
++	memset(&ev, 0, sizeof(ev));
++	ev.type = PUGL_OHOS_EV_KEYBOARD;
++	ev.press = press;
++	ev.key = key;
++	ev.mods = mods;
++	puglOhosPush(view, &ev);
++	view->event_timestamp_ms = puglOhosTimestamp();
++}
++
++PUGL_API void
++puglSendEnterLeave(PuglView* view, bool enter, int x, int y, int mods)
++{
++	PuglOhosEvent ev;
++	memset(&ev, 0, sizeof(ev));
++	ev.type = enter ? PUGL_OHOS_EV_ENTER : PUGL_OHOS_EV_LEAVE;
++	ev.x = x;
++	ev.y = y;
++	ev.mods = mods;
++	puglOhosPush(view, &ev);
++}
++
++/*****************************************************************************
++ * EGL plumbing
++ */
++
++static bool
++puglOhosCreateSurface(PuglView* view)
++{
++	PuglInternals* impl = puglOhosImpl(view);
++
++	if (impl->surface != EGL_NO_SURFACE) {
++		eglDestroySurface(impl->display, impl->surface);
++		impl->surface = EGL_NO_SURFACE;
++	}
++
++	if (impl->window) {
++		impl->surface = eglCreateWindowSurface(
++				impl->display, impl->config,
++				(EGLNativeWindowType)impl->window, NULL);
++		if (impl->surface == EGL_NO_SURFACE) {
++			puglOhosEglError("eglCreateWindowSurface");
++			return false;
++		}
++		impl->offscreen = false;
++	} else {
++		/* HarmonyOS EGL rejects negative (and beyond-the-config-maximum)
++		 * pbuffer sizes with EGL_BAD_ATTRIBUTE.  A UI that measures text can
++		 * end up with degenerate geometry when the host has no usable fonts
++		 * (pango then reports meaningless metrics), so never hand an
++		 * out-of-range size to EGL: clamp it and say what was requested. */
++		EGLint maxw = 0, maxh = 0;
++		eglGetConfigAttrib(impl->display, impl->config, EGL_MAX_PBUFFER_WIDTH, &maxw);
++		eglGetConfigAttrib(impl->display, impl->config, EGL_MAX_PBUFFER_HEIGHT, &maxh);
++
++		EGLint w = view->width;
++		EGLint h = view->height;
++		if (w <= 0 || h <= 0 || (maxw > 0 && w > maxw) || (maxh > 0 && h > maxh)) {
++			fprintf(stderr,
++					"pugl: offscreen drawable requested %dx%d, clamping to the "
++					"valid range (config maximum %dx%d)\n",
++					w, h, maxw, maxh);
++			if (w <= 0) { w = 1; }
++			if (h <= 0) { h = 1; }
++			if (maxw > 0 && w > maxw) { w = maxw; }
++			if (maxh > 0 && h > maxh) { h = maxh; }
++		}
++
++		const EGLint attr[] = {
++			EGL_WIDTH,  w,
++			EGL_HEIGHT, h,
++			EGL_NONE
++		};
++		impl->surface = eglCreatePbufferSurface(impl->display, impl->config, attr);
++		if (impl->surface == EGL_NO_SURFACE) {
++			fprintf(stderr, "pugl: eglCreatePbufferSurface(%dx%d) failed\n", w, h);
++			puglOhosEglError("eglCreatePbufferSurface");
++			return false;
++		}
++		impl->offscreen = true;
++	}
++
++	if (!eglMakeCurrent(impl->display, impl->surface, impl->surface, impl->ctx)) {
++		puglOhosEglError("eglMakeCurrent");
++		return false;
++	}
++	return true;
++}
++
++/** Attach (or detach) the native window the UI is drawn into.
++
++    The host calls this when the XComponent surface becomes available (and
++    with 0 when it is destroyed).  The EGL surface is re-created accordingly.
++*/
++PUGL_API PuglStatus
++puglSetNativeWindow(PuglView* view, PuglNativeWindow window)
++{
++	PuglInternals* impl = puglOhosImpl(view);
++	if ((PuglNativeWindow)impl->window == window) {
++		return PUGL_SUCCESS;
++	}
++	impl->window = (OHNativeWindow*)window;
++	if (impl->ctx != EGL_NO_CONTEXT) {
++		puglOhosCreateSurface(view);
++	}
++	view->redisplay = true;
++	return PUGL_SUCCESS;
++}
++
++/* The host owns the window buffer, but it must still be told a *valid* size
++ * (a UI with degenerate geometry must not be forwarded to the compositor). */
++static void
++puglOhosSetWindowGeometry(PuglInternals* impl, int width, int height)
++{
++	if (!impl->window) {
++		return;
++	}
++	if (width <= 0 || height <= 0) {
++		fprintf(stderr, "pugl: ignoring invalid window size %dx%d\n", width, height);
++		return;
++	}
++	OH_NativeWindow_NativeWindowHandleOpt(
++			impl->window, SET_BUFFER_GEOMETRY, width, height);
++}
++
++PuglView*
++puglCreate(PuglNativeWindow parent,
++           const char*      title,
++           int              min_width,
++           int              min_height,
++           int              width,
++           int              height,
++           bool             resizable,
++           bool             ontop,
++           unsigned long    transientId)
++{
++	(void)title;
++	(void)ontop;
++	(void)transientId;
++
++	PuglView*      view = (PuglView*)calloc(1, sizeof(PuglView));
++	PuglInternals* impl = (PuglInternals*)calloc(1, sizeof(PuglInternals));
++	if (!view || !impl) {
++		free(view);
++		free(impl);
++		return NULL;
++	}
++
++	view->impl               = impl;
++	if (width <= 0 || height <= 0) {
++		/* a UI with meaningless text metrics can ask for a degenerate size;
++		 * keep the state valid instead of forwarding it to EGL */
++		fprintf(stderr, "pugl: invalid drawable size %dx%d, using 1x1\n", width, height);
++		width  = width  > 0 ? width  : 1;
++		height = height > 0 ? height : 1;
++	}
++	view->width              = width;
++	view->height             = height;
++	view->ui_scale           = 1.0f;
++	view->set_window_hints   = true;
++	view->user_resizable     = resizable;
++	view->event_timestamp_ms = puglOhosTimestamp();
++
++	impl->ctx        = EGL_NO_CONTEXT;
++	impl->surface    = EGL_NO_SURFACE;
++	impl->display    = EGL_NO_DISPLAY;
++	impl->window     = (OHNativeWindow*)parent;
++	impl->offscreen  = (parent == 0);
++	impl->visible    = true;
++	impl->min_width  = min_width;
++	impl->min_height = min_height;
++	impl->aspect     = false;
++
++	impl->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
++	if (impl->display == EGL_NO_DISPLAY) {
++		puglOhosEglError("eglGetDisplay");
++		free(impl);
++		free(view);
++		return NULL;
++	}
++
++	EGLint major = 0, minor = 0;
++	if (!eglInitialize(impl->display, &major, &minor)) {
++		puglOhosEglError("eglInitialize");
++		free(impl);
++		free(view);
++		return NULL;
++	}
++#ifdef VERBOSE_PUGL
++	printf("puGL: HarmonyOS EGL %d.%d (%s)\n", major, minor,
++			eglQueryString(impl->display, EGL_VENDOR));
++#endif
++
++	const EGLint surface_type = impl->window
++		? EGL_WINDOW_BIT
++		: EGL_PBUFFER_BIT;
++
++	/* OpenGL ES 3 first, fall back to ES 2 (both are served by libGLESv3.so) */
++	const EGLint renderable[] = {
++		EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
++		EGL_SURFACE_TYPE,    surface_type,
++		EGL_RED_SIZE,        8,
++		EGL_GREEN_SIZE,      8,
++		EGL_BLUE_SIZE,       8,
++		EGL_ALPHA_SIZE,      8,
++		EGL_DEPTH_SIZE,      0,
++		EGL_NONE
++	};
++	const EGLint renderable_es2[] = {
++		EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
++		EGL_SURFACE_TYPE,    surface_type,
++		EGL_RED_SIZE,        8,
++		EGL_GREEN_SIZE,      8,
++		EGL_BLUE_SIZE,       8,
++		EGL_ALPHA_SIZE,      8,
++		EGL_DEPTH_SIZE,      0,
++		EGL_NONE
++	};
++
++	EGLint client_version = 3;
++	EGLint n_config       = 0;
++	if (!eglChooseConfig(impl->display, renderable, &impl->config, 1, &n_config)
++			|| n_config == 0) {
++		client_version = 2;
++		if (!eglChooseConfig(impl->display, renderable_es2, &impl->config, 1, &n_config)
++				|| n_config == 0) {
++			puglOhosEglError("eglChooseConfig");
++			eglTerminate(impl->display);
++			free(impl);
++			free(view);
++			return NULL;
++		}
++	}
++
++	const EGLint ctx_attr[] = {
++		EGL_CONTEXT_CLIENT_VERSION, client_version,
++		EGL_NONE
++	};
++	impl->ctx = eglCreateContext(impl->display, impl->config, EGL_NO_CONTEXT, ctx_attr);
++	if (impl->ctx == EGL_NO_CONTEXT) {
++		puglOhosEglError("eglCreateContext");
++		eglTerminate(impl->display);
++		free(impl);
++		free(view);
++		return NULL;
++	}
++
++	impl->doubleBuffered = impl->window != NULL;
++
++	if (!puglOhosCreateSurface(view)) {
++		eglDestroyContext(impl->display, impl->ctx);
++		eglTerminate(impl->display);
++		free(impl);
++		free(view);
++		return NULL;
++	}
++
++	/* the host owns the buffer; only tell it how large the UI is */
++	puglOhosSetWindowGeometry(impl, width, height);
++
++#ifdef VERBOSE_PUGL
++	printf("puGL: HarmonyOS %s drawable %d x %d (%s)\n",
++			impl->offscreen ? "offscreen" : "window",
++			width, height, (const char*)glGetString(GL_VERSION));
++#endif
++
++	/* the X11 backend learns about the initial window size from MapNotify;
++	 * here the surface is ready right away, so request a first reshape and
++	 * redisplay (both are performed by the first puglProcessEvents). */
++	view->resize    = true;
++	view->redisplay = true;
++
++	/* the context stays current: HarmonyOS hosts call the UI from a single
++	 * thread (the one that created the view), c.f. the HAVE_IDLE_IFACE mode
++	 * of robtk which drives puglProcessEvents() from the host event loop. */
++	return view;
++}
++
++PUGL_API void
++puglDestroy(PuglView* view)
++{
++	if (!view) {
++		return;
++	}
++	PuglInternals* impl = puglOhosImpl(view);
++
++	eglMakeCurrent(impl->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
++	if (impl->surface != EGL_NO_SURFACE) {
++		eglDestroySurface(impl->display, impl->surface);
++	}
++	if (impl->ctx != EGL_NO_CONTEXT) {
++		eglDestroyContext(impl->display, impl->ctx);
++	}
++	if (impl->display != EGL_NO_DISPLAY) {
++		eglTerminate(impl->display);
++	}
++	free(impl);
++	free(view);
++}
++
++PUGL_API void
++puglShowWindow(PuglView* view)
++{
++	PuglInternals* impl = puglOhosImpl(view);
++	impl->visible = true;
++	view->redisplay = true;
++}
++
++PUGL_API void
++puglHideWindow(PuglView* view)
++{
++	PuglInternals* impl = puglOhosImpl(view);
++	/* the ArkUI surface is hidden: stop rendering into it, the host will
++	 * call puglShowWindow() when it becomes visible again. */
++	impl->visible = false;
++}
++
++static void
++puglReshape(PuglView* view, int width, int height)
++{
++	PuglInternals* impl = puglOhosImpl(view);
++
++	if (!eglMakeCurrent(impl->display, impl->surface, impl->surface, impl->ctx)) {
++		puglOhosEglError("eglMakeCurrent");
++		return;
++	}
++	if (view->reshapeFunc) {
++		view->reshapeFunc(view, width, height);
++	} else {
++		puglDefaultReshape(view, width, height);
++	}
++	view->width  = width;
++	view->height = height;
++}
++
++static void
++puglDisplay(PuglView* view)
++{
++	PuglInternals* impl = puglOhosImpl(view);
++
++	if (!eglMakeCurrent(impl->display, impl->surface, impl->surface, impl->ctx)) {
++		puglOhosEglError("eglMakeCurrent");
++		return;
++	}
++
++	view->redisplay = false;
++	if (view->displayFunc) {
++		view->displayFunc(view);
++	}
++
++	glFinish();
++	if (impl->doubleBuffered && !impl->offscreen) {
++		eglSwapBuffers(impl->display, impl->surface);
++	}
++}
++
++static void
++puglResize(PuglView* view)
++{
++	PuglInternals* impl = puglOhosImpl(view);
++	int set_hints = 1;
++
++	view->resize = false;
++	if (view->resizeFunc) {
++		view->resizeFunc(view, &view->width, &view->height, &set_hints);
++	}
++
++	if (view->width < impl->min_width)  { view->width  = impl->min_width; }
++	if (view->height < impl->min_height) { view->height = impl->min_height; }
++	if (view->width < 1)  { view->width  = 1; }
++	if (view->height < 1) { view->height = 1; }
++
++	if (impl->window) {
++		puglOhosSetWindowGeometry(impl, view->width, view->height);
++		puglOhosCreateSurface(view);
++	} else if (impl->offscreen) {
++		/* pbuffer size is immutable: re-create it at the new size */
++		puglOhosCreateSurface(view);
++	}
++
++	puglReshape(view, view->width, view->height);
++}
++
++/*****************************************************************************
++ * Event dispatch
++ */
++
++static void
++puglOhosDispatch(PuglView* view, const PuglOhosEvent* ev)
++{
++	view->mods = ev->mods;
++
++	switch (ev->type) {
++		case PUGL_OHOS_EV_MOTION:
++			if (view->motionFunc) {
++				view->motionFunc(view, ev->x, ev->y);
++			}
++			break;
++		case PUGL_OHOS_EV_BUTTON:
++			if (view->mouseFunc) {
++				view->mouseFunc(view, ev->button, ev->press, ev->x, ev->y);
++			}
++			break;
++		case PUGL_OHOS_EV_SCROLL:
++			if (view->scrollFunc) {
++				view->scrollFunc(view, ev->x, ev->y, ev->dx, ev->dy);
++			}
++			break;
++		case PUGL_OHOS_EV_SPECIAL:
++			if (view->specialFunc) {
++				view->specialFunc(view, ev->press, (PuglKey)ev->key);
++			}
++			break;
++		case PUGL_OHOS_EV_KEYBOARD:
++			if (view->keyboardFunc) {
++				view->keyboardFunc(view, ev->press, ev->key);
++			}
++			break;
++		case PUGL_OHOS_EV_ENTER:
++			view->mouse_in_view = true;
++			if (view->focusFunc) {
++				view->focusFunc(view, true);
++			}
++			if (view->motionFunc) {
++				view->motionFunc(view, ev->x, ev->y);
++			}
++			break;
++		case PUGL_OHOS_EV_LEAVE:
++			view->mouse_in_view = false;
++			if (view->motionFunc) {
++				/* the X11 backend reports a pointer that left the view
++				 * as (-1, -1); do the same here */
++				view->motionFunc(view, -1, -1);
++			}
++			if (view->focusFunc) {
++				view->focusFunc(view, false);
++			}
++			break;
++		case PUGL_OHOS_EV_CLOSE:
++			if (view->closeFunc) {
++				view->closeFunc(view);
++			}
++			break;
++		default:
++			break;
++	}
++}
++
++/** Ask the host to close the UI (equivalent to the window close button). */
++PUGL_API void
++puglSendClose(PuglView* view)
++{
++	PuglOhosEvent ev;
++	memset(&ev, 0, sizeof(ev));
++	ev.type = PUGL_OHOS_EV_CLOSE;
++	puglOhosPush(view, &ev);
++}
++
++PuglStatus
++puglProcessEvents(PuglView* view)
++{
++	PuglInternals* impl = puglOhosImpl(view);
++
++	while (impl->qcount > 0) {
++		const PuglOhosEvent ev = impl->queue[impl->qhead];
++		impl->qhead = (impl->qhead + 1) % PUGL_OHOS_EVENT_QUEUE;
++		--impl->qcount;
++		puglOhosDispatch(view, &ev);
++	}
++
++	if (!impl->visible) {
++		return PUGL_SUCCESS;
++	}
++	if (view->resize) {
++		puglResize(view);
++	}
++	if (view->redisplay) {
++		puglDisplay(view);
++	}
++	return PUGL_SUCCESS;
++}
++
++PUGL_API void
++puglPostRedisplay(PuglView* view)
++{
++	view->redisplay = true;
++}
++
++PUGL_API void
++puglPostResize(PuglView* view)
++{
++	view->resize = true;
++}
++
++PUGL_API PuglNativeWindow
++puglGetNativeWindow(PuglView* view)
++{
++	PuglInternals* impl = puglOhosImpl(view);
++	return (PuglNativeWindow)impl->window;
++}
++
++PUGL_API int
++puglOpenFileDialog(PuglView* view, const char* title)
++{
++	(void)view;
++	(void)title;
++	/* file pickers are provided by the ArkUI application, not by the
++	 * toolkit; the host is notified through the view's file-selected
++	 * callback once the user picked a file. */
++	return -1;
++}
++
++PUGL_API int
++puglUpdateGeometryConstraints(PuglView* view, int min_width, int min_height, bool aspect)
++{
++	PuglInternals* impl = puglOhosImpl(view);
++	impl->min_width  = min_width;
++	impl->min_height = min_height;
++	impl->aspect     = aspect;
++	return 0;
++}
++
++/** Copy the current drawable into `rgba` (width * height * 4 bytes, RGBA).
++
++    @return 0 on success, negative on error.  `width`/`height` are updated
++    with the size of the frame that was read back.
++*/
++PUGL_API int
++puglGrabFrame(PuglView* view, int* width, int* height, unsigned char* rgba)
++{
++	PuglInternals* impl = puglOhosImpl(view);
++	if (!rgba) {
++		return -1;
++	}
++	if (!eglMakeCurrent(impl->display, impl->surface, impl->surface, impl->ctx)) {
++		puglOhosEglError("eglMakeCurrent");
++		return -1;
++	}
++	const int w = view->width;
++	const int h = view->height;
++	/* drop errors left over from earlier drawing so that a failure below is
++	 * really reported by glReadPixels and not by an unrelated stale error */
++	while (glGetError() != GL_NO_ERROR) { }
++	glPixelStorei(GL_PACK_ALIGNMENT, 1);
++	glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
++	const GLenum err = glGetError();
++	if (err != GL_NO_ERROR) {
++		fprintf(stderr, "pugl: glReadPixels failed (0x%04x)\n", (unsigned)err);
++		return -2;
++	}
++	if (width)  { *width  = w; }
++	if (height) { *height = h; }
++	return 0;
++}

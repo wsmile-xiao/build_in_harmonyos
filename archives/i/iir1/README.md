@@ -1,28 +1,17 @@
 # iir1
 
-DSP IIR realtime filter library written in C++
+iir1 is a realtime C++ IIR filter library implementing Butterworth,
+Chebyshev I/II, RBJ, and custom second-order-section filters.
 
-## Description
+- Upstream: https://github.com/berndporr/iir1
+- License: MIT
+- Build system: CMake
+- Third-party dependencies: none
+- Consumer interfaces: `find_package(iir)`, `iir::iir`, and pkg-config `iir`
 
-High performance IIR (Infinite Impulse Response) filter library for real-time signal processing. Features:
+## 1.10.0
 
-- Realtime sample in - sample out processing
-- Butterworth, RBJ, Chebychev filters
-- Lowpass, highpass, bandpass and bandstop filters
-- Template based header-only filter functions
-- Cross platform: Linux, Windows and Mac
-
-## Features
-
-- Butterworth filters
-- RBJ filters
-- Chebyshev Type I and Type II filters
-- Custom filter coefficients import from Python (scipy)
-- Memory-safe (no malloc/new at runtime)
-- Header-only integration for optimal performance
-
-## Version 1.10.0
-
-- Initial OpenHarmony compilation
-- CMake build system
-- MIT License
+The OpenHarmony recipe supports shared and static packages, builds all eight
+upstream CTest executables, and supplies 46 independently runnable consumer
+API tests. See the version directory for exact source hashes and validation
+evidence.

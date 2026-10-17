@@ -1,0 +1,66 @@
+#====================================================================
+# E600 — HMDFS setgid prevents mktemp from creating writable confstat dirs
+#====================================================================
+
+# Layer 0: Error Surface
+id:                     E600
+trigger_tool:           configure
+phase:                  configuration
+error_signature: |
+  Permission denied.*confstat
+  confstat.*Permission denied
+  cannot create.*temporary directory
+
+# Layer 1: Recognition
+severity:               2
+category:               hmdfs, build-system, portability
+prescan_pattern:        umask 077.*mktemp|mktemp.*confstat
+root_cause:             |
+  The conan build dir (b/) on HMDFS is setgid (group=file_manager).
+  The vendor configure script uses `umask 077 && mktemp -d -q ./confstatXXXXXX`.
+  On HMDFS, this creates confstat dirs with mode 0270 owned by group=file_manager
+  (uid 20001006), not the build user (uid 20020101).  Even though the build
+  user is in the file_manager group, the setgid bit forces the result to be
+  owned by file_manager, and 0270 grants no write permission to the group.
+  HMDFS enforces owner-based permission checking strictly, so the build user
+  cannot write to its own temp dirs.  chmod does not help because HMDFS
+  enforces the permission model at the filesystem level.
+
+# Layer 2: Fix Strategy
+rec_approach:           build-in-user-owned-dir
+fix_description:        |
+  (a) Copy source from export_sources_folder to a fully user-owned build
+  root such as /storage/Users/currentUser/usr/<name>-build.  This prevents setgid
+  inheritance because the parent dir is no longer setgid.
+  (b) Patch the configure script to use `umask 022` instead of `umask 077`,
+  so mktemp creates dirs with mode 0755 instead of 0270.
+  (c) Redirect confstat paths to the build root using `sed -i` in the
+  recipe's build() method.
+  (d) Run configure/make/install from the build script (do_build.sh) with
+  the conan environment (conanbuild.sh) properly sourced.
+
+fix_code:               |
+  # In conanfile.py build() method:
+  import subprocess
+  build_root = "/storage/Users/currentUser/usr/nylon-build"
+  if os.path.exists(build_root):
+      shutil.rmtree(build_root)
+  os.makedirs(build_root, 0o755)
+  # Copy source...
+  # Patch configure:
+  subprocess.run([
+      "sed", "-i",
+      "-e", "s|(umask 077|(umask 022|g",
+      "-e", "s|./confstat$$-|%s/confstat$$-|g" % build_root,
+      "-e", "s|./confstatXXXXXX|%s/confstatXXXXXX|g" % build_root,
+      os.path.join(build_root, "configure"),
+  ], check=True)
+
+fix_reference:           archives/n/nylon/1.21/conanfile.py (nylon 1.21)
+
+# Layer 3: Validation
+validation:             |
+  - Source tree copied to /storage/Users/currentUser/usr/<name>-build (verified by
+    stat that the dir is owned by uid 20020101, not setgid).
+  - configure completes without "Permission denied" errors in config.status.
+  - make completes without "Permission denied" errors in the temp file operations.

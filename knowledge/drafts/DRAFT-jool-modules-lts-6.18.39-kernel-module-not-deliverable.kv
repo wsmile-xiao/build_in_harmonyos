@@ -1,0 +1,182 @@
+# ═══ Draft knowledge entry — 内核模块交付物分层适配：内核态判定 + 用户态分层交付（2026-09-21 结论修订）═══
+# Timestamp: 2026-09-20 初版 / 2026-09-21 修订
+# Software: jool-modules-lts 6.18.39 (上游 Jool v4.1.14)
+# Gate: MR #11362 管理员审查 rule4+rule12 FAIL（初版「不建包走 issue」通道）→ 重做为分层交付
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-jool-modules-lts-6.18.39
+trigger_tool:           clang|make|kbuild|dkms|conan
+phase:                  preflight|configure|build
+error_signature:        fatal error: 'net/net_namespace\.h' file not found|
+                         make: \*\*\* No rule to make target 'modules'\.  Stop\.|
+                         Version mismatch\. The kernel module's version is
+
+severity:               2
+category:               kernel|platform|limitation|detection|toolchain|build-system
+match_keywords:         obj-m, Kbuild, dkms.conf, MODULES_DIR, /lib/modules,
+                         genl_register_family, JOOLNL_FAMILY, joolnl_setup, genl_connect,
+                         NETLINK_GENERIC, nl_socket_alloc, net/net_namespace.h,
+                         insmod, modprobe, sudo dmesg, graybox, recompile/reinstall,
+                         _UAPI_LINUX_MODULE_H, bionic, UAPI stub, MODULE_LICENSE, module_init
+title:                  内核模块交付物（多模块 Kbuild + DKMS + 内核态测试设施）的分层适配：内核态判定清单成立，但处置为用户态分层交付（制品 + 源码快照 + fail-closed 契约），「不建包走 issue」通道已被 rule4/rule12 审查否定
+
+root_cause: >
+  一类软件的交付物本身位于内核空间，且其用户态组件是内核模块的纯 netlink 客户端——典型如
+  内核态网络栈扩展（本例 Jool：三个 obj-m 模块 jool_common/jool/jool_siit + 经 generic
+  netlink family "Jool" 配置模块的 CLI）。OHOS PC 适配框架（conan recipe + HNP 非特权
+  用户空间沙箱）对此存在四重结构性障碍：
+  1) 构建需要目标机内核构建树（dkms.conf MAKE[0]="make -C ${kernel_source_dir}
+     M=.../src/mod/{common,nat64,siit} modules"），而 OHOS aarch64 sysroot 不是内核
+     源码/构建树（实测：usr/src、usr/include/linux/kconfig.h、usr/include/config、
+     usr/include/generated 四项均不存在，SDK 与 NDK sysroot 皆然；以 sysroot 作
+     kernel_source_dir 执行 Kbuild 报 "No rule to make target 'modules'"，exit 2）；
+  2) 所需头是内核内部头：本例 src/mod 源码 41 个 include 中 28 个缺失；13 个现存头
+     全部是 bionic 自动生成的用户态 UAPI 导出（12 个含 "automatically generated from
+     a Linux kernel header" 横幅，net/route.h 为 musl 风格），对 MODULE_LICENSE/
+     module_init/struct module/THIS_MODULE 命中全为 0；且传递引入的头（如经
+     mod/common/init.h 引入的 net/net_namespace.h）同样缺失——缺失面大于源码直接
+     include 清单；
+  3) 交付需要 root 权限把 .ko 安装到 /lib/modules/<kver>/ 并用 insmod/modprobe 加载
+     （dkms.conf: root@host:~# dkms install；AUTOINSTALL="yes"），沙箱既无权限也无
+     内核模块支持面；
+  4) 用户态子集不可单独交付：CLI 的每个子命令都以 joolnl_setup() 开始（nl/core.c:
+     nl_socket_alloc + genl_connect），与内核模块版本握手，模块未加载即 -ESRCH
+     （core.c:277），所有响应处理均为 "The kernel module's response ..."——该子集
+     不实现任何数据平面功能，单独交付属平台禁止的裁剪。
+  另有一类高判别度特征：测试设施自身也是内核态——unit 测试编译为 .ko 并用
+  `ls -r */*.ko` + `sudo insmod` + `sudo dmesg` 运行（test/unit/），报文注入框架自带
+  obj-m 内核模块（test/graybox/mod/Kbuild: obj-m += graybox.o），部分脚本要求先
+  recompile/reinstall 内核模块再运行（test/nl-fragmentation/）。此时上游测试在
+  用户态框架内的可运行数为 0。
+
+affected_scope:         以 Linux 内核模块为交付物、且用户态组件依赖内核模块接口
+                        （sysfs 路径硬编码或 netlink/genl family 握手）的软件
+                        （内核态网络栈扩展、netfilter 模块、DKMS 包、需与内核同版本
+                        编译的模块 + 配套 CLI/守护进程）在 OHOS PC 用户态适配流程中
+                        的任务；同族软件即使语言为 C/C++ 也不适用本流程。
+
+verification_cmd:       # 1) 交付物性质（是否内核态；多模块也适用）
+                        grep -rn "obj-m\|MODULES_DIR\|/lib/modules" src/mod --include=Kbuild --include=Makefile*
+                        grep -n "kernel_source_dir\|BUILT_MODULE_NAME\|AUTOINSTALL" dkms.conf
+                        # 2) 逐头核验目标 sysroot（缺失 vs bionic UAPI 导出）
+                        #    ⚠ 头名必须用 sed 按尖括号抽取：tr -d "#include<>" 删的是字符集合，
+                        #    会把 <linux/module.h> 破坏成 " x/mo.h"，导致所有头恒报 MISSING（伪证据）
+                        grep -rhE '^[[:space:]]*#[[:space:]]*include[[:space:]]*<[^>]+>' src/mod \
+                          | sed -E 's/.*<([^>]+)>.*/\1/' | sort -u | while read -r h; do
+                          test -e "$SYSROOT/usr/include/$h" && echo "present $h" || echo "MISSING $h"; done
+                        # 3) 现存头是否内核 API（bionic UAPI 导出判定：横幅 + 模块 API 命中数）
+                        for h in <present 头>; do
+                          grep -c 'automatically generated' "$SYSROOT/usr/include/$h";
+                          grep -cE 'MODULE_LICENSE|module_init|struct module|THIS_MODULE' "$SYSROOT/usr/include/$h"; done
+                        # 4) 内核构建树存在性（SDK 与 NDK sysroot 都要查）
+                        for s in "$SYSROOT" "$NDK_SYSROOT"; do for p in usr/src usr/include/linux/kconfig.h usr/include/config usr/include/generated; do test -e "$s/$p" && echo "present $p" || echo "MISSING $p"; done; done
+                        # 5) 用户态子集是否 netlink 客户端（不得裁剪论证）
+                        grep -rn "genl_register_family\|JOOLNL_FAMILY\|_FAMILY \"" src/mod src/common --include='*.c' --include='*.h' | head
+                        grep -rn "nl_socket_alloc\|genl_connect\|joolnl_setup\|genl_ctrl_resolve" src/usr --include='*.c' | head
+                        # 6) 测试设施是否内核态
+                        grep -rn "insmod\|rmmod\|dmesg\|modprobe" test --include='*.sh' | head
+                        find test -name Kbuild -o -name 'obj-m*' | xargs grep -l "obj-m" 2>/dev/null
+                        # 7) 实测编译（应失败于第一个内核内部头，含传递引入者）
+                        clang --target=aarch64-linux-ohos --sysroot="$SYSROOT" -I src -fsyntax-only src/mod/siit/*.c
+
+rec_priority:           1
+rec_approach:           detect-kernel-space-then-escalate
+rec_description: >
+  判定顺序（全部为可复现命令，见 verification_cmd）：
+  1) 看交付物是否内核态：构建文件出现 obj-m / MODULES_DIR / /lib/modules，或存在
+     dkms.conf（kernel_source_dir / BUILT_MODULE_NAME / AUTOINSTALL）即为内核态；
+     多模块（本例 3 个 obj-m）与单模块同判；
+  2) 逐头核验目标 sysroot：统计「缺失」与「bionic UAPI 导出」两类；UAPI 导出的判据
+     是含 bionic 自动生成横幅（或为 musl 风格用户态头）且对 MODULE_LICENSE/
+     module_init/struct module/THIS_MODULE 命中为 0——行数大（如 linux/tcp.h 249 行）
+     不代表是内核头；注意传递引入的头也会缺失，实测编译取第一个失败头作证据；
+  3) 确认无内核构建树（usr/src、linux/kconfig.h、include/config、include/generated；
+     SDK 与 NDK sysroot 均查）；
+  4) 检查「不裁剪」路径：若用户态子集是内核模块的 netlink 客户端（genl family 握手 /
+     joolnl_setup 每命令一次 / 模块未加载即 -ESRCH / 错误文案全部指向 kernel module），
+     则该子集零功能，交付即裁剪，禁止（与 sysfs 路径硬编码型同判，见
+     similar_to 的 lenovolegionlinux 草稿）；
+  5) 检查测试设施：测试脚本出现 sudo insmod/dmesg/modprobe、测试目标编译为 .ko、
+      测试框架自带 obj-m 模块、或要求 recompile/reinstall 内核模块——则上游测试在
+      用户态框架内可运行数如实统计（本例 0/36），逐脚本给出阻塞前置的具体技术原因；
+  6) 结论落 路径 B（分层交付，2026-09-21 修订；先例 lenovolegionlinux 0.0.20 /
+      MR #11320 CI 构建 #52755 通过）：
+      a) 上游自建为独立 bin_PROGRAMS 的用户态组件（本例 jool/jool_siit/joold，上游
+         Makefile.am SUBDIRS=src/common src/usr，src/mod 交 DKMS）用 conan 真实构建交付；
+      b) 内核模块源码以任务指定 tarball 原样再解压的快照随包交付（零构建产物），
+         配 fail-closed 契约测试（obj-M/MODULE_LICENSE/module_init/dkms.conf/
+         /lib/modules 依赖逐项校验，缺一即失败）；
+      c) 上游测试 0/N 表达为「上游用例形态」（被测对象是内核模块），非缺依赖/环境配置
+         （tracy 先例：0/1+形态归因被接受；rdfind 反例：占位符必须补全）；
+      d) 带非 root 门禁的脚本必须真实执行并以预期方式阻塞（本例 client-test.sh、
+         graybox run.sh：exit 1 + "Please start the script as root or sudo."），其余
+         脚本做逐脚本 fail-closed 前置审计（阻塞模式串每轮 CI 复检）；
+      e) rule12：至少 1 个鸿蒙特有测试（bin 交付契约 / 整包不得含 .ko / 快照纯净 /
+         无内核模块时 CLI 必须优雅降级）。
+      ⚠ archives/<字母>/<包>/<版本>/ 必须含 conanfile.py：CI 包发现逻辑
+      （ci/conan/build_and_test.sh:234-275）对无 recipe 路径报 "[error] No packages
+      to build" + exit 1（实测），该 exit 1 即 rule4 判「编译失败」的直接来源——
+      「不建包、只在包目录放记录文件」的通道不可行；完全无用户态交付物的任务才走
+      无法适配 issue 通道（aegisub → issue #2136 先例）。
+  禁止项：不得伪造内核头、不得以空壳 stub 让内核态源码「编译通过」、不得交付伪造/预编译 .ko。
+
+rec_command:            grep -rn "obj-m\|MODULES_DIR" src/mod --include=Kbuild --include=Makefile*; \
+                         clang --target=aarch64-linux-ohos --sysroot="$SYSROOT" -I src -fsyntax-only src/mod/siit/*.c
+rec_auto_fix:           false
+rec_impl:               unadaptable-escalate-path-b
+
+fallback_priority:      2
+fallback_approach:      userspace-layered-delivery (条件允许，2026-09-21 修订；初版无条件禁止的立场已被审查实践修正)
+fallback_description:   交付上游自建为独立 bin_PROGRAMS 的用户态组件（真实构建）+ 内核模块源码快照
+                         （原样再解压）+ fail-closed 契约测试 + 上游 0/N 形态归因 + root 门禁脚本真实
+                         执行 + 鸿蒙特有测试。合法前提：① 用户态组件是上游发行版的既有构建形态
+                         （Makefile.am SUBDIRS 不含 src/mod）；② 内核模块缺失时用户态遵循上游设计内的
+                         降级契约（本例 -ESRCH + "Jool's socket family doesn't seem to exist"，非崩溃）；
+                         ③ 内核态部分如实申报为「未声明通过」、零伪造。若用户态子集无独立价值且无
+                         降级契约（纯零功能壳），仍禁止交付、走无法适配 issue 通道。
+fallback_command:       conan create . --profile:build ci/conan/profiles/ohos-aarch64 -pr:b ci/conan/profiles/ohos-aarch64
+fallback_auto_fix:      false
+fallback_impl:          userspace-layered-delivery-with-snapshot
+
+forbid_1_pattern:       (touch|echo|cat >)[^\n]*include/(linux/(skbuff|list|mutex)|net/(net_namespace|ip))\.h
+forbid_1_reason:        伪造内核内部头或留空壳 stub 只能让编译通过，不产出可加载的内核模块
+forbid_1_consequence:   交付物在目标机不可加载、无任何功能，评审判定为伪造/裁剪，任务失败
+
+forbid_2_pattern:       (insmod|modprobe)\s+\S+\.ko
+forbid_2_reason:        适配框架运行在非特权用户空间沙箱内，且目标机不加载第三方未签名模块
+forbid_2_consequence:   构建/测试阶段必然失败（权限或内核拒绝），并污染 worker 环境
+
+principles:
+similar_to:             DRAFT-lenovolegionlinux-0.0.20-kernel-module-not-deliverable（同为内核态
+                        交付物判定；本条新增 netlink 客户端型子集依赖、内核态测试设施、
+                        多模块 Kbuild 与 bionic UAPI 导出规模化判据）
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-jool-modules-lts-6.18.39-kernel-module-not-deliverable.md
+last_updated:           2026-09-21
+source_event:           jool-modules-lts 6.18.39 适配任务（平台任务 contrib-12671）：
+                        ① W3 实测 clang 15 + OHOS aarch64 sysroot 编译内核模块失败
+                        （net/net_namespace.h 缺失，exit 1；任务原样命令先失败于
+                        'mod/common/init.h'，补 -I src 后失败于内核内部头）；
+                        Kbuild 方式无内核构建树（No rule to make target 'modules'，exit 2）；
+                        ② 初版「不建包走 issue」（MR #11362 @ 5f1b98589e + issue #3163）被管理员
+                        审查判 rule4 FAIL（编译失败+0/36 无真实执行）+ rule12 FAIL（鸿蒙测试 N=0）；
+                        ③ 2026-09-21 重做：用户态三件套 conan 包 + 快照 + 118 断言 fail-closed
+                        契约测试（本机 OHOS clang 交叉验证 50/50 编译+三二进制链接成功；
+                        WSL autoreconf 2.71 自举实测 rc=0，E114 模式串 ac_tmp=$tmp×1、
+                        umask 077×2 实证存在）。
+authors:                lkyz
+source_pr:              MR #11362（分支 feat/jool-modules-lts-6.18.39）
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     1
+metrics_confidence:     0.5
+metrics_last_used:      2026-09-21

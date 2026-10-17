@@ -1,19 +1,8 @@
-# sqlite3 3.49.1 — OpenHarmony 编译记录
+# sqlite3 OpenHarmony 编译记录
 
-## 基本信息
-- 软件: sqlite3
-- 版本: 3.49.1
-- 构建系统: autotools
-- 目标: ohos-aarch64
+该目录包含 SQLite 3.49.1（历史已发布版本）和本次新增的 3.53.4 适配。
+3.53.4 从官方 `sqlite-autoconf-3530400.tar.gz` 构建，提供静态 C 库、
+`sqlite3` 命令行工具及手册，避免覆盖平台可能提供的同名库。
 
-## 编译指导
-<!-- 编译注意事项 -->
-
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
-
-## 功能验证
-<!-- 验证命令和结果 -->
+OHOS HMDFS 上不调用 autosetup 的 jimsh0 生成器；配方直接编译官方
+amalgamation，并从 Conan 工具闭包解析目标 clang 与 llvm-ar。

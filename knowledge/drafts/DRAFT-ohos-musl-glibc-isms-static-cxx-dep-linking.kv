@@ -1,0 +1,65 @@
+# ═══ Draft knowledge entry — musl 下的 glibc 惯性符号与静态 C++ 依赖链接 ═══
+# Timestamp: 2026-09-12
+# Software: cdo 2.6.3（适用于所有 autotools/CMake 项目 + 依赖静态 C++ 库的场景）
+# Gate: build()（编译期未知类型/未声明标识符；configure 期 AC_CHECK_LIB 链接失败）
+# Status: DRAFT — needs review to promote to E-entry
+
+id:                     draft-ohos-musl-glibc-isms-static-cxx-dep-linking
+trigger_tool:           clang|clang++|configure|ld.lld
+phase:                  configure|build
+error_signature:        unknown type name '__off64_t'|
+                        use of undeclared identifier 'pthread_cancel'|
+                        Could not link to PROJ library!|
+                        undefined symbol: operator delete\(void\*\)|
+                        undefined symbol: operator new\(unsigned long\)
+
+severity:               2
+category:               platform|musl|autotools|linking
+match_keywords:         __off64_t, off64_t, USE_LARGEFILE, fopen64, fseeko64, stat64,
+                        libf2c, sysdep1.h0, pthread_cancel, musl, glibc, __GLIBC__,
+                        AC_CHECK_LIB, static C++ library, libproj.a, -lc++, -lc++abi,
+                        operator new, operator delete, C driver link
+title:                  musl 环境两类高发卡点：glibc 惯性符号缺失（__off64_t/*64 别名、pthread_cancel）与 C 驱动探测静态 C++ 依赖（缺 -lc++/-lc++abi）
+
+root_cause: ① glibc 惯性符号：部分老代码/第三方库把 libc 等同于 glibc——例如 libf2c 的
+  sysdep1.h0 对 `__linux__` 一律写死 `OFF_T __off64_t` 并启用 `USE_LARGEFILE`
+  （依赖 fopen64/fseeko64/stat64 等别名）；musl 既无 __off64_t 类型也无这些别名。
+  同理 musl 不实现线程取消，pthread.h 里连 pthread_cancel 声明都没有
+  （PTHREAD_CANCELED 等宏仍存在，不能用它做能力探测）。
+  ② 静态 C++ 依赖链接：proj >= 6 是 C++ 实现，制品仓发布的是静态 libproj.a；
+  上游 autotools 用 AC_CHECK_LIB([proj],[proj_create]) 以**纯 C 驱动**做链接探测，
+  不会自动带上 libc++，于是报 ld.lld: undefined symbol: operator new/delete，
+  表现为 "Could not link to PROJ library!"（config.log 才是真错误所在地）。
+
+affected_scope: 所有在 OHOS/musl 上构建、源码含 glibc 专有类型或 *64 别名、含 pthread_cancel
+  调用，或在 autotools 里用 AC_CHECK_LIB 探测静态 C++ 库（proj/opencv 等）的项目。
+  本次实证：cdo 2.6.3（libyac/clapack/libf2c + processManager + proj 探测）。
+
+verification_cmd: conan create . -pr:h=ohos-aarch64-wsl -pr:b=default -c tools.build:jobs=8（cdo/2.6.3，
+  2026-09-12：三处修复后 configure 通过、aarch64 ELF 产物生成）；
+  探针：printf '#include "http_config.h"\n' | <ohos-clang> -c -x c - 复现 glibc 头缺失类问题
+
+rec_priority:           1
+rec_approach:           libc-capability-guards-plus-cxx-runtime-in-ldflags
+rec_description: ① 对 glibc 惯性代码按 **libc 能力**分流（不用平台宏）：
+  `#if defined(__linux__) && defined(__GLIBC__)` 保留 glibc 分支，
+  `#if defined(__linux__) && !defined(__GLIBC__)` 走 POSIX（off_t/fseeko/ftello）；
+  pthread_cancel 同理按 libc 能力分支（无该能力的 libc 直接不进取消路径）。
+  ② 对 autotools 的 AC_CHECK_LIB 探测静态 C++ 库：给 LDFLAGS 补 `-lc++ -lc++abi`
+  （或在 recipe 里 tc.extra_ldflags.append），使 C 驱动的链接测试能解析 C++ 运行时符号。
+  ③ 退出路径上的 pthread_cancel 若确实无等价物，需在 PR/notes 说明该分支只影响
+  teardown（本次：kill_processes() 仅由 cdo_exit() 调用，紧随 std::exit）。
+rec_command: 补丁示例：archives/c/cdo/2.6.3/patches/0001-libf2c-sysdep1-libc-off-t.patch、
+  0003-process-manager-libc-pthread-cancel.patch；
+  LDFLAGS 示例：tc.extra_ldflags.append("-lc++"); tc.extra_ldflags.append("-lc++abi")
+rec_auto_fix:           partial
+rec_impl:               libc-feature-guard-patches + recipe-extra-ldflags
+
+fallback_priority:      2
+fallback_approach:      patch-AC_CHECK_LIB-to-CXX-or-disable-feature
+fallback_description: 若不便改 LDFLAGS：可把该探测换成 `AC_LINK_IFELSE` + `AC_LANG_PUSH([C++])`，
+  或对该可选特性直接关闭（--without-XXX）。对确实无 POSIX 等价物的 libc 缺失符号，
+  只能走"能力分支 + 明确说明"，禁止空壳 stub（R8）。
+
+doc_file:               knowledge/drafts/DRAFT-ohos-musl-glibc-isms-static-cxx-dep-linking.md
+related:                E072（config.sub 未识别 ohos 三元组，预审相似度 0.30）、E092（CMake 不认识 HarmonyOS 平台名）；cdo/2.6.3（archives/c/cdo/2.6.3/notes.md）；仓内同类先例：mtbl 1.7.1 / audiofile 0.3.6 / cif-api 0.4.2（-lc++ 修法）、classads 1.0.10（libtool 不为 clang++ 追加运行库）

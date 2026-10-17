@@ -1,0 +1,115 @@
+#====================================================================
+# DRAFT-autotools-configure-ac-cflags-clobber-toolchain-flags
+# — configure.ac 末尾「无条件赋值」CFLAGS/CXXFLAGS 会丢弃 Conan
+#   AutotoolsToolchain 注入的 --target / --sysroot / -fPIC，须改追加式赋值
+# 来源: pipexec 2.6.2 适配（feat/pipexec-2.6.2-codex，补丁 0002）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+# 注：正则/含冒号字段用单引号标量，长文本用块标量，避免 YAML 歧义。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-autotools-configure-ac-cflags-clobber-toolchain-flags
+trigger_tool:           'configure|cc|clang|conan'
+phase:                  configuration
+error_signature:        'CFLAGS.*=.*(invalid option|unrecognized)|fatal error: .*(stdint\.h|sysroot|target)|cannot find crt[0-9]*\.o|unknown target|ld.*target .* not found'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               autotools, configure, toolchain, conan, cross-compile, flags
+match_keywords:         'configure.ac, CFLAGS, CXXFLAGS, unconditional assignment, clobber, 覆盖, AutotoolsToolchain, extra_cflags, --target, --sysroot, -fPIC, aarch64-linux-ohos, toolchain flags lost, respect user cflags, conan buildenv, cross compile'
+title:                  'configure.ac 末尾无条件赋值 CFLAGS/CXXFLAGS 会把 AutotoolsToolchain 注入的 --target/--sysroot/-fPIC 全部丢掉——改为 $CFLAGS 追加式赋值'
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >-
+  部分 autotools 上游在 configure.ac（及其生成的 configure）**末尾**用硬编码无条件赋值
+  覆盖编译器旗标，例如：
+    CFLAGS="-std=c99 ${COMMON_FLAGS}"
+    CXXFLAGS="-std=c++11 ${COMMON_FLAGS}"
+  autoconf 把这两行原样搬到 configure 脚本靠后位置，于是执行到此处时，
+  Conan `AutotoolsToolchain` 经 conanbuild 环境注入的 CFLAGS/CXXFLAGS（含
+  `--target=aarch64-linux-ohos`、`--sysroot=<SDK>/sysroot`、`-fPIC`、`-O*`）被整体
+  丢弃，只剩上游自己那几个开关。后果按平台不同：
+  - **交叉编译（x86_64 宿主 → aarch64 目标）**：clang 失去 `--target/--sysroot`，
+    要么编出宿主架构产物，要么在找 `stdint.h`/`crt*.o` 时直接失败；-fPIC 丢失还会
+    让后续共享库链接报 relocation。
+  - **OHOS 原生构建（宿主即 aarch64）**：hnp clang 默认目标已正确，`--target` 丢掉
+    不致命，因此**该缺陷在原生真机 CI 上可能长期不报错而在交叉/换代码路径时突然炸**
+    ——属"潜伏缺陷"，不能因为这一轮绿了就忽略。
+  同因的另一个变体：上游用 `CFLAGS=$temp_CFLAGS` 这类中间变量回写（见
+  archives/a/agg、archives/l/libagg 的同类补丁），本质一致。
+
+affected_scope: >-
+  所有 configure.ac/configure 里存在「不以 $CFLAGS/$CXXFLAGS 自身为右值起点的
+  CFLAGS=/CXXFLAGS= 赋值」的 autotools 包（常见于把 -std/-O/-Wall 写死的老项目）。
+  与 musl/HarmonyOS 无关，是 autotools × 包管理器的通用交互缺陷；仓内已有先例
+  archives/l/libnova/0.16（补丁名 respect-user-cflags）、archives/a/agg、
+  archives/l/libagg 均属此形。判定口径：`grep -nE '^(C|CXX)FLAGS=' configure` 命中
+  且右值不含 `$CFLAGS`/`$CXXFLAGS`。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+verification_cmd: >
+  # 1) 命中判据（含 configure.ac 与预生成 configure 两处）：
+  grep -nE '^(C|CXX)FLAGS=' <src>/configure <src>/configure.ac
+  #    右值若不以 $CFLAGS/$CXXFLAGS 开头 → 就是覆盖式赋值
+  # 2) 复现实验（本机，先证明旗标真的丢）：
+  #    CFLAGS="-DOHC_MARKER=1" ./configure --prefix=/tmp/x
+  #    grep -n '^CFLAGS = ' Makefile          # 期望含 -DOHC_MARKER=1；不含=被覆盖
+  # 3) 修复后复验：同上，Makefile 的 CFLAGS 应同时含 -DOHC_MARKER=1 与上游开关
+
+rec_priority:           1
+rec_approach:           append-not-overwrite-cflags-in-configure
+rec_description: >-
+  对 configure.ac 与其生成的 configure **两处**做最小补丁，把覆盖式赋值改成追加式
+  （两条独立文本都要改，否则改 configure.ac 只影响将来重生成的 configure）：
+    -CFLAGS="-std=c99 ${COMMON_FLAGS}"
+    +CFLAGS="$CFLAGS -std=c99 ${COMMON_FLAGS}"
+    -CXXFLAGS="-std=c++11 ${COMMON_FLAGS}"
+    +CXXFLAGS="$CXXFLAGS -std=c++11 ${COMMON_FLAGS}"
+  补丁类型 portability，语义与 archives/l/libnova/0.16 的 respect-user-cflags 一致
+  （上游用中间变量时同理：改成 `CFLAGS="$CFLAGS $temp_CFLAGS"`）。
+  **不要**在配方里改用 tc.extra_cflags 去"对冲"——extra_cflags 最终也进同一个
+  CFLAGS 环境变量，仍会被末尾赋值覆盖，属无效处方；正确做法是让上游不覆盖用户值。
+  验证以「生成的 Makefile 里同时出现外部标记与上游开关」为准（见 verification_cmd）。
+rec_command: >
+  # 生成补丁（对 pristine 快照做定向 diff，-p1）：
+  #   configure.ac 与 configure 各一处 CFLAGS/CXXFLAGS 覆盖 -> 追加
+  # 复验：CFLAGS="-DOHC_MARKER=1" ./configure && grep '^CFLAGS = ' Makefile
+rec_auto_fix:           false
+rec_impl:               patch-configure-ac-and-generate
+
+forbid_1_pattern:       'tc\.extra_cflags\.append.*-std|configure_args.*CFLAGS='
+forbid_1_reason: >-
+  往 extra_cflags/configure_args 里再塞一份旗标并不能阻止上游末尾覆盖：extra_cflags
+  拼进的是同一个 CFLAGS 环境变量，被 configure 的 CFLAGS= 赋值整体替换后依然丢失；
+  configure_args 传 `CFLAGS=...` 在老 autoconf 上还会被当 host 三元组（见
+  DRAFT-sntop-1.4.3）。唯一有效修法是让上游赋值不再覆盖。
+forbid_1_consequence:   看似"注入了旗标"，实际编译命令行里没有；交叉构建仍失败，
+                        排查会被"明明加了 extra_cflags"误导。
+
+principles:             R1
+similar_to:             E075, E384
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-autotools-configure-ac-cflags-clobber-toolchain-flags.md
+last_updated:           2026-09-27
+source_event: >-
+  pipexec 2.6.2 适配（feat/pipexec-2.6.2-codex）补丁 0002：上游 configure.ac 末尾
+  `CFLAGS="-std=c99 ${COMMON_FLAGS}"` / `CXXFLAGS="-std=c++11 ${COMMON_FLAGS}"` 覆盖式
+  赋值；本机以 `CFLAGS="-O0 -DPIPEXEC_USER_CFLAGS_SEEN=1"` 实测复现标记丢失
+  （生成 Makefile 的 `CFLAGS = ` 不含该标记），补丁改为追加后标记与上游开关并存。
+  同型先例：archives/l/libnova/0.16 "respect user cflags"、archives/a/agg、
+  archives/l/libagg。
+
+authors:                ZCode agent（deepseek-flash）
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-27
+
+draft:                  true
+contributor_id:         8F1F

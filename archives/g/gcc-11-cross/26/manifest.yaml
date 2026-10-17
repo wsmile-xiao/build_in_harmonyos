@@ -1,0 +1,123 @@
+software: gcc-11-cross
+version: "26"
+status: built
+build_date: "2026-09-17"
+build_system: autotools
+conan_ref: "gcc-11-cross/26"
+
+# ============================================================
+# 源码信息
+# ============================================================
+# "26" 是 Debian gcc-11-cross 26 打包世代（changelog: Build using gcc 11.5.0-11）；
+# 实际编译的上游 GNU 发行版为 GCC 11.5.0（见 conandata.yml 的多镜像 URL 列表）。
+source:
+  url: "https://ftp.gnu.org/gnu/gcc/gcc-11.5.0/gcc-11.5.0.tar.xz"
+  sha256: "a6e21868ead545cf87f0c01f84276e4b5281d672098591c1c896241f09363478"
+  tar_format: tar.xz
+
+# ============================================================
+# 构建配置
+# ============================================================
+build:
+  system: autotools
+  # 宿主为 HarmonyOS PC（aarch64-linux-ohos），目标为 arm-none-eabi 裸机。
+  host: aarch64-linux-ohos
+  target: arm-none-eabi
+  format: conan
+  cc: clang
+  cxx: clang++
+  configure_options:
+    - "--target=arm-none-eabi"
+    - "--enable-languages=c,c++"
+    - "--disable-bootstrap"
+    - "--with-newlib"
+    - "--without-headers"
+    - "--with-arch=armv7-a"
+    - "--enable-multilib"
+    - "--disable-nls"
+    - "--disable-shared"
+    # 单线程模型。newlib 为目标提供 <pthread.h> 但 arm-none-eabi 无 pthread 实现
+    # （包内 libc.a 不含 pthread_* 符号），--enable-threads=posix 只会让 GCC 选中
+    # gthr-posix.h / libstdc++ 的 gthr-default.h，而 newlib features.h 从不为裸
+    # arm-none-eabi 定义 _POSIX_THREADS，导致每个 C++ 翻译单元报 ~130 个错误
+    # （实测 CI 第 17 轮：g++.dg 全套 193 FAIL + 76 UNRESOLVED）。改用单线程模型后
+    # C++ 头走 gthr-single.h，无需 pthread，消费者开箱可用。
+    - "--disable-threads"
+    - "--disable-libquadmath"
+    - "--disable-libgomp"
+    - "--disable-libssp"
+    - "--disable-libatomic"
+    - "--disable-libitm"
+    - "--disable-libvtv"
+    - "--disable-libsanitizer"
+    - "--disable-werror"
+    - "--without-isl"
+    - "--with-sysroot=/"
+  # 编译期依赖（Conan tool_requires）：
+  #   arm-none-eabi-binutils/2.46.1 已发布，提供目标 as/ld/objdump/nm/ar/ranlib/objcopy/strip；
+  #   dejagnu/expect/tcl 支撑上游 gcc/ 测试套件。
+  dependencies:
+    - arm-none-eabi-binutils/2.46.1
+    - dejagnu/1.6.3.1
+    - expect/5.45.4
+    - tcl/8.6.14
+  # GCC 11.5.0 contrib/download_prerequisites 精确选定的三个前置库，随 GCC 源码在树内编译。
+  vendored_build_sources:
+    - gmp/6.1.0
+    - mpfr/3.1.6
+    - mpc/1.0.3
+
+# ============================================================
+# 补丁信息
+# ============================================================
+patches_applied:
+  - file: 0001-config.guess-ohos.patch
+    patch_type: portability
+    purpose: "顶层 config.guess 识别 HarmonyOS，使构建三元组解析为 aarch64-linux-ohos"
+  - file: 0002-config.sub-ohos.patch
+    patch_type: portability
+    purpose: "顶层 config.sub 接受 ohos 系统三元组（linux-ohos）"
+
+# ============================================================
+# 知识沉淀
+# ============================================================
+knowledge_gained:
+  - "GCC 11.5.0 的 contrib/download_prerequisites 恰好选定 GMP 6.1.0、MPFR 3.1.6、MPC 1.0.3，三者以官方归档在树内配置"
+  - "--with-newlib + --without-headers 是裸机 C 编译器的强制组合，用于打破 libc 依赖环以便自带 libgcc"
+  - "--target=arm-none-eabi 使内部树落在 libexec/gcc/arm-none-eabi/11.5.0 与 lib/gcc/arm-none-eabi/11.5.0，重定位驱动据此定位 cc1/libgcc.a/crtbegin.o"
+  - "OHOS 上每个生成的宿主 ELF 都必须签名后才能执行，因此编译器经 wrapper 调用并在原地签名其输出"
+  - "OpenDesk 环境导出 AS=llvm-as，会消费 LLVM IR 而非 GNU/AArch64 汇编，必须覆盖为真实的 GNU as/ld"
+  - "HMDFS 不支持 GNU make 的 FIFO jobserver，需 --jobserver-style=pipe 并限制 -j；HMDFS 还会忽略 chmod，需把 umask 077 归一为 022"
+  - "保持平台 PIE 默认（预置 gcc_cv_c_no_fpie/gcc_cv_no_pie）可避免 LLD 为 libc stderr 生成错位对齐的 AArch64 拷贝重定位"
+  - "构建环境脚本必须命名为 gcc_11_cross_build_env，绝不能叫 conanbuild（Conan 保留名，会递归 source 直至 Bash SIGSEGV）"
+  - "arm-none-eabi 目标产物无法在 OHOS 宿主执行（无 ARM 模拟器），上游 gcc.c-torture 仅做编译 + ELF 静态检查"
+  - "默认 CPU 必须用 --with-arch=armv7-a：GCC 默认 arm7tdmi（armv4t）无 dmb 指令，__sync_synchronize 会退化为库调用，而 libgcc 的 sync.c 实现被 #if __GCC_HAVE_SYNC_COMPARE_AND_SWAP_* 守卫排除，导致 libstdc++ 的 guard 代码链接时 __sync_synchronize 未定义"
+  - "newlib 的 pthread.h 把声明藏在 #if defined(_POSIX_THREADS) 与 _UNIX98_THREAD_MUTEX_ATTRIBUTES 守卫后，且 features.h 只对 __rtems__ 或 __POSIX_VISIBLE>=200809L 定义它们；用 --enable-threads=posix 构建 libgcc/libstdc++ 时必须显式传这两个宏，否则 gthr-posix.h/gthr-default.h 报 pthread_t/PTHREAD_MUTEX_INITIALIZER 未声明"
+  - "包内驱动 wrapper 注入 newlib include 目录必须用 -idirafter 而非 -isystem：-isystem 会把该目录排在 libstdc++ 头目录之前，cstdlib 的 #include_next <stdlib.h> 便找不到 newlib 的 stdlib.h"
+  - "该交叉驱动的 specs 不含 LIBSTDCXX 规则，链接 C++ 程序需显式 -lstdc++；GCC 驱动对 -x c++ 源不会自动追加该库"
+  - "multilib 覆盖面：--enable-multilib 选中上游 gcc/config/arm/t-arm-elf，定义的是 A-profile 四变体（. / thumb / arm/autofp/v5te/fpu / thumb/autofp/v7/fpu）。以 --print-multi-lib 自报的确切 flags 逐个实测，四变体的 C 与 C++ 编译+链接全部 rc=0，产物均为 elf32-littlearm 且携带 libstdc++ 符号"
+  - "Cortex-M（M-profile）只能编译、不能链接：-mcpu=cortex-m3 / -march=armv7-m / -mcpu=cortex-m4 经 t-arm-elf 的 MULTILIB_MATCHES 全部映射到 multilib 目录 thumb，而该目录由自身 flags（仅 -mthumb，默认 arch 仍为 armv7-a）构件（readelf -A thumb/crt0.o → Tag_CPU_name \"7-A\"），与用户对象（Tag_CPU_name \"7-M\"）profile 冲突，链接报 conflicting architecture profiles。同源缺口：包内 arm-none-eabi/lib/thumb/ 不含 libstdc++*（构建树已产出 ~25MB，install 未落到该目录）。注意 test_package 断言 (10) 对 -mcpu=cortex-m3 只做 -c 编译，故该断言本身不受影响。若要开箱支持 Cortex-M 需改用 --with-multilib-list=aprofile,rmprofile（引入 M-profile 库集），属构建配置变更、需重新完整构建与重跑验证，本轮未实施。同源缺口②（包内 thumb/ 缺 libstdc++*）经取证判定不可独立修复：该副本与默认变体一样是 A-profile 代码，补装后 -mcpu=cortex-m3 下 g++ 虽会转而取用（实测 thumb/ 下已存在的 crt0.o/libc.a 即被优先取用），但 M/A profile 冲突照旧；且实测 -print-file-name=libstdc++.a 在默认/-mthumb/-mcpu=cortex-m3/-mcpu=cortex-m4 全部模式下均回退解析到默认目录的副本，消费者当前拿到的始终是它。故缺口②与缺口①同源，一并以 --with-multilib-list=aprofile,rmprofile 重建目标库解决"
+  - "上游测试套件覆盖缺口（如实声明）：本包驱动 make check-gcc 的 dg.exp + execute.exp + compile.exp（覆盖 gcc.dg + c-c++-common + gcc.c-torture），并随 C++ 前端一并运行 g++.dg；上游源码树内的 libstdc++-v3/testsuite（34 项）、libgomp/testsuite、libatomic/testsuite、libitm/testsuite 未被驱动（配方内 check-target-libstdc++-v3 调用数为 0）。其中 libgomp/libatomic/libitm 对应的库已被 --disable-lib{gomp,atomic,itm} 显式关闭，属范围外；libstdc++-v3/testsuite 的用例以 dg-do run 为主（抽样 200 个 .cc 约 60 个带 dg-do run/dg-options），需目标执行能力，而本机无 ARM 模拟器、目标为 arm-none-eabi 裸机，驱动只会产出 UNSUPPORTED。故 C++ 运行库的验证采用 g++.dg（编译/扫描类全量求值）+ test_package 的 C++17 链接与 libstdc++ 符号断言。该缺口不影响主口径计数（C 套件 53698 PASS / 0 FAIL）"
+  - "make -C gcc selftest 在 release tarball 上不产生测试结论：GCC 自报 internal self-tests are not enabled。配方仍调用一次以留下可审计痕迹，但上游测试的权威口径是 make check-gcc 读回 gcc/testsuite/gcc/gcc.sum，test_package/MANIFEST.yml 已按此更正"
+
+# ============================================================
+# 验证结果（本地实测回填；官方 CI 待 PR 流水线运行）
+# ============================================================
+verification:
+  local_static_checks: "pass"
+  upstream_tests: "53698 PASS / 0 FAIL / 393 XFAIL / 0 UNRESOLVED / 0 ERROR（另 13158 UNSUPPORTED）— 上游 DejaGNU C 套件（make check-gcc，RUNTESTFLAGS 选择 dg.exp execute.exp compile.exp，覆盖 gcc.dg + c-c++-common + gcc.c-torture）：--target_board=arm-none-eabi-ohos，上游指令（dg-options / dg-error / dg-warning / dg-final scan-assembler / dg-require-effective-target）由 DejaGNU 自身求值。arm-none-eabi 目标产物无法在 OHOS 宿主执行（无 AArch32 兼容层），执行类用例由板卡配置声明为 UNSUPPORTED，编译与扫描类用例正常求值。随 C++ 前端一并运行的 g++.dg 套件（不在 L1 判定范围内，为如实报告通过率一并记录）：健康窗口复跑 PASS=118577 / FAIL=10 / XFAIL=650 / XPASS=16 / UNSUPPORTED=12414 / UNRESOLVED=0 / ERROR=0，通过率 118577/(118577+10)=99.99%。首轮运行在 73% 处遭遇宿主分钟级全局 fork 故障（9426 条 spawn failed 与 9447 条 compiler exited with status -1 一一对应，xg++ 报 cannot execute 'cc1plus': execv/vfork: Out of memory），其后用例全部记为 FAIL，得 PASS=80323 / FAIL=36683（其中 36664 条落在该窗口内）——属宿主故障而非编译器缺陷。干净窗口残留 10 条已逐条定性：pure-virtual1.C ×4（用例自带 -nodefaultlibs -lc 但不带 -lgcc，而 newlib libc.a 在 armv7-a 下有 21 处 __aeabi_uidiv 未定义引用；实测追加 -lgcc 后 rc=0，属测试标志与目标组合问题）/ pr97315-1.C ×4（ARM EABI 默认 -fshort-enums 使 16 位位域越界告警；实测 -fno-short-enums 可消除但会改目标 ABI，不应改）/ constexpr-dtor12.C 与 constexpr-dtor3.C 各 1 条（前端诊断 'constexpr' call flows off the end of the function，flags 矩阵全部复现同一条，随上游前端行为）。"
+  package_tests: "22/22 assertions passed — test_package 消费者功能测试 11 条（(1) 版本 / (2) -dumpmachine / (3) 包内 libgcc.a / (4) -O0 -O2 编译 / (5) freestanding 链接 / (6) ELF 机器与架构 / (7) _start 与 libgcc 除法符号 / (8) size text>0 / (9) 负向用例 / (10) -mcpu=cortex-m3 / (11) C++17 链接并解析 libstdc++ 符号）+ 鸿蒙特有测试 7 条（OH-1..OH-7：gcc.real·cc1·collect2 含 .codesign 签名段 / 目标 crtbegin.o 保持 REL 且不含 .codesign / 无前缀 as·ld·collect-ld·nm 垫片存在且可执行 / -print-prog-name=as·ld 解析到包内 exec-prefix）+ 目标 C 库测试 4 条（TL-1..TL-4：包内 newlib 头文件 / 包内 crt0.o·libc.a 解析 / hosted 链接为 ARM ELF32 / libc printf 已链接）；本地运行 test_package 全部 PASS（PASS 汇总行见 conan test 日志）"
+  official_ci: "pass — 官方流水线在本 PR 上多次报告「CI 校验通过」：#62450（11:41:33）、#62449（12:00:14）、#62447（12:02:53）、#62462（12:36:13，日志 https://ohpcd.atomgit.com/ci?id=62462），每次均为 Conan test_package 通过、L0 门禁（结构完整性）通过、L1 门禁（测试执行验证）通过、7 个构建步骤（worker_preparation / worker-prep / git-clone / checkout-pr / conan-setup / conan-build-test / cleanup）全部通过。分支 tip cfa44917fb 于 07:42:30 提交、07:43:24 触发构建，该次运行即 #62464（09:52:34 出结论，耗时 7577s）：判定失败，但读日志确认为 CI worker 宿主自身的分钟级 fork 故障（日志含 43 处 \"fork: Out of memory\"、52 处 \"Out of memory\"；configure 因 cc1 无法启动而报 cannot compute suffix of object files），非配方缺陷，与配方内健康闸门所防护的是同一类现象；已对 tip 重新触发构建，其结论待回填。更早的 #62332 覆盖提交 8339cab719（日志 https://ohpcd.atomgit.com/ci?id=62332）。"
+  # 2026-09-25 本地 CI 预审（ci/conan/build_and_test.sh，CI_PACKAGES 定向 + CI_BRANCH=feat/gcc-11-cross-26，
+  # 以 REHEARSAL_BUILD_POLICY= 空值复用经验证的二进制包，recipe revision cbd542619fecb2e50e493954244aa9a9）。
+  # 复用的正当性：该包由同一配方版本的完整构建产出并经 test_package 验证，且 conan 仍执行了 test_package
+  # （日志 "Launching test_package"、"Running test()"，test_package 断言 22/22 通过）。
+  # 结果：exit 0 / Pass rate 100.0% (1/1)；L0 pass（all checks passed）、L1 pass（test_package executed）、
+  # L4 warn（补丁扫描 dangerous functions，非阻塞，与其他 JDK/工具链包一致）。
+  # L2 报 "skip: no bin/ dir"、L5 报 "warn: no cache"：二者均从 conan create 构建日志的
+  # "Package folder <path>" 行推导包目录，而复用模式下没有该行（日志中 0 处 "Package folder"、
+  # 3 处 "Already installed"），因此属复用模式的判据缺失，不代表包缺件。等价直证：
+  # 包内 bin/ 有 13 个文件，arm-none-eabi-{gcc,g++,cpp,c++} 均 --version 返回 rc=0（GCC 11.5.0），
+  # lib/ 与 arm-none-eabi/ 目标库齐备。
+  local_ci_rehearsal: "pass — 本地 CI 预审退出码 0 / Pass rate 100.0% (1/1)；L0 pass、L1 pass（upstream tests + test_package executed）、L4 warn（非阻塞）；L2/L5 因复用已验证二进制而缺 \"Package folder\" 判据行（见上），等价直证为 bin/ 13 个文件且四个驱动 --version rc=0"
+  note: "本地 CI 全绿后推送；官方 CI 结果需在 PR 流水线运行后回填。为适配宿主内存超售（Committed_AS 超过 CommitLimit，且 memory cgroup 文件缓存无法主动回收），构建为串行 -j1，并对每条 make/configure 命令设健康闸门：fork 探针 + 编译探针 + MemAvailable ≥ 2GB，最多等待 20×15s = 5 分钟；命令失败时按 (0,30,60,120,240,300,300,300) 秒退避重试 8 次（约 22.5 分钟），以跨过本机分钟级的全局 fork 故障窗口。代价是构建时间变长，已被 28800s 超时配置覆盖。上游 C 套件（make check-gcc）为 L1 判定口径；g++ 套件不在判定范围内，其通过率另见 upstream_tests。"

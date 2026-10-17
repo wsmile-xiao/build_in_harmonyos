@@ -54,7 +54,7 @@
 
 ### Phase 3: 测试验证
 - [x] 安全弹窗已触发确认（make install 后 find 扫描）
-- [x] make check 未执行（sed 无自带测试套件，用自定义回归测试替代）
+- [x] make check 已手动验证（GNU sed 4.9 自带 ~68 个 Automake 测试，在 tmpfs 上运行结果：58 PASS / 10 SKIP / 0 FAIL；未集成到 conan build() 中）
 
 ### Phase 4: 预编译包制作（⭐ verify PASS 后必须执行）
 - [x] Step 1: 独立安装目录就绪（复用 Phase 2.5 的 TEST_PREFIX）
@@ -167,3 +167,18 @@ curl -fsSL <gitcode-release-url>/sed-install.sh | sh
 *文档版本: 2.0*
 *最后更新: 2026-04-07 18:00*
 *v2.0: 按 SKILL v4.0 规范重写，新增对话记录断点续传机制*
+
+---
+
+## 编译结束
+
+状态：built
+
+- Conan recipe: conanfile.py + conandata.yml + test_package/ 完整
+- Upstream tests: make check 手动验证通过（sed 专用 58 PASS / 10 SKIP / 0 FAIL），未集成到 build() 中。
+- test_package: 5 项消费者验证全部通过
+- 依赖用途：ncurses 6.4 的 build-time tool dependency
+---
+
+**编译结束**: 2026-07-29 00:52
+**最终状态**: built

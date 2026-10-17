@@ -1,0 +1,172 @@
+# ═══ Draft knowledge entry — Conan 里的 PostgreSQL 扩展要「可重定位」：产物落在包内而不是 PG 安装目录（install_to_postgresql / datadir），再由集群参数 extension_control_path + dynamic_library_path 指回去；PG 18 对 $libdir/<简单名> 会剥前缀交给 dynamic_library_path，所以 control 里的 module_pathname 不需要改写 ═══
+# Timestamp: 2026-09-20
+# Software: pgroonga 4.0.8
+# Gate: G2 (conan create)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-pgroonga-4.0.8-pg-extension-relocatable-install-and-discovery
+trigger_tool:           conan|meson|psql|postgres
+phase:                  package|runtime
+error_signature:        could not open extension control
+                         file.*pgroonga\.control|could not open
+                         file.*\$(libdir|module.*pgroonga\.so|Access is
+                         denied|permission denied.*postgresql/extension|could not
+                         load library.*\$libdir|extension_control_path|
+                         dynamic_library_path|libdir.*//lib
+severity:               3
+category:               conan, packaging, postgresql, relocation, runtime
+match_keywords:         PostgreSQL extension, CREATE EXTENSION, .control,
+                         module_pathname, $libdir, probin, pg_extension,
+                         extension_control_path, dynamic_library_path,
+                         install_to_postgresql, datadir, resdirs, relocatable
+                         install, pkglibdir, sharedir/extension, load_external_function,
+                         simple name
+title:                  可重定位的 PG 扩展：产物落包内 + 集群参数指回去；PG 18
+                         的 $libdir 简单名剥离让 control 无需改写
+
+root_cause: >
+  两个约束叠在一起：
+  (a) **不能往 PG 安装目录写**。Conan 打包的 postgresql 是 DESTDIR 可重定位
+  安装（编译期前缀为空），没有稳定的 pkglibdir/sharedir 可以让扩展落进去；
+  即便路径存在，Conan cache 也是只为该依赖包服务的，往里写别的包的产物会
+  破坏包指纹与可重定位性（同规则 21 的"边界"精神）。
+  (b) **但 PG 只会去固定几个地方找扩展**：control / 版本 SQL 走
+  <sharedir>/extension，共享库走 pkglibdir 或 $libdir 展开出来的路径。产物
+  既然在别处，就必须在**运行期**把这两处搜索路径指过去。
+  典型失败信息是 `could not open extension control file
+  ".../extension/pgroonga.control"`（找不到 control）与
+  `could not load library "$libdir/pgroonga"`（找到了 control 但库解析不了），
+  两者根因相同、修法不同。
+  另有一个易忽略的构建期变体：上游若把 datadir 通过构建系统的默认值推导，
+  在 Conan 里可能落成 `share/res/extension` 这种**PG 不会去找**的路径 ——
+  目录结构看着像对的，PG 却永远找不到。
+
+affected_scope: >
+  所有要交付给 PostgreSQL 的扩展 / 插件（PGXS、meson、cmake、autotools 都有）：
+  产物包含 `<name>.control` + `<name>--<ver>.sql` + 一个或多个 shared_module，
+  且这些产物**不**允许写进依赖包目录。也适用于任何"宿主程序只从固定目录加载
+  插件、而插件由另一个 Conan 包提供"的场景（GStreamer 插件、GLib GIO
+  modules、PAM modules 同理），只需要把「搜索路径」换成宿主对应的开关。
+
+verification_cmd: >
+  # 构建期：产物到底落在哪
+  find "$PKG_PKG" -name '*.control' -o -name '*.so' | sort
+  #   期望 <pkg>/share/extension/*.control 与 <pkg>/lib/*.so
+  #   出现 share/res/extension 说明 datadir 被构建系统默认值带偏了
+  # 反向断言：产物不得出现在 PG 包目录里
+  test ! -e "$PG_PKG/lib/postgresql/pgroonga.so"
+  test ! -e "$PG_PKG/share/postgresql/extension/pgroonga.control"
+  # 运行期：集群参数是否生效
+  psql -c "SHOW extension_control_path"
+  psql -c "SHOW dynamic_library_path"
+  psql -c "SELECT probin FROM pg_proc WHERE probin = '\$libdir/pgroonga' LIMIT 1"
+  #   期望：probin 仍是 '$libdir/pgroonga'，且 pg_proc 里没有任何含绝对路径的 probin
+rec_priority:           1
+rec_approach:           install-to-package-layout-and-inject-cluster-search-paths-at-runtime
+rec_description: >
+  构建期：关掉"装进 PG 目录"，并把扩展脚本目录显式钉成 `share/extension`。
+  meson 上是 `-Dinstall_to_postgresql=false` + `-Ddatadir=share`（第二条别省：
+  ConanToolchain 默认把 datadir 设成 resdirs[0]，很容易得到
+  `share/res/extension`）；autotools 上是 `--libdir=<pkg>/lib
+  --datadir=<pkg>/share`（PGXS 的 `make` 则用 `DESTDIR` + 覆盖
+  `pkglibdir`/`sharedir` 变量）。
+  运行期：给集群注入两条搜索路径参数，**本包在前、PG 自带在后**：
+
+    extension_control_path = '<pkg>/share/extension:<pg>/share/postgresql/extension'
+    dynamic_library_path   = '<pkg>/lib:<pg>/lib/postgresql:$libdir'
+
+  第二条里 PG 自带的那个 `<pg>/share/postgresql/extension` **必须保留**：
+  initdb 会在模板库里建 plpgsql，而 plpgsql.control 就在那；漏掉它连集群都
+  起不来（并且报错会是"plpgsql 找不到"这种看起来毫不相关的症状）。
+  `dynamic_library_path` 里的 `$libdir` 保留，是让 PG 自己的模块（如
+  plpgsql.so）仍然可解析。
+  **control 文件本身不用改**：PG 18 的 load_external_function 对「简单名」
+  （`$libdir/` 之后不再出现目录分隔符）会剥掉前缀把裸名交给
+  dynamic_library_path 搜索，再依次尝试 `name` 与 `name + DLSUFFIX`。所以
+  `module_pathname = '$libdir/pgroonga'` 在空前缀的 PG 上依然可用 —— 这
+  正是"不需要补丁"的原因，也是"要不要给 control 打补丁"这个问题的最短答案。
+  自证方式：包内**不带任何补丁**，并且 test_package 里加一条反向断言，
+  确认产物没有泄漏到 PG 包目录、且 `pg_proc.probin` 里不存在绝对路径。
+rec_command: >
+  # 构建期（meson）
+  tc.project_options["install_to_postgresql"] = False
+  tc.project_options["datadir"] = "share"
+  # 运行期（集群参数）
+  #   postgresql.auto.conf:
+  #     extension_control_path = '<pkg>/share/extension:<pg>/share/postgresql/extension'
+  #     dynamic_library_path   = '<pkg>/lib:<pg>/lib/postgresql:$libdir'
+  # 断言
+  CREATE EXTENSION pgroonga;
+  SELECT count(*) FROM pg_proc WHERE probin = '$libdir/pgroonga';   -- > 0
+  SELECT count(*) FROM pg_proc WHERE probin LIKE '/%'
+                                  OR probin LIKE '%/%/%';          -- = 0
+rec_auto_fix:           true
+rec_impl:               recipe-side-package
+
+fallback_priority:      2
+fallback_approach:      install-into-a-writable-copy-of-the-postgresql-tree
+fallback_description: >
+  若宿主的版本**没有** extension_control_path（PG 18 之前），就没有"再加一条
+  搜索路径"的官方开关。退路是把 postgresql 包的 share/postgresql 与 lib/postgresql
+  **复制**到 build 目录下一个可写副本里，让扩展也装进那个副本，然后让测试/
+  运行期只用这一份自定义 PGDATA+PGHOME。代价：多一份上百 MB 的树，
+  且"运行的是不是同一个 PG"变得更难说清（psql/initdb 来自 A、共享库来自 B）。
+  只有在目标 PG 版本低于 18 且又必须可重定位时才值得走；即便如此，
+  `dynamic_library_path` 那一半（`$libdir` 剥离）在旧版本同样成立，所以
+  control 依然不用改。
+fallback_command:       cp -a "$PG_PKG/share/postgresql" "<copy>/share/" && cp -a "$PG_PKG/lib/postgresql" "<copy>/lib/" && # 再让扩展装进 <copy>，并用 <copy> 起集群
+fallback_auto_fix:      false
+fallback_impl:          recipe-side-build
+
+forbid_1_pattern:       (?i)patch.*\.control|sed.*module_pathname|把 \$libdir/\w+
+                         改写成绝对路径
+forbid_1_reason:        把 module_pathname 改成绝对路径等于把**当前机器**的
+                          路径烘进 catalog：扩展一旦被搬走/复制到另一个
+                          PGDATA 或另一台机器就失效，而且 pg_proc.probin 会
+                          永久留下绝对路径（违反可重定位，也违反
+                          "catalog 不应记录构建机路径"的卫生要求）。
+                          PG 18 的简单名剥离已经让原样 `$libdir/<name>` 可用，
+                          没有改写的必要。
+forbid_1_consequence:   可重定位性被打掉：同一份包在 A 路径下实验证通过、
+                          搬到 B 路径必坏；且这类绝对路径会随 DROP/CREATE
+                          被写进 pg_dump，污染下游。属于"为了让本次 CI 变绿
+                          而在产物里藏了环境假设"。
+
+forbid_2_pattern:       (?i)cp.*postgresql/(lib|share).*cache|往
+                         dependencies\[.*\]\.package_folder 里写文件
+forbid_2_reason:        依赖包的 package_folder 在 Conan cache 里是**只读**
+                          且**受指纹保护**的；往里写扩展产物既会失败，就算
+                          侥幸成功也不会改变该包的指纹，下一次 CI 拿到的是
+                          "改过又没改"的不确定状态。还会让"某包到底装了
+                          什么"这件事无法从包内容推断。
+forbid_2_consequence:   跨 worker 抖动 + 扩展来源不可追溯；reviewer 用
+                          `conan cache path` 也复现不出你的环境。
+
+forbid_3_pattern:       extension_control_path\s*=\s*['\"]?[^:'\"]*$|只设
+                         extension_control_path 不设（或漏掉）PG 自带的那一段
+forbid_3_reason:        extension_control_path 是**完全替换**而不是追加：一旦
+                          设成只有本包 share/extension，PG 就再也找不到
+                          plpgsql 等随 PG 安装的扩展。而报错会出现在
+                          initdb/CREATE EXTENSION plpgsql 阶段，与"我的扩展
+                          路径"看起来毫无关系。
+forbid_3_consequence:   集群起不来或模板库缺 plpgsql，白跑一轮 CI
+                          （本赛事 CI 排队 ~2.5-3 小时），且第一反应会去查
+                          自己的扩展而不是这条参数。
+
+principles:             P005
+similar_to:
+conflicts_with:
+prerequisite_of:        DRAFT-pgroonga-4.0.8-pg-regress-without-ruby-on-live-tcp-cluster
+
+doc_file:               knowledge/drafts/DRAFT-pgroonga-4.0.8-pg-extension-relocatable-install-and-discovery.md
+last_updated:           2026-09-20
+source_event:           archives/p/pgroonga/4.0.8
+
+authors:                2301_76770579
+source_pr:              11628
+source_commit:          3cdf9f29a0ab
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-20

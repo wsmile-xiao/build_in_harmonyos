@@ -1,0 +1,96 @@
+# ═══ Draft knowledge entry — pip install --prefix=<stage> 会跳过构建机已装的同名依赖，
+#     python-require 包因此不自包含（本地假绿 / 消费机 ModuleNotFoundError） ═══
+# Timestamp: 2026-09-29
+# Software: rapt-ble 0.1.2（案例位；模式域=Python 打包/依赖闭包，层=L2）
+# Gate: 本地 W3 conan create PASS（test_package 消费者断言 27/27 + 上游 pytest 7/7）
+# 相关: E512（宿主预装致本地绿、CI 干净环境红）——本条是其"打包侧"成因与修复
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review content 与 paired .md 的去重表
+#   2. Rename to E0XX.kv 并移入 knowledge/graph/（doc_file 同步改指 doc/E0XX.md）
+#   3. 在 knowledge/graph/index.tsv 追加一行
+
+id:                     DRAFT-rapt-ble-0.1.2-pip-prefix-skip-satisfied-deps-not-self-contained
+trigger_tool:           pip|conan|python3|build_and_test.sh
+phase:                  build|package|runtime
+error_signature:        ModuleNotFoundError: No module named 'cryptography'|
+                        ModuleNotFoundError: No module named 'cffi'|
+                        Requirement already satisfied:.*(cryptography|cffi|pycparser) in /usr/local/lib/python3\.12/site-packages
+severity:               2
+category:               python, conan, packaging, dependency-closure
+match_keywords:         pip install, --prefix, --ignore-installed, Requirement already satisfied,
+                        构建机预装, 宿主 site-packages, staging 前缀, 自包含, python-require,
+                        site-packages, ModuleNotFoundError, cryptography, cffi, pycparser,
+                        bluetooth-data-tools, 本地绿远端红, runenv_info, PYTHONPATH
+title:                  纯 Python 包用 pip install . --prefix=<stage> 做 conan staging 时，构建机已装的
+                        同名依赖会被判定 Requirement already satisfied 而不写入前缀，产出的
+                        python-require 包不自包含（干净消费环境 import 即 ModuleNotFoundError）
+root_cause:             |
+  pip 的"已满足"判定看的是**当前解释器的 sys.path（含构建机的
+  /usr/local/lib/python3.12/site-packages）**，而不是 --prefix 目标目录：
+  目标前缀里有没有该依赖，pip 不检查。于是构建机恰好预装了依赖闭包中的若干包
+  （本机预装 cffi 2.1.1 / cryptography 50.0.1 / pycparser 3.0）时，pip 认为
+  需求已满足，**跳过下载与安装**，staging 前缀里只有"构建机没装的那些"包。
+  conanfile 的 package() 把 staging 前缀整体拷进 package_folder 后，包内
+  site-packages 缺失该依赖；而本地 conan create / 手跑测试之所以还是绿的，
+  是因为测试进程的 sys.path 仍然指向构建机宿主 site-packages（本地假绿）。
+  消费机（或 CI 干净环境）里宿主没有这些包，import 链在第一个
+  `from cryptography...` 处即断——本案例断在
+  bluetooth_data_tools/privacy.py:16 `from cryptography.hazmat.primitives.ciphers import ...`。
+affected_scope:         所有以 `pip install <src> --prefix=<stage>` 制作 conan 包
+                        （package_type=python-require / basic_layout 模式）的纯 Python 包；
+                        只要构建机宿主预装了依赖闭包中的任一同名包，就会漏装，
+                        且是否漏装取决于构建机环境（CI worker 与开发机结果可能不同）。
+                        本案例实测：不加 --ignore-installed 时漏装
+                        cffi / cryptography / pycparser 三件（含 OHOS wheel
+                        `_cffi_backend.cpython-312-aarch64-linux-ohos.so`）。
+verification_cmd:       |
+  # 1) 造两级 staging 前缀对比（构建机已预装 cffi/cryptography/pycparser）
+  python3 -m pip install <src> --prefix=$HOME/tmp/stage-a --no-warn-script-location
+  python3 -m pip install <src> --prefix=$HOME/tmp/stage-b --ignore-installed --no-warn-script-location
+  ls $HOME/tmp/stage-a/lib/python3.12/site-packages | wc -l   # 32（漏 3 包）
+  ls $HOME/tmp/stage-b/lib/python3.12/site-packages | wc -l   # 39（全闭包）
+  comm -13 <(ls $HOME/tmp/stage-a/lib/python3.12/site-packages|sort) \
+           <(ls $HOME/tmp/stage-b/lib/python3.12/site-packages|sort)
+  #   -> cffi/ cryptography/ pycparser/ _cffi_backend.cpython-312-aarch64-linux-ohos.so
+  # 2) 干净 venv（不带 system-site-packages）模拟消费机，用 PYTHONPATH 指向 staging
+  python3 -m venv $HOME/tmp/venv-clean
+  PYTHONPATH=$HOME/tmp/stage-a/lib/python3.12/site-packages \
+      $HOME/tmp/venv-clean/bin/python -c "import bluetooth_data_tools"
+  #   -> ModuleNotFoundError: No module named 'cryptography'（stage-a 不自包含）
+  PYTHONPATH=$HOME/tmp/stage-b/lib/python3.12/site-packages \
+      $HOME/tmp/venv-clean/bin/python -c "import bluetooth_data_tools, cryptography, cffi; print('OK')"
+  #   -> OK（stage-b 自包含）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           pip-prefix-with-ignore-installed
+rec_description:        |
+  build() 里安装到 staging 前缀时加 `--ignore-installed`，强制 pip 忽略构建机
+  宿主已装版本、把**整棵依赖闭包**重新解析并落进 --prefix 目标；
+  再加 `--no-warn-script-location` 抑制脚本目录告警。package() 照常整前缀拷贝，
+  package_info() 用 runenv_info 暴露 PYTHONPATH=<prefix>/lib/python3.12/site-packages。
+  验证判据不是"本地 conan create 绿"，而是"干净 venv 里只靠包内 site-packages 能 import"。
+rec_command:            python3 -m pip install . --prefix=<stage> --ignore-installed --no-warn-script-location
+rec_auto_fix:           false
+rec_impl:               conanfile-build-pip-prefix-ignore-installed-with-clean-venv-proof
+
+fallback_priority:      2
+fallback_approach:      declare-conan-requires-and-let-conan-resolve
+fallback_description:   |
+  若依赖已在制品仓发布为 conan 配方，正解是 conanfile `requires` 声明并让 conan
+  解析（R36），根本不进 pip 的"已满足"判定路径。本案例不可用：bluetooth-data-tools
+  等运行时依赖在仓内/ConanCenter 均无配方（conan download --only-recipe 全部
+  "no matching recipe references"），故退回 pip 镜像解析 + --ignore-installed。
+fallback_command:       conan download "<dep>/*" --only-recipe  # 逐个探测，无命中即不可走 requires
+fallback_auto_fix:      false
+
+forbid_1_pattern:       仅凭本地 `conan create` 通过（或手跑 test_package 通过）就认定 python-require 包自包含
+forbid_1_reason:        测试进程的 sys.path 仍包含构建机宿主 site-packages，pip 的
+                        "已满足"跳过恰好被本机环境掩盖，属于本地假绿；
+                        远端 CI / 消费机无该宿主环境时才会暴露 ModuleNotFoundError（E512 同型）。
+forbid_1_consequence:   配方 PR 本地全绿、CI 或用户机器 import 失败；排查成本高（错误指向
+                        cryptography/cffi 而非配方），且失败与构建机预装状态相关、难以复现。
+
+doc_file:               DRAFT-rapt-ble-0.1.2-pip-prefix-skip-satisfied-deps-not-self-contained.md

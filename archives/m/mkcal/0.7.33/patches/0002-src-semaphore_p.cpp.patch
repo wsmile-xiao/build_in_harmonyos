@@ -1,0 +1,276 @@
+--- a/src/semaphore_p.cpp
++++ b/src/semaphore_p.cpp
+@@ -26,43 +26,71 @@
+  * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE."
+  */
+ 
+ #include "semaphore_p.h"
+ #include "logging_p.h"
+ 
+ #include <errno.h>
++#include <time.h>
+ #include <unistd.h>
+-#include <libgen.h>
+-
+-#include <sys/sem.h>
++
+ #include <sys/stat.h>
+ #include <sys/types.h>
++
++#ifdef __OHOS__
++// OHOS does not implement the SysV IPC semaphore syscalls (semget/semctl/
++// semtimedop): calling them terminates the process with SIGSYS, and that
++// signal cannot be intercepted. Use POSIX named semaphores instead, which the
++// platform does provide, while keeping the counting-semaphore contract that
++// ProcessMutex relies on.
++#include <fcntl.h>
++#include <semaphore.h>
++
++#include <QCryptographicHash>
++#else
++#include <libgen.h>
+ #include <sys/ipc.h>
++#include <sys/sem.h>
++#endif
+ 
+ namespace {
++
++void semaphoreError(const char *msg, const char *id, int error)
++{
++    qCWarning(lcMkcal) << QString::fromLatin1("%1 %2: %3 (%4)").arg(msg).arg(id).arg(::strerror(error)).arg(
++                 error).toUtf8().constData();
++}
++
++#ifdef __OHOS__
++
++// POSIX semaphore names live in a flat namespace: they must start with '/'
++// and contain no further separator. Derive a stable name from the identifier
++// (the database path) plus the slot index.
++QByteArray semaphoreName(const QString &identifier, size_t index)
++{
++    const QByteArray digest =
++        QCryptographicHash::hash(identifier.toUtf8(), QCryptographicHash::Md5).toHex();
++    return QByteArray("/mkcal-") + digest + '-' + QByteArray::number(static_cast<qulonglong>(index));
++}
++
++#else
+ 
+ // Defined as required for ::semun
+ union semun {
+     int              val;
+     struct semid_ds *buf;
+     unsigned short  *array;
+     struct seminfo  *__buf;
+ };
+-
+-void semaphoreError(const char *msg, const char *id, int error)
+-{
+-    qCWarning(lcMkcal) << QString::fromLatin1("%1 %2: %3 (%4)").arg(msg).arg(id).arg(::strerror(error)).arg(
+-                 error).toUtf8().constData();
+-}
+ 
+ int semaphoreInit(const char *id, size_t count, const int *initialValues)
+ {
+     int rv = -1;
+ 
+     // the specific value of proj_id is unimportant except that it must be non-zero, so 5?
+     char *filepath = ::strdup(id);
+     char *dirpath = ::dirname(filepath);
+     key_t key = ::ftok(dirpath, 5);
+     ::free(filepath);
+@@ -123,32 +151,166 @@
+ 
+     do {
+         int rv = ::semtimedop(id, &op, 1, (wait && ms > 0 ? &timeout : 0));
+         if (rv == 0)
+             return true;
+     } while (errno == EINTR);
+ 
+     return false;
+ }
+ 
+-}
++#endif  // __OHOS__
++
++}
++
++#ifdef __OHOS__
++
++void Semaphore::initialize(size_t count, const int *initialValues)
++{
++    m_semaphores.assign(count, nullptr);
++
++    for (size_t i = 0; i < count; ++i) {
++        const QByteArray name = semaphoreName(m_identifier, i);
++        sem_t *semaphore = ::sem_open(name.constData(), O_CREAT, 0666,
++                                      static_cast<unsigned>(initialValues[i]));
++        if (semaphore == SEM_FAILED) {
++            semaphoreError("Unable to create semaphore", m_identifier.toUtf8().constData(), errno);
++            // Close the slots opened so far and report the failure.
++            for (size_t j = 0; j < m_semaphores.size(); ++j) {
++                if (m_semaphores[j]) {
++                    ::sem_close(m_semaphores[j]);
++                    m_semaphores[j] = nullptr;
++                }
++            }
++            return;
++        }
++
++        m_semaphores[i] = semaphore;
++    }
++}
++
++Semaphore::Semaphore(const char *identifier, int initial)
++    : m_identifier(identifier)
++    , m_errorString()
++{
++    const int initialValues[1] = { initial };
++    initialize(1, initialValues);
++}
++
++Semaphore::Semaphore(const char *identifier, size_t count, const int *initialValues)
++    : m_identifier(identifier)
++    , m_errorString()
++{
++    initialize(count, initialValues);
++}
++
++Semaphore::~Semaphore()
++{
++    for (sem_t *&semaphore : m_semaphores) {
++        if (semaphore) {
++            ::sem_close(semaphore);
++            semaphore = nullptr;
++        }
++    }
++}
++
++bool Semaphore::isValid() const
++{
++    if (m_semaphores.empty())
++        return false;
++
++    for (sem_t *semaphore : m_semaphores) {
++        if (!semaphore)
++            return false;
++    }
++
++    return true;
++}
++
++bool Semaphore::decrement(size_t index, bool wait, size_t timeoutMs)
++{
++    if (index >= m_semaphores.size() || !m_semaphores[index]) {
++        errno = 0;
++        return false;
++    }
++
++    int rv = -1;
++    if (!wait) {
++        rv = ::sem_trywait(m_semaphores[index]);
++    } else if (timeoutMs > 0) {
++        struct timespec deadline;
++        ::clock_gettime(CLOCK_REALTIME, &deadline);
++        deadline.tv_sec += static_cast<time_t>(timeoutMs / 1000);
++        deadline.tv_nsec += static_cast<long>(timeoutMs % 1000) * 1000000L;
++        if (deadline.tv_nsec >= 1000000000L) {
++            deadline.tv_sec += 1;
++            deadline.tv_nsec -= 1000000000L;
++        }
++        rv = ::sem_timedwait(m_semaphores[index], &deadline);
++    } else {
++        do {
++            rv = ::sem_wait(m_semaphores[index]);
++        } while (rv != 0 && errno == EINTR);
++    }
++
++    if (rv != 0) {
++        if (errno != EAGAIN || wait) {
++            error("Unable to decrement semaphore", errno);
++        }
++        return false;
++    }
++
++    return true;
++}
++
++bool Semaphore::increment(size_t index, bool wait, size_t timeoutMs)
++{
++    Q_UNUSED(wait)
++    Q_UNUSED(timeoutMs)
++
++    if (index >= m_semaphores.size() || !m_semaphores[index]) {
++        errno = 0;
++        return false;
++    }
++
++    if (::sem_post(m_semaphores[index]) != 0) {
++        error("Unable to increment semaphore", errno);
++        return false;
++    }
++
++    return true;
++}
++
++int Semaphore::value(size_t index) const
++{
++    if (index >= m_semaphores.size() || !m_semaphores[index])
++        return -1;
++
++    int current = -1;
++    if (::sem_getvalue(m_semaphores[index], &current) != 0)
++        return -1;
++
++    return current;
++}
++
++#else
+ 
+ Semaphore::Semaphore(const char *id, int initial)
+     : m_identifier(id)
+-    , m_id(-1)
++    , m_errorString()
+ {
+     m_id = semaphoreInit(m_identifier.toUtf8().constData(), 1, &initial);
+ }
+ 
+ Semaphore::Semaphore(const char *id, size_t count, const int *initialValues)
+     : m_identifier(id)
+-    , m_id(-1)
++    , m_errorString()
+ {
+     m_id = semaphoreInit(m_identifier.toUtf8().constData(), count, initialValues);
+ }
+ 
+ Semaphore::~Semaphore()
+ {
+ }
+ 
+ bool Semaphore::isValid() const
+ {
+@@ -177,20 +339,22 @@
+     return true;
+ }
+ 
+ int Semaphore::value(size_t index) const
+ {
+     if (m_id == -1)
+         return -1;
+ 
+     return ::semctl(m_id, index, GETVAL, 0);
+ }
++
++#endif  // __OHOS__
+ 
+ void Semaphore::error(const char *msg, int error)
+ {
+     m_errorString = QString::fromUtf8(::strerror(error));
+     semaphoreError(msg, m_identifier.toUtf8().constData(), error);
+ }
+ 
+ QString Semaphore::errorString() const
+ {
+     return m_errorString;

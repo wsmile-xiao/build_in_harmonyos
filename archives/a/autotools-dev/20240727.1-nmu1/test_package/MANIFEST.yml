@@ -1,0 +1,55 @@
+package: autotools-dev/20240727.1-nmu1
+homepage: "https://salsa.debian.org/hmh/autotools-dev"
+
+# 上游测试：make check 运行 testsuite/config-guess.sh 与 config-sub.sh
+upstream_check_command: "make check"
+upstream_test_in_build: true
+upstream_test_command: "make check"
+
+# 审计说明（2026-08-22，第 8 轮修订）：
+# - 真机 38 个 FAIL 全部为 config-guess.data 中 system=Linux/GNU 的元组（36 Linux + 2 GNU/*），
+#   症状均为 harness 的 `sh -eu ../config.guess` 非零退出 -> "unable to guess"。
+# - 第 3~6 轮三个逐步假设（pipefail、case 模式 | 交替、<<- heredoc）均已应用补丁且被真机逐一证伪
+#   （0001 || true、0002 case 拆分、0003 heredoc 列0化 + ${RANDOM-} 均已在真机生效，仍 38 失败）。
+#   本地 WSL 用 toybox 0.8.14 sh 实测：其 sh 无 read 内建（harness while read 直接失败、0 用例
+#   执行即 PASS，与真机 38 FAIL 不符），且直接执行 config.guess 对所有元组段错误（rc=139），
+#   说明真机 /bin/sh 并非 toybox 0.8.14 而是支持 read/local/set -eu 的另一个实现，其具体缺陷
+#   构造无法在本地精确复现；但失败集合判别特征唯一且稳定：恰好是进入 libc 探测块的元组。
+# - 第 7 轮结构性方案（0004）：libc 探测机制只在有编译器时才有意义。harness 固定以
+#   CC_FOR_BUILD=no_compiler_found 运行 config.guess，此时探测必然空结果（LIBC 保持 unknown ->
+#   最终回退 gnu），因此 0004 在 CC_FOR_BUILD=no_compiler_found 时直接 LIBC=gnu，跳过
+#   heredoc/反引号管道/eval/command -v ldd/ldd 整段机制；有编译器时行为与上游完全一致。
+#   输出三元组不变（x86_64-pc-linux-gnu 等），且主 case 各 Linux 分支内 heredoc 均已有
+#   `test "$CC_FOR_BUILD" != no_compiler_found` 守卫，harness 场景全程不再执行任何可疑构造。
+#   真机验证（第 8 轮预检日志）：0001-0004 后 `PASS: config.guess checks (153 tests)`，0 FAIL。
+# - 第 8 轮新失败（check-sub）：`config-sub.sh[11]: shopt: inaccessible or not found` +
+#   `make: *** [Makefile:13: check-sub] Error 127`。根因：testsuite/config-sub.sh 是 bash 脚本
+#   （shopt -s lastpipe / local -i / numtests+=1 / declare / jobs -p / &+wait 并发），真机
+#   /bin/sh 非 bash，shopt 非内建 -> 127。补丁 0005 将其 POSIX 化：删 shopt/lastpipe、local -i、
+#   declare、+=（改 $(( ))）、jobs -p 并发（改串行 &+wait 保留 rc 聚合）；依赖管道内 while
+#   的用例改为先经临时文件（TMPDIR）再 while read，避免子 shell 丢失 rc/计数。
+# - 本地验证：dash（严格 POSIX）下 config-sub.sh 全量 1161+1043+153 全 PASS 0 FAIL；
+#   bash 语义下亦全过。真机最终结果以 HMBS 预检为准。
+# - 第 11 轮（2026-08-22）：conan create 命中包缓存（"Already installed!"）时 build()
+#   不执行，build() 内的 HMBS_UPSTREAM_TEST_RESULT 标记在缓存轮次缺失（证据门禁
+#   incomplete）。修复：build() 把 make check 结果 JSON 持久化到 build 目录，
+#   package() 复制进包内 res/upstream_test_result.json，每轮必跑的 test_package
+#   test() 读取并复发 HMBS_UPSTREAM_TEST_RESULT=<同一 JSON>；文件缺失或非法则抛
+#   ConanException 显式失败。test_package 仍每轮真实运行 test.sh（3 断言）。
+
+upstream_tests:
+  - file: testsuite/config-sub.data
+    source: autotools-dev/testsuite/config-sub.data
+    description: "config.sub alias->canonical 三元组映射校验（1161 用例）"
+    command: "bash testsuite/config-sub.sh"
+  - file: testsuite/config-guess.data
+    source: autotools-dev/testsuite/config-guess.data
+    description: "config.guess uname 模拟三元组猜测校验（153 用例）"
+    command: "bash testsuite/config-guess.sh"
+
+test_package_tests:
+  - file: test.sh
+    description: "运行打包的 config.sub 断言 OHOS/GNU 三元组规范化与幂等性"
+    command: "bash test.sh"
+
+assertion_count: 3

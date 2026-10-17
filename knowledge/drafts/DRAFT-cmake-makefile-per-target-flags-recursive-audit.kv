@@ -1,0 +1,135 @@
+#====================================================================
+# DRAFT-cmake-makefile-per-target-flags-recursive-audit
+#   Makefile 生成器把 per-target flags.make 随源码子目录分层存放，
+#   ABI 关键编译标志自检必须递归定位（单层 glob 漏检子目录目标）
+# 来源: run lapacke64-3.12.1（Reference-LAPACK 3.12.1 LAPACKE ILP64 适配）
+#       run1 权威 CI FAIL（自检假阴性）→ 最小回修 → run2 全绿
+# 路径: Path B（知识库扩展）主条（Curator 判定，八分类：构建系统语义，L1）
+# 状态: 草稿（待审核 promote；最终 Exxx 编号由知识库主编确认）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# 注：不收录泛化构建失败签名；辨别性指纹是"配方自检读 flags.make 报标志未见"
+# 这一形态本身（标志实际已注入子目录目标的 per-target flags.make）。
+id:                     DRAFT-cmake-makefile-per-target-flags-recursive-audit
+trigger_tool:           conan|cmake|make
+phase:                  configuration
+error_signature:        Fortran 编译标志中未见|flags.*未见|ILP64.*分支未生效|
+                        Error in build\(\) method.*_assert.*flags|ConanException.*flags
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               cmake, make, conan, build-system, flags, ilp64, fortran
+match_keywords:         flags.make, CMakeFiles, per-target, 单层, 递归, glob,
+                        fdefault-integer-8, ILP64, BUILD_INDEX64, 自检, 误报,
+                        add_compile_options, COMPILE_LANGUAGE, Unix Makefiles,
+                        build.ninja, add_subdirectory
+title:                  Makefile 生成器把 per-target flags.make 随源码子目录分层存放，ABI 关键编译标志自检必须递归定位（单层 glob 漏检子目录目标 → 假阴性失败/假阳性放行）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             CMake Unix Makefiles 生成器为每个 target 生成
+                        <build>/<该 target 所在源码目录相对路径>/CMakeFiles/<tgt>.dir/flags.make，
+                        目录深度镜像源码树——只有顶层 CMakeLists 定义的 target 才在
+                        <build>/CMakeFiles/<tgt>.dir/。上游经 add_compile_options($<$<COMPILE_LANGUAGE:Fortran>:...>)
+                        生成器表达式注入的标志只体现在 per-target 落盘文件，不回写
+                        CMAKE_Fortran_FLAGS 类全局变量视图。配方自检若只单层 glob
+                        build/CMakeFiles/*/flags.make，会漏掉定义于子目录的目标（本例
+                        LAPACK 的 Fortran 主体 blas64/lapack64 在 BLAS/SRC、SRC 子目录，
+                        顶层只有纯 C 的 lapacke64），读到"标志未见"实为标志在深层
+                        flags.make 中真实存在——假阴性误杀构建；反向若顶层目标恰带
+                        标志而子目录目标漏加，则假阳性放行，静默 ABI 错位到运行期
+                        数据损坏。归类构建系统语义（生成器落盘布局 × 自检读取路径），
+                        非上游缺陷、非平台差异。
+affected_scope:         任何在 Conan/CMake 多子目录工程 build() 内读取生成器落盘
+                        flags 文件自检 per-target 编译标志的项目；ILP64/INTERFACE64、
+                        -fPIC、LTO、feature 宏等硬 ABI/语义标志审计均适用。实证：
+                        lapacke64/3.12.1（BUILD_INDEX64=ON，flang 兜底加
+                        -fdefault-integer-8）run1 权威 CI 因单层 glob 假阴性失败。
+verification_cmd:       最小机理探针（任意临时目录，bash）：mkdir -p sub && cd 该目录；
+                        顶层 CMakeLists.txt 写 project(probe NONE)+add_library(top INTERFACE)+add_subdirectory(sub)；
+                        sub/CMakeLists.txt 写 add_library(deep STATIC dummy.c)+target_compile_options(deep PRIVATE -fdefault-integer-8)；
+                        printf 'int x;' > sub/dummy.c; cmake -B build -G "Unix Makefiles"；
+                        find build -name flags.make 显示 sub/CMakeFiles/deep.dir/flags.make 存在，
+                        而 ls build/CMakeFiles/*/flags.make 单层集合不含它——差集即本条知识；
+                        grep -l fdefault-integer-8 $(find build -name flags.make) 命中子目录条目。
+                        仓内重放：CI_PACKAGES=lapacke64/3.12.1 ci/conan/build_and_test.sh，
+                        修复前 conan create failed（自检误报），修复后日志出现
+                        "ILP64 self-check: -fdefault-integer-8 present (2 个目标 flags 文件)"
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           target-whitelist-recursive-glob-fail-closed
+rec_description:        按被审计目标白名单递归 glob **/CMakeFiles/<tgt>.dir/flags.make
+                        （recursive=True），并以 fail-closed 语义处理"文件不存在"
+                        （白名单目标缺文件即失败，不静默通过）；对每个命中的文件
+                        逐一断言标志存在，缺失即列出具体路径失败。白名单保证每个
+                        被审计目标必达，递归 glob 适配任意源码树深度。
+rec_command:            blobs = {}
+                        for tgt in ("blas64", "lapack64"):
+                            for p in glob.glob(os.path.join(self.build_folder, "**", "CMakeFiles", tgt + ".dir", "flags.make"), recursive=True):
+                                with open(p, errors="replace") as f: blobs[p] = f.read()
+                        if not blobs: raise ConanException("未找到目标 flags 文件——fail-closed")
+                        bad = [p for p, t in blobs.items() if "-fdefault-integer-8" not in t]
+                        if bad: raise ConanException("标志缺失于 per-target flags：%s" % bad)
+rec_auto_fix:           false
+rec_impl:               conan-recipe-self-check
+
+fallback_priority:      2
+fallback_approach:      ninja-build-ninja-fulltext-scan
+fallback_description:   Ninja 生成器不产 flags.make：退回 glob(build_folder/build.ninja)
+                        全文扫描目标/标志字符串。权衡：全文匹配无法区分 target 边界
+                        与作用域，只能作"标志存在于构建图"的存在性证据，不能断言
+                        "注入到了指定目标"，仅作 Makefiles 路径不可用时的退路。
+fallback_command:       for p in glob.glob(os.path.join(self.build_folder, "build.ninja")):
+                            with open(p, errors="replace") as f: blobs[p] = f.read()
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe-self-check
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       glob\([^)]*"CMakeFiles",\s*"\*+,\s*"flags\.make"|单层.*CMakeFiles/\*/flags\.make.*审计
+forbid_1_reason:        单层 glob 只命中顶层 CMakeLists 定义的目标，漏掉子目录目标；
+                        生成器把 per-target flags.make 放在镜像源码树路径的深层
+forbid_1_consequence:   假阴性失败（误杀真实正确的构建，本例 run1 权威 CI FAIL）或
+                        假阳性放行（子目录目标漏加标志时照常通过，静默 ABI 错位，
+                        ILP64 场景 C 侧 int64 与 Fortran 侧 int32 混调，运行期数据损坏）
+forbid_2_pattern:       只看.*CMAKE_(Fortran|C|CXX)_FLAGS.*即.*通过|tc\.variables.*即.*验证
+forbid_2_reason:        生成器表达式（$<COMPILE_LANGUAGE:...>）注入的标志不回写全局
+                        变量视图，只体现在 per-target 落盘文件
+forbid_2_consequence:   自检对象与真实编译命令脱钩，验证假象
+forbid_3_pattern:       删除.*自检|放宽.*自检|注释.*_assert.*flags
+forbid_3_reason:        自检失败应修读取路径（递归 glob），而非移除守卫
+forbid_3_consequence:   把配置期可发现的 ABI 错位推迟到运行期，静默数据损坏比构建
+                        失败贵一个数量级
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P-BUILD-001, P-CFLAGS-001
+
+# ═══ 关系图 (Relations) ═══
+# 签名族与关系：E346 同为 Makefile 生成器语义族（"执行 shell 被拒"与"落盘目录深度"
+# 两面并列）；E547-draft-CD3B 是 ILP64/flang 能力面，本条是其审计链的读取路径半边。
+causes:                 []
+caused_by:              []
+similar_to:             E346（Makefile 生成器 SHELL=/bin/sh 被沙盒拒绝——同族不同面）、
+                        DRAFT-conan-cmake-cache-stale-variable（验证假象族）、
+                        DRAFT-10251-libnfc-tools-1.8.0-automake-per-target-cppflags-empty-override（autotools per-target 标志族）、
+                        E547-draft-CD3B（ILP64/flang 族）
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-cmake-makefile-per-target-flags-recursive-audit.md
+last_updated:           2026-09-18
+source_event:           run lapacke64-3.12.1：run1 权威 CI FAIL（配方自检单层 glob 顶层
+                        未命中 -fdefault-integer-8，误报 ILP64 Fortran 分支未生效，run 日志
+                        ci-full-1.log :329-338）→ 最小回修（目标白名单递归 glob + Ninja
+                        兜底，仅 conanfile.py）→ run2 权威 CI 全绿（ci-full-2.log；
+                        ci-full-2-conan-build.log:220 自检命中 2 个目标 flags 文件）；
+                        下游 test_package 8/8 与 LAPACKE/example 4 演示双轮执行互证
+                        标志真实生效
+authors:                sea_crab（不知对不队）
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-18

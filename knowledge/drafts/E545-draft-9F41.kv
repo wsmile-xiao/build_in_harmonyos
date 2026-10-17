@@ -1,0 +1,98 @@
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E545
+trigger_tool:           test|conan|runtime
+phase:                  testing|runtime
+error_signature:        PMIx_Init.*returned -25|
+                         PMIX_ERR_UNREACH|
+                         PMIx_Init.*UNREACH|
+                         test_package.*timeout|
+                         subprocess.*timeout.*test
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               test_package, conan, runtime, portability, api, hpc
+match_keywords:         PMIx_Init, PMIX_ERR_UNREACH, -25, 无服务器, simptest, PMIx_server_init, PMIx_server_register_client, PMIx_server_setup_fork, PMIx_Finalize, server 模式, 测试范式, conan run, timeout, subprocess, HMBS_TEST_PACKAGE_RESULT, 端到端
+title:                  PMIx 5.x 无服务器时 PMIx_Init 返回 UNREACH(-25)——test_package 必须走 simptest server 模式端到端（附：适配版 conan run() 无 timeout，输出捕获用 stdout 文件对象 + L0d 门禁要求 self.run）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             PMIx 是 client/server 架构：客户端 PMIx_Init 需要环境变量（PMIX_NAMESPACE 等）
+                        指向已启动的本地 server。test_package 直接调 PMIx_Init 必然返回
+                        PMIX_ERR_UNREACH(-25)——这不是适配 bug，是设计使然。端到端测试必须模拟
+                        上游 test/simple/simptest.c 的 server 模式：父进程 PMIx_server_init
+                        （**5.x 是 3 参数签名**：attrs, map, ninfo）→ PMIx_server_register_client →
+                        PMIx_server_setup_fork 生成子进程 env → fork 后子进程 putenv(env) 再
+                        PMIx_Init/PMIx_Finalize。另：OHOS 适配版 conan 2.29.1 的 ConanFile.run()
+                        签名无 timeout 参数且只返回 retcode——但 stdout 参数可接 open() 的文件
+                        对象捕获输出（stderr 用 subprocess.STDOUT 合并）；且 CI L0d/PF3 门禁
+                        grep self.run，test() 纯 subprocess 会被判 stub_test_method——正确写法是
+                        self.run(cmd, env="conanrun", stdout=f, stderr=subprocess.STDOUT,
+                        ignore_errors=True) 后读文件解析断言行。
+affected_scope:         所有 PMIx（openpmix）版本的 test_package 与端到端验证；以及所有需要在
+                        Conan test() 中带超时执行被测二进制的 OHOS 适配包。
+verification_cmd:       grep -n "PMIx_server_init" test_package/test_pmix.c; grep -n "subprocess" test_package/conanfile.py
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           simptest-server-mode-test
+rec_description:        test_package 按 simptest 范式写：①父进程 PMIx_server_init(NULL, NULL, 0)
+                        （3 参数）断言 rc==PMIX_SUCCESS；②PMIx_server_register_client 注册
+                        (nspace, rank, uid, gid) 断言 0；③PMIx_server_setup_fork(pid, &env) 断言 0；
+                        ④fork 子进程 putenv(env) 后 PMIx_Init 断言 PMIX_SUCCESS（nspace/rank 合法），
+                        PMIx_Finalize 断言 PMIX_SUCCESS；⑤父进程 PMIx_server_finalize 断言 0。
+                        版本冒烟用无参数 `pmix_info` 输出的 "PMIX: X.Y.Z" 行（--version 走 CLI help
+                        机制只打印帮助文本，是上游设计）。conanfile.py 的 test() 用 subprocess.run
+                        （timeout=300）+ try/finally shutil.rmtree 承接，输出 HMBS_TEST_PACKAGE_RESULT:
+                        total=N passed=N 行供 CI/审计断言。
+rec_command:            |
+  # 伪代码骨架（完整见 archives/p/pmix/5.0.11/test_package/test_pmix.c）
+  # parent: PMIx_server_init(NULL, NULL, 0) -> register_client -> setup_fork -> fork
+  # child:  putenv(env); PMIx_Init(&proc); assert rank/nspace; PMIx_Finalize()
+  # parent: waitpid; PMIx_server_finalize()
+rec_auto_fix:           false
+rec_impl:               conan-recipe-and-test-package
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:      api-presence-smoke
+fallback_description:   若 fork/env 注入在目标环境受限，退化为链接+符号级冒烟：断言 libpmix 存在、
+                        PMIx_Get_version() 返回含正确版本号的字符串、pmix_info 无参数输出含
+                        "PMIX: X.Y.Z"。此方案证明布局与版本但不证明运行时 API 路径，须在
+                        notes.md 声明降级原因。
+fallback_command:       nm -D libpmix.so | grep PMIx_Init; pmix_info | grep "PMIX: "
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe-and-test-package
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+forbid_1_pattern:       assert.*PMIx_Init.*PMIX_SUCCESS.*\n.*#.*standalone
+forbid_1_reason:         禁止在无 server 的 test_package 里直接断言 PMIx_Init==SUCCESS——恒返回
+                         UNREACH(-25)，为过 CI 必然演变成注释掉断言的空壳测试（R34 红线）
+forbid_1_consequence:   假阳性的空壳测试流入制品仓，下游 MPI 运行时踩坑
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P003, P013
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E545.md
+last_updated: 2026-09-07
+source_event:           archives/p/pmix/5.0.11 (test_pmix.c 8 断言 simptest 模式全过；srvtest.c 样例 $TMPDIR/pmix-apitest/)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-07
+
+draft: true
+contributor_id: 9F41

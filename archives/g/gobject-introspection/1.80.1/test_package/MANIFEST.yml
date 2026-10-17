@@ -1,0 +1,158 @@
+# test_package/MANIFEST.yml
+# 上游官方测试声明文件
+# CI 脚本 (build_and_test.sh L0e) 强制要求此文件存在
+
+package: gobject-introspection/1.80.1
+homepage: "https://gi.readthedocs.io/"
+
+# 上游测试命令（meson test）
+# 注：本变体 meson 配置为 build_introspection_data=true，且 1.80 的 tests 闸
+# 只剩 `if not meson.is_cross_build()`（1.78 的 `and get_option(...)` 已被上游移除）。
+# 本包 cross/host 同为 ohos-aarch64 → is_cross_build() 为假，会真的构建上游 tests，
+# 故配方 build() 内将该闸内联改写为 `if false and ...` 以跳过 subdir('tests')，
+# 改为逐个实测可运行的上游子集（见下）。
+upstream_check_command: "meson test -C builddir"
+# P0-2（审查整改）：上游用例确实**在 build() 内**逐个实测执行，且失败即阻断构建。
+# 原先填 false 与正文自相矛盾，故更正为 true。
+# 本版起实测**两个组**（此前只有 scanner 组）：
+#   - tests/scanner/*.py（9 文件 / 76 用例）→ _run_upstream_scanner_tests()
+#   - tests/warn/*.h（19 夹具，按 // EXPECT: 逐条比对期望告警）→ _run_upstream_warn_tests()
+upstream_test_in_build: true
+upstream_test_command: "python3 tests/scanner/test_<name>.py（_run_upstream_scanner_tests，9 文件 / 76 用例）+ python3 warningtester.py <fixture.h>（_run_upstream_warn_tests，19 夹具；夹具集解析自上游 tests/warn/meson.build 的 warn_tests）—— 均在配方 build() 内逐个执行，任一失败即 raise ConanException 阻断"
+
+# 申报口径：上游 def test_ 函数数（项目规则），非文件数。
+# 规范口径 = passed/(passed+failed+errors) = 71/71 = 100%（skipped 不计分母）。
+#
+# P1-1（审查整改）：补报**全量分母**。此前仅申报「实测的 scanner 子集」，
+# 而配方在 build() 内联改写上游 meson.build（`if false and not meson.is_cross_build()`）
+# 跳过了 subdir('tests')，导致 meson 注册的 offsets / repository / warn 三组
+# 一并**从未执行**却未计入分母。
+# 现按上游 1.80.1 tests/ 快照 + meson 实际注册的 test() 目标逐组统计：
+#   scanner    9 文件 → 76 个 def test_   ← 已实测（71 passed / 2 xfail / 3 skipped / 0 failed）
+#   offsets    1（tests/offsets/test_offsets.py，直接 test()）
+#   repository 4（gitestrepo / giteststructinfo / gitestthrows / gitypelibtest；
+#                 meson 对该字典 foreach，注册 4 个 test()）
+#   warn       19（warn_tests 列表 19 个 .h 夹具；meson 对该列表 foreach，
+#                 每个注册 warn-<name>）  ← 本版**已实测 19/19 通过**
+#
+# ── 本轮两项修正（均为口径/事实错误，非新增功能）──
+# (1) 计数单位不一致导致分母少算：上一版把 warn 记成 **1**（只数了脚本文件
+#     warningtester.py），而同表 offsets/repository 用的是「meson 注册的 test
+#     目标数」。按同一把尺子 warn 应为 **19**，故全量分母 = 76+1+4+**19** = **100**
+#     （上一版写 82，少算 18）。
+# (2) warn 组的裁剪归因**不成立**：warningtester.py 是**纯 Python** —— 只 import
+#     giscanner.*（SourceScanner/Transformer/MainTransformer/IntrospectablePass），
+#     不加载任何 typelib、不 dlopen 上游共享库；19 个夹具唯一的系统依赖是
+#     common.h 的 <glib-object.h>，而 glib 是本配方现成依赖。故它与
+#     offsets/repository 两个**编译型 C 测试**不是一类，本版改为真跑
+#     （conanfile.py 新增 _run_upstream_warn_tests()，夹具集解析自上游 meson.build，
+#      失败即阻断）。
+full_test_denominator:
+  total_all: 100           # 76（scanner def test_）+ 1（offsets）+ 4（repository）+ 19（warn）
+  measured_and_passed: 95  # 76 scanner + 19 warn —— 均已实际执行并全通过
+  pruned_never_run: 5      # offsets(1) + repository(4) —— 从未运行，**不得计为通过**
+  pass_rate_reported: "已实测 95 项全部通过（scanner 71/71 规范口径 + warn 19/19）；未运行的 5 项不计入通过率"
+  measured_groups:
+    - group: scanner
+      count: 76
+      command: "python3 tests/scanner/test_<name>.py（conanfile.py _run_upstream_scanner_tests）"
+      result: "71 passed / 2 expected failure / 3 skipped / 0 failed"
+    - group: warn
+      count: 19
+      command: "python3 warningtester.py <fixture.h>（conanfile.py _run_upstream_warn_tests；夹具集解析自上游 tests/warn/meson.build 的 warn_tests，失败即 raise）"
+      result: "19/19 passed（纯 Python giscanner 路径，无 typelib 依赖；每个夹具逐条比对 // EXPECT: 期望告警）"
+  pruned_groups:
+    - group: offsets
+      count: 1
+      reason: "可构建；运行期需 GLib/GObject/Gio 的 typelib（本仓 glib 配方 introspection=disabled，0 typelib），且 gitestoffsets 还需两个 CLI 参数（COMPILED_OFFSETS_FILE INTROSPECTED_OFFSETS_FILE）"
+    - group: repository
+      count: 4
+      reason: "可链接构建；运行期报 `Typelib file for namespace 'Gio' (any version) not found`，G_DEBUG=fatal-warnings 下即 abort（Signal 5）"
+upstream_tests:
+  # ── scanner 组 9 个纯 Python unittest —— 已实测 ──
+  # 仅 import giscanner（配方已将其复制到 conan python 的 lib-dynload 并签名）+
+  # vendored distutils，不依赖 C 编译 / typelib 生成。
+  # 配方 build() 中 _run_upstream_scanner_tests() 逐个运行，结果输出到 CI 日志
+  # （UPSTREAM-SCANNER-TESTS: N/N passed）。实测：9/9 文件通过。
+  - file: tests/scanner/test_ccompiler.py
+    source: gobject-introspection-1.80.1/tests/scanner/test_ccompiler.py
+    description: "scanner 纯 Python unittest：CCompiler 命令构造与 spawn 参数（19 用例，2 skipped / 2 expected failures）"
+    command: "python3 tests/scanner/test_ccompiler.py（配方 build() 内实测）"
+  - file: tests/scanner/test_docwriter.py
+    source: gobject-introspection-1.80.1/tests/scanner/test_docwriter.py
+    description: "scanner 纯 Python unittest：DocWriter 构建（1 用例，缺 mako 时 skip）"
+    command: "python3 tests/scanner/test_docwriter.py（配方 build() 内实测）"
+  - file: tests/scanner/test_maintransformer.py
+    source: gobject-introspection-1.80.1/tests/scanner/test_maintransformer.py
+    description: "scanner 纯 Python unittest：MainTransformer 弃用注解处理（2 用例）"
+    command: "python3 tests/scanner/test_maintransformer.py（配方 build() 内实测）"
+  - file: tests/scanner/test_pkgconfig.py
+    source: gobject-introspection-1.80.1/tests/scanner/test_pkgconfig.py
+    description: "scanner 纯 Python unittest：pkg-config 参数拼接与输出解析（5 用例）"
+    command: "python3 tests/scanner/test_pkgconfig.py（配方 build() 内实测）"
+  - file: tests/scanner/test_scanner.py
+    source: gobject-introspection-1.80.1/tests/scanner/test_scanner.py
+    description: "scanner 纯 Python unittest：scannermain get_source_root_dirs（3 用例，1 skipped）"
+    command: "python3 tests/scanner/test_scanner.py（配方 build() 内实测）"
+  - file: tests/scanner/test_shlibs.py
+    source: gobject-introspection-1.80.1/tests/scanner/test_shlibs.py
+    description: "scanner 纯 Python unittest：ldd 输出解析 / 共享库路径规范化（10 用例）"
+    command: "python3 tests/scanner/test_shlibs.py（配方 build() 内实测）"
+  - file: tests/scanner/test_sourcescanner.py
+    source: gobject-introspection-1.80.1/tests/scanner/test_sourcescanner.py
+    description: "scanner 纯 Python unittest：SourceScanner 解析 C 声明/注释（6 用例）"
+    command: "python3 tests/scanner/test_sourcescanner.py（配方 build() 内实测）"
+  - file: tests/scanner/test_transformer.py
+    source: gobject-introspection-1.80.1/tests/scanner/test_transformer.py
+    description: "scanner 纯 Python unittest：AST Transformer（typedef/struct/union/数组，25 用例）"
+    command: "python3 tests/scanner/test_transformer.py（配方 build() 内实测）"
+  - file: tests/scanner/test_xmlwriter.py
+    source: gobject-introspection-1.80.1/tests/scanner/test_xmlwriter.py
+    description: "scanner 纯 Python unittest：GIR XMLWriter 输出（5 用例）"
+    command: "python3 tests/scanner/test_xmlwriter.py（配方 build() 内实测）"
+
+  # ── offsets / repository 两组 —— 未运行，逐条归因（warn 组已移入上方已实测区）──
+  # 与 1.78.1.1 的归因**不同**：1.78 时这三组因 girepository 为静态库而
+  # **无法链接构建**；1.80 的 girepository 已是共享库，这三组**可以构建**
+  # （本地实测 tests/offsets/gitestoffsets 与 tests/repository/gitestrepo 均
+  #  成功链接产出），但**运行期**仍不通过，证据：
+  #   $ ./tests/repository/gitestrepo
+  #   ** ERROR **: Typelib file for namespace 'Gio' (any version) not found
+  #   Signal 5 (core dumped)        # G_DEBUG=fatal-warnings → 警告即 abort
+  # 根因：运行期需要 GLib/GObject/Gio 的 typelib，而这些自 glib 2.80 起由
+  # **glib 自身**提供；本仓 glib 配方显式 `introspection = "disabled"`（0 typelib），
+  # 故运行期无法加载。gitestoffsets 另需两个命令行参数
+  # （用法：gitestoffsets COMPILED_OFFSETS_FILE INTROSPECTED_OFFSETS_FILE）。
+  # 按上述可复现证据归因，不以 skip/xfail 掩盖。
+  - file: tests/offsets/test_offsets.py
+    source: gobject-introspection-1.80.1/tests/offsets/test_offsets.py
+    description: "offsets 组：可构建但运行期缺 GLib/GObject/Gio typelib（glib introspection=disabled），且需 CLI 参数；归因见上"
+    command: "（未运行，归因见上）"
+  - file: tests/repository/gitestrepo.c
+    source: gobject-introspection-1.80.1/tests/repository/gitestrepo.c
+    description: "repository 组：可构建，运行期报 Typelib file for namespace 'Gio' not found → G_DEBUG abort；归因见上"
+    command: "（未运行，归因见上）"
+  # ── warn 组 19 个夹具 —— 本版**已实测 19/19 通过** ──
+  # 关键区分：本组与 offsets/repository **不是一类**。warningtester.py 是纯 Python，
+  # 只 import giscanner.*，不加载 typelib、不 dlopen 上游共享库；夹具唯一系统依赖是
+  # common.h 的 <glib-object.h>（glib 为本配方现成依赖）。故无平台阻塞，本版改为真跑。
+  # 夹具集不硬编码：_upstream_warn_fixtures() 解析上游 tests/warn/meson.build 的
+  # warn_tests 列表（19 项：annotationparser / callback-invalid-scope /
+  # callback-missing-scope / invalid-allow-none / invalid-array / invalid-closure /
+  # invalid-constructor / invalid-element-type / invalid-method / invalid-nullable /
+  # invalid-optional / invalid-option / invalid-out / invalid-return / invalid-transfer /
+  # missing-element-type / return-gobject / unknown-parameter / unresolved-type）。
+  - file: tests/warn/warningtester.py
+    source: gobject-introspection-1.80.1/tests/warn/warningtester.py
+    description: "warn 组：19 个夹具各跑一次，逐条比对夹具内 `// EXPECT:` 声明的期望告警（数量与文本均须一致，否则 SystemExit 非零）。纯 Python giscanner 路径（SourceScanner→Transformer→MainTransformer→IntrospectablePass），不依赖 typelib"
+    command: "python3 warningtester.py <fixture.h>（配方 build() 内 _run_upstream_warn_tests 实测，19/19 passed）"
+
+# test_package 中自带的测试 (消费者视角验证，R34 实质调用被测包)
+test_package_tests:
+  - file: test_gi.py
+    description: "GI 基础设施验证：校验本包交付的 typelib（GIRepository-2.0 等）+ 共享库形态（libgirepository-1.0.so/.so.1）+ 3 个 g-ir 工具"
+  - file: conanfile.py
+    description: "调用 test_gi.py（10 项断言）并实际运行 g-ir-compiler --version 消费被测包"
+
+# 测试断言总数（test_package/test_gi.py 的检查项）
+assertion_count: 10

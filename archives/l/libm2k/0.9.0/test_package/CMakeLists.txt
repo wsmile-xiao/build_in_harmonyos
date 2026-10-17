@@ -1,0 +1,61 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_libm2k CXX)
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+find_package(libm2k REQUIRED CONFIG)
+# Fallback via pkg-config if config not found
+if(NOT TARGET libm2k::libm2k)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LIBM2K REQUIRED IMPORTED_TARGET libm2k)
+endif()
+
+# libm2k public headers (utils.hpp) expose <iio.h> transitively.
+# Upstream's libm2kConfig.cmake does not call find_dependency(libiio), so the
+# consumer must ensure libiio's include is on the path. Conan's CMakeDeps
+# provides libiio::libiio via the package's transitive requires, but the
+# upstream config shadows it when found via CMAKE_PREFIX_PATH. Handle both.
+find_package(libiio QUIET CONFIG)
+if(NOT TARGET libiio::libiio)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(LIBIIO QUIET IMPORTED_TARGET libiio)
+    endif()
+endif()
+# Fallback: direct find_path for iio.h (Conan's libiio package)
+find_path(IIO_INCLUDE_DIR iio.h PATHS ${LIBIIO_INCLUDE_DIRS} NO_DEFAULT_PATH)
+if(NOT IIO_INCLUDE_DIR)
+    find_path(IIO_INCLUDE_DIR iio.h)
+endif()
+
+add_executable(test_version test_version.cpp)
+if(TARGET libm2k::libm2k)
+    target_link_libraries(test_version PRIVATE libm2k::libm2k)
+else()
+    target_link_libraries(test_version PRIVATE PkgConfig::LIBM2K)
+endif()
+if(TARGET libiio::libiio)
+    target_link_libraries(test_version PRIVATE libiio::libiio)
+elseif(TARGET PkgConfig::LIBIIO)
+    target_link_libraries(test_version PRIVATE PkgConfig::LIBIIO)
+elseif(IIO_INCLUDE_DIR)
+    target_include_directories(test_version PRIVATE ${IIO_INCLUDE_DIR})
+endif()
+
+add_executable(test_context test_context.cpp)
+if(TARGET libm2k::libm2k)
+    target_link_libraries(test_context PRIVATE libm2k::libm2k)
+else()
+    target_link_libraries(test_context PRIVATE PkgConfig::LIBM2K)
+endif()
+if(TARGET libiio::libiio)
+    target_link_libraries(test_context PRIVATE libiio::libiio)
+elseif(TARGET PkgConfig::LIBIIO)
+    target_link_libraries(test_context PRIVATE PkgConfig::LIBIIO)
+elseif(IIO_INCLUDE_DIR)
+    target_include_directories(test_context PRIVATE ${IIO_INCLUDE_DIR})
+endif()
+
+enable_testing()
+add_test(NAME test_version COMMAND test_version)
+add_test(NAME test_context COMMAND test_context)

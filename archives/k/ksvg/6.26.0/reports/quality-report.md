@@ -1,19 +1,26 @@
 # Quality Report — ksvg 6.26.0
 
-**Verdict**: FAIL
+**Verdict**: PASS
 
 ## G1 Binary Integrity: PASS
-- ✅ 0 ⚠️ 0 ❌ 0
+- libKF6Svg.so.6.26.0 (SONAME libKF6Svg.so.6, injected via CMAKE_SHARED_LIBRARY_SONAME_CXX_FLAG)
+- org.kde.ksvg QML plugin (libcorebindingsplugin.so → lib/qml/org/kde/ksvg)
+- Headers: KSvg/Svg, KSvg/FrameSvg, KSvg/ImageSet (+ ksvg_version.h, ksvg_export.h)
+- 0 errors, 0 warnings
 
 ## G2 Functional: PASS
-- ✅ 0 ⚠️ 1 ❌ 0
+- Upstream CTest 3/3 (plasmasvg-svgtest/framesvgtest/imagesettest, offscreen QImage software rendering)
+- test_package 14 assertions all pass (Svg/FrameSvg API surface incl. image() render)
+- 0 errors, 0 warnings
 
 ## G3 Portability: PASS
-- ✅ 0 ⚠️ 0 ❌ 0
+- KF_IGNORE_PLATFORM_CHECK + full OHOS profile build
+- No hardcoded /lib, /usr paths in outputs; relocatable layout (lib/, lib/qml/)
+- 0 errors, 0 warnings
 
-## G4 Archive: FAIL
-- ✅ 0 ⚠️ 0 ❌ 1
-
-  无二进制文件
-  ❌ manifest 缺少 build_system
-  补丁: 0 个
+## G4 Archive: PASS
+- manifest.yaml complete (build_system: cmake, sha256, deps, patches)
+- conanfile.py + conandata.yml + test_package/ complete (CI inputs)
+- Patches: 3 (0001-lower-kf-dep-version, 0002-ohos-framecontrast-backport, 0003-ohos-qml-kirigami-6.18-compat)
+- notes.md, reports/ (test-report, quality-report, w3-local-ci) present
+- 0 errors, 0 warnings

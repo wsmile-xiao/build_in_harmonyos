@@ -74,5 +74,5 @@ $ mrdb --version (交互式调试器)
 5. rake install 使用 PREFIX/INSTALL_PREFIX 环境变量设置安装前缀
 ---
 
-**编译结束**: 2026-05-26 16:24
-**最终状态**: published
+**编译结束**: 2026-08-07 00:45
+**最终状态**: built

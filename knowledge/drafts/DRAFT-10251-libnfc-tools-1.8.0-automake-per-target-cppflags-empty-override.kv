@@ -1,0 +1,135 @@
+#====================================================================
+# DRAFT-10251-libnfc-tools-1.8.0-automake-per-target-cppflags-empty-override
+#   automake per-target `*_CPPFLAGS =`（空值）替换 AM_CPPFLAGS，
+#   VPATH 构建下头文件找不到
+# 来源: PR #10251 feat(libnfc-tools): 1.8.0 适配 HarmonyOS PC
+#       （Cutter 1.2.6 交叉编译 VPATH 构建期子问题）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# 注：不收录泛化的 `fatal error: <X>.h file not found`（那是 E217/E169 的签名家族），
+# 本条的辨别性指纹是 automake per-target 变量本身的形态 + VPATH 构建语境。
+id:                     DRAFT-10251-libnfc-tools-1.8.0-automake-per-target-cppflags-empty-override
+trigger_tool:           make|automake|libtool|clang
+phase:                  compilation
+error_signature:        ^[A-Za-z_]+_(la_)?CPPFLAGS\s*=\s*$|
+                        ^[A-Za-z_]+_(la_)?CPPFLAGS\s*=$|
+                        AM_CPPFLAGS|
+                        VPATH.*(build|构建)|srcdir\s*!=\s*builddir
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               build-system, autotools, automake, vpath, flags
+match_keywords:         AM_CPPFLAGS, per-target CPPFLAGS, _la_CPPFLAGS, _CPPFLAGS,
+                        AM_CFLAGS, AM_LDFLAGS, 空值, 覆盖, 替换, VPATH,
+                        out-of-tree, srcdir, builddir, file not found,
+                        include path, 头文件找不到, automake, conan build
+title:                  automake per-target `*_CPPFLAGS =`（空值）替换 AM_CPPFLAGS：VPATH 构建下该目标的 -I 全丢，头文件找不到
+prescan_pattern:        ^[A-Za-z_]*_(la_)?CPPFLAGS\s*=|^AM_CPPFLAGS
+prescan_globs:          Makefile.am, */Makefile.am, **/Makefile.am
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             automake 的 AM_CPPFLAGS 只是"默认值"，不是"追加值"：
+                        一旦 Makefile.am 对某目标显式声明 per-target
+                        *_CPPFLAGS（如 xml_la_CPPFLAGS =），automake 就用它
+                        替换 AM_CPPFLAGS，而非在其基础上追加。写空值时尤其
+                        隐蔽——生成的 Makefile 里该变量展开为空串，编译命令
+                        里看不到任何 -I，而 AM_CPPFLAGS 完全不参与该目标编译。
+                        症状是"同一组 -I 在别的目标上生效、只在这个目标丢"，
+                        且在 VPATH（srcdir != builddir，conan build 的默认
+                        形态）下必然复现；in-source 构建常因相对路径凑巧成立
+                        而不报错。非 OHOS 专有——Linux 上 VPATH 构建同样复现。
+                        同族陷阱：AM_CFLAGS/AM_CXXFLAGS/AM_LDFLAGS 与对应
+                        per-target 变量是完全相同的替换语义。
+
+affected_scope:         所有用 automake 且 VPATH 构建的工程，其 Makefile.am 对
+                        部分目标写了 per-target *_CPPFLAGS/*_CFLAGS/*_LDFLAGS
+                        （含空值）时都会命中。本题实证：Cutter 1.2.6 的
+                        module/report/Makefile.am（xml_la_CPPFLAGS = 空值）
+                        在 HarmonyOS PC + VPATH 交叉编译时丢 -I，报
+                        cut-module-impl.h file not found。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           refill-per-target-vars-on-make-command-line
+rec_description:        make 命令行回填 per-target 变量——命令行变量优先级高于
+                        Makefile 内赋值，且不改上游源码（可审计，命令留在脚本/
+                        配方里）：
+                        make -C module/report \
+                          xml_la_CPPFLAGS="-I$BUILD -I$SRC" \
+                          xml_factory_la_CPPFLAGS="-I$BUILD -I$SRC"
+                        缺点：需逐个目标点名。适配期最快、侵入性最低。
+                        判别三行：
+                        ① grep -nE '^[A-Za-z_]*_(la_)?CPPFLAGS' */Makefile.am
+                        ② grep -n '^xml_la_CPPFLAGS' module/report/Makefile
+                        ③ make V=1 2>&1 | grep -E 'fatal error|not found'
+                        必须先构造 VPATH 布局复现（mkdir build && cd build &&
+                        ../configure），in-source 构建往往看不到。
+rec_command:            make -C <subdir> <target>_CPPFLAGS="-I<src> -I<build>"
+rec_auto_fix:           false
+rec_impl:               make-cmdline-override
+
+fallback_priority:      2
+fallback_approach:      conan-toolchain-variable-injection
+fallback_description:   conan 配方 configure() 里 tc.variables["CPPFLAGS"] = ...；
+                        仅当该目标最终仍引用全局 CPPFLAGS 时有效——若上游写的是
+                        *_CPPFLAGS = 空值，注入无效，需退回主方案或补丁。
+fallback_command:       tc.variables["CPPFLAGS"] = f"-I{self.source_folder} -I{self.build_folder}"
+fallback_auto_fix:      false
+fallback_impl:          conan-toolchain-inject
+
+fallback_priority:      3
+fallback_approach:      patch-upstream-makefile-am
+fallback_description:   补丁删除空赋值或补上正确 -I（patch_type: build-fix），
+                        单列补丁并在 PR「文件修改说明」逐条披露。侵入源码，仅
+                        当前两者不可行时使用。
+fallback_command:       patches/000X-fix-per-target-cppflags.patch
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       cp.*\.h.*/usr/include|symlink.*\.h|把.*头文件.*拷到.*系统.*include
+forbid_1_reason:         禁止用"把头文件拷进系统 include"或全局软链绕过——掩盖了
+                        per-target 变量替换这个真因，且污染系统路径（G3 同名库
+                        隔离精神）
+forbid_1_consequence:   局部能编、其他目标/其他包行为被改，问题被推迟到运行期
+forbid_2_pattern:       in-source.*构建.*通过|srcdir.*builddir.*已通过.*因此无问题
+forbid_2_reason:         本模式在 in-source 构建下常因相对路径凑巧成立而不复现，
+                        不能据此判定无问题；conan/CI 走 VPATH 构建
+forbid_2_consequence:   本地 PASS、CI 或 conan 构建报 file not found
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+# ⚠️ 签名家族重叠（均为 header not found 类症状），但**根因不同**，非重复条目：
+#   E217 = CMake includedirs / test_package 安装路径（DESTINATION include）；
+#   E169 = OHOS 缺 IPC 头 argp.h（API 缺口）；
+#   本条 = automake per-target 变量**替换** AM_CPPFLAGS（变量语义），automake + VPATH 专属。
+similar_to:             E217（通用「头文件找不到」节点，CMake 语境；签名家族重叠、根因不同）、
+                        E169（argp.h 缺失，API 缺口；签名家族重叠、根因不同）、
+                        E346-draft-2301（X11 子库 pkg-config 桩，关键字重叠但对象不同）
+caused_by:
+conflicts_with:
+prerequisite_of:        DRAFT-10251-libnfc-tools-1.8.0-autotools-test-framework-guard（本条为其构建期子问题）
+
+# ═══ 元数据 ═══
+verification_cmd:       cd <cutter-build> && make V=1 2>&1 | head -5
+                        # 期望：编译命令含 -I<src>，无 'cut-module-impl.h file not found'
+doc_file:               knowledge/drafts/DRAFT-10251-libnfc-tools-1.8.0-automake-per-target-cppflags-empty-override.md
+last_updated:           2026-09-16
+source_event:           PR #10251 feat(libnfc-tools): 1.8.0 适配 HarmonyOS PC；
+                        Cutter 1.2.6 VPATH 交叉编译时 module/report 的
+                        xml_la_CPPFLAGS 空值致 cut-module-impl.h 找不到；
+                        命令行回填后通过，6 个上游用例真实执行
+authors:                SunShine_06
+source_pr:              10251
+source_commit:          2ce1a91cd6
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-16

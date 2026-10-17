@@ -1,0 +1,76 @@
+#====================================================================
+# Draft: Conan 的 CMakeToolchain 不写 CMAKE_SYSTEM_NAME，CMake 于是用 uname -s 的
+#        HarmonyOS 当系统名；CMake 只有 Platform/OHOS.cmake（include(Platform/Linux)）
+#        而没有 Platform/HarmonyOS.cmake → 平台语义整链不加载 →
+#        CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG 为空 → build-tree 可执行文件没有 RPATH，
+#        且 CMAKE_BUILD_RPATH 被静默忽略；项目 ctest 里凡是链接自身 .so 的用例一律
+#        "Error loading shared library"（并连带报一串误导性的 "symbol not found"）
+# 来源: libmongocrypt/1.20.1 适配（上游 8 条 ctest 中 3 条失败→修好后 8/8 通过）
+#====================================================================
+
+id:                     DRAFT-LIBMONGOCRYPT-1201-OHOS-CMAKE-BUILD-RPATH-MISSING
+trigger_tool:           cmake|ctest|ld|make|test
+phase:                  testing|linking|runtime
+error_signature:        Error loading shared library lib[a-zA-Z0-9_.-]+\.so(\.[0-9]+)?\)|Error relocating .*: [a-zA-Z_0-9]+: symbol not found|System is unknown to cmake
+
+severity:               2
+category:               cmake, ohos, testing, linking, platform
+match_keywords:         CMAKE_SYSTEM_NAME, CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG, CMAKE_BUILD_RPATH, RUNPATH, build tree, ctest, Error loading shared library, symbol not found, System is unknown to cmake, Platform/HarmonyOS, Platform/OHOS, uname, LD_LIBRARY_PATH, add_test
+
+title:                  CMakeToolchain 不写 CMAKE_SYSTEM_NAME 使 CMake 落到 uname 的 HarmonyOS（无对应 Platform 模块）→ 链接期 RPATH 能力为空，上游 ctest 中链接本包 .so 的用例全部以「Error loading shared library」失败（不是缺依赖，是搜索路径为空）
+
+root_cause:             ① conan 2.29.1 的 CMakeToolchain 生成的 conan_toolchain.cmake 里没有任何 CMAKE_SYSTEM_NAME 赋值（实测 grep 无输出，CMakeCache.txt 里也查不到该变量），
+                        ② CMake 于是按 uname -s 取系统名，真机返回 HarmonyOS，
+                        ③ CMake 的 Modules/Platform/ 只有 OHOS.cmake（全文 include(Platform/Linux)），没有 HarmonyOS.cmake → 平台模块不加载，只打印警告 "System is unknown to cmake, create: Platform/HarmonyOS"（退出码仍为 0），
+                        ④ 由 Platform/Linux.cmake 建立的语义因此全部为空，其中 Linux.cmake:2 的 CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG="-Wl,-rpath," 变空串，
+                        ⑤ CMake 发不出 -Wl,-rpath，build-tree 可执行文件的 DT_RPATH/DT_RUNPATH 为空（link.txt 里 -Wl,-rpath 出现 0 次），target 属性 BUILD_RPATH 与全局 CMAKE_BUILD_RPATH 同样被忽略（实测设置后 readelf 依旧无 RPATH/RUNPATH），
+                        ⑥ 于是链接了本包 SHARED 目标的上游测试/示例可执行文件，DT_NEEDED 只有裸文件名 libX.so，加载器在默认搜索路径里找不到位于构建树里的该文件，报 "Error loading shared library"；
+                        后续重定位再连带报一串 "symbol not found"（容易误判成「符号没导出」或「缺依赖」）。
+                        8 行 CMakeLists 的 A/B 最小复现见 .md 第「最小复现」节：唯一变量是 -DCMAKE_SYSTEM_NAME，A 失败、B 通过。
+affected_scope:         任何 CMake 项目同时满足：(a) 构建 SHARED 目标；(b) 用 add_test/ctest 跑链接了该 SHARED 的上游测试或示例。
+                        交付实例 libmongocrypt 1.20.1 的 mc-dec128 / mc-mlib.int128 / example-state-machine 三条 ctest 条目（两种语言、三种目标）。
+                        同一根因链在本机还顺带解释了 SONAME 缺失：补上 CMAKE_SYSTEM_NAME=OHOS 后 libmongocrypt.so 才带上 DT_SONAME=libmongocrypt.so.0（实测 readelf）。
+verification_cmd:       uname -s; grep -in system_name ~/.conan2/p/b/libmo*/b/build/Release/generators/conan_toolchain.cmake; B=$(ls -dt ~/.conan2/p/b/libmo*/b/build/Release | head -1); grep -c -- '-Wl,-rpath' "$B/CMakeFiles/example-state-machine.dir/link.txt"; llvm-readelf -d "$B/example-state-machine" | grep -cE 'rpath|runpath'
+
+rec_priority:           1
+rec_approach:           hand-cmake-the-spelling-it-has-platform-module-for
+rec_description:        在 generate() 里显式给出 CMake 认得的那个拼法：`tc.cache_variables["CMAKE_SYSTEM_NAME"] = "OHOS"`（走 Platform/OHOS.cmake → include(Platform/Linux)）。
+                        实测 A/B 复现：加上后 CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG 恢复 "-Wl,-rpath,"，link.txt 出现 1 次 -Wl,-rpath，ELF 带 RUNPATH=构建目录，ctest 1/1 通过。
+                        知情副作用：CMAKE_CROSSCOMPILING 由 FALSE 变 TRUE、UNIX 由未定义变 1，上游按这两个开关路由的分支会改变，必须重跑一遍确认 ctest 条目数没有静默减少
+                        （本包加该变量后仍是 8 条全注册全执行、100% tests passed out of 8）。
+rec_command:            grep -n 'CMAKE_SYSTEM_NAME' archives/l/libmongocrypt/1.20.1/conanfile.py
+rec_auto_fix:           false
+rec_impl:               conanfile.py generate() 的 tc.cache_variables["CMAKE_SYSTEM_NAME"]
+
+fallback_priority:      2
+fallback_approach:      give-ctest-the-build-tree-path-via-ld-library-path
+fallback_description:   不改系统名时的兜底（本包与 rec 同时保留，防不同 cmake 安装的平台模块差异）：在 build() 里用构建目录绝对路径显式提供搜索路径再跑 ctest：`self.run('LD_LIBRARY_PATH="<build/Release>" ctest --output-on-failure', cwd=self.build_folder, env="conanbuild")`。
+                        路径是 Python 侧拼出的字面量、不是 shell 变量引用，因此不触发 R33（L0h 只匹配 self.run 里的 ${CC}/${CFLAGS}/… 形式）；不改上游 CMakeLists、不写 patch，测试语义与上游完全一致。
+fallback_command:       grep -n "LD_LIBRARY_PATH=" archives/l/libmongocrypt/1.20.1/conanfile.py
+fallback_auto_fix:      false
+fallback_impl:          conanfile.py build() 的 self.run(ctest) 前缀
+
+forbid_1_pattern:       set\(CMAKE_BUILD_RPATH|-DCMAKE_BUILD_RPATH|CMAKE_INSTALL_RPATH.*build
+forbid_1_reason:        实测在 CMakeToolchain 里设 CMAKE_BUILD_RPATH=<构建目录> 完全无效（configure 通过、readelf 仍无 RPATH/RUNPATH）——机制层面 CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG 是空串，任何 RPATH 类变量都翻译不出链接参数。写它只会让配方多一条误导性的「已处理」痕迹。
+forbid_1_consequence:   表面上加了 RPATH 配置，ctest 依旧 3 条失败，排查时被"CMAKE_BUILD_RPATH 已经设了"带偏。
+forbid_2_pattern:       用「不跑这些用例 / ctest -E 排除 / 把上游测试改成静态链接」换 CI 绿
+forbid_2_reason:        这是本包构建产物与平台能力问题，不是用例本身有问题；排除等于少报上游测试数（rule4 判 FAIL），改成静态链接则改变了被测目标（SHARED 路径不再被覆盖）。
+forbid_2_consequence:   R51/rule4「上游有用例却 0 个没跑」直接不通过，且丢失 shared 构建的验证价值。
+
+principles:             real-evidence-over-assumption, upstream-tests-must-actually-run, minimal-recipe-diff
+
+causes:                 []
+caused_by:              []
+similar_to:             E088, E267
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               drafts/DRAFT-libmongocrypt-1.20.1-ohos-cmake-build-rpath-missing.md
+last_updated:           2026-09-19
+source_event:           libmongocrypt/1.20.1 真机 ctest：4/8 失败，其中 3 条为 Error loading shared library libmongocrypt.so
+
+# ═══ 知识协作 ═══
+draft:                  true
+contributor_id:         iKalous_OscarP
+authors:                iKalous_OscarP
+source_pr:              pending

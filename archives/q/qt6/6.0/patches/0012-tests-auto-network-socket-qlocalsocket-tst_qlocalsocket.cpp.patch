@@ -1,0 +1,258 @@
+diff --git a/tests/auto/network/socket/qlocalsocket/tst_qlocalsocket.cpp b/tests/auto/network/socket/qlocalsocket/tst_qlocalsocket.cpp
+index e481db6644..b05a0b2f74 100644
+--- a/tests/auto/network/socket/qlocalsocket/tst_qlocalsocket.cpp
++++ b/tests/auto/network/socket/qlocalsocket/tst_qlocalsocket.cpp
+@@ -33,13 +33,16 @@
+ #include <qtextstream.h>
+ #include <qdatastream.h>
+ #include <qelapsedtimer.h>
++#include <qfile.h>
+ #include <QtNetwork/qlocalsocket.h>
+ #include <QtNetwork/qlocalserver.h>
+ 
+ #ifdef Q_OS_UNIX
++#include <errno.h>
+ #include <sys/types.h>
+ #include <sys/socket.h>
+ #include <sys/un.h>
++#include <string.h>
+ #include <unistd.h> // for unlink()
+ #endif
+ 
+@@ -70,6 +73,7 @@ private slots:
+ 
+     void listenAndConnect_data();
+     void listenAndConnect();
++    void managedAbstractNameAllowsDifferentClientUid();
+ 
+     void connectWithOpen();
+     void connectWithOldOpen();
+@@ -299,7 +303,12 @@ void tst_QLocalSocket::listen()
+ 
+     // test listening
+     QCOMPARE(server.serverName(), name);
++#if defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
++    if (canListen)
++        QVERIFY(server.fullServerName().startsWith(QLatin1String("@qt6:")));
++#else
+     QVERIFY(server.fullServerName().contains(name));
++#endif
+     QCOMPARE(server.isListening(), canListen);
+     QCOMPARE(server.hasPendingConnections(), false);
+     QCOMPARE(server.nextPendingConnection(), (QLocalSocket*)0);
+@@ -350,6 +359,10 @@ void tst_QLocalSocket::listenAndConnect()
+     QCOMPARE(server.listen(name), canListen);
+     QTRY_COMPARE(server.serverError(),
+                  canListen ? QAbstractSocket::UnknownSocketError : QAbstractSocket::HostNotFoundError);
++#if defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
++    if (canListen)
++        QVERIFY(server.fullServerName().startsWith(QLatin1String("@qt6:")));
++#endif
+ 
+     // test creating connection(s)
+     QFETCH(int, connections);
+@@ -369,10 +382,14 @@ void tst_QLocalSocket::listenAndConnect()
+ #endif
+ 
+         QCOMPARE(socket->serverName(), name);
+-        QVERIFY(socket->fullServerName().contains(name));
+         sockets.append(socket);
+         if (canListen) {
+             QVERIFY(socket->waitForConnected());
++#if defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
++            QVERIFY(socket->fullServerName().startsWith(QLatin1String("@qt6:")));
++#else
++            QVERIFY(socket->fullServerName().contains(name));
++#endif
+             QVERIFY(socket->isValid());
+             QCOMPARE(socket->errorString(), QString("Unknown error"));
+             QCOMPARE(socket->error(), QLocalSocket::UnknownSocketError);
+@@ -380,6 +397,11 @@ void tst_QLocalSocket::listenAndConnect()
+             //QVERIFY(socket->socketDescriptor() != -1);
+             QCOMPARE(spyError.count(), 0);
+         } else {
++#if defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
++            QVERIFY(socket->fullServerName().isEmpty());
++#else
++            QVERIFY(socket->fullServerName().contains(name));
++#endif
+             QVERIFY(!socket->errorString().isEmpty());
+             QVERIFY(socket->error() != QLocalSocket::UnknownSocketError);
+             QCOMPARE(socket->state(), QLocalSocket::UnconnectedState);
+@@ -431,7 +453,11 @@ void tst_QLocalSocket::listenAndConnect()
+         // server checks post connection
+         if (canListen) {
+             QCOMPARE(server.serverName(), name);
++#if defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
++            QVERIFY(server.fullServerName().startsWith(QLatin1String("@qt6:")));
++#else
+             QVERIFY(server.fullServerName().contains(name));
++#endif
+             QVERIFY(server.nextPendingConnection() != (QLocalSocket*)0);
+             QTRY_COMPARE(server.hits.count(), i + 1);
+             QCOMPARE(spyNewConnection.count(), i + 1);
+@@ -455,6 +481,40 @@ void tst_QLocalSocket::listenAndConnect()
+     QCOMPARE(spyNewConnection.count(), (canListen ? connections : 0));
+ }
+ 
++void tst_QLocalSocket::managedAbstractNameAllowsDifferentClientUid()
++{
++#if defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
++    const qulonglong displayUid = static_cast<qulonglong>(::geteuid()) + 1;
++    const QByteArray hash = QByteArray::number(::getpid(), 16).rightJustified(64, '0');
++    const QByteArray key = QByteArray("qt6:") + QByteArray::number(displayUid) + ':' + hash;
++
++    sockaddr_un address {};
++    address.sun_family = AF_UNIX;
++    address.sun_path[0] = '\0';
++    ::memcpy(address.sun_path + 1, key.constData(), size_t(key.size()));
++    const socklen_t addressLength = socklen_t(offsetof(sockaddr_un, sun_path) + 1 + key.size());
++
++    const int listener = ::socket(AF_UNIX, SOCK_STREAM, 0);
++    QVERIFY2(listener != -1, "could not create native abstract AF_UNIX listener");
++    const int bindResult = ::bind(listener, reinterpret_cast<const sockaddr *>(&address), addressLength);
++    QVERIFY2(bindResult == 0, "could not bind native abstract AF_UNIX listener");
++    QVERIFY2(::listen(listener, 1) == 0, "could not listen on native abstract AF_UNIX socket");
++
++    QLocalSocket socket;
++    const QString displayName = QLatin1Char('@') + QString::fromLatin1(key);
++    socket.connectToServer(displayName);
++    QVERIFY2(socket.waitForConnected(3000), qPrintable(socket.errorString()));
++
++    const int accepted = ::accept(listener, nullptr, nullptr);
++    QVERIFY2(accepted != -1, "native listener did not receive the Qt client connection");
++    ::close(accepted);
++    socket.abort();
++    ::close(listener);
++#else
++    QSKIP("HarmonyOS managed abstract socket names are only enabled in this Qt build");
++#endif
++}
++
+ void tst_QLocalSocket::connectWithOpen()
+ {
+     LocalServer server;
+@@ -762,7 +822,8 @@ void tst_QLocalSocket::simpleCommandProtocol2()
+ void tst_QLocalSocket::fullPath()
+ {
+     QLocalServer server;
+-    QString name = "qlocalsocket_pathtest";
++    QString name = QStringLiteral("qlocalsocket_pathtest_%1")
++            .arg(QCoreApplication::applicationPid());
+ #if defined(QT_LOCALSOCKET_TCP)
+     QString path = "QLocalServer";
+ #elif defined(Q_OS_WIN)
+@@ -771,7 +832,51 @@ void tst_QLocalSocket::fullPath()
+     QString path = "/tmp";
+ #endif
+     QString serverName = path + '/' + name;
++#if defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
++    QLocalServer::removeServer(serverName);
++    if (!server.listen(serverName)) {
++        QVERIFY(server.serverName().isEmpty());
++        QVERIFY(server.fullServerName().isEmpty());
++        QVERIFY(!server.errorString().isEmpty());
++
++        const QByteArray encodedServerName = QFile::encodeName(serverName);
++        sockaddr_un address {};
++        QVERIFY(encodedServerName.size() + 1 <= int(sizeof(address.sun_path)));
++        address.sun_family = AF_UNIX;
++        ::memcpy(address.sun_path, encodedServerName.constData(), encodedServerName.size() + 1);
++
++        const int nativeSocket = ::socket(PF_UNIX, SOCK_STREAM, 0);
++        QVERIFY(nativeSocket != -1);
++        const int nativeBindResult = ::bind(nativeSocket, (sockaddr *)&address,
++                                            sizeof(sockaddr_un));
++        const int nativeBindError = errno;
++        ::close(nativeSocket);
++        if (nativeBindResult == 0) {
++            ::unlink(encodedServerName.constData());
++            QFAIL("QLocalServer rejected an absolute pathname while native AF_UNIX bind succeeded");
++        }
++
++        const bool platformRejectedPathname = nativeBindError == EACCES
++                || nativeBindError == EPERM || nativeBindError == EAFNOSUPPORT
++                || nativeBindError == EPROTONOSUPPORT || nativeBindError == EOPNOTSUPP
++                || nativeBindError == EROFS || nativeBindError == ENOTDIR
++                || nativeBindError == ENOENT;
++        QVERIFY2(platformRejectedPathname,
++                 qPrintable(QStringLiteral("Native AF_UNIX pathname bind failed unexpectedly with errno %1")
++                            .arg(nativeBindError)));
++        QAbstractSocket::SocketError expectedQtError = QAbstractSocket::UnknownSocketError;
++        if (nativeBindError == EACCES)
++            expectedQtError = QAbstractSocket::SocketAccessError;
++        else if (nativeBindError == EROFS || nativeBindError == ENOTDIR
++                 || nativeBindError == ENOENT)
++            expectedQtError = QAbstractSocket::HostNotFoundError;
++        QCOMPARE(server.serverError(), expectedQtError);
++        QSKIP(qPrintable(QStringLiteral("HarmonyOS rejected absolute pathname AF_UNIX bind (errno %1; Qt: %2)")
++                         .arg(nativeBindError).arg(server.errorString())));
++    }
++#else
+     QVERIFY2(server.listen(serverName), server.errorString().toLatin1().constData());
++#endif
+     QCOMPARE(server.serverName(), serverName);
+     QCOMPARE(server.fullServerName(), serverName);
+ 
+@@ -1069,7 +1174,13 @@ void tst_QLocalSocket::removeServer()
+     QVERIFY(! server2.listen("cleanuptest"));
+ #endif
+     QVERIFY(QLocalServer::removeServer("cleanuptest"));
++#if defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
++    QVERIFY(!server2.listen("cleanuptest"));
++    server.close();
+     QVERIFY(server2.listen("cleanuptest"));
++#else
++    QVERIFY(server2.listen("cleanuptest"));
++#endif
+ }
+ 
+ void tst_QLocalSocket::recycleServer()
+@@ -1286,7 +1397,7 @@ void tst_QLocalSocket::asyncDisconnectNotify()
+ 
+ void tst_QLocalSocket::verifySocketOptions_data()
+ {
+-#ifdef Q_OS_LINUX
++#if defined(Q_OS_LINUX) && !defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
+     QTest::addColumn<QString>("service");
+     QTest::addColumn<QLocalServer::SocketOption>("opts");
+     QTest::addColumn<QFile::Permissions>("perms");
+@@ -1306,13 +1417,27 @@ void tst_QLocalSocket::verifySocketOptions_data()
+         QFile::ExeGroup|QFile::WriteGroup|QFile::ReadGroup|
+         QFile::ExeOther|QFile::WriteOther|QFile::ReadOther;
+     QTest::newRow("all")   << "worldPerms" << QLocalServer::WorldAccessOption << p;
++#elif defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
++    QTest::addColumn<QString>("service");
++    QTest::addColumn<QLocalServer::SocketOption>("opts");
++    QTest::newRow("abstract-permission-option-rejected")
++            << "abstract-permission-option" << QLocalServer::UserAccessOption;
+ #endif
+ }
+ 
+ void tst_QLocalSocket::verifySocketOptions()
+ {
+     // These are only guaranteed to be useful on linux at this time
+-#ifdef Q_OS_LINUX
++#if defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
++   QFETCH(QString, service);
++   QFETCH(QLocalServer::SocketOption, opts);
++
++   QLocalServer server;
++   server.setSocketOptions(opts);
++   QVERIFY(!server.listen(service));
++   QCOMPARE(server.serverError(), QAbstractSocket::UnsupportedSocketOperationError);
++   QVERIFY(!server.errorString().isEmpty());
++#elif defined(Q_OS_LINUX)
+    QFETCH(QString, service);
+    QFETCH(QLocalServer::SocketOption, opts);
+    QFETCH(QFile::Permissions, perms);
+@@ -1410,7 +1535,9 @@ void tst_QLocalSocket::verifyListenWithDescriptor_data()
+     QTest::addColumn<bool>("abstract");
+     QTest::addColumn<bool>("bound");
+ 
++#if !defined(QT_BUILD_HARMONYOS_LOCAL_SOCKETS)
+     QTest::newRow("normal") << QDir::tempPath() + QLatin1String("/testsocket") << false << true;
++#endif
+ #ifdef Q_OS_LINUX
+     QTest::newRow("abstract") << QString::fromLatin1("abstractsocketname") << true << true;
+     QTest::newRow("abstractwithslash") << QString::fromLatin1("abstractsocketwitha/inthename") << true << true;

@@ -1,0 +1,41 @@
+#====================================================================
+# DRAFT-composefs-1.0.8-hmfs-security-xattr-skip — HMFS security.* xattr 不可读时跳过而非中止
+#====================================================================
+
+id:                     DRAFT-composefs-1.0.8-hmfs-security-xattr-skip
+trigger_tool:           composefs|mkcomposefs|lcfs-writer|getxattr|listxattr|build|tar|cp
+phase:                  runtime|build
+error_signature:        error accessing .*: Invalid argument|getxattr.*security\.hmmac|listxattr.*security\.|read_xattrs|xattr.*failed
+
+severity:               2
+category:               hmfs, xattr, security, platform, aarch64, ohos, filesystem
+match_keywords:         security.hmmac, security.selinux, getxattr, listxattr, EINVAL, EACCES, HMFS, xattr, read_xattrs, 目录扫描
+title:                  HMFS 目录 listxattr 暴露 security.hmmac/security.selinux 但非特权 getxattr 失败（EACCES/EINVAL/EPERM），逐 xattr 读拷贝的构建工具需跳过不可读的 security.* 条目而不是中止整个目录扫描
+
+root_cause:             HMFS 在 listxattr 中暴露内核托管的 security.hmmac（及 security.selinux）条目，但非特权用户 getxattr(security.hmmac) 失败（实测 EACCES/EINVAL 族）。composefs read_xattrs 对任意 getxattr 失败都整体 return -1，使 lcfs_build 对目录树扫描中止（mkcomposefs 报 "error accessing ...: Invalid argument"）。这些 security.* 是 HMFS 文件系统内部元数据，不携带可跨文件系统迁移的业务语义，无法读也不应写入镜像。
+affected_scope:         在 OHOS HMFS 上"listxattr 后逐个 getxattr 读拷贝全部属性"的工具：composefs（mkcomposefs/read_xattrs）、类似目录扫描器、备份/归档工具。
+verification_cmd:       python3 -c 'import os; os.listxattr(d); os.getxattr(d,"security.hmmac")'（返回 -1/EACCES）；补丁后 mkcomposefs 对含 security.* 的目录构建成功（check-units test_inline/test_objects OK）
+
+rec_priority:           1
+rec_approach:           skip-unreadable-security-xattrs
+rec_description:        在 read_xattrs 的 getxattr 失败分支中，对 security.* 前缀且 errno ∈ {EACCES, EINVAL, EPERM} 的条目 continue（跳过），而不是返回错误中止；其余属性仍按原逻辑读取。语义：内核托管的 security.* 不可读即不迁移，镜像不承载该条目（与 -Dskip-xattrs 对单条目的效果一致）。
+rec_command:            patch read_xattrs: if (str_has_prefix(it,"security.") && (errno==EACCES||errno==EINVAL||errno==EPERM)) continue; 然后重跑 mkcomposefs/check-units
+rec_auto_fix:           true
+rec_impl:               source-patch-with-validation
+
+fallback_priority:      2
+fallback_approach:      run-on-posix-fs
+fallback_description:   目标工具无法改语义时，在完整 POSIX xattr 挂载点（ext4/tmpfs）运行受影响入口；无可迁移挂载点时如实记录平台限制与恢复条件（同 DRAFT-tar-1.35-hmdfs-dir-xattr-einval 的处置）。
+fallback_command:       在 ext4/tmpfs 挂载点重建目录树后重跑
+fallback_auto_fix:      false
+fallback_impl:          document-with-recovery-condition
+
+forbid_1_pattern:       伪造通过|把 security.hmmac 的读取失败当作普通权限问题 chmod|整体丢弃所有 xattr（-Dskip-xattrs 全局开关）掩盖
+forbid_1_reason:        只应跳过不可读的 security.* 单条目；全局丢 xattr 会丢失 user.*/security.capability 等可迁移属性。
+forbid_1_consequence:   适配不完整；审计发现即返工。
+
+principles:             P020
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-tar-1.35-hmdfs-dir-xattr-einval
+conflicts_with:         []

@@ -1,0 +1,913 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d4970f0..aac64bb 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -125,8 +125,17 @@ elseif(UNIX)
+         endif()
+     endif()
+ 
++elseif(CMAKE_SYSTEM_NAME STREQUAL "OHOS" OR CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS")
++    # HarmonyOS (OHOS) backend — forward EGL calls to the system libEGL.so
++    # via dlopen.  No X11, no Wayland, no Vulkan.  Only pbuffer + ES context.
++    # Conan OHOS profile maps CMAKE_SYSTEM_NAME=HarmonyOS; accept both forms.
++    message(STATUS "EGL: OHOS backend — system libEGL forwarding")
++    set(EGL_PLATFORM_SOURCES
++        ${CMAKE_CURRENT_LIST_DIR}/src/egl_ohos.cpp)
++    set(EGL_BACKEND_SUFFIX "_GL_OHOS_System_EGL")
++
+ else()
+-    message(FATAL_ERROR "EGL: Unsupported platform. Supported: WIN32, UNIX")
++    message(FATAL_ERROR "EGL: Unsupported platform. Supported: WIN32, UNIX, OHOS")
+ endif()
+ 
+ set(EGL_SOURCES
+@@ -186,10 +195,17 @@ elseif(UNIX AND NOT GBM_PLATFORM)
+         target_compile_definitions(EGL PUBLIC EGL_LINUX_ENABLE_GLES)
+     endif()
+     target_include_directories(EGL PRIVATE ${X11_INCLUDE_DIR})
++elseif(CMAKE_SYSTEM_NAME STREQUAL "OHOS" OR CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS")
++    # OHOS backend links only libdl (egl_ohos.cpp dlopens libEGL.so at runtime).
++    # No X11/OpenGL/Vulkan/Wayland link-time dependency.
++    target_link_libraries(EGL PUBLIC ${CMAKE_DL_LIBS})
+ endif()
+ 
+ target_include_directories(EGL PUBLIC
+     ${CMAKE_CURRENT_LIST_DIR}/include)
+ target_compile_definitions(EGL PUBLIC KHRONOS_STATIC) # PUBLIC - make it go down to every target linking EGL
+ add_definitions(-DEGLAPI=)
+-add_subdirectory(examples)
++# OHOS has no native window system → upstream examples (X11/Wayland/Win) cannot build.
++if(NOT (CMAKE_SYSTEM_NAME STREQUAL "OHOS" OR CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS"))
++    add_subdirectory(examples)
++endif()
+diff --git a/include/EGL/eglctxinternals.h b/include/EGL/eglctxinternals.h
+index b8db4f1..1517e45 100644
+--- a/include/EGL/eglctxinternals.h
++++ b/include/EGL/eglctxinternals.h
+@@ -14,6 +14,23 @@ struct _EGLContextInternals
+     HGLRC context;
+ };
+ 
++#elif defined(__OHOS__)
++
++/*
++ * HarmonyOS (OHOS) backend — system libEGL forwarding (egl_ohos.cpp).
++ * No native window system; only pbuffer + ES context are real.
++ * Stores opaque pointers to the system EGLDisplay/EGLSurface/EGLContext.
++ */
++struct _EGLContextInternals
++{
++    void* display;   /* system EGLDisplay */
++    struct {
++        void* drawable;  /* system EGLSurface (pbuffer) */
++        void* config;    /* system EGLConfig  */
++    } surface;
++    void* context;  /* system EGLContext */
++};
++
+ #elif defined(WL_EGL_PLATFORM) || defined(USE_X11) || defined(__unix__)
+ 
+ /* X11/GLX (X11 backend and Wayland backend both use GLX context internals) */
+diff --git a/src/egl_internal.h b/src/egl_internal.h
+index 2c84b99..ca607d2 100644
+--- a/src/egl_internal.h
++++ b/src/egl_internal.h
+@@ -179,6 +179,51 @@ typedef struct _NativeLocalStorageContainer {
+ 
+ typedef GLXPbuffer NativePbufferType;
+ 
++#elif defined(__OHOS__)
++
++// HarmonyOS (OHOS) backend — system libEGL forwarding (egl_ohos.cpp).
++// OHOS has no native window system on this path; the backend delegates EGL
++// calls to the system libEGL.so via dlopen.  Only pbuffer + OpenGL ES context
++// are real; window/pixmap surfaces return EGL_BAD_MATCH/EGL_BAD_NATIVE_PIXMAP.
++// No X11, no Wayland, no Vulkan.
++//
++// The platform-agnostic core files (egl_sync.cpp etc.) and egl_common.h declare
++// GL sync fn-pointer typedefs using Khronos GL scalar types (GLenum/GLbitfield/
++// GLsizei/GLint/GLboolean).  Other backends pull these in via <GL/glx.h> or
++// <windows.h>; OHOS has no <GL/gl.h> on this path, so we typedef the minimal
++// set actually consumed by egl_common.h here with the ABI stable widths used
++// by Khronos OpenGL (OpenGL ES 2/3 shares the same widths).  No <GL/glx.h>.
++typedef unsigned int GLenum;
++typedef unsigned int GLbitfield;
++typedef int          GLint;
++typedef int          GLsizei;
++typedef unsigned char GLboolean;
++
++#define CONTEXT_ATTRIB_LIST_SIZE 11
++
++// OHOS has a single backend: forwarding to the system EGL.  The tag is kept
++// for symmetry with the other backends so core files can reference it.
++typedef enum {
++    EGL_BACKEND_OHOS = 0
++} NativeBackend;
++
++typedef struct _NativeSurfaceContainer {
++    void* sysSurface;   /* system EGLSurface (pbuffer) opaque pointer */
++    void* sysConfig;    /* system EGLConfig     opaque pointer */
++    NativeBackend backend;  /* always EGL_BACKEND_OHOS */
++} NativeSurfaceContainer;
++
++typedef struct _NativeContextContainer {
++    void* sysCtx;       /* system EGLContext    opaque pointer */
++    NativeBackend backend;  /* always EGL_BACKEND_OHOS */
++} NativeContextContainer;
++
++typedef struct _NativeLocalStorageContainer {
++    void* sysDisplay;   /* system EGLDisplay    opaque pointer (libEGL.so handle lives in egl_ohos.cpp) */
++} NativeLocalStorageContainer;
++
++typedef void* NativePbufferType;  /* opaque system EGLSurface */
++
+ #elif defined(__unix__)
+ 
+ // Generic Unix fallback (Linux+X11, FreeBSD, OpenBSD, etc.) — GLX backend (egl_x11_glx.cpp)
+@@ -219,7 +264,7 @@ typedef struct _NativeLocalStorageContainer {
+ typedef GLXPbuffer NativePbufferType;
+ 
+ #else
+-#error "Platform not recognized. Supported: _WIN32, WL_EGL_PLATFORM, USE_X11, __unix__"
++#error "Platform not recognized. Supported: _WIN32, WL_EGL_PLATFORM, USE_X11, __unix__, __OHOS__"
+ #endif
+ 
+ #include <EGL/egl.h>
+@@ -562,6 +607,20 @@ static inline EGLBoolean __matchPlatformDisplay(EGLenum platform, const void* na
+     return EGL_FALSE;
+ }
+ 
++#elif defined(__OHOS__)
++
++// OHOS has no native display token; always use EGL_DEFAULT_DISPLAY.
++static inline EGLNativeDisplayType __getDefaultNativeDisplay(const NativeLocalStorageContainer*)
++    { return EGL_DEFAULT_DISPLAY; }
++
++static inline EGLBoolean __matchPlatformDisplay(EGLenum platform, const void* native_display, EGLNativeDisplayType* out)
++{
++    // OHOS accepts only EGL_PLATFORM_DEVICE_EXT with no native display (default device).
++    if (platform == EGL_PLATFORM_DEVICE_EXT && !native_display)
++        { *out = EGL_DEFAULT_DISPLAY; return EGL_TRUE; }
++    return EGL_FALSE;
++}
++
+ #elif defined(USE_X11) || defined(__unix__)
+ 
+ static inline EGLNativeDisplayType __getDefaultNativeDisplay(const NativeLocalStorageContainer* c)
+diff --git a/src/egl_ohos.cpp b/src/egl_ohos.cpp
+new file mode 100644
+index 0000000..f8ecc79
+--- /dev/null
++++ b/src/egl_ohos.cpp
+@@ -0,0 +1,751 @@
++/**
++ * EGL HarmonyOS (OHOS) backend — system libEGL forwarding.
++ *
++ * The MIT License (MIT)
++ * Copyright (c) since 2014 Norbert Nopper
++ *
++ * OHOS backend implements only the __-prefixed platform hooks declared in
++ * egl_internal.h (consumed by the platform-agnostic core files egl_context.cpp,
++ * egl_surface.cpp, egl_globals.cpp, egl_api.cpp, egl_sync.cpp).  The _egl* API
++ * surface is owned by the core files; this backend MUST NOT redefine them.
++ *
++ * Strategy: dlopen("/system/lib64/libEGL.so") at __internalInit, dlsym the
++ * system EGL entry points, and forward every platform hook to the system EGL.
++ * Only pbuffer surface + OpenGL ES context are real; window/pixmap surfaces
++ * return EGL_BAD_MATCH / EGL_BAD_NATIVE_PIXMAP (no native window system).
++ * No X11, no Wayland, no Vulkan.
++ */
++
++#include "egl_common.h"
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++#include <EGL/eglctxinternals.h>   // EGLContextInternals (platform context internals)
++
++#include <dlfcn.h>
++#include <stdlib.h>
++#include <string.h>
++#include <stdio.h>
++
++// ── System EGL function pointer types ──────────────────────────────────────────
++// Opaque void* used for EGLDisplay/EGLConfig/EGLSurface/EGLContext to avoid
++// header collision between our EGL/egl.h and the system EGL symbols.
++typedef void*       (*Sys_eglGetDisplay)(EGLNativeDisplayType);
++typedef void*       (*Sys_eglGetPlatformDisplay)(EGLenum, void*, const EGLAttrib*);
++typedef EGLBoolean  (*Sys_eglInitialize)(void*, EGLint*, EGLint*);
++typedef EGLBoolean  (*Sys_eglTerminate)(void*);
++typedef EGLBoolean  (*Sys_eglChooseConfig)(void*, const EGLint*, void*, EGLint, EGLint*);
++typedef EGLBoolean  (*Sys_eglGetConfigs)(void*, void*, EGLint, EGLint*);
++typedef EGLBoolean  (*Sys_eglGetConfigAttrib)(void*, void*, EGLint, EGLint*);
++typedef EGLBoolean  (*Sys_eglBindAPI)(EGLenum);
++typedef EGLSurface  (*Sys_eglCreatePbufferSurface)(void*, void*, const EGLint*);
++typedef EGLBoolean  (*Sys_eglDestroySurface)(void*, EGLSurface);
++typedef EGLContext  (*Sys_eglCreateContext)(void*, EGLConfig, EGLContext, const EGLint*);
++typedef EGLBoolean  (*Sys_eglMakeCurrent)(void*, EGLSurface, EGLSurface, EGLContext);
++typedef EGLBoolean  (*Sys_eglDestroyContext)(void*, EGLContext);
++typedef EGLBoolean  (*Sys_eglSwapBuffers)(void*, EGLSurface);
++typedef EGLBoolean  (*Sys_eglSwapInterval)(void*, EGLint);
++typedef EGLBoolean  (*Sys_eglBindTexImage)(void*, EGLSurface, EGLint);
++typedef EGLBoolean  (*Sys_eglReleaseTexImage)(void*, EGLSurface, EGLint);
++typedef EGLBoolean  (*Sys_eglSurfaceAttrib)(void*, EGLSurface, EGLint, EGLint);
++typedef void*       (*Sys_eglGetProcAddress)(const char*);
++typedef const char* (*Sys_eglQueryString)(void*, EGLint);
++typedef EGLint      (*Sys_eglGetError)(void);
++
++// ── Globals ───────────────────────────────────────────────────────────────────
++
++static void* s_libEGL = nullptr;  // RTLD_LAZY|RTLD_LOCAL handle to /system/lib64/libEGL.so
++
++static Sys_eglGetDisplay            s_eglGetDisplay            = nullptr;
++static Sys_eglGetPlatformDisplay    s_eglGetPlatformDisplay    = nullptr;
++static Sys_eglInitialize            s_eglInitialize            = nullptr;
++static Sys_eglTerminate             s_eglTerminate             = nullptr;
++static Sys_eglChooseConfig          s_eglChooseConfig          = nullptr;
++static Sys_eglGetConfigs            s_eglGetConfigs            = nullptr;
++static Sys_eglGetConfigAttrib       s_eglGetConfigAttrib       = nullptr;
++static Sys_eglBindAPI               s_eglBindAPI               = nullptr;
++static Sys_eglCreatePbufferSurface  s_eglCreatePbufferSurface  = nullptr;
++static Sys_eglDestroySurface        s_eglDestroySurface        = nullptr;
++static Sys_eglCreateContext         s_eglCreateContext         = nullptr;
++static Sys_eglMakeCurrent           s_eglMakeCurrent           = nullptr;
++static Sys_eglDestroyContext        s_eglDestroyContext        = nullptr;
++static Sys_eglSwapBuffers           s_eglSwapBuffers           = nullptr;
++static Sys_eglSwapInterval          s_eglSwapInterval          = nullptr;
++static Sys_eglBindTexImage          s_eglBindTexImage          = nullptr;
++static Sys_eglReleaseTexImage       s_eglReleaseTexImage       = nullptr;
++static Sys_eglGetProcAddress        s_eglGetProcAddress        = nullptr;
++static Sys_eglQueryString           s_eglQueryString           = nullptr;
++static Sys_eglGetError              s_eglGetError              = nullptr;
++
++// GL sync pointers (declared extern in egl_common.h, used by egl_sync.cpp).
++// OHOS loads them lazily through __getProcAddress (system GLES via system EGL).
++__PFN_glFinish         glFinish_PTR         = nullptr;
++__PFN_glFenceSync      glFenceSync_PTR      = nullptr;
++__PFN_glDeleteSync    glDeleteSync_PTR     = nullptr;
++__PFN_glClientWaitSync glClientWaitSync_PTR = nullptr;
++__PFN_glWaitSync       glWaitSync_PTR       = nullptr;
++__PFN_glGetSynciv      glGetSynciv_PTR     = nullptr;
++
++// ── Helpers ───────────────────────────────────────────────────────────────────
++
++template <typename T>
++static void loadSym(T& dst, const char* name)
++{
++    dst = reinterpret_cast<T>(dlsym(s_libEGL, name));
++}
++
++// Build a minimal RGBA888 config attrib list for fallback enumeration.
++static const EGLint kDefaultConfigAttribs[] = {
++    EGL_SURFACE_TYPE,    EGL_PBUFFER_BIT,
++    EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
++    EGL_RED_SIZE,        8,
++    EGL_GREEN_SIZE,      8,
++    EGL_BLUE_SIZE,       8,
++    EGL_ALPHA_SIZE,      8,
++    EGL_NONE
++};
++
++// ── Platform lifecycle ─────────────────────────────────────────────────────────
++
++EGLBoolean __internalInit(NativeLocalStorageContainer* c, EGLint* GL_max, EGLint* ES_max)
++{
++    if (!c)
++        return EGL_FALSE;
++
++    // Advertise desktop GL as unsupported; ES is the only client API on OHOS.
++    if (GL_max) { GL_max[0] = 0; GL_max[1] = 0; }
++    if (ES_max) { ES_max[0] = 2; ES_max[1] = 0; }
++
++    if (s_libEGL && c->sysDisplay)
++        return EGL_TRUE;  // already initialised
++
++    // OHOS ships libEGL.so in /system/lib64; also try generic SONAME fallbacks.
++    s_libEGL = dlopen("/system/lib64/libEGL.so", RTLD_LAZY | RTLD_LOCAL);
++    if (!s_libEGL) s_libEGL = dlopen("libEGL.so",   RTLD_LAZY | RTLD_LOCAL);
++    if (!s_libEGL)
++        return EGL_FALSE;
++
++    loadSym(s_eglGetDisplay,            "eglGetDisplay");
++    loadSym(s_eglGetPlatformDisplay,    "eglGetPlatformDisplay");
++    loadSym(s_eglInitialize,            "eglInitialize");
++    loadSym(s_eglTerminate,             "eglTerminate");
++    loadSym(s_eglChooseConfig,          "eglChooseConfig");
++    loadSym(s_eglGetConfigs,            "eglGetConfigs");
++    loadSym(s_eglGetConfigAttrib,       "eglGetConfigAttrib");
++    loadSym(s_eglBindAPI,               "eglBindAPI");
++    loadSym(s_eglCreatePbufferSurface,  "eglCreatePbufferSurface");
++    loadSym(s_eglDestroySurface,        "eglDestroySurface");
++    loadSym(s_eglCreateContext,         "eglCreateContext");
++    loadSym(s_eglMakeCurrent,           "eglMakeCurrent");
++    loadSym(s_eglDestroyContext,        "eglDestroyContext");
++    loadSym(s_eglSwapBuffers,           "eglSwapBuffers");
++    loadSym(s_eglSwapInterval,          "eglSwapInterval");
++    loadSym(s_eglBindTexImage,          "eglBindTexImage");
++    loadSym(s_eglReleaseTexImage,       "eglReleaseTexImage");
++    loadSym(s_eglGetProcAddress,        "eglGetProcAddress");
++    loadSym(s_eglQueryString,           "eglQueryString");
++    loadSym(s_eglGetError,              "eglGetError");
++
++    if (!s_eglGetDisplay || !s_eglInitialize || !s_eglChooseConfig ||
++        !s_eglGetConfigs || !s_eglGetConfigAttrib || !s_eglSwapInterval ||
++        !s_eglCreateContext || !s_eglMakeCurrent || !s_eglCreatePbufferSurface ||
++        !s_eglDestroySurface || !s_eglDestroyContext || !s_eglSwapBuffers ||
++        !s_eglTerminate)
++    {
++        dlclose(s_libEGL); s_libEGL = nullptr;
++        return EGL_FALSE;
++    }
++
++    // Open the default system EGLDisplay
++    c->sysDisplay = s_eglGetDisplay(EGL_DEFAULT_DISPLAY);
++    if (!c->sysDisplay)
++    {
++        dlclose(s_libEGL); s_libEGL = nullptr;
++        return EGL_FALSE;
++    }
++
++    EGLint egl_major = 0, egl_minor = 0;
++    if (!s_eglInitialize(c->sysDisplay, &egl_major, &egl_minor))
++    {
++        c->sysDisplay = nullptr;
++        dlclose(s_libEGL); s_libEGL = nullptr;
++        return EGL_FALSE;
++    }
++    // eglInitialize returns the EGL API version (e.g. 1.4), NOT the OpenGL ES
++    // client API version.  Upstream egl_context.cpp caps the user's requested
++    // EGL_CONTEXT_MAJOR_VERSION against g_ES_max_supported_version, so probe the
++    // highest ES context major the system EGL can actually create (try 3→2→1).
++    if (ES_max)
++    {
++        EGLint esMajor = 0;
++        const EGLint probeAttribs[] = {
++            EGL_SURFACE_TYPE,    EGL_PBUFFER_BIT,
++            EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
++            EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8,
++            EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_NONE
++        };
++        EGLConfig probeCfg = nullptr;
++        EGLint got = 0;
++        if (s_eglChooseConfig(c->sysDisplay, probeAttribs, &probeCfg, 1, &got) && got > 0 && probeCfg)
++        {
++            for (EGLint tryMajor = 3; tryMajor >= 1; --tryMajor)
++            {
++                if (s_eglBindAPI) s_eglBindAPI(EGL_OPENGL_ES_API);
++                const EGLint ctxAttribs[] = { EGL_CONTEXT_MAJOR_VERSION, tryMajor,
++                                               EGL_CONTEXT_MINOR_VERSION, 0, EGL_NONE };
++                EGLContext probeCtx = s_eglCreateContext(c->sysDisplay, probeCfg, nullptr, ctxAttribs);
++                if (probeCtx)
++                {
++                    esMajor = tryMajor;
++                    s_eglDestroyContext(c->sysDisplay, probeCtx);
++                    break;
++                }
++            }
++        }
++        ES_max[0] = esMajor > 0 ? esMajor : 2;  // safe fallback if probe failed
++        ES_max[1] = 0;
++    }
++
++    // GL sync pointers are EGL/GLES extension entry points; resolve through the
++    // system eglGetProcAddress so egl_sync.cpp can fence ES contexts.
++    if (s_eglGetProcAddress)
++    {
++        glFinish_PTR         = reinterpret_cast<__PFN_glFinish>         (s_eglGetProcAddress("glFinish"));
++        glFenceSync_PTR      = reinterpret_cast<__PFN_glFenceSync>      (s_eglGetProcAddress("glFenceSync"));
++        glDeleteSync_PTR     = reinterpret_cast<__PFN_glDeleteSync>     (s_eglGetProcAddress("glDeleteSync"));
++        glClientWaitSync_PTR = reinterpret_cast<__PFN_glClientWaitSync> (s_eglGetProcAddress("glClientWaitSync"));
++        glWaitSync_PTR       = reinterpret_cast<__PFN_glWaitSync>       (s_eglGetProcAddress("glWaitSync"));
++        glGetSynciv_PTR      = reinterpret_cast<__PFN_glGetSynciv>      (s_eglGetProcAddress("glGetSynciv"));
++    }
++
++    return EGL_TRUE;
++}
++
++EGLBoolean __internalTerminate(NativeLocalStorageContainer* c)
++{
++    if (!c)
++        return EGL_FALSE;
++
++    if (c->sysDisplay && s_eglTerminate)
++        s_eglTerminate(c->sysDisplay);
++    c->sysDisplay = nullptr;
++
++    glFinish_PTR         = nullptr;
++    glFenceSync_PTR      = nullptr;
++    glDeleteSync_PTR     = nullptr;
++    glClientWaitSync_PTR = nullptr;
++    glWaitSync_PTR       = nullptr;
++    glGetSynciv_PTR      = nullptr;
++
++    if (s_libEGL) { dlclose(s_libEGL); s_libEGL = nullptr; }
++    return EGL_TRUE;
++}
++
++// ── Display initialisation: enumerate system configs → EGL configs ───────────
++
++EGLBoolean __initialize(EGLDisplayImpl* walkerDpy,
++                         const NativeLocalStorageContainer* nativeLocalStorageContainer,
++                         EGLint* error)
++{
++    if (!walkerDpy || !nativeLocalStorageContainer || !error)
++        return EGL_FALSE;
++
++    void* sysDpy = nativeLocalStorageContainer->sysDisplay;
++    if (!sysDpy)
++    {
++        *error = EGL_NOT_INITIALIZED;
++        return EGL_FALSE;
++    }
++
++    walkerDpy->display_id = reinterpret_cast<EGLNativeDisplayType>(sysDpy);
++    walkerDpy->srgbFramebufferSupported = EGL_FALSE;
++    walkerDpy->supportedHDRColorspaces = 0;  // OHOS path has no HDR colorspace support
++
++    // Enumerate all system configs that accept the minimal pbuffer + ES2 profile.
++    EGLint total = 0;
++    if (!s_eglGetConfigs(sysDpy, nullptr, 0, &total) || total <= 0)
++    {
++        // Some drivers reject null configs; retry via eglChooseConfig with a minimal list.
++        total = 0;
++        if (!s_eglChooseConfig(sysDpy, kDefaultConfigAttribs, nullptr, 0, &total))
++        {
++            *error = EGL_NOT_INITIALIZED;
++            return EGL_FALSE;
++        }
++    }
++    if (total <= 0)
++    {
++        *error = EGL_NOT_INITIALIZED;
++        return EGL_FALSE;
++    }
++
++    void** sysConfigs = reinterpret_cast<void**>(calloc((size_t)total, sizeof(void*)));
++    if (!sysConfigs)
++    {
++        *error = EGL_NOT_INITIALIZED;
++        return EGL_FALSE;
++    }
++
++    EGLint got = 0;
++    EGLBoolean ok = s_eglGetConfigs(sysDpy, reinterpret_cast<EGLConfig*>(sysConfigs), total, &got);
++    if (!ok || got <= 0)
++    {
++        got = 0;
++        ok = s_eglChooseConfig(sysDpy, kDefaultConfigAttribs,
++                               reinterpret_cast<EGLConfig*>(sysConfigs), total, &got);
++    }
++    if (!ok || got <= 0)
++    {
++        free(sysConfigs);
++        *error = EGL_NOT_INITIALIZED;
++        return EGL_FALSE;
++    }
++
++    EGLConfigImpl* lastConfig = nullptr;
++    for (EGLint i = 0; i < got; ++i)
++    {
++        EGLConfigImpl* newConfig = reinterpret_cast<EGLConfigImpl*>(malloc(sizeof(EGLConfigImpl)));
++        if (!newConfig) { free(sysConfigs); *error = EGL_NOT_INITIALIZED; return EGL_FALSE; }
++        _eglInternalSetDefaultConfig(newConfig);
++        newConfig->next = nullptr;
++        if (lastConfig) lastConfig->next = newConfig;
++        else            walkerDpy->rootConfig = newConfig;
++        lastConfig = newConfig;
++
++        // Surface type
++        EGLint surf = 0;
++        s_eglGetConfigAttrib(sysDpy, sysConfigs[i], EGL_SURFACE_TYPE, &surf);
++        newConfig->drawToWindow  = (surf & EGL_WINDOW_BIT)  ? EGL_TRUE : EGL_FALSE;
++        newConfig->drawToPixmap  = (surf & EGL_PIXMAP_BIT)  ? EGL_TRUE : EGL_FALSE;
++        newConfig->drawToPBuffer = (surf & EGL_PBUFFER_BIT) ? EGL_TRUE : EGL_FALSE;
++        newConfig->surfaceType   = surf;
++
++        // Renderable type
++        EGLint rt = 0;
++        s_eglGetConfigAttrib(sysDpy, sysConfigs[i], EGL_RENDERABLE_TYPE, &rt);
++        newConfig->renderableType = rt;
++        newConfig->conformant     = rt;
++
++        // Color sizes
++        s_eglGetConfigAttrib(sysDpy, sysConfigs[i], EGL_RED_SIZE,   &newConfig->redSize);
++        s_eglGetConfigAttrib(sysDpy, sysConfigs[i], EGL_GREEN_SIZE, &newConfig->greenSize);
++        s_eglGetConfigAttrib(sysDpy, sysConfigs[i], EGL_BLUE_SIZE,  &newConfig->blueSize);
++        s_eglGetConfigAttrib(sysDpy, sysConfigs[i], EGL_ALPHA_SIZE, &newConfig->alphaSize);
++        newConfig->bufferSize = newConfig->redSize + newConfig->greenSize
++                              + newConfig->blueSize + newConfig->alphaSize;
++        s_eglGetConfigAttrib(sysDpy, sysConfigs[i], EGL_DEPTH_SIZE,   &newConfig->depthSize);
++        s_eglGetConfigAttrib(sysDpy, sysConfigs[i], EGL_STENCIL_SIZE, &newConfig->stencilSize);
++
++        newConfig->colorBufferType = EGL_RGB_BUFFER;
++
++        // Config id
++        s_eglGetConfigAttrib(sysDpy, sysConfigs[i], EGL_CONFIG_ID, &newConfig->configId);
++
++        // Caveat
++        EGLint caveat = 0;
++        s_eglGetConfigAttrib(sysDpy, sysConfigs[i], EGL_CONFIG_CAVEAT, &caveat);
++        newConfig->configCaveat = caveat;
++
++        // Multisample
++        s_eglGetConfigAttrib(sysDpy, sysConfigs[i], EGL_SAMPLE_BUFFERS, &newConfig->sampleBuffers);
++        s_eglGetConfigAttrib(sysDpy, sysConfigs[i], EGL_SAMPLES,        &newConfig->samples);
++
++        // Max pbuffer dims
++        s_eglGetConfigAttrib(sysDpy, sysConfigs[i], EGL_MAX_PBUFFER_WIDTH,  &newConfig->maxPBufferWidth);
++        s_eglGetConfigAttrib(sysDpy, sysConfigs[i], EGL_MAX_PBUFFER_HEIGHT, &newConfig->maxPBufferHeight);
++        s_eglGetConfigAttrib(sysDpy, sysConfigs[i], EGL_MAX_PBUFFER_PIXELS, &newConfig->maxPBufferPixels);
++
++        // Swap interval range (system EGL has no direct query; use sensible defaults)
++        newConfig->minSwapInterval = 0;
++        newConfig->maxSwapInterval = 1;
++
++        newConfig->nativeRenderable = EGL_FALSE;  // no native rendering API on this path
++        newConfig->nativeVisualId   = 0;
++        newConfig->nativeVisualType = EGL_NONE;
++        newConfig->transparentType  = EGL_NONE;
++        newConfig->level            = 0;
++        newConfig->matchNativePixmap = EGL_NONE;
++
++        // Bind-to-texture support flag from system EGL
++        EGLint bindTexRGB = 0, bindTexRGBA = 0;
++        s_eglGetConfigAttrib(sysDpy, sysConfigs[i], EGL_BIND_TO_TEXTURE_RGB,  &bindTexRGB);
++        s_eglGetConfigAttrib(sysDpy, sysConfigs[i], EGL_BIND_TO_TEXTURE_RGBA, &bindTexRGBA);
++        newConfig->bindToTextureRGB  = bindTexRGB;
++        newConfig->bindToTextureRGBA = bindTexRGBA;
++
++        // Keep the system EGLConfig pointer inside the config via configId relookup is fragile;
++        // surface creation relooks up by configId below.  (config stores nothing extra.)
++    }
++
++    free(sysConfigs);
++    return EGL_TRUE;
++}
++
++// ── Context ───────────────────────────────────────────────────────────────────
++
++EGLBoolean __deleteContext(const EGLDisplayImpl* walkerDpy, const NativeContextContainer* nativeContextContainer)
++{
++    if (!walkerDpy || !nativeContextContainer)
++        return EGL_FALSE;
++
++    void* sysDpy = reinterpret_cast<void*>(walkerDpy->display_id);
++    if (nativeContextContainer->sysCtx && s_eglDestroyContext)
++        s_eglDestroyContext(sysDpy, (EGLContext)nativeContextContainer->sysCtx);
++    return EGL_TRUE;
++}
++
++EGLBoolean __processAttribList(EGLenum api, EGLint* target_attrib_list, const EGLint* attrib_list, EGLint* error)
++{
++    if (!target_attrib_list || !attrib_list || !error)
++        return EGL_FALSE;
++
++    (void)api;  // OHOS only supports ES; GL profile tokens are rejected below.
++
++    // Forward the user's attrib list verbatim up to EGL_NONE into the system
++    // eglCreateContext.  We do NOT re-pack defaults — the caller (egl_context.cpp)
++    // already emits EGL_CONTEXT_MAJOR_VERSION when requested.  Trailing slots
++    // past EGL_NONE must stay zero so the system sees a clean terminator.
++    memset(target_attrib_list, 0, CONTEXT_ATTRIB_LIST_SIZE * sizeof(EGLint));
++
++    EGLint dst = 0;
++    EGLint src = 0;
++    while (attrib_list[src] != EGL_NONE)
++    {
++        if (dst >= CONTEXT_ATTRIB_LIST_SIZE - 1)
++        { *error = EGL_BAD_ATTRIBUTE; return EGL_FALSE; }  // overflow guard
++
++        EGLint token = attrib_list[src];
++        EGLint value = attrib_list[src + 1];
++
++        // GL-only profile/flag tokens have no ES equivalent → reject explicitly.
++        switch (token)
++        {
++            case EGL_CONTEXT_OPENGL_PROFILE_MASK:
++            case EGL_CONTEXT_OPENGL_DEBUG:
++            case EGL_CONTEXT_OPENGL_FORWARD_COMPATIBLE:
++            case EGL_CONTEXT_OPENGL_ROBUST_ACCESS:
++            case EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY:
++                *error = EGL_BAD_ATTRIBUTE;
++                return EGL_FALSE;
++            case EGL_CONTEXT_MAJOR_VERSION:
++                if (value < 1) { *error = EGL_BAD_ATTRIBUTE; return EGL_FALSE; }
++                break;
++            case EGL_CONTEXT_MINOR_VERSION:
++                if (value < 0) { *error = EGL_BAD_ATTRIBUTE; return EGL_FALSE; }
++                break;
++            default:
++                break;  // accept other EGL 1.5 context attribs verbatim
++        }
++
++        target_attrib_list[dst++] = token;
++        target_attrib_list[dst++] = value;
++        src += 2;
++    }
++    target_attrib_list[dst] = EGL_NONE;  // clean terminator; rest stays zero
++    return EGL_TRUE;
++}
++
++EGLBoolean __createContext(NativeContextContainer* nativeContextContainer,
++                           const EGLDisplayImpl* walkerDpy,
++                           const NativeSurfaceContainer* nativeSurfaceContainer,
++                           const NativeContextContainer* sharedNativeContextContainer,
++                           const EGLint* attribList)
++{
++    if (!walkerDpy || !nativeContextContainer || !nativeSurfaceContainer)
++        return EGL_FALSE;
++
++    void* sysDpy  = reinterpret_cast<void*>(walkerDpy->display_id);
++    void* sysConf = nativeSurfaceContainer->sysConfig;
++
++    // When called without a bound surface (e.g. shared-context creation) the
++    // surface container carries no system config handle.  Relook up the system
++    // EGLConfig by configId from the walkerConfig passed by egl_context.cpp.
++    if (!sysConf)
++    {
++        // egl_context.cpp hands walkerConfig through walkerDpy->rootConfig chain;
++        // we re-resolve via EGL_CONFIG_ID, which is stable across EGL calls.
++        EGLint targetId = 0;
++        for (EGLConfigImpl* c = walkerDpy->rootConfig; c; c = c->next)
++        {
++            if (c->drawToPBuffer) { targetId = c->configId; break; }
++        }
++        if (targetId == 0)
++            return EGL_FALSE;
++
++        const EGLint idQuery[] = { EGL_CONFIG_ID, targetId, EGL_NONE };
++        EGLint got = 0;
++        if (!s_eglChooseConfig(sysDpy, idQuery, reinterpret_cast<EGLConfig*>(&sysConf), 1, &got)
++            || got <= 0 || !sysConf)
++            return EGL_FALSE;
++    }
++
++    // ES is the only client API on OHOS → always bind ES before creating context.
++    if (s_eglBindAPI) s_eglBindAPI(EGL_OPENGL_ES_API);
++
++    EGLContext shareCtx = sharedNativeContextContainer
++        ? (EGLContext)sharedNativeContextContainer->sysCtx : nullptr;
++
++    EGLContext ctx = s_eglCreateContext(sysDpy, (EGLConfig)sysConf, shareCtx, attribList);
++    if (!ctx)
++        return EGL_FALSE;
++
++    nativeContextContainer->backend = EGL_BACKEND_OHOS;
++    nativeContextContainer->sysCtx  = reinterpret_cast<void*>(ctx);
++    return EGL_TRUE;
++}
++
++EGLBoolean __makeCurrent(const EGLDisplayImpl* walkerDpy,
++                         const NativeSurfaceContainer* nativeSurfaceContainer,
++                         const NativeContextContainer* nativeContextContainer)
++{
++    if (!walkerDpy)
++        return EGL_FALSE;
++
++    void* sysDpy = reinterpret_cast<void*>(walkerDpy->display_id);
++
++    if (!nativeContextContainer && !nativeSurfaceContainer)
++        return s_eglMakeCurrent(sysDpy, nullptr, nullptr, nullptr);
++
++    if (!nativeContextContainer || !nativeSurfaceContainer)
++        return EGL_FALSE;  // both must be present (or both null) per EGL spec
++
++    return s_eglMakeCurrent(sysDpy,
++                            (EGLSurface)nativeSurfaceContainer->sysSurface,
++                            (EGLSurface)nativeSurfaceContainer->sysSurface,
++                            (EGLContext)nativeContextContainer->sysCtx);
++}
++
++// ── Surfaces ──────────────────────────────────────────────────────────────────
++
++EGLBoolean __createWindowSurface(EGLSurfaceImpl* newSurface,
++                                 EGLNativeWindowType win,
++                                 const EGLint* attrib_list,
++                                 const EGLDisplayImpl* walkerDpy,
++                                 const EGLConfigImpl* walkerConfig,
++                                 EGLint* error)
++{
++    // OHOS backend has no native window system → real surface is impossible.
++    (void)newSurface; (void)win; (void)attrib_list; (void)walkerDpy; (void)walkerConfig;
++    if (error) *error = EGL_BAD_MATCH;
++    return EGL_FALSE;
++}
++
++EGLBoolean __createPbufferSurface(EGLSurfaceImpl* newSurface,
++                                   const EGLint* attrib_list,
++                                   const EGLDisplayImpl* walkerDpy,
++                                   const EGLConfigImpl* walkerConfig,
++                                   EGLint* error)
++{
++    if (!newSurface || !walkerDpy || !walkerConfig || !error)
++        return EGL_FALSE;
++
++    void* sysDpy = reinterpret_cast<void*>(walkerDpy->display_id);
++
++    // Relook up the system EGLConfig by configId (EGL_CONFIG_ID is stable across calls).
++    EGLint targetId = walkerConfig->configId;
++    void* sysConf = nullptr;
++    {
++        EGLint n = 0;
++        const EGLint idQuery[] = { EGL_CONFIG_ID, targetId, EGL_NONE };
++        if (!s_eglChooseConfig(sysDpy, idQuery, reinterpret_cast<EGLConfig*>(&sysConf), 1, &n) || n <= 0)
++        {
++            // Fallback: scan walkerDpy configs by configId pointer equality is not available,
++            // surface creation requires a system config handle.
++            *error = EGL_BAD_CONFIG;
++            return EGL_FALSE;
++        }
++    }
++
++    // Parse EGL pbuffer attribs (width/height + colorspace/texture).
++    EGLint width = 0, height = 0;
++    EGLBoolean largestPbuf = EGL_FALSE;
++    EGLBoolean mipmapTex   = EGL_FALSE;
++    EGLint texFormat = EGL_NO_TEXTURE;
++    EGLint texTarget = EGL_NO_TEXTURE;
++    EGLint pbufColorspace = EGL_GL_COLORSPACE_LINEAR;
++
++    if (attrib_list)
++    {
++        EGLint i = 0;
++        while (attrib_list[i] != EGL_NONE)
++        {
++            EGLint value = attrib_list[i + 1];
++            switch (attrib_list[i])
++            {
++                case EGL_WIDTH:             width  = value; break;
++                case EGL_HEIGHT:            height = value; break;
++                case EGL_LARGEST_PBUFFER:   largestPbuf = (EGLBoolean)value; break;
++                case EGL_MIPMAP_TEXTURE:    mipmapTex   = (EGLBoolean)value; break;
++                case EGL_GL_COLORSPACE:
++                    if (value == EGL_GL_COLORSPACE_LINEAR || value == EGL_GL_COLORSPACE_SRGB)
++                        pbufColorspace = value;
++                    else { *error = EGL_BAD_ATTRIBUTE; return EGL_FALSE; }
++                    break;
++                case EGL_TEXTURE_FORMAT:
++                    if (value != EGL_NO_TEXTURE && value != EGL_TEXTURE_RGB && value != EGL_TEXTURE_RGBA)
++                    { *error = EGL_BAD_ATTRIBUTE; return EGL_FALSE; }
++                    texFormat = value;
++                    break;
++                case EGL_TEXTURE_TARGET:
++                    if (value != EGL_NO_TEXTURE && value != EGL_TEXTURE_2D)
++                    { *error = EGL_BAD_ATTRIBUTE; return EGL_FALSE; }
++                    texTarget = value;
++                    break;
++                case EGL_VG_ALPHA_FORMAT:
++                case EGL_VG_COLORSPACE:
++                    *error = EGL_BAD_MATCH;
++                    return EGL_FALSE;
++                default:
++                    *error = EGL_BAD_ATTRIBUTE;
++                    return EGL_FALSE;
++            }
++            i += 2;
++        }
++    }
++
++    const EGLint pbufAttribs[] = {
++        EGL_WIDTH,            width,
++        EGL_HEIGHT,           height,
++        EGL_LARGEST_PBUFFER,  largestPbuf ? 1 : 0,   // avoid EGLBoolean→EGLint narrowing in init list
++        EGL_GL_COLORSPACE,    pbufColorspace,
++        EGL_TEXTURE_FORMAT,   texFormat,
++        EGL_TEXTURE_TARGET,   texTarget,
++        EGL_MIPMAP_TEXTURE,   mipmapTex ? 1 : 0,      // same narrowing fix
++        EGL_NONE
++    };
++
++    EGLSurface surf = s_eglCreatePbufferSurface(sysDpy, (EGLConfig)sysConf, pbufAttribs);
++    if (!surf)
++    {
++        *error = EGL_BAD_ALLOC;
++        return EGL_FALSE;
++    }
++
++    newSurface->drawToWindow  = EGL_FALSE;
++    newSurface->drawToPixmap  = EGL_FALSE;
++    newSurface->drawToPBuffer = EGL_TRUE;
++    newSurface->doubleBuffer  = walkerConfig->doubleBuffer;
++    newSurface->configId      = walkerConfig->configId;
++    newSurface->width         = width;
++    newSurface->height        = height;
++    newSurface->swapBehavior         = EGL_BUFFER_DESTROYED;
++    newSurface->multisampleResolve   = EGL_MULTISAMPLE_RESOLVE_DEFAULT;
++    newSurface->mipmapLevel          = 0;
++    newSurface->mipmapTexture        = mipmapTex;
++    newSurface->largestPbuffer       = largestPbuf;
++    newSurface->textureFormat        = texFormat;
++    newSurface->textureTarget        = texTarget;
++    newSurface->glColorspace         = pbufColorspace;
++    newSurface->initialized          = EGL_TRUE;
++    newSurface->destroy              = EGL_FALSE;
++    newSurface->pbuf                 = reinterpret_cast<NativePbufferType>(surf);
++    newSurface->nativeSurfaceContainer.sysSurface = reinterpret_cast<void*>(surf);
++    newSurface->nativeSurfaceContainer.sysConfig  = sysConf;
++    newSurface->nativeSurfaceContainer.backend    = EGL_BACKEND_OHOS;
++
++    return EGL_TRUE;
++}
++
++EGLBoolean __createPixmapSurface(EGLSurfaceImpl* newSurface,
++                                 EGLNativePixmapType pixmap,
++                                 const EGLint* attrib_list,
++                                 const EGLDisplayImpl* walkerDpy,
++                                 const EGLConfigImpl* walkerConfig,
++                                 EGLint* error)
++{
++    // OHOS has no native pixmap system → real surface is impossible.
++    (void)newSurface; (void)pixmap; (void)attrib_list; (void)walkerDpy; (void)walkerConfig;
++    if (error) *error = EGL_BAD_NATIVE_PIXMAP;
++    return EGL_FALSE;
++}
++
++EGLBoolean __destroySurface(EGLNativeDisplayType dpyType, const EGLSurfaceImpl* surface)
++{
++    if (!surface)
++        return EGL_FALSE;
++
++    void* sysDpy = reinterpret_cast<void*>(dpyType);
++    if (surface->drawToPBuffer && surface->nativeSurfaceContainer.sysSurface && s_eglDestroySurface)
++        s_eglDestroySurface(sysDpy, (EGLSurface)surface->nativeSurfaceContainer.sysSurface);
++    // Window/pixmap surfaces were never created on OHOS → nothing to destroy.
++    return EGL_TRUE;
++}
++
++EGLBoolean __copyBuffers(const EGLDisplayImpl* walkerDpy,
++                         const EGLSurfaceImpl* surface,
++                         EGLNativePixmapType target)
++{
++    // No native pixmap target on OHOS → cannot copy into one.
++    (void)walkerDpy; (void)surface; (void)target;
++    return EGL_FALSE;
++}
++
++// ── Swap & texture binding ─────────────────────────────────────────────────────
++
++EGLBoolean __swapBuffers(const EGLDisplayImpl* walkerDpy, const EGLSurfaceImpl* walkerSurface)
++{
++    if (!walkerDpy || !walkerSurface)
++        return EGL_FALSE;
++
++    void* sysDpy = reinterpret_cast<void*>(walkerDpy->display_id);
++    return s_eglSwapBuffers(sysDpy, (EGLSurface)walkerSurface->nativeSurfaceContainer.sysSurface);
++}
++
++EGLBoolean __swapInterval(const EGLDisplayImpl* walkerDpy, EGLint interval)
++{
++    if (!walkerDpy)
++        return EGL_FALSE;
++    // eglSwapInterval is bound to the current surface; forward to system EGL.
++    void* sysDpy = reinterpret_cast<void*>(walkerDpy->display_id);
++    return s_eglSwapInterval(sysDpy, interval);
++}
++
++EGLBoolean __bindTexImage(const EGLDisplayImpl* walkerDpy,
++                          const EGLSurfaceImpl* walkerSurface, EGLint buffer)
++{
++    if (!walkerDpy || !walkerSurface)
++        return EGL_FALSE;
++    if (!s_eglBindTexImage)
++        return EGL_FALSE;
++    void* sysDpy = reinterpret_cast<void*>(walkerDpy->display_id);
++    return s_eglBindTexImage(sysDpy, (EGLSurface)walkerSurface->nativeSurfaceContainer.sysSurface, buffer);
++}
++
++EGLBoolean __releaseTexImage(const EGLDisplayImpl* walkerDpy,
++                             const EGLSurfaceImpl* walkerSurface, EGLint buffer)
++{
++    if (!walkerDpy || !walkerSurface)
++        return EGL_FALSE;
++    if (!s_eglReleaseTexImage)
++        return EGL_FALSE;
++    void* sysDpy = reinterpret_cast<void*>(walkerDpy->display_id);
++    return s_eglReleaseTexImage(sysDpy, (EGLSurface)walkerSurface->nativeSurfaceContainer.sysSurface, buffer);
++}
++
++// ── Proc address & platform handles ────────────────────────────────────────────
++
++__eglMustCastToProperFunctionPointerType __getProcAddress(const char* procname)
++{
++    void* result = nullptr;
++    if (s_eglGetProcAddress && procname)
++        result = s_eglGetProcAddress(procname);
++    if (!result && s_libEGL && procname)
++        result = dlsym(s_libEGL, procname);
++    // Avoid reinterpret_cast from std::nullptr_t: cast through the void* result.
++    return reinterpret_cast<__eglMustCastToProperFunctionPointerType>(result);
++}
++
++EGLBoolean __getPlatformDependentHandles(void* out,
++                                         const EGLDisplayImpl* walkerDpy,
++                                         const NativeSurfaceContainer* nativeSurfaceContainer,
++                                         const NativeContextContainer* nativeContextContainer)
++{
++    if (!out || !walkerDpy || !nativeSurfaceContainer || !nativeContextContainer)
++        return EGL_FALSE;
++
++    EGLContextInternals* h = reinterpret_cast<EGLContextInternals*>(out);
++    h->display            = reinterpret_cast<void*>(walkerDpy->display_id);
++    h->surface.drawable   = nativeSurfaceContainer->sysSurface;
++    h->surface.config     = nativeSurfaceContainer->sysConfig;
++    h->context            = nativeContextContainer->sysCtx;
++    return EGL_TRUE;
++}

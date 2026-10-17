@@ -71,5 +71,5 @@ ELF shared object, 64-bit LSB arm64, dynamic (/lib/ld-musl-aarch64.so.1), not st
 - make check 在 OpenHarmony 上超时，需跳过
 ---
 
-**编译结束**: 2026-06-03 14:39
+**编译结束**: 2026-07-15 17:00
 **最终状态**: built

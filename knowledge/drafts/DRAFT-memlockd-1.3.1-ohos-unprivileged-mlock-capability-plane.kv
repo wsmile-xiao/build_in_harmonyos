@@ -1,0 +1,99 @@
+#====================================================================
+# DRAFT-memlockd-1.3.1-ohos-unprivileged-mlock-capability-plane
+#   OHOS/HarmonyOS 用户态锁页能力面与它的可证伪测试载体：
+#   非 root、无 CAP_IPC_LOCK 时 RLIMIT_MEMLOCK 即无限，mlockall/mlock 全放行；
+#   但 getrlimit 与 syscall 返回值都不足以证明"策略真的让页钉住了"，
+#   判别性证据只能取 /proc/<pid>/smaps_rollup 的 Locked 计数差分。
+# 来源: memlockd 1.3.1 适配 HarmonyOS PC（路径 B，平台任务 8789）
+# 实证: 2026-09-25 HarmonyOS PC 真机非 root 会话（uid=20020084），
+#       conan create 全绿 + 17 条消费者断言（其中 5 条直接打在这条能力面上）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# 辨别性指纹不是"mlock 失败"，而是相反：本机 mlock 族全部"成功返回"，
+# 而成功返回本身可能只是策略未生效的假绿——
+#   ① getrlimit(RLIMIT_MEMLOCK) 返回 -1/-1（RLIM_INFINITY），与 Linux 桌面默认的 64KB/8MB 截然不同；
+#   ② mlockall(MCL_CURRENT|MCL_FUTURE) 与 mmap+mlock 在非 root、无 CAP_IPC_LOCK 下 rc=0；
+#   ③ 唯一能区分"真钉页"与"调用返回 0 但没钉"的是 /proc/<pid>/smaps_rollup 的 Locked 行数差。
+id:                     memlockd-1.3.1-ohos-unprivileged-mlock-capability-plane
+trigger_tool:           clang|make|conan|python3
+phase:                  test|runtime
+error_signature:        "Can't lock memory, exiting|Cannot allocate memory.*mlock|mlockall: Permission denied|Locked:.*kB missing from smaps_rollup"
+match_keywords:         mlock, mlockall, munlock, RLIMIT_MEMLOCK, CAP_IPC_LOCK, smaps_rollup, Locked 计数, MAP_SHARED 锁页, 预加载守护进程, 内存常驻, 换页时仍可登录, 非特权锁页, 锁页上限, memlockd, memcached -k, gpg-agent mlock, libsodium sodium_mlock
+severity:               2
+category:               ohos|runtime|memory|security|test
+title:                  OHOS 用户态锁页能力面：非 root 且无 CAP_IPC_LOCK 时 RLIMIT_MEMLOCK 无限、mlock/mlockall 全放行，而正确性证据只能取 /proc/<pid>/smaps_rollup 的 Locked 差分（返回值与 getrlimit 都会假绿）
+prescan_pattern:        mlock\(|mlockall\(|RLIMIT_MEMLOCK|CAP_IPC_LOCK|sodium_mlock|munlockall
+prescan_globs:          "**/src/**/*.c, **/src/**/*.cpp, **/*.c, **/*.cpp, **/test_package/**"
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+root_cause:             (1) 本机（HarmonyOS PC，HongMeng Kernel 1.12.0，musl 用户态）给普通用户会话的
+                        RLIMIT_MEMLOCK 就是无限：同一进程内 getrlimit 读 cur 与 max 均为 -1
+                        （即 RLIM_INFINITY，create-6.log:152 逐字 RLIMIT_MEMLOCK cur=-1 max=-1）。
+                        这与常见 Linux 发行版默认 64KB（或 systemd 下 LimitMEMLOCK=8MB）不同，
+                        因此"非 root 一定锁不住多少页"的先验在 OHOS 上不成立。
+                        (2) 结果是三类调用全部放行：mlockall(MCL_CURRENT|MCL_FUTURE) rc=0（本包守护进程
+                        启动第一步，失败即 exit(1)）、mmap(PROT_READ, MAP_SHARED)+mlock(整个文件) rc=0、
+                        追加 8 MiB 文件后依旧成功。非 root、未持有 CAP_IPC_LOCK 都无从拒绝。
+                        (3) 关键陷阱在于**证明方向**：rc=0 只能证伪"被拒绝"，不能证实"页真的钉住"。
+                        若把能力判据写成"mlock 返回 0 即通过"，则任何静默忽略 mlock 语义的环境
+                        （返回 0 但不钉页）同样报绿，这是假绿家族，与 E584（configure 报 yes、
+                        运行期 SIGSYS）同族但更隐蔽，因为这里连 syscall 都完全正常。
+                        (4) 可证伪的载体是 /proc/<pid>/smaps_rollup 的 Locked 行：本机在同一进程上
+                        先读基线 31768 kB，经 SIGHUP 让守护进程重解析配置、追加映射一个 8 MiB 文件后
+                        读到 39960 kB，**差值恰为 8192 kB**（create-6.log:163）。
+                        差分而非绝对值，是因为 mlockall 本身已把整个地址空间钉住，绝对值恒大于 0、
+                        无法归因到被测文件。
+                        (5) 归因还需要把"被测映射"从进程自身的段里挑出来：可执行文件既有 r--p 也有 r-xp 段，
+                        与 memlockd 自己建立的 PROT_READ|MAP_SHARED 映射同路径，只有权限串 r--s 那一条
+                        才是被测对象（开发期一次按路径匹配的断言就是因此无条件成立的，已在 notes.md 更正）。
+
+# ═══ Layer 2: 建议方案 (Recommendation) ═══
+rec_priority:           1
+rec_approach:           verify-page-lock-via-smaps_rollup-delta
+rec_description:        凡在 OHOS 上以 mlock/mlockall 为功能核心的包（锁页守护进程、密钥内存清零、
+                        memcached -k 这类显式锁页开关），配方与消费者测试一律按三步落地：
+                        (1) 先在同一进程内读 getrlimit(RLIMIT_MEMLOCK) 与一次最小 mlock 的 errno，
+                        只为记录平台形态，不作为通过判据；
+                        (2) 以 /proc/<pid>/smaps_rollup 的 Locked 做**差分**：先起被测进程读基线，
+                        再通过上游自身的重配置入口（本包为 SIGHUP 重解析配置文件）追加一块已知大小
+                        （建议 >= 8 MiB，显著大于任何默认上限）的映射，重读 Locked 并断言增量落在该大小；
+                        (3) 用 /proc/<pid>/maps 的权限串（r--s）把被测映射与进程自身段区分，
+                        路径匹配按尾段而非全串（HMDFS 在 procfs 侧打印规范路径，见 notes.md 与通用草稿池）。
+rec_command:            python3 test_memlockd.py <package_folder> <work_folder>   （逐字读数见 create-6.log:152-173）
+rec_impl:               test-package-procfs-delta
+rec_auto_fix:           false
+fallback_priority:      2
+fallback_approach:      absolute-locked-threshold-when-no-reconfig-entry
+fallback_description:   若上游没有可触发"重读配置/增量锁页"的入口（无法做差分），退一步用
+                        绝对阈值：在被测进程锁完一个 >= 8 MiB 已知文件后断言 Locked >= 该文件字节数，
+                        并在报告中说明该形态无法排除"环境本身把全地址空间钉住"带来的贡献，
+                        属于弱一等的证据；再退一步才允许写"仅证伪不证实"并标注未覆盖。
+fallback_command:       awk '/^Locked:/{print $2}' /proc/$PID/smaps_rollup
+fallback_auto_fix:      false
+fallback_impl:          test-package-assertion
+safety_boundary:        本条只覆盖"非特权用户态能否真正锁页"以及它的正确测试载体，**不**覆盖：
+                        锁页上限被策略下调后的行为（本机 max 亦为无限，未观测到有限值形态）、
+                        munlock/mmap 之外的内存策略（如 THP、madvise(MEMLOCK)）、
+                        以及 seccomp 直接以信号终止 mlock 族的形态（那是 E584 家族，签名与处置都不同）。
+                        若 CI worker 以 root 或带 CAP_IPC_LOCK 运行，本条读数（无限上限）不能外推到它，
+                        申报前须在目标执行路径上重测一次差分。sysfs/容器侧的 memcg 锁页记账不在本条范围。
+
+# ═══ Layer 3: 关联 (Linkage) ═══
+similar_to:             E584（configure 探测报 yes、运行期被 seccomp 以 SIGSYS 终止——同为假绿家族，但本条 syscall 完全正常返回，需要靠 procfs 差分而非信号判别）、DRAFT-keyd-2.5.0-ohos-input-subsystem-mac-invisible（同为"OHOS 用户态能力面判定"，那条是整片子系统 EACCES 拒绝，本条是放行且上限无限，两者共同说明：能力探测必须逐 syscall 逐字段取证，不能由一个入口外推）、E543（HMDFS 默认 660 影响产物可执行位——同属"本机平台默认值与 Linux 惯例不同"一族）
+caused_by:
+conflicts_with:
+prerequisite_of:
+verification_cmd:       conan create archives/m/memlockd/1.3.1 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing --user=ohpcd --channel=stable
+doc_file:               knowledge/drafts/DRAFT-memlockd-1.3.1-ohos-unprivileged-mlock-capability-plane.md
+last_updated:           2026-09-25
+source_event:           memlockd 1.3.1 适配 HarmonyOS PC（平台任务 8789，路径 B）
+authors:                hw-3
+source_pr:
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-25

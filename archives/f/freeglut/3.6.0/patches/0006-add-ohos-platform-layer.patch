@@ -1,0 +1,558 @@
+--- /dev/null
++++ b/src/ohos/fg_ohos.c
+@@ -0,0 +1,555 @@
++/*
++ * fg_ohos.c
++ *
++ * OpenHarmony / HarmonyOS platform layer for freeglut.
++ *
++ * Design
++ * ------
++ * OHOS provides neither X11 nor Wayland nor the Android app-glue.  What it does
++ * provide, in every plain native process, is EGL reachable through
++ * EGL_DEFAULT_DISPLAY, together with pbuffer configs and
++ * EGL_KHR_surfaceless_context.  freeglut is therefore implemented on top of
++ * **EGL pbuffer surfaces**, i.e. headless/offscreen rendering.
++ *
++ * Consequence for GLUT semantics: there is no window manager, so
++ * glutCreateWindow() creates an offscreen render target of the requested size
++ * instead of an on-screen window.  Window-position/title/iconify/cursor/game
++ * mode/spaceball/joystick requests are accepted and stored but have no visual
++ * effect (there is no compositor to honour them).
++ *
++ * GL entry points
++ * ---------------
++ * On OHOS the symbols exported directly by libGLESv2.so are dispatcher stubs:
++ * a direct glGetString() returns NULL and direct drawing has no effect, whereas
++ * the very same entry points fetched through eglGetProcAddress() are the real
++ * driver functions (verified: GL_VERSION="OpenGL ES 3.2 B301",
++ * GL_RENDERER="Maleoon 916", glClear+glReadPixels yields the cleared colour).
++ * fgPlatformGetProcAddress() consequently routes through eglGetProcAddress().
++ */
++#include <errno.h>
++#include <string.h>
++#include <time.h>
++#include <unistd.h>
++
++#include <EGL/egl.h>
++
++#include <GL/freeglut.h>
++#include "fg_internal.h"
++#include "egl/fg_init_egl.h"
++#include "egl/fg_window_egl.h"
++#include "egl/fg_state_egl.h"
++
++/* fgSystemTime() is declared in fg_internal.h */
++
++
++/* ------------------------------------------------------------------------- */
++/* Display / library lifecycle                                               */
++/* ------------------------------------------------------------------------- */
++
++/* Forward declarations: these are defined below / in the egl backend and are
++   called before their definitions appear. */
++void fgPlatformInitialiseInputDevices( void );
++void fgPlatformCloseInputDevices( void );
++
++void fgPlatformInitialize( const char* displayName )
++{
++    (void)displayName;   /* OHOS always uses EGL_DEFAULT_DISPLAY */
++    fghPlatformInitializeEGL();
++
++    /* Get start time */
++    fgState.Time = fgSystemTime();
++
++    /* Every platform init routine must flag the library as initialised, since
++       glutCreateWindow() and friends bail out with "called without first
++       calling 'glutInit'" otherwise (see fg_window.c). Input devices also
++       require this to be TRUE before they may use GlutTimerFunc(). */
++    fgState.Initialised = GL_TRUE;
++
++    atexit(fgDeinitialize);
++
++    fgPlatformInitialiseInputDevices();
++}
++
++void fgPlatformCloseDisplay( void )
++{
++    fghPlatformCloseDisplayEGL();
++}
++
++/* No serial/dial input devices, no platform input thread. */
++void fgPlatformInitialiseInputDevices( void )
++{
++}
++
++void fgPlatformCloseInputDevices( void )
++{
++}
++
++void fgPlatformDeinitialiseInputDevices ( void )
++{
++}
++
++
++/* NOTE: fgPlatformGetProcAddress() is provided by src/egl/fg_ext_egl.c,
++ * which already routes through eglGetProcAddress() -- the correct source of GL
++ * entry points on OHOS.  Do not define it here (duplicate symbol). */
++
++
++/* ------------------------------------------------------------------------- */
++/* Window management                                                         */
++/* ------------------------------------------------------------------------- */
++
++void fgPlatformCreateWindow ( SFG_Window *window )
++{
++    fghPlatformCreateWindowEGL( window );
++}
++
++/*
++ * Really opens a window: choose an EGL config, create a GLES context and bind
++ * it to a pbuffer surface of the requested size (fghPlatformOpenWindowEGL
++ * creates the pbuffer on OHOS).
++ */
++void fgPlatformOpenWindow( SFG_Window* window, const char* title,
++                           GLboolean positionUse, int x, int y,
++                           GLboolean sizeUse, int w, int h,
++                           GLboolean gameMode, GLboolean isSubWindow )
++{
++    (void)title; (void)gameMode; (void)isSubWindow;
++
++    /* Save the display mode if we are creating a menu window */
++    if( window->IsMenu && ( ! fgStructure.MenuContext ) )
++        fgState.DisplayMode = GLUT_DOUBLE | GLUT_RGB ;
++
++    fghChooseConfig( &window->Window.pContext.egl.Config );
++
++    if( ! window->Window.pContext.egl.Config )
++    {
++        /*
++         * The "fghChooseConfig" returned a null meaning that the visual
++         * context is not available.
++         * Try a couple of variations to see if they will work.
++         */
++        if( fgState.DisplayMode & GLUT_MULTISAMPLE )
++        {
++            fgState.DisplayMode &= ~GLUT_MULTISAMPLE ;
++            fghChooseConfig( &window->Window.pContext.egl.Config );
++            fgState.DisplayMode |= GLUT_MULTISAMPLE;
++        }
++    }
++
++    FREEGLUT_INTERNAL_ERROR_EXIT( window->Window.pContext.egl.Config != NULL,
++                                  "EGL configuration with necessary capabilities "
++                                  "not found", "fgOpenWindow" );
++
++    if( ! positionUse )
++        x = y = -1;      /* no compositor: position is advisory only */
++    if( ! sizeUse )
++        w = h = 300;     /* default window size */
++
++    if( w <= 0 ) w = 300;
++    if( h <= 0 ) h = 300;
++
++    /* The pbuffer surface is sized from these, see fghPlatformOpenWindowEGL. */
++    window->State.Width   = w;
++    window->State.Height  = h;
++    window->State.Xpos    = x;
++    window->State.Ypos    = y;
++
++    window->Window.Context = fghCreateNewContextEGL( window );
++
++    fghPlatformOpenWindowEGL( window );
++
++    /* Bind context to the current thread if it's lost */
++    if (eglGetCurrentContext() == EGL_NO_CONTEXT &&
++        eglMakeCurrent(fgDisplay.pDisplay.egl.Display,
++               window->Window.pContext.egl.Surface,
++               window->Window.pContext.egl.Surface,
++               window->Window.Context) == EGL_FALSE)
++      fgError("eglMakeCurrent: err=%x\n", eglGetError());
++
++    window->State.Visible = GL_TRUE;
++}
++
++void fgPlatformCloseWindow( SFG_Window* window )
++{
++    fghPlatformCloseWindowEGL( window );
++}
++
++/*
++ * On OHOS a "resize" means reallocating the offscreen render target, because
++ * an EGL pbuffer surface has a fixed size.
++ */
++void fgPlatformReshapeWindow ( SFG_Window *window, int width, int height )
++{
++    EGLDisplay display = fgDisplay.pDisplay.egl.Display;
++
++    if( width  <= 0 ) width  = 300;
++    if( height <= 0 ) height = 300;
++
++    if( window->Window.pContext.egl.Surface != EGL_NO_SURFACE )
++    {
++        if( fgStructure.CurrentWindow == window )
++            eglMakeCurrent( display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT );
++        eglDestroySurface( display, window->Window.pContext.egl.Surface );
++        window->Window.pContext.egl.Surface = EGL_NO_SURFACE;
++    }
++
++    window->State.Width  = width;
++    window->State.Height = height;
++
++    {
++        EGLConfig config = window->Window.pContext.egl.Config;
++        EGLint pbattr[5];
++        pbattr[0] = EGL_WIDTH;  pbattr[1] = width;
++        pbattr[2] = EGL_HEIGHT; pbattr[3] = height;
++        pbattr[4] = EGL_NONE;
++
++        window->Window.pContext.egl.Surface =
++            eglCreatePbufferSurface( display, config, pbattr );
++        if( window->Window.pContext.egl.Surface == EGL_NO_SURFACE )
++            fgError( "Cannot recreate EGL pbuffer surface, err=%x\n", eglGetError() );
++    }
++
++    /*
++     * Rebind explicitly.  The shared EGL helper fgPlatformSetWindow() only calls
++     * eglMakeCurrent() when the window it is handed is NOT fgStructure.CurrentWindow
++     * (see src/egl/fg_window_egl.c), so for a reshape of the *current* window it
++     * would do nothing: we would have released the old surface via
++     * eglMakeCurrent(EGL_NO_SURFACE) above and never bind the new one, leaving the
++     * thread with no current context — every subsequent GL call would be a no-op
++     * with no error reported.
++     */
++    if( fgStructure.CurrentWindow == window )
++    {
++        if( eglMakeCurrent( display, window->Window.pContext.egl.Surface,
++                            window->Window.pContext.egl.Surface,
++                            window->Window.Context ) == EGL_FALSE )
++            fgError( "eglMakeCurrent after reshape: err=%x\n", eglGetError() );
++    }
++}
++
++void fgPlatformShowWindow( SFG_Window *window )
++{
++    window->State.Visible = GL_TRUE;
++}
++
++void fgPlatformHideWindow( SFG_Window *window )
++{
++    window->State.Visible = GL_FALSE;
++}
++
++void fgPlatformIconifyWindow( SFG_Window *window )
++{
++    (void)window;   /* no window manager */
++}
++
++void fgPlatformFullScreenToggle( SFG_Window *win )
++{
++    win->State.IsFullscreen = !win->State.IsFullscreen;
++}
++
++void fgPlatformPositionWindow( SFG_Window *window, int x, int y )
++{
++    window->State.Xpos = x;
++    window->State.Ypos = y;
++}
++
++void fgPlatformPushWindow( SFG_Window *window )
++{
++    (void)window;
++}
++
++void fgPlatformPopWindow( SFG_Window *window )
++{
++    (void)window;
++}
++
++void fgPlatformGlutSetWindowTitle( const char* title )
++{
++    (void)title;   /* no compositor to display a title */
++}
++
++void fgPlatformGlutSetIconTitle( const char* title )
++{
++    (void)title;
++}
++
++
++/* ------------------------------------------------------------------------- */
++/* Main loop                                                                 */
++/* ------------------------------------------------------------------------- */
++
++fg_time_t fgPlatformSystemTime( void )
++{
++    struct timespec ts;
++    clock_gettime( CLOCK_MONOTONIC, &ts );
++    return (fg_time_t)ts.tv_sec * 1000000ULL + (fg_time_t)( ts.tv_nsec / 1000 );
++}
++
++void fgPlatformSleepForEvents( fg_time_t msec )
++{
++    if( msec > 0 )
++    {
++        /*
++         * Use nanosleep() rather than usleep(): usleep() takes useconds_t
++         * (32-bit), so (useconds_t)(msec * 1000) truncates for waits above
++         * ~4295 s, and POSIX additionally requires the argument to be below
++         * 1000000 (values >= 1 s are implementation-defined).  nanosleep()
++         * takes a 64-bit seconds field and has no such limit, so an idle main
++         * loop with a large computed wait behaves correctly instead of busy-
++         * waiting or sleeping for an unintended duration.
++         */
++        struct timespec ts;
++        ts.tv_sec  = (time_t)( msec / 1000 );
++        ts.tv_nsec = (long)( ( msec % 1000 ) * 1000000 );
++
++        while( nanosleep( &ts, &ts ) == -1 && errno == EINTR )
++            ;   /* interrupted: ts now holds the remaining time, keep sleeping */
++    }
++}
++
++/*
++ * No event source exists: OHOS input is delivered to an ArkTS/XComponent host
++ * application, not to a plain native process.  Nothing to dispatch here.
++ */
++void fgPlatformProcessSingleEvent ( void )
++{
++}
++
++void fgPlatformMainLoopPreliminaryWork ( void )
++{
++}
++
++void fgPlatformInitWork(SFG_Window* window)
++{
++    (void)window;
++}
++
++/*
++ * Perform the queued position / reshape / z-order / fullscreen work.
++ *
++ * This must not be a stub: glutReshapeWindow() only records GLUT_SIZE_WORK plus
++ * DesiredWidth/DesiredHeight, and it is *here* that fgPlatformReshapeWindow() is
++ * actually invoked (same contract as the X11/Wayland back ends).  Leaving this
++ * empty silently swallows every reshape request.
++ */
++void fgPlatformPosResZordWork(SFG_Window* window, unsigned int workMask)
++{
++    if (workMask & GLUT_FULL_SCREEN_WORK)
++        fgPlatformFullScreenToggle( window );
++    if (workMask & GLUT_POSITION_WORK)
++        fgPlatformPositionWindow( window, window->State.DesiredXpos,
++                                  window->State.DesiredYpos );
++    if (workMask & GLUT_SIZE_WORK)
++        fgPlatformReshapeWindow( window, window->State.DesiredWidth,
++                                 window->State.DesiredHeight );
++    if (workMask & GLUT_ZORDER_WORK)
++    {
++        if (window->State.DesiredZOrder < 0)
++            fgPlatformPushWindow( window );
++        else
++            fgPlatformPopWindow( window );
++    }
++}
++
++void fgPlatformVisibilityWork(SFG_Window* window)
++{
++    (void)window;
++}
++
++void fgPlatformSetColor(int idx, float r, float g, float b)
++{
++    (void)idx; (void)r; (void)g; (void)b;
++}
++
++float fgPlatformGetColor(int idx, int comp)
++{
++    (void)idx; (void)comp;
++    return 0.0f;
++}
++
++void fgPlatformCopyColormap(int win)
++{
++    (void)win;
++}
++
++
++/* ------------------------------------------------------------------------- */
++/* GLUT state queries                                                        */
++/* ------------------------------------------------------------------------- */
++
++int fgPlatformGlutDeviceGet ( GLenum eWhat )
++{
++    switch( eWhat )
++    {
++    case GLUT_HAS_KEYBOARD:
++        /* Input arrives through the host application; assume present. */
++        return 1;
++
++    case GLUT_HAS_MOUSE:
++        return 1;
++
++    case GLUT_NUM_MOUSE_BUTTONS:
++        return 1;
++
++    default:
++        fgWarning( "glutDeviceGet(): missing enum handle %d", eWhat );
++        break;
++    }
++
++    /* And now -- the failure. */
++    return -1;
++}
++
++int fgPlatformGlutGet ( GLenum eWhat )
++{
++    switch (eWhat) {
++    case GLUT_WINDOW_X:
++    case GLUT_WINDOW_Y:
++    case GLUT_WINDOW_BORDER_WIDTH:
++    case GLUT_WINDOW_HEADER_HEIGHT:
++        return 0;
++
++    case GLUT_WINDOW_WIDTH:
++    case GLUT_WINDOW_HEIGHT:
++        if ( fgStructure.CurrentWindow == NULL )
++            return 0;
++        return ( eWhat == GLUT_WINDOW_WIDTH )
++                 ? fgStructure.CurrentWindow->State.Width
++                 : fgStructure.CurrentWindow->State.Height;
++
++    default:
++        break;
++    }
++
++    return fghPlatformGlutGetEGL( eWhat );
++}
++
++
++/* ------------------------------------------------------------------------- */
++/* Cursor                                                                    */
++/* ------------------------------------------------------------------------- */
++
++void fgPlatformSetCursor ( SFG_Window *window, int cursorID )
++{
++    (void)window; (void)cursorID;   /* no pointer device to draw a cursor with */
++}
++
++void fgPlatformWarpPointer ( int x, int y )
++{
++    (void)x; (void)y;
++}
++
++void fghPlatformGetCursorPos(const SFG_Window *window, GLboolean client, SFG_XYUse *mouse_pos)
++{
++    (void)window; (void)client;
++    mouse_pos->X = 0;
++    mouse_pos->Y = 0;
++    mouse_pos->Use = GL_FALSE;
++}
++
++
++/* ------------------------------------------------------------------------- */
++/* Game mode                                                                 */
++/* ------------------------------------------------------------------------- */
++
++GLboolean fgPlatformChangeDisplayMode( GLboolean haveToTest )
++{
++    (void)haveToTest;
++    return GL_FALSE;
++}
++
++void fgPlatformEnterGameMode( void )
++{
++    fgWarning( "glutEnterGameMode(): not supported on OHOS (no display manager)\n" );
++}
++
++void fgPlatformRememberState( void )
++{
++}
++
++void fgPlatformRestoreState( void )
++{
++}
++
++void fgPlatformLeaveGameMode( void )
++{
++    fgWarning( "glutLeaveGameMode(): not supported on OHOS (no display manager)\n" );
++}
++
++void fgPlatformGetGameModeVMaxExtent( SFG_Window* window, int* x, int* y )
++{
++    if( x ) *x = 0;
++    if( y ) *y = 0;
++}
++
++
++/* ------------------------------------------------------------------------- */
++/* Spaceball / dial devices                                                  */
++/* ------------------------------------------------------------------------- */
++
++void fgPlatformInitializeSpaceball(void)
++{
++}
++
++void fgPlatformSpaceballClose(void)
++{
++}
++
++int fgPlatformHasSpaceball(void)
++{
++    return 0;
++}
++
++int fgPlatformSpaceballNumButtons(void)
++{
++    return 0;
++}
++
++void fgPlatformSpaceballSetWindow(SFG_Window *window)
++{
++    (void)window;
++}
++
++void fgPlatformRegisterDialDevice ( const char *dial_device )
++{
++    (void)dial_device;
++}
++
++
++/* ------------------------------------------------------------------------- */
++/* Joystick (none exposed by the OHOS native API)                            */
++/* ------------------------------------------------------------------------- */
++
++void fgPlatformJoystickRawRead( SFG_Joystick* joy, int* buttons, float* axes )
++{
++    (void)joy;
++    if( buttons ) *buttons = 0;
++    if( axes )    axes[0] = axes[1] = axes[2] = axes[3] = axes[4] = 0.0f;
++}
++
++void fgPlatformJoystickOpen( SFG_Joystick* joy )
++{
++    (void)joy;
++}
++
++void fgPlatformJoystickInit( SFG_Joystick *fgJoystick[], int ident )
++{
++    (void)fgJoystick; (void)ident;
++}
++
++void fgPlatformJoystickClose ( int ident )
++{
++    (void)ident;
++}
++
++
++/* ------------------------------------------------------------------------- */
++/* GLUT extension procedure table                                            */
++/* ------------------------------------------------------------------------- */
++
++GLUTproc fgPlatformGetGLUTProcAddress( const char* procName )
++{
++    /* No platform-specific GLUT extensions on OHOS. */
++    (void)procName;
++    return NULL;
++}

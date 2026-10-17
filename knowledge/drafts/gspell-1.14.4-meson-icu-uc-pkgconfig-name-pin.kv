@@ -1,0 +1,89 @@
+#====================================================================
+# DRAFT-gspell-1.14.4-meson-icu-uc-pkgconfig-name-pin
+# meson 的 dependency('icu-uc') 按 Conan 依赖生成的 .pc **文件名**解析，
+# 不是按 Conan 包名；且可用的那个 icu4c 版本是静态 C++ 归档，纯 C
+# 工程的每次链接都要补 -lc++
+#====================================================================
+
+id:                     DRAFT-gspell-1.14.4-meson-icu-uc-pkgconfig-name-pin
+trigger_tool:           conan|meson|pkg-config|clang
+phase:                  configuration|linking
+error_signature:        Dependency "icu-uc" not found|
+                         Run-time dependency icu-uc found: NO|
+                         undefined reference to `__gxx_personality_v0'|
+                         undefined reference to `__cxa_begin_catch'
+
+severity:               2
+category:               dependency-resolution, meson, pkg-config, conan, ohos-platform
+match_keywords:         icu-uc, icu4c, pkg_config_name, icu4c.pc, PkgConfigDeps,
+                         meson dependency not found, set_property, fPIC,
+                         shared=False, static C++ archive, -lc++, libc++,
+                         __gxx_personality_v0, __cxa_begin_catch,
+                         private dependency, MesonToolchain.c_link_args
+title:                  meson 的 dependency('icu-uc') 按 Conan 依赖**生成的 .pc 文件名**解析而非包名——钉版本要查 recipe 有没有 set_property("pkg_config_name")；可用的版本是静态 C++ 归档，纯 C 工程每处链接都要补 -lc++
+
+root_cause:             meson 的 dependency('icu-uc') 走 pkg-config 协议，要的是名为
+                        icu-uc.pc 的文件。Conan 的 PkgConfigDeps 生成 .pc 时文件名由
+                        recipe 的 cpp_info.set_property("pkg_config_name", ...) 决定，
+                        缺省等于包名。icu4c/78 没有这个 property，只生成 icu4c.pc，
+                        于是 meson 配置期直接报 `Dependency "icu-uc" not found`——
+                        这个报错看起来像"远程没有这个包"或"网络抖动"，实际是与网络
+                        无关的确定性缺 .pc。icu4c/77 设了 pkg_config_name="icu-uc"
+                        且 fPIC=True，才能被 meson 解析到。第二个坑随之而来：
+                        icu4c/77 默认 shared=False，交付的是 libicudata.a / libicuuc.a
+                        等静态 C++ 归档；gspell 是纯 C 工程（libgspell-1.so.3 全部由
+                        C 源编译），把静态 C++ 归档链进共享库会引入
+                        __gxx_personality_v0 / __cxa_begin_catch 等 C++ 运行时符号，
+                        C 链接不会自动带上 C++ 运行时，链接期即为 undefined symbol。
+affected_scope:         所有用 meson 且请求 icu-uc（或其它"上游要的名字 ≠ Conan 包名"
+                        的依赖）的工程；任何把静态 C++ 归档链进纯 C 共享库/可执行
+                        文件的场景。实测：gspell 1.14.4（archives/g/gspell/1.14.4）。
+                        判别要点两条——上游要的名字与 Conan 生成的 .pc 文件名必须
+                        对齐；静态 C++ 归档的运行时必须人工补齐。
+verification_cmd:       conan create archives/g/gspell/1.14.4 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing -nr
+                        # meson setup 不再出现 'Dependency "icu-uc" not found'，
+                        # 且 libgspell-1.so.3 链接期无 __gxx_personality_v0
+
+rec_priority:           1
+rec_approach:           pin-by-pkg_config_name-and-add-lcxx-to-c-links
+rec_description:        两步。(1) **选版本前先看依赖 recipe 的 pkg_config_name**：用
+                        `conan download <ref> -r ohpcd` 取回 recipe 再 grep，或直接看
+                        依赖包内 lib/pkgconfig 下有没有上游要的那个 .pc。确认
+                        icu4c/77 有 pkg_config_name="icu-uc" + fPIC=True 才钉；
+                        icu4c/78 两项都缺，属确定性不可用（本仓库 icu4c 制品目录与
+                        archives/i/icu4c/77/conanfile.py 有这条先例）。(2) 因为
+                        icu4c/77 是共享关闭的静态 C++ 归档，在 MesonToolchain 上补
+                        C 链接参数 `tc.c_link_args.append("-lc++")`（OHOS 用 libc++；
+                        同 cif-api/0.4.2 的处理）。只补 C 链接即可，C++ 链接本来就带
+                        运行时。验收不要停在"configure 通过"：共享库要真的链出来，
+                        用 readelf -d 确认 DT_NEEDED 与符号解析完整。
+rec_command:            tc = MesonToolchain(self)
+                        if "-lc++" not in tc.c_link_args:
+                            tc.c_link_args.append("-lc++")
+rec_auto_fix:           false
+
+# ═══ 反例 (Anti-patterns) ═══
+forbid_1_pattern:       dependency\('icu-uc',\s*required:\s*false\)|-Dicu=disabled|option\('icu'.*false
+forbid_1_reason:        把私有依赖整体关掉，等于把语言名本地化能力（_gspell_icu_*）阉割掉，换来的是"配置能过"而不是"依赖解析正确"。
+forbid_1_consequence:   上游 test-icu 的 2 个用例（断言 en_US -> "English (United States)"）失去意义，库在有词典的环境下语言显示名会退化，且这类退化不会在 CI 里报错。
+
+forbid_2_pattern:       icu4c/78
+forbid_2_reason:        icu4c/78 的 recipe 既无 fPIC 选项、也未 set_property("pkg_config_name","icu-uc")，PkgConfigDeps 只生成 icu4c.pc，上游 dependency('icu-uc') 必失败，是配置期确定性失败而非概率问题。
+forbid_2_consequence:   每次 conan create 都在 meson setup 阶段挂掉，且报错文案（not found）容易误导成远程/网络问题而反复重跑。
+
+principles:             P004
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+source_pr:              11616
+source_commit:          0e5311685
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-21
+last_updated:           2026-09-21

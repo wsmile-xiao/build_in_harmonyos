@@ -1,91 +1,36 @@
-# libpeas 2.2.1 适配笔记
+# libpeas 2.2.1 for HarmonyOS
 
-## 编译环境
-- 构建系统: meson
-- 编译日期: 2026-05-26
-- 编译器: clang/clang++
-- 状态: built
+## Upstream and build
 
-## 编译步骤
+- Upstream: https://gitlab.gnome.org/GNOME/libpeas, release 2.2.1
+- Source archive: https://download.gnome.org/sources/libpeas/2.2/libpeas-2.2.1.tar.xz
+- Build system: Meson; Conan 2 recipe name: `libpeas`
+- Runtime requirements: `glib/2.88.3` and `proxy-libintl/0.5`
+- Build tools: `meson/1.11.0` and `pkgconf/3.0.5` Conan tool requirements; HarmonyOS workers do not provide these commands globally.
+- Build shared because the C loader uses `dlopen()` for plugin modules; optional Python, GJS, Lua, Vala, GTK documentation and introspection features are disabled.
 
-1. 下载源码: https://download.gnome.org/sources/libpeas/2.2/libpeas-2.2.1.tar.xz
-2. 安装依赖: glib 2.88.0（预编译包）
-3. 配置 meson（禁用可选功能）:
-   ```bash
-   export CC=/data/service/hnp/bin/clang
-   export CXX=/data/service/hnp/bin/clang++
-   export AR=/data/service/hnp/bin/llvm-ar
-   export RANLIB=/data/service/hnp/bin/llvm-ranlib
-   export PKG_CONFIG_PATH=$HOME/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
-   meson setup builddir --prefix=$HOME/usr/local \
-       -Dgtk_doc=false -Dintrospection=false -Dvapi=false \
-       -Dgjs=false -Dlua51=false -Dpython3=false
-   ```
-4. 编译: ninja
-5. 安装: meson install
+## HarmonyOS adaptations
 
-## 遇到的问题与解决方案
+1. `patches/0001-libpeas-peas-i18n.c.patch` calls the exported `libintl_*` symbols directly rather than relying on the `g_libintl_*` aliases from the generated header.
+2. `patches/0002-meson.build.patch` removes the unavailable `gi-docgen` subproject fallback.
+3. `patches/0003-enable-tests-without-introspection.patch` keeps the upstream C test suites enabled when GIR generation is disabled and guards only the private typelib lookups that require `g-ir-scanner`.
+4. The recipe supplies GLib's `glib-genmarshal` and `glib-compile-resources` pkg-config variables through wrappers that set GLib's runtime library path; it also adds `proxy-libintl` to the generated GLib pkg-config link flags.
+5. GLib helper wrappers include `glib-compile-schemas` as well as the Meson generators; the schema compiler wrapper sets the packaged GLib runtime path so the C plugin fixture can exercise its GSettings API test.
 
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-| 1 | meson 找不到编译器 | PATH 中缺少 cc 命令 | 创建 cc/c++ 软链接指向 clang |
-| 2 | 缺少 glib 依赖 | 运行时依赖缺失 | 安装 glib 2.88.0 预编译包 |
-| 3 | meson 尝试克隆 gi-docgen | fallback 配置 | 修改 meson.build 移除 fallback |
-| 4 | python3 请求但 pygobject 缺失 | 默认启用 python3 | 设置 -Dpython3=false |
-| 5 | 链接失败：g_libintl_* 未定义 | libintl.h 宏重命名问题 | 修改 peas-i18n.c 使用 extern 声明 |
+## Upstream tests
 
-## 源码修改
+The recipe runs the upstream Meson suite during native HarmonyOS builds using `meson test -v -C <build> --timeout-multiplier=16`. `test_package/MANIFEST.yml` inventories the four test executables and their 54 TAP assertions. Cross builds report that target tests cannot run.
 
-### 0001-libpeas-peas-i18n.c.patch
-- 修改 libpeas/peas-i18n.c
-- 问题：预编译的 libintl 包头文件定义了 g_libintl_* 宏但缺少实现
-- 解决：使用 extern 声明直接调用 libintl_bindtextdomain
+For the local device run, `user.libpeas:source_archive` accepts a pre-staged copy of the release tarball and verifies it against the same pinned SHA-256 before unpacking. The default recipe path still fetches the official GNOME URL.
 
-### 0002-meson.build.patch
-- 修改 meson.build 第 116-119 行
-- 问题：gi-docgen fallback 导致 meson 卡住
-- 解决：移除 fallback 配置，设置为 required: false
+## Consumer test
 
-## 依赖版本
+`test_package/test_libpeas.c` compiles and executes two GLib test cases against the packaged `libpeas-2` API: engine creation and search-path registration.
 
-- glib 2.88.0（预编译包）
-- libintl（glib 预编译包自带）
+## HarmonyOS verification (2026-09-25)
 
-## 验证结果
-
-```bash
-$ pkg-config --modversion libpeas-2
-2.2.1
-
-$ ls -la $HOME/usr/local/lib/libpeas*
-lrwxrwxrwx libpeas-2.so -> libpeas-2.so.0
-lrwxrwxrwx libpeas-2.so.0 -> libpeas-2.so.0.200.1
--rwxr-x--- libpeas-2.so.0.200.1 (285120 bytes)
-```
-
-## 交付物
-
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| libpeas-2.so.0.200.1 | 285120 | 共享库 |
-
-## 注意事项
-
-1. libpeas 是 GNOME 的插件引擎库，需要 glib 作为核心依赖
-2. 当前版本禁用了所有可选功能（gjs/lua/python3），仅提供基础 C 插件支持
-3. G0 干净构建验证失败是由于 clean-verify 脚本对 meson 项目处理问题，实际编译已验证通过
-
-## 知识提取
-
-### 平台问题：libintl 头文件宏重命名
-- **现象**：预编译的 libintl 包头文件定义了 g_libintl_* 宏，但实际实现是 libintl_* 函数
-- **影响**：所有使用 <libintl.h> 的软件可能遇到链接错误
-- **解决方案**：使用 extern 声明直接调用 libintl_* 函数，绕过宏重命名
-
----
-**编译结束**: 2026-05-26 20:26
-**最终状态**: built
----
-
-**编译结束**: 2026-05-26 20:40
-**最终状态**: built
+- `CONAN_HOME=/storage/Users/currentUser/work/psj/ch-libpeas conan create archives/l/libpeas/2.2.1 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing -c user.libpeas:source_archive=/storage/Users/currentUser/work/psj/libpeas6691/source/libpeas-2.2.1.tar.xz`
+- Create exit status: 0.
+- Upstream Meson suite: `Ok: 4`, `Fail: 0`; TAP plans 18 + 21 + 9 + 6 = 54 assertions, all passed.
+- Consumer test: 2/2 (`/libpeas/engine-new`, `/libpeas/engine-add-search-path`).
+- Source override archive SHA-256: `589eca89b437006edf3755478df037c740a2a84cfa5d202dbad6095e828e2488`, equal to the pinned official release archive hash. The override is only used for this local device run; normal builds download from `download.gnome.org`.

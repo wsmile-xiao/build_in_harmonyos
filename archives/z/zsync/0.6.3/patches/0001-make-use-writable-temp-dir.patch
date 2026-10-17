@@ -1,0 +1,88 @@
+diff --git a/c/make.c b/c/make.c
+index c07a336..a2947ba 100644
+--- a/c/make.c
++++ b/c/make.c
+@@ -56,6 +56,61 @@ off_t len = 0;
+ int verbose = 0;
+ static int no_look_inside;
+ 
++/* zsync_tmpfile() - Open a temporary file for intermediate data.
++ *
++ * The C library tmpfile() is tried first, but it is not sufficient on its own:
++ * it creates its file in a fixed directory (P_tmpdir, normally /tmp) and
++ * ignores TMPDIR, so it fails outright wherever /tmp is not writable. HarmonyOS
++ * ships a read-only /tmp, which makes zsyncmake abort as soon as it writes its
++ * first block checksum. Fall back to $TMPDIR, then /tmp, then the current
++ * directory; return NULL only when none of them work, so callers can report an
++ * error rather than dereferencing a NULL stream. */
++static FILE *zsync_tmpfile(void) {
++    const char *dirs[3];
++    FILE *f;
++    int i;
++
++    /* Fast path - let the C library choose its own location */
++    f = tmpfile();
++    if (f)
++        return f;
++
++    dirs[0] = getenv("TMPDIR");
++    dirs[1] = "/tmp";
++    dirs[2] = ".";
++
++    for (i = 0; i < 3; i++) {
++        char *name;
++        int fd;
++        size_t len;
++
++        if (!dirs[i] || !dirs[i][0])
++            continue;
++
++        len = strlen(dirs[i]) + sizeof("/zsync-XXXXXX");
++        name = malloc(len);
++        if (!name)
++            return NULL;
++        snprintf(name, len, "%s/zsync-XXXXXX", dirs[i]);
++
++        fd = mkstemp(name);
++        /* Unlink immediately - the caller only needs the stream, and this
++         * keeps the automatic cleanup that tmpfile() provides. */
++        if (fd != -1)
++            unlink(name);
++        free(name);
++
++        if (fd != -1) {
++            f = fdopen(fd, "w+b");
++            if (f)
++                return f;
++            close(fd);
++        }
++    }
++
++    return NULL;
++}
++
+ /* stream_error(function, stream) - Exit with IO-related error message */
+ void __attribute__ ((noreturn)) stream_error(const char *func, FILE * stream) {
+     fprintf(stderr, "%s: %s\n", func, strerror(ferror(stream)));
+@@ -227,7 +282,7 @@ void do_zstream(FILE * fin, FILE * fout, const char *bufsofar, size_t got) {
+     }
+ 
+     /* Start the zmap. We write into a temp file, which the caller then copies into the zsync file later. */
+-    zmap = tmpfile();
++    zmap = zsync_tmpfile();
+     if (!zmap) {
+         perror("tmpfile");
+         exit(2);
+@@ -581,7 +636,11 @@ int main(int argc, char **argv) {
+     time_t mtime = -1;
+ 
+     /* Open temporary file */
+-    FILE *tf = tmpfile();
++    FILE *tf = zsync_tmpfile();
++    if (!tf) {
++        fprintf(stderr, "unable to create a temporary file (tried TMPDIR, /tmp and the current directory)\n");
++        exit(2);
++    }
+ 
+     {   /* Options parsing */
+         int opt;

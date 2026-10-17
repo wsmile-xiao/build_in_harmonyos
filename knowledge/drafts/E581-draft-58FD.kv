@@ -1,0 +1,94 @@
+#====================================================================
+# E581 — conan test_package 构建环境 cmake 无法加载 libc++_shared.so → 改用编译器直编
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E581
+trigger_tool:           conan|cmake|test_package
+phase:                  testing
+error_signature:        Error loading shared library libc\+\+_shared\.so: \(needed by /data/service/hnp/bin/cmake\)|Error relocating /data/service/hnp/bin/cmake:.*symbol not found|test package.*Error in build\(\) method|CMake\.configure.*Error 127
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               build-system, cmake, conan, testing
+match_keywords:         libc++_shared.so, cmake, Error relocating, symbol not found, test_package, CMake.configure, Error 127, LD_LIBRARY_PATH, aarch64-linux-ohos, OHOS SDK
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OHOS SDK 提供的 cmake 可执行文件（/data/service/hnp/bin/cmake →
+                        cmake.org/cmake_4.1.2/bin/cmake）依赖 libc++_shared.so，而该库位于
+                        ohos-sdk_26.0.0.18/ohos/native/llvm/lib/aarch64-linux-ohos/ 子目录；
+                        conan 构建环境（CMakeToolchain/CMakeDeps 注入的 LD_LIBRARY_PATH 指向
+                        llvm/lib 根目录）找不到该库 → cmake 启动即失败（Error loading shared
+                        library / Error relocating ... symbol not found），test_package 的
+                        cmake.configure() 以 Exit 127 失败。交互 shell 下 cmake 能跑
+                        （系统加载路径含该库），但 conan 环境被 profile buildenv 覆盖。
+affected_scope:         OHOS 上所有 test_package 使用 CMakeToolchain/CMakeDeps 且 cmake 依赖
+                        libc++_shared.so 的库包；whitedb 0.8.0alpha 实测触发
+verification_cmd:       readelf -d /data/service/hnp/bin/cmake | grep NEEDED; find /data/service/hnp/ohos-sdk.org -name libc++_shared.so | head -3
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           compiler-direct-compile
+rec_description:        test_package 不使用 CMake，改用 profile 编译器（clang）直接编译链接
+                        测试源文件并运行：generators=VirtualBuildEnv，test() 中
+                        ${CC:-clang} -I<pkg>/include -L<pkg>/lib -o <bin> test.c -l<lib> 后
+                        self.run(<bin>, env="conanrun")。规避 cmake 运行时依赖，且测试仍
+                        真实调用被测包 API（满足 R34）。同 alpine 等已合入配方先例。
+rec_command: |
+  import os
+  from conan import ConanFile
+  class TestConan(ConanFile):
+      settings = "os", "arch", "compiler", "build_type"
+      generators = "VirtualBuildEnv"
+      def requirements(self):
+          self.requires(self.tested_reference_str)
+      def test(self):
+          pkg = self.dependencies["whitedb"].package_folder
+          self.run(f"${{CC:-clang}} ${{CFLAGS}} -I\"{pkg}/include\" -L\"{pkg}/lib\" "
+                   f"-o \"{self.build_folder}/test_whitedb\" test.c -lwgdb -lm",
+                   env="conanbuild")
+          self.run(f"\"{self.build_folder}/test_whitedb\"", env="conanrun")
+rec_auto_fix:           false
+rec_impl:               conan-test-package
+
+# 回退方案
+fallback_priority:      2
+fallback_approach:      add-ld-library-path
+fallback_description:   若必须保留 CMake（消费者需消费上游 CMake target），在 recipe 的
+                        generate()/buildenv 中把 aarch64-linux-ohos 目录加入
+                        LD_LIBRARY_PATH：os.environ 或 conf_info 注入
+                        llvm/lib/aarch64-linux-ohos
+fallback_command:       export LD_LIBRARY_PATH=/data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/llvm/lib/aarch64-linux-ohos:$LD_LIBRARY_PATH
+fallback_auto_fix:      false
+fallback_impl:          environment-hints
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       os\.environ.*CC|default.*cc|skip.*test_package|pass.*without.*compile
+forbid_1_reason:        shell 编译器回退脱离 Conan profile（R33）；空壳测试违反 R34
+forbid_1_consequence:   本地/CI 工具链不一致或无法证明测试依赖被测包
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P010, P014
+
+# ═══ 关系图 (Relations) ═══
+causes:
+caused_by:
+similar_to:             E307, E132, E520
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+doc_file:               doc/E581.md
+last_updated:           2026-09-15
+source_event:           whitedb 0.8.0alpha HarmonyOS PC 适配（conan-verify test_package 阶段）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors: HouYuxuan
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count: 0
+metrics_fail_count: 0
+metrics_confidence: 0.0
+metrics_last_used:

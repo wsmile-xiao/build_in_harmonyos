@@ -1,0 +1,69 @@
+# ═══ Draft knowledge entry — 并行 make 下 bison 并发覆写 → clang ICE 135 表象 ═══
+# Timestamp: 2026-09-25
+# Software: genders 1.27-3
+# Gate: W3 探索构建 make -j4 确定性复现 / make -j1 通过（A/B 实测）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the content below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-E728
+trigger_tool:           build|cc
+phase:                  compilation
+error_signature:        "clang frontend command failed with exit code 135|PLEASE submit a bug report to https://github.com/llvm/llvm-project/issues|parsing function body '_calc_complement'"
+prescan_pattern:        '\.c: \$\(srcdir\)/\S+\.y'
+
+severity:               2
+category:               build, autotools, parallel, race, yacc, toolchain
+match_keywords:         bison, yacc, -j4, 并发, 竞态, BUILT_SOURCES, genders_query, tab.c, clang ICE, exit code 135, 生成物, 交叉写坏, 串行, -j1
+
+title:                  旧 autotools+yacc 包：.y 规则 target 与产物名不匹配致 bison 每轮必跑，-j>1 并发覆写生成物 → 编译器 ICE（clang exit 135）表象，配方钉 -j1
+
+root_cause: >
+  上游 Makefile.am 的 yacc 规则 target 名与实际产物不一致（genders: target
+  `genders_query.c`，而 `$(YACC) -d -b genders_query` 产出 `genders_query.tab.c`），
+  target 永不落地 ⇒ 每轮 make 都重跑 bison；BUILT_SOURCES 让多个消费者各自触发同一
+  规则。make -j>1 时多个 bison 进程并发覆写同一文件 → 交叉写坏的半截生成物被 clang
+  编译 → 编译器前端崩溃（genders 实测 clang-15 exit code 135、崩点伪随机落在
+  `_calc_complement` 等函数解析）。A/B 实测：同一源树 -j4 必现（bison×3 + ICE、
+  make rc=2），-j1 rc=0——纯并发竞态，不是 clang 或上游代码缺陷。
+  排查陷阱：ICE 栈里出现具体源码位置会把人引向「编译器 bug / 代码 UB」，真正的判据是
+  串并行 A/B 与 bison 执行次数（grep 'bison -y' 日志计数）。
+
+affected_scope:         带 yacc/lex 生成物且规则 target/产物名不匹配的老 autotools 工程
+                        （BUILT_SOURCES + force-dependency-check 形态高发）；任何在
+                        内存高压设备上用 -j4/-j8 全量并行的同类包。
+
+verification_cmd:       cd "$WORKSPACE_ROOT/tmp/builds/genders-1.27-3.work" && rm -f src/libgenders/genders_query.tab.c src/libgenders/genders_query_parse.c && make -j4 > "$TASK_DIR/explore-logs/j4.log" 2>&1; grep -c 'bison -y' "$TASK_DIR/explore-logs/j4.log"; grep -c 'exit code 135' "$TASK_DIR/explore-logs/j4.log"; make -j1; echo "j4 必现 + j1 rc=0 即复现"
+
+rec_priority:           1
+rec_approach:           pin-serial-make
+rec_description:        配方 build() 固定 `autotools.make(args=["-j1"])`（及 `make target="check"`
+                        同样 -j1），不随 tools.build:jobs 放开；notes 记录 A/B 实测。不要把 ICE
+                        当编译器缺陷去改 -O 级别或升级工具链，也不要去改上游 .y/.c 规则（那是
+                        上游构建图缺陷，配方层串行即可确定性规避）。
+rec_command:             autotools.make(args=["-j1"]); autotools.make(target="check", args=["-j1"])
+rec_auto_fix:            false
+rec_impl:                archives/g/genders/1.27-3/conanfile.py build()
+
+fallback_priority:      2
+fallback_approach:       serial-generated-sources-first
+fallback_description:    若串行仍复现（不同形态）：先单线程让 BUILT_SOURCES 全部生成完毕
+                         （make 先不带并行跑一次生成目标），再并行编译；仅当能证明生成物不再
+                         被并发触碰时才放开 -j。
+fallback_command:        make -j1 src/libgenders/genders_query.tab.c src/libgenders/genders_query_parse.c && make -j4
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:        clang.*升级|-O[0123].*降级|删.*\.y|rm .*genders_query\.y
+forbid_1_reason:         以改工具链/降优化/删生成规则的方式掩盖并发竞态，会把确定性可规避的
+                         构建图问题变成不可审计的环境差异
+forbid_1_consequence:    本地与 CI 行为漂移；上游源被无据改动；问题在别的并行场景复发
+
+principles:             P004, P020
+caused_by:
+causes:
+related:                DRAFT-E727

@@ -44,7 +44,35 @@ configure \
 - ✅ 需创建 nroff → groff -Tascii -mandoc wrapper (L3)
 - ✅ gdbm 库文件可能安装在 ~/usr/local/ 根目录，需复制到标准路径 (L3)
 
+## CI 适配修复 (2026-09-04)
+
+- 移除硬编码设备路径 (/storage/Users/currentUser/usr/local/...)
+- libpipeline 始终从源码构建（CI 环境无系统安装版本）
+- libpipeline 下载改用 Debian 镜像 (savannah 服务器 502)
+- nroff wrapper 改用 /bin/sh shebang，仅在 groff 可用时创建
+- test.sh shebang 从 /data/service/hnp/bin/bash 改为 /bin/sh
+- 修复 JC6 多包冲突：rebase 到最新 main，仅保留 man-db 提交
+
+## CI 修复续 (2026-09-18, 构建失败 "no supported database library/header found")
+
+- 根因 1: generate() 缺少 AutotoolsDeps — conan 依赖 (gdbm/zlib) 的 -I/-L/-l
+  从未进入 configure 环境。之前本地 conan-verify 侥幸通过是因为设备 shell
+  遗留 CPPFLAGS=-I~/usr/local/include 且探索阶段手动装过 gdbm；CI 干净环境
+  直接报 "Fatal: no supported database library/header found" (L2)
+- 修复 1: generate() 添加 AutotoolsDeps(self).generate() (L2)
+- 根因 2: AutotoolsDeps 注入 LIBS="-lgdbm" 后，configure conftest 链接
+  libgdbm.so 但 OHOS loader 无 conan cache 搜索路径 → "cannot run C
+  compiled programs" (E524 同族问题)
+- 修复 2: 按 aaphoto/0.45 模式给 build scope 注入 LD_LIBRARY_PATH (L2)
+- 根因 3: man-db 内部库 libman/libmandb 默认构建为 .so 并安装到 lib/man-db/
+  （RUNPATH=//lib/man-db 绝对路径），包内运行时无法解析 → 二进制大量符号缺失
+- 修复 3: configure 加 --disable-shared --enable-static 静态化内部库 (L2)
+- 根因 4: test_package 用 Conan 1.x 的 self.deps_env_info（Conan 2 已移除）
+- 修复 4: 改用 self.dependencies["man-db"].package_folder + cpp_info.bindirs，
+  test() 通过 sh test.sh 真实执行 man --version (L3)
+- 本地复验: conan create (ohos-aarch64 profile) 完整通过，test_package
+  输出 "man 2.13.1 / man-db test passed"
 ---
 
-**编译结束**: 2026-04-14 16:45
-**最终状态**: success
+**编译结束**: 2026-09-18 18:45
+**最终状态**: published

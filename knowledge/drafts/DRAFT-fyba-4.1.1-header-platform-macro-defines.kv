@@ -1,0 +1,107 @@
+#====================================================================
+# DRAFT-fyba-4.1.1-header-platform-macro-defines
+#   公开头文件在 `#ifdef LINUX/UNIX` 等平台宏下才定义类型/常量，
+#   库本体以这些宏编译，但消费者 include 时无宏 → 类型未定义报错；
+#   配方需用 cpp_info.defines 把与库编译一致的平台宏导出给消费者
+# 来源: PR 适配 fyba 4.1.1（Kartverket SOSI 库）到 HarmonyOS PC 时实证
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# 辨别性指纹：消费者编译报 unknown type name '<类型>'，
+# 且该类型在公开头文件中位于 `#ifdef <平台宏>` 内。
+id:                     DRAFT-fyba-4.1.1-header-platform-macro-defines
+trigger_tool:           clang|clang++|gcc|g++|cmake|make
+phase:                  compilation
+error_signature:        error: unknown type name '[A-Za-z_][A-Za-z0-9_]*'|
+                        #ifdef LINUX|#ifdef UNIX|#if defined\(LINUX\)|
+                        #if defined\(UNIX\)
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               headers, portability, build-system, conan, flags
+match_keywords:         unknown type name, 公开头, public header, #ifdef LINUX,
+                        #ifdef UNIX, #ifdef WIN32, 平台宏, platform macro,
+                        cpp_info.defines, consumer, defines, 类型未定义,
+                        UT_INT64, fyut.h, 库编译宏, 与库一致
+title:                  公开头文件在平台宏（#ifdef LINUX/UNIX）下才定义类型，消费者 include 无宏报 unknown type name；需 cpp_info.defines 导出与库编译一致的宏
+prescan_pattern:        ^\s*#\s*ifdef\s+(LINUX|UNIX|WIN32|_WIN32)
+prescan_globs:          *.h, **/*.h
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             1990s-2000s 老式 C/C++ 库的公开头文件习惯用
+                        `#ifdef LINUX`/`#ifdef UNIX`/`#ifdef WIN32` 等平台宏做条件
+                        编译（如 fyut.h 仅在 `#ifdef LINUX` 下
+                        `#define UT_INT64 int64_t`）。库本体编译时通过 Makefile.am
+                        的 AM_CPPFLAGS（如 `-DUNIX -DLINUX`）带上了这些宏，因此
+                        库自身构建正常；但消费者只 include 安装后的公开头，链接库
+                        和符号时并不知道上游编译期的平台宏约定，`UT_INT64` 等类型
+                        未定义 → 消费者编译报 unknown type name。修复必须让配方把
+                        "与库编译一致的平台宏"通过 cpp_info.defines 明示导出。
+affected_scope:         公开头以平台宏条件定义类型/常量/函数声明、且库本体以这些宏
+                        编译的老式 C/C++ 库；一切可能的消费者（test_package、
+                        CMakeDeps import、直接 -I 使用）。本题实证：fyba 4.1.1
+                        fyut.h `#ifdef LINUX` 下定义 UT_INT64，test_package 消费者
+                        报 `unknown type name 'UT_INT64'`（fyut.h:155）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           cpp-info-defines-export
+rec_description:        配方 package_info() 用 self.cpp_info.defines 导出与库编译一致的
+                        平台宏（例如 ["UNIX", "LINUX"]），消费者通过 Conan 传递依赖
+                        自动获得 -DUNIX -DLINUX，公开头中的条件类型定义即可用。
+rec_command:            self.cpp_info.defines = ["UNIX", "LINUX"]
+rec_auto_fix:           false
+rec_impl:               conan-defines-export
+
+fallback_priority:      2
+fallback_approach:      patch-header-remove-cond-or-add-fallback
+fallback_description:   若平台宏语义不可外泄（例如库内部宏与 libc 冲突，或不能要求所有
+                        消费者带宏），用补丁在公开头条件分支外补无条件回退定义
+                        （patch_type: portability），或把条件分支改为对 OHOS 也成立。
+fallback_command:       patches/000X-header-fallback-define.patch
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       消费者.*只打印|test.*printf.*字符串.*代替
+forbid_1_reason:         不能把消费者测试降级为空壳绕过 R34——公开头宏缺失必须真修
+                        （defines 导出或补丁），不是把测试改成不 include 头文件
+forbid_1_consequence:   PF3/R34 空壳测试被拦，或 CI 消费者阶段失败
+forbid_2_pattern:       -DLINUX.*写进.*Makefile\.am.*提交上游源码
+forbid_2_reason:         改上游 Makefile.am 硬编码 -DLINUX 是换汤不换药：库能编，但
+                        消费者 include 公开头仍无宏；且 R8 禁平台宏补丁（libc 探针例外）
+forbid_2_consequence:   库构建通过但消费者依旧报 unknown type name，PR 被拒
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P005
+
+# ═══ 关系图 (Relations) ═══
+# 签名家族与 E217（include 子目录 → includedirs 调整）E472（消费者 includedirs 透传）
+# 同属"消费者侧配方导出"族，但本条是**宏（defines）**导出，非 include 路径：
+#   E217 = includedirs 安装子目录；E472 = 消费者 include/SDL2 透传；
+#   本条 = 平台宏条件类型定义需要 cpp_info.defines 导出。
+similar_to:             E217、E472（消费者侧配方导出族，对象不同：includedirs vs defines）、
+                        E293（老代码 C++17 兼容，同为老式源码平台适配）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       conan create archives/f/fyba/4.1.1 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+doc_file:               knowledge/drafts/DRAFT-fyba-4.1.1-header-platform-macro-defines.md
+last_updated:           2026-09-27
+source_event:           fyba 4.1.1 适配 HarmonyOS PC（task fyba-4.1.1-r01-pc4-4）；
+                        fyut.h `#ifdef LINUX` 下定义 UT_INT64，test_package 消费者
+                        unknown type name，配方 cpp_info.defines=["UNIX","LINUX"]
+                        后消费者编译运行全绿（ctest 2/2）
+authors:                pc4-4
+source_pr:              TBD
+source_commit:          TBD
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-27

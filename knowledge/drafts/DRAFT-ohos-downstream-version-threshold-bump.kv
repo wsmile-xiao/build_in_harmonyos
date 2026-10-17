@@ -1,0 +1,115 @@
+#====================================================================
+# DRAFT-ohos-downstream-version-threshold-bump — 下游库的构建系统版本门槛
+#   驱动一串基础库升级（先量拓扑，再逐个验证构建契约）
+# 对应文档: knowledge/drafts/DRAFT-ohos-downstream-version-threshold-bump.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-ohos-downstream-version-threshold-bump
+trigger_tool:           meson|cmake|configure|conan|pip
+phase:                  configuration
+error_signature:        Dependency .* found: NO\. Found .* but need: '>=.*'|
+                         Run-time dependency .* found: NO.*but need|
+                         Automatic wrap-based subproject downloading is disabled
+
+severity:               2
+category:               dependency, version, build-system, porting, planning
+match_keywords:         version threshold, 版本门槛, dependency version, but need,
+                        meson version_compare, wlroots, wayland-server, xkbcommon,
+                        wayland-protocols, automatic wrap disabled, 升级基础库,
+                        下游要求, requires_dist
+title:                  下游库构建系统里的版本门槛（dependency(..., version: '>=X')）
+                        会驱动一串基础库升级——动手前先量化拓扑并逐个确认构建契约是否变
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             被适配的下游库在其构建系统里对基础依赖声明**硬性最低版本**
+                        （meson 的 dependency('foo', version: '>=X')、cmake 的
+                        find_package(foo X REQUIRED)）。若制品仓现有版本低于门槛，
+                        配置阶段直接失败，且**该失败无法用补丁绕过**——它要求的不是
+                        代码改动，而是基础库版本本身。典型报错同时给出"当前版本"与
+                        "所需版本"，并常伴随 "Automatic wrap-based subproject
+                        downloading is disabled"（meson 不能自动下载依赖来顶替）。
+                        这类门槛常成串出现：上游一个库往往同时抬升多个基础依赖的
+                        下限，而**每个提升的难度不同**——有的版本间构建契约完全兼容
+                        （可整体沿用配方），有的新增了默认开启的选项（照搬配方会直接
+                        error() 失败），有的抬高了对**嵌入式工具**的版本要求
+                        （如启用测试时要求 wayland-scanner >= 1.23.0）。故必须逐个
+                        核对，不能按"版本号 +0.1"统一估工。
+affected_scope:         任何"某库依赖某基础库的新版本，而制品仓只有旧版本"的场景；
+                        尤其是被多个包依赖的基础件（wayland / xkbcommon /
+                        wayland-protocols / libdrm 这类图形与协议栈底座）。
+                        与 requires_dist 窄区间的区别见对照段：那是包管理器层面可
+                        只告警的声明，本条是构建系统层面直接中断的硬门槛。
+verification_cmd:       meson setup build <downstream-src>   # 用制品仓现有版本的真实 .pc
+                        # 观察 "found: NO ... but need: '>=X'"，
+                        # 并核对下游 src 里所有 version: '>=' 声明：
+                        # grep -rnE "dependency\(.*version.*'>='|version_compare" <downstream>/meson.build
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           dependency-first
+rec_description:        先量化再动手：①在被适配库的源码里枚举全部版本门槛
+                        （grep dependency(...version...) / find_package 带版本），
+                        列出「依赖 → 要求版本 → 制品仓现有版本」对照表；②逐个判定
+                        该版本升级的**构建契约是否变化**（依赖项、构建选项名与默认值、
+                        内嵌工具要求），据此决定是整体沿用旧配方还是需要新增处理；
+                        ③按拓扑序逐个升级、各自独立 PR（一个 PR 一个包，W2），
+                        每升一个都真实跑 conan create + 上游测试；④基础件升级要考虑
+                        依赖它的既有包（升级影响面），必要时同步验证下游可编译。
+rec_command:            grep -rnE "dependency\([^)]*version" <src>/meson.build   # 枚举门槛
+                        conan download "<dep>/<existing>" -r=ohpcd --only-recipe  # 确认仓内现状
+rec_auto_fix:           false
+rec_impl:               dependency-first
+
+fallback_priority:      2
+fallback_approach:      disable-the-feature-gate
+fallback_description:   部分门槛是**条件性**的：仅当某个可选特性开启时才要求更高版本
+                        （实例：wayland-protocols 只在 tests=true 时要求
+                        wayland-scanner >= 1.23.0；tests=false 时门槛降到 1.20.0）。
+                        若该特性对本包不是必需，关闭它即可把门槛降回仓内现有版本能
+                        满足的范围。**但这要写清代价**：关掉的是测试或功能覆盖面，
+                        属降低验证强度，须在 notes.md 显式申报而不是静默关掉。
+fallback_command:       # meson -Dtests=false （仅当门槛确实由该选项引入）
+fallback_auto_fix:      false
+fallback_impl:          option-toggle
+
+forbid_1_pattern:       把下游库的门槛.*当作普通编译错误.*(打补丁|改源码)|打补丁绕过 dependency 版本检查
+forbid_1_reason:        版本门槛要求的不是源码改动，而是基础库版本本身；改下游源码去
+                        绕过 version 检查，等于宣称"低版本也兼容上游未验证的组合"，
+                        会把风险推给运行时且无法回归验证。
+forbid_1_consequence:   配置阶段"修好"了，却在运行/链接期以未定义符号、ABI 不匹配、
+                        接口缺失等形式爆发，且下游无法归因。
+
+forbid_2_pattern:       为满足门槛.*把多个基础库升级.*塞进同一个 PR|
+                        一个 PR 同时新增 (wayland|xkbcommon|wayland-protocols)/
+forbid_2_reason:        基础件各自独立发布、各自有依赖方与影响面；混在一个 PR 里
+                        无法单独回滚、无法单独验证，且违反 W2（一 PR 一软件目录）
+                        与 PF4（依赖须先发布后使用）。
+forbid_2_consequence:   评审无法判断每个升级单独是否正确；一旦其中一个有问题，
+                        整串改动被迫整体回退。
+
+principles:             dependency-first, upstream-compat-evidence, one-package-per-pr
+
+causes:                 []
+caused_by:              []
+similar_to:             [DRAFT-ohos-dep-version-assert-warn, E6341]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-downstream-version-threshold-bump.md
+last_updated:           2026-09-16
+source_event:           wlroots 0.20.1 依赖门槛实测（wayland>=1.24.0 / xkbcommon>=1.8.0 /
+                        wayland-protocols>=1.47 三库升级）
+
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  3
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:         7E31

@@ -1,0 +1,57 @@
+#====================================================================
+# DRAFT: OHOS 真机无 GNU as —— registry OCaml 包下游 ocamlopt/dune 的
+# 裸 `as` 汇编器失效与 PATH shim 修复（xmlm 1.4.0，PR #14675）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-xmlm-1.4.0-ocamlopt-missing-gnu-as-shim
+trigger_tool:           ocamlopt|ocamlc|dune|make|conan
+phase:                  building
+error_signature: >-
+  as: inaccessible or not found|I/O error: as  -o '.*\.o' '.*\.s'|Assembler error|Error during linking|undefined symbol: caml_call_gc
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               ohos, toolchain, ocaml
+match_keywords: ocamlopt,ocamlc,dune,registry ocaml package,as,GNU as,assembler,integrated assembler,clang -c,shim,PATH,data/service/hnp,downstream OCaml package,camlp-streams,xmlm,startup.cmxs
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+title: OHOS 无 GNU as 时 registry OCaml 下游包的原生汇编修复（as shim 转发 clang 集成汇编器）
+root_cause: >
+  registry 提供的 ocaml/4.14.1.1.4 包在 CI worker 上构建，其 Config.asm 烘焙为裸 `as`
+  （GNU 汇编器名）。OHOS PC 真机没有 GNU as（SDK 只带 llvm-as，语义是 LLVM IR，不能汇编
+  GAS 文本），ocamlopt 进入汇编阶段时直接执行 `as -o x.o x.s`，报
+  `as: inaccessible or not found`，任何原生编译（ocamlopt / dune 的 native target /
+  topkg 流水线）全部失败，且错误出现在 OCaml 驱动内部，上游源码与 conanfile 均无直接线索。
+affected_scope: >
+  一切依赖 registry ocaml 工具链做原生编译的下游 OCaml 包（ocamlopt 单文件、dune build 默认
+  native、ocaml pkg/pkg.ml build / topkg、ocamlfind 生态）；字节码-only 路径不触发。
+verification_cmd: command -v as || echo MISSING; ocamlopt -I src src/xmlm.cmxa test/test.ml -o test.exe
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach: ocaml-asm-shim-to-clang-integrated-as
+solution: |
+  # 在 build()（及 test_package/test.sh）里生成一个只做转发的最小 `as` shim：
+  #!/bin/sh
+  exec <OHOS clang 绝对路径> -c "$@"
+  # 要点：
+  # 1) clang 集成汇编器原生支持 GAS 语法的 aarch64 .s（无需独立 as）；
+  # 2) shim 目录前置到 PATH（放在 ocaml bin 之前），不修改 conan 包、不修改上游源码；
+  # 3) clang 路径取 conan conf 的 tools.build:compiler_executables.c（R33，不硬编码）；
+  # 4) shim 只放 build/工作目录，绝不进包（package() 只收集产物清单）。
+fallback: |
+  若环境确有 GNU as（CI worker /data/service/hnp/bin 存在时），shim 不被调用即可原样通过；
+  找不到 clang 时退回 `as` 报错信息，不静默伪成功。
+verify_builds: xmlm 1.4.0 真机 conan create 全绿（G0-G4；4/4 上游 Pkg.test；22 断言消费者测试+设备 e2e）；camlp-streams 5.0.1 / findlib 1.9.8 同族先例
+prescan_pattern: >-
+  as: inaccessible or not found|caml_call_gc|ocamlopt
+
+# ═══ Layer 4: 证据层 (Evidence) ═══
+evidence_url: https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/merge_requests/14675
+source_commit: xmlm 1.4.0（https://erratique.ch/software/xmlm/releases/xmlm-1.4.0.tbz）
+notes: >
+  与 E253（OCaml 工具链自身迁移）互补：E253 处理编译器如何被构建，本条处理
+  registry 已发布 ocaml 包在真机下游使用时的汇编器缺失；与
+  DRAFT-gas-arm64-clang-integrated-as 互补：那条是 C 编译器驱动的 .S 编译，
+  本条是 OCaml 驱动器内部对外部 `as` 的硬调用，必须靠 shim 改 PATH 语义。

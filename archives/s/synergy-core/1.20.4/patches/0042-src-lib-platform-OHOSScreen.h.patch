@@ -1,0 +1,301 @@
+--- /dev/null
++++ b/src/lib/platform/OHOSScreen.h
+@@ -0,0 +1,298 @@
++/*
++ * Deskflow -- mouse and keyboard sharing utility
++ * Copyright (C) 2026 Symless Ltd.
++ *
++ * This package is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * found in the file LICENSE that should have accompanied this file.
++ */
++
++#pragma once
++
++#include "base/Event.h"
++#include "deskflow/KeyMap.h"
++#include "deskflow/PlatformScreen.h"
++#include "platform/OHOSScreenState.h"
++
++#include <database/pasteboard/oh_pasteboard.h>
++#include <multimodalinput/oh_input_manager.h>
++
++#include <array>
++#include <atomic>
++#include <condition_variable>
++#include <cstdint>
++#include <map>
++#include <mutex>
++
++class OHOSKeyState;
++
++//! OpenHarmony implementation of IPlatformScreen
++class OHOSScreen : public PlatformScreen
++{
++public:
++  OHOSScreen(
++      bool isPrimary, IEventQueue *events, bool enableLangSync,
++      deskflow::ClientScrollDirection scrollDirection = deskflow::ClientScrollDirection::SERVER
++  );
++  ~OHOSScreen() override;
++
++  // IScreen overrides
++  void *getEventTarget() const override;
++  bool getClipboard(ClipboardID id, IClipboard *clipboard) const override;
++  void getShape(SInt32 &x, SInt32 &y, SInt32 &width, SInt32 &height) const override;
++  void getCursorPos(SInt32 &x, SInt32 &y) const override;
++
++  // IPrimaryScreen overrides
++  void reconfigure(UInt32 activeSides) override;
++  void warpCursor(SInt32 x, SInt32 y) override;
++  UInt32 registerHotKey(KeyID key, KeyModifierMask mask) override;
++  void unregisterHotKey(UInt32 id) override;
++  void fakeInputBegin() override;
++  void fakeInputEnd() override;
++  SInt32 getJumpZoneSize() const override;
++  bool isAnyMouseButtonDown(UInt32 &buttonID) const override;
++  void getCursorCenter(SInt32 &x, SInt32 &y) const override;
++
++  // ISecondaryScreen overrides
++  void fakeMouseButton(ButtonID id, bool press) override;
++  void fakeMouseMove(SInt32 x, SInt32 y) override;
++  void fakeMouseRelativeMove(SInt32 dx, SInt32 dy) const override;
++  void fakeMouseWheel(SInt32 xDelta, SInt32 yDelta) const override;
++
++  // IKeyState overrides
++  void fakeKeyDown(KeyID id, KeyModifierMask mask, KeyButton button, const String &lang) override;
++  bool fakeKeyRepeat(KeyID id, KeyModifierMask mask, SInt32 count, KeyButton button, const String &lang) override;
++  bool fakeKeyUp(KeyButton button) override;
++  void fakeAllKeysUp() override;
++  bool fakeCtrlAltDel() override;
++  bool fakeMediaKey(KeyID id) override;
++
++  // IPlatformScreen overrides
++  void enable() override;
++  void disable() override;
++  void enter() override;
++  bool canLeave() override;
++  void leave() override;
++  bool setClipboard(ClipboardID id, const IClipboard *clipboard) override;
++  void checkClipboards() override;
++  void openScreensaver(bool notify) override;
++  void closeScreensaver() override;
++  void screensaver(bool activate) override;
++  void resetOptions() override;
++  void setOptions(const OptionsList &options) override;
++  void setSequenceNumber(UInt32 sequenceNumber) override;
++  bool isPrimary() const override;
++  String getSecureInputApp() const override;
++  void clearDraggingFilename() override;
++
++protected:
++  void handleSystemEvent(const Event &event, void *data) override;
++  void updateButtons() override;
++  IKeyState *getKeyState() const override;
++
++private:
++  struct OHOSNativeDependencies
++  {
++    Input_Result (*m_queryAuthorization)(Input_InjectionStatus *);
++    Input_Result (*m_requestAuthorization)(Input_InjectAuthorizeCallback);
++    bool (*m_pasteboardHasData)(OH_Pasteboard *);
++    OH_UdmfData *(*m_pasteboardGetData)(OH_Pasteboard *, int *);
++    int (*m_pasteboardSetData)(OH_Pasteboard *, OH_UdmfData *);
++    int (*m_pasteboardClearData)(OH_Pasteboard *);
++    std::uint32_t (*m_pasteboardChangeCount)(OH_Pasteboard *);
++    Input_Result (*m_removeHotkey)(const Input_Hotkey *, Input_HotkeyCallback);
++    void (*m_destroyHotkey)(Input_Hotkey **);
++    std::int64_t (*m_monotonicMicroseconds)();
++  };
++
++  OHOSScreen(
++      bool isPrimary, IEventQueue *events, bool enableLangSync,
++      deskflow::ClientScrollDirection scrollDirection, const OHOSNativeDependencies &native
++  );
++  static const OHOSNativeDependencies &systemDependencies();
++
++  enum class InputMode
++  {
++    kNone,
++    kMonitor,
++    kIntercept
++  };
++
++  enum class NativeEventKind
++  {
++    kKey,
++    kMouse,
++    kAxis,
++    kHotkey,
++    kHotkeyCleanup,
++    kPasteboard,
++    kDisplay
++  };
++
++  using InjectionTokenClass = deskflow::platform::InjectionTokenClass;
++  using InjectionFingerprint = deskflow::platform::InjectionFingerprint;
++  using ClipboardFingerprint = deskflow::platform::ClipboardFingerprint;
++  using ClipboardSnapshot = deskflow::platform::ClipboardSnapshot;
++
++  struct NativeEventData final : public EventData
++  {
++    NativeEventKind m_kind{NativeEventKind::kKey};
++    std::uint64_t m_generation{};
++    std::int32_t m_action{};
++    std::int32_t m_code{};
++    std::int32_t m_x{};
++    std::int32_t m_y{};
++    double m_horizontal{};
++    double m_vertical{};
++    std::int64_t m_actionTime{};
++    bool m_injectedEcho{false};
++    std::array<std::int32_t, 2> m_hotkeyPreKeys{};
++    std::int32_t m_hotkeyPreKeyCount{};
++    std::uint64_t m_id{};
++    std::uint64_t m_epoch{};
++  };
++
++  struct HotKeyRegistration
++  {
++    Input_Hotkey *m_hotkey{};
++    std::array<std::int32_t, 2> m_preKeys{};
++    std::int32_t m_preKeyCount{};
++    std::int32_t m_finalKey{};
++    std::uint64_t m_epoch{};
++  };
++
++  bool refreshShape(bool notify);
++  bool requestInjectionAuthorization();
++  bool injectionAuthorized() const;
++  bool setInputMode(InputMode mode);
++  bool removeInputMode();
++  bool removeInputRegistrations();
++  bool removeInputRegistrationsWithRetry();
++  void finishInputModeOperation();
++  bool nativeCleanupIncomplete() const;
++  bool snapshotNativeEventGeneration(std::uint64_t &generation) const noexcept;
++  void enqueueNativeEvent(NativeEventData *data) noexcept;
++  void queueHotkeyCleanup(UInt32 id, std::uint64_t epoch) noexcept;
++  void cleanupHotkey(UInt32 id, std::uint64_t epoch);
++  void drainHotkeyCleanup();
++  void handleNativeEvent(const Event &event, void *data);
++  bool injectionEchoTrackingActive(InjectionTokenClass tokenClass) const;
++  bool inputRoleAllowsInjection(InjectionTokenClass tokenClass, bool recenterWarp) const;
++  std::int64_t beginInjectionToken(InjectionFingerprint fingerprint) const;
++  void finishInjectionToken(std::int64_t actionTime, bool success) const;
++  bool consumeInjectionToken(const InjectionFingerprint &fingerprint) const;
++  bool clipboardFingerprint(
++      bool hasText, const String &text, bool hasHtml, const String &html,
++      bool hasBitmap, const String &bitmap, ClipboardFingerprint &fingerprint
++  ) const;
++  ClipboardSnapshot readClipboardSnapshot() const;
++  void processClipboardChange(bool localChange);
++  bool waitForClipboardCallback(std::uint64_t generation, std::int64_t deadline);
++  void setClipboardCallbackGeneration(std::uint64_t generation);
++  std::uint32_t takeClipboardCallbackCount(std::uint64_t generation);
++  void clearPendingClipboardWrite();
++  void beginClipboardOperation();
++  void finishClipboardOperation();
++  void sendEvent(Event::Type type, void *data = nullptr) const;
++  void sendClipboardEvent(ClipboardID id) const;
++  bool injectMouseEvent(Input_MouseEvent *event, bool global, bool recenterWarp = false) const;
++  bool injectAbsoluteMouse(SInt32 x, SInt32 y, bool recenterWarp = false) const;
++  void onKeyEvent(std::int32_t keyCode, std::int32_t action);
++  void onMouseEvent(std::int32_t action, std::int32_t button, SInt32 x, SInt32 y);
++  void onAxisEvent(InputEvent_AxisAction action, double horizontal, double vertical);
++  void onHotkey(UInt32 id, std::uint64_t epoch);
++  void onClipboardChanged(Pasteboard_NotifyType type);
++  void onDisplayChanged(uint64_t displayId);
++
++  static void keyEventCallback(const Input_KeyEvent *event);
++  static void mouseEventCallback(const Input_MouseEvent *event);
++  static void axisEventCallback(const Input_AxisEvent *event);
++  static void hotkeyCallback(Input_Hotkey *hotkey);
++  static void injectionAuthorizationCallback(Input_InjectionStatus status);
++  static void displayChangeCallback(uint64_t displayId);
++  static void pasteboardCallback(void *context, Pasteboard_NotifyType type);
++  static OHOSScreen *acquireInstance();
++  static void releaseInstance(OHOSScreen *instance);
++
++private:
++  friend class OHOSKeyState;
++
++  const bool m_isPrimary;
++  IEventQueue *m_events;
++  OHOSKeyState *m_keyState;
++  const OHOSNativeDependencies &m_native;
++  deskflow::KeyMap m_keyMap;
++
++  mutable std::mutex m_stateMutex;
++  mutable std::mutex m_inputModeMutex;
++  mutable std::mutex m_clipboardWriteMutex;
++  mutable std::mutex m_injectionTokenMutex;
++  mutable std::mutex m_callbackMutex;
++  mutable std::mutex m_clipboardCallbackMutex;
++  std::condition_variable m_callbackCondition;
++  std::condition_variable m_clipboardCondition;
++  std::condition_variable m_clipboardWriteCondition;
++  std::condition_variable m_inputModeCondition;
++  std::atomic<unsigned int> m_callbackCount{0};
++  std::atomic<std::uint64_t> m_nativeEventGeneration{0};
++  std::atomic<bool> m_acceptNativeEvents{false};
++  Event::Type m_nativeEventType{Event::kUnknown};
++  bool m_nativeEventHandlerRegistered{false};
++  bool m_systemEventHandlerRegistered{false};
++  InputMode m_inputMode{InputMode::kNone};
++  bool m_keyMonitorRegistered{false};
++  bool m_mouseMonitorRegistered{false};
++  bool m_axisMonitorRegistered{false};
++  bool m_keyInterceptorRegistered{false};
++  bool m_pointerInterceptorRegistered{false};
++  bool m_inputModeOperationActive{false};
++  bool m_clipboardOperationActive{false};
++  std::atomic<bool> m_hotkeyCleanupPending{false};
++  bool m_enabled{false};
++  bool m_cleanupFailed{false};
++  bool m_isOnScreen{false};
++  bool m_screensaverOpen{false};
++  bool m_screensaverNotify{false};
++  std::atomic<std::uint64_t> m_authorizationEpoch{0};
++  std::atomic<bool> m_injectionAuthorizationReady{false};
++  mutable deskflow::platform::InjectionEchoTracker m_injectionEchoTracker;
++  mutable bool m_injectionTokenOverflowLogged{false};
++
++  SInt32 m_x{};
++  SInt32 m_y{};
++  SInt32 m_width{};
++  SInt32 m_height{};
++  mutable SInt32 m_cursorX{};
++  mutable SInt32 m_cursorY{};
++  bool m_warpPending{false};
++  std::int64_t m_warpPendingExpiresAt{};
++  std::array<bool, 5> m_buttons{};
++  uint64_t m_defaultDisplayId{};
++  SInt32 m_defaultDisplayX{};
++  SInt32 m_defaultDisplayY{};
++  SInt32 m_defaultDisplayWidth{};
++  SInt32 m_defaultDisplayHeight{};
++
++  OH_Pasteboard *m_pasteboard{};
++  OH_PasteboardObserver *m_localPasteboardObserver{};
++  OH_PasteboardObserver *m_remotePasteboardObserver{};
++  bool m_localPasteboardSubscribed{false};
++  bool m_remotePasteboardSubscribed{false};
++  deskflow::platform::ClipboardWriteTracker m_clipboardWriteTracker;
++  std::uint64_t m_activeClipboardGeneration{};
++  std::uint64_t m_observedClipboardGeneration{};
++  std::uint32_t m_observedClipboardCallbackCount{};
++  uint32_t m_displayListenerIndex{};
++  bool m_displayListenerRegistered{false};
++  UInt32 m_sequenceNumber{};
++
++  std::map<UInt32, HotKeyRegistration> m_hotkeys;
++  deskflow::platform::HotKeyRegistry m_hotkeyRegistry;
++  UInt32 m_nextHotkeyId{1};
++
++  static std::mutex s_instanceMutex;
++  static OHOSScreen *s_instance;
++  static Input_InterceptorEventCallback s_interceptorCallbacks;
++  static bool s_constructionInProgress;
++  static bool s_restartBlocked;
++};

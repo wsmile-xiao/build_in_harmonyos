@@ -1,0 +1,82 @@
+#====================================================================
+# E319-draft — Python noarch 包 OHOS 适配：import 时资源下载惰性化 + pip wheel 打包
+# 对应的人类文档: graph/E319-draft-python-noarch-nltk-lazy-ohos.md (draft)
+#
+# 本条目已由主编审核合入。
+# 触发事件: PR !4638 acronym 2.0.0 适配 HarmonyOS PC
+# 路径支撑: 路径 A（基础适配申请）+ 路径 B（贡献创新，新增可复用知识，10 分候选，最终以官方审核为准）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E319
+trigger_tool:           python3|pip|conan
+phase:                  import|installation|runtime
+error_signature:        LookupError:.*corpus|Initial downloading of word corpus|nltk.download|ModuleNotFoundError: No module named '.*'|connection timed out|Failed to establish a new connection|unable to generate a unique filename|ssl.SSLCertVerificationError
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 2
+category:               network, python, packaging
+match_keywords: acronym, NLTK, nltk.corpus, ensure_loaded, nltk.download, python noarch, py3-none-any, pip wheel, installer, site-packages, PYTHONPATH, egg-info, console_scripts, import 阻塞, 语料库, words corpus, brown, gutenberg
+title: Python noarch 包在 OHOS 受限网络下 import 时自动下载资源导致阻塞/失败；纯 Python 包需 pip wheel --no-deps + site-packages 布局打包
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: (1) 上游 Python 包（如 bacook17/acronym 2.0.0）在模块顶层调用 nltk.corpus.words/brown/gutenberg.ensure_loaded()，语料缺失时自动 nltk.download() 联网下载——OHOS 构建/worker 容器网络受限时 import 挂起或失败，阻塞所有仅 import 包的使用方；(2) 纯 Python noarch 包（py3-none-any.whl）无编译产物，Conan 打包必须用 pip wheel --no-deps 构建 wheel，再以 site-packages 布局（lib/pythonX.Y/site-packages）放入 package，并通过 runenv/buildenv PYTHONPATH 暴露，console_scripts 放 bin/。
+affected_scope: 所有在模块顶层下载语料/模型/字典等资源的 Python 包（NLTK 系、torchvision 模型缓存系等）在 OHOS/受限网络上的 import；所有纯 Python noarch 包的 Conan 适配
+verification_cmd: timeout 30 python3 -c "import acronym" 2>&1 | head -3; python3 -m pip wheel --no-deps -w .dist . && ls .dist/*.whl; python3 -m installer .dist/*.whl --destdir $STAGING --prefix $PREFIX
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority: 1
+rec_approach: lazy-resource-loading-and-pip-wheel-noarch-package
+rec_description: 1) 移除模块顶层的 ensure_loaded()/download() 调用，改为显式惰性 helper（如 ensure_corpus(corpus)），仅在真正执行功能（find_acronyms/main）时调用，语料缺失抛清晰 RuntimeError 提示 nltk.download()；import 模块绝不触网；2) 纯 Python 包 Conan 配方：settings 仅 ("os","arch")，build() 用 python3 -m pip install --break-system-packages --no-deps --prefix=staging 安装，package() 定位 staging 下 lib/pythonX.Y/site-packages 复制到 package 同构目录，bin/ 复制 console_scripts；3) package_info() 中 runenv_info/buildenv_info append PYTHONPATH 指向 package 的 site-packages，bindirs=["bin"]；4) test_package 用 unittest 补全路径 B 测试，find_acronyms 用 FakeCorpus（实现 words()/ensure_loaded()）避免真实语料下载。
+rec_command: conan create archives/a/acronym/2.0.0 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing --user=ohpcd --channel=stable
+rec_auto_fix: false
+rec_impl: patches
+
+# 回退方案
+fallback_priority: 2
+fallback_approach: preinstall-nltk-data
+fallback_description: 若功能必须真实语料，可在 test_package/构建环境预置 NLTK_DATA 目录并 nltk.download() 完整语料（words/brown/gutenberg），再运行功能测试。体积大（words+brown 约数十 MB），受限网络下需离线源。
+fallback_command: python3 -m nltk.downloader -d $NLTK_DATA words brown gutenberg
+fallback_auto_fix: false
+fallback_impl: environment
+
+# ★ 禁止策略 ★
+forbid_1_pattern: 保留模块顶层 nltk.download()|import 时 ensure_loaded() 不捕获
+forbid_1_reason: OHOS 受限网络下 import 挂起/失败，所有使用方被阻塞；知识库 E215 已记录 os.tmpname() 受限环境问题，同属网络/环境依赖
+forbid_1_consequence: conan create 的 test_package import 阶段超时或失败
+forbid_2_pattern: 把补写测试写成"上游测试通过率"|勾选"上游无测试"却把新增用例计入上游通过率
+forbid_2_reason: 上游 sdist 无任何测试文件，补全是路径 B 测试框架/工具链材料；计入上游通过率属误报
+forbid_2_consequence: AI Review/CI 审核拒绝
+forbid_3_pattern: 纯 Python 包 recipe 声明 settings=("os","compiler","build_type","arch") 并要求编译
+forbid_3_reason: noarch 包无编译，声明 compiler 会强制工具链检测，交叉环境可能失败
+forbid_3_consequence: 不必要的工具链依赖与失败
+forbid_4_pattern: package() 直接 copy site-packages 到 include/ 或忽略 PYTHONPATH
+forbid_4_reason: Python 运行时按 site-packages 布局与 PYTHONPATH 搜索模块，放错位置 import 失败
+forbid_4_consequence: test_package import acronym 报 ModuleNotFoundError
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes: []
+caused_by: [E215]
+similar_to: []
+conflicts_with: []
+prerequisite_of: []
+
+# ═══ 元数据 ═══
+doc_file: doc/E319.md
+last_updated: 2026-08-07
+source_event: PR !4638 acronym 2.0.0 适配 HarmonyOS PC
+
+# ═══ 知识协作 ═══
+authors:                Fish_bone233 <Fish_bone233@noreply.gitcode.com>
+source_pr: 4638
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count: 0
+metrics_fail_count: 0
+metrics_confidence: 0.0
+metrics_last_used:
+

@@ -1,0 +1,90 @@
+# ═══ Draft knowledge entry — OHOS /bin/sh 预置大量 toybox 别名，`command -v` 返回 `alias X=X` 导致可执行性探测假阳性；配合 set -e 使安装脚本静默中断、文件不落地 ═══
+# Timestamp: 2026-09-29
+# Software: mk（mk-configure）0.40.0（所有在 OHOS /bin/sh 下探测外部程序可用性的脚本）
+# Gate: W3 本地 CI / 上游 mkshlib 等安装型用例
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+# 修正记录: v2（2026-09-29）— 精确化别名范围（实测 chown/chgrp/chmod/cp/mv/mkdir/rm/sed/awk=别名；
+#           ln/expr/nm/strip=真实路径；id/install=rc1 不在别名表），并订正退出码 127 与引用日志
+
+id:                     DRAFT-13686-mk-ohos-shell-alias-breaks-exec-probe
+trigger_tool:           install|make|runtime
+phase:                  installation|runtime
+error_signature:        ^alias [a-z0-9_-]+=[a-z0-9_-]+$|
+                         [a-z0-9_-]+: inaccessible or not found$|
+                         安装脚本非零退出但目标文件缺失（无更多线索）
+severity:               3
+category:               compat|portability|shell|installation
+match_keywords:         command -v, alias, toybox applet, OHOS /bin/sh, alias table,
+                         chown, chgrp, set -e, exec probe, package install,
+                         silent abort, files not installed, mkc_install, rc=127
+title:                  OHOS /bin/sh 预置 139 条 toybox 别名，`command -v chown` 返回
+                         `alias chown=chown`（rc=0、非路径）：以 command -v 判定"程序可用"
+                         得到假阳性；当该名字不在 PATH 时执行报 rc=127，安装脚本在 set -e 下
+                         于 cp/mv 之间中断——**安装静默失败、文件不落地**
+
+root_cause: >
+  OHOS 的 /bin/sh 在启动时预置了约 120 条别名（`sh -c 'alias' | grep -c .` 实测 **139** 条；chown/chgrp/chmod/cp/mv/
+  mkdir/rm/sed/awk/basename/dirname/tar/grep/find/… 均在其中）。因此 `command -v chown`
+  返回字符串 `alias chown=chown`——**非空、非路径、退出码 0**。以"command -v 有输出 →
+  程序存在"判定的可移植性探测得到假阳性；随后真正调用该名字时，若它不在 PATH（本机
+  /system/bin 不在 PATH），shell 报 `/usr/bin/sh: chown: inaccessible or not found` 并
+  返回 **127**。mk-configure 的 scripts/mkc_install（源自 X11R5 install.sh）以 `set -e`
+  运行，copy_file() 顺序为 `cp <src> <dsttmp>` → `chown <dsttmp>` → `mv <dsttmp> <dst>`：
+  cp 成功、chown 失败即整体中止，mv 永不执行，且入口 `trap "rm -f ${dsttmp}" 0` 还会删掉
+  临时文件——**文件静默不落地**，只留一行 `chown: ...` 线索。目录之所以存在，是此前 `-d`
+  分支逐个建成后同样中止。
+affected_scope: >
+  所有在 OHOS /bin/sh 下做"程序可用性"探测并据此分支的 shell 脚本，仅当**该名字位于别名表
+  且不在 PATH** 时致命（在 PATH 时别名无害，因为展开后仍能按 PATH 解析）。以 `set -e`
+  运行的安装/复制脚本后果最严重：静默不落地 → 产出残缺安装树。
+verification_cmd: >
+  sh -c 'command -v chown; echo "rc=$?"'      # → alias chown=chown / rc=0（假阳性）
+  sh -c 'command -v id;    echo "rc=$?"'      # → 空 / rc=1（不在别名表，判定正确）
+  sh -c 'chown --help'; echo "rc=$?"          # → /usr/bin/sh: chown: inaccessible or not found / rc=127
+  sh -c 'alias' | grep -c .                   # → 139（别名表规模）
+rec_priority:           1
+rec_approach:           resolve-absolute-then-test-x
+rec_description: >
+  把 `command -v` 的结果**解析为绝对路径后再判可执行**，解析不到就回退为空操作：
+  `_p=\`command -v "$prog" 2>/dev/null\` || _p= ; test -x "$_p" || prog=":"`。别名/内置
+  名字（非 `/...` 开头）会被判掉；调用链随之安全降级（如跳过属主变更而不是中断安装）。
+rec_command:            _p=`command -v "$prog" 2>/dev/null` || _p= ; test -x "$_p" || prog=":"
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      probe-by-execution
+fallback_description:   >
+  改用"实测执行"判断可用性（`"$prog" --help >/dev/null 2>&1`），可同时避开别名与假可执行；
+  代价是对目标程序产生一次真实调用（`--help` 通常无副作用）。
+fallback_command:       "$prog" --help >/dev/null 2>&1 || prog=":"
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       [^x]\scommand -v\s+\S+\s*(&&|\|\|)|command -v\s+\S+\s*>\s*/dev/null\s*&&
+forbid_1_reason:        以 `command -v` 的返回码/非空输出直接当作"可执行"判据——OHOS 上
+                         别名表内的名字会给出假阳性。
+forbid_1_consequence:   后续执行 rc=127；在 set -e 脚本里演变为静默中断 + 文件不落地。
+forbid_2_pattern:       安装步骤一律 `\|\| true`|(cp|install).*(\|\|\s*true)
+forbid_2_reason:        为了让脚本"别中断"而吞掉所有错误，会把残缺安装树伪装成成功。
+forbid_2_consequence:   产出静默残缺的包（本条的原始症状），比显式失败危险得多。
+
+principles:             P013
+causes:                 []
+caused_by:              []
+similar_to:             E098
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-13686-mk-ohos-shell-alias-breaks-exec-probe.md
+last_updated:           2026-09-29
+source_event:           archives/m/mk/0.40.0
+
+authors:                GaoPengqiang <GaoPengqiang@noreply.gitcode.com>
+source_pr:              13686
+source_commit:          91cb4612f4
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-29

@@ -1,0 +1,117 @@
+#====================================================================
+# DRAFT-perl-acceptance-test-toolkit-deps — 「验收测试工具集」类 CPAN 模块：
+#   自身测试极少、真实能力在 run_tests 驱动的套件里，且这些套件要求调用方先加载
+#   被验收的目标实现（逻辑依赖，不在 META prereqs 中）
+# 对应人类文档: knowledge/drafts/DRAFT-perl-acceptance-test-toolkit-deps.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-perl-acceptance-test-toolkit-deps
+trigger_tool:           perl|make|test|conan
+phase:                  testing
+error_signature:        Can't\ locate\ (?:object\ )?method\ "\w+"\ via\ package|
+                         Can't\ locate\ \S+\.pm\ in\ @INC.*Future::IO|
+                         Unrecognised\ test\ suite\ name
+severity:               2
+category:               perl, testing, packaging, conan, dependency
+match_keywords:         acceptance test, run_tests, Test::Future::IO::Impl,
+                         Future::IO, logical dependency, META prereqs, upstream t/,
+                         coverage boundary, stub implementation, R51 申报口径,
+                         self-contained suite, sleep suite, R36
+title:                  验收测试工具集类 CPAN 模块的适配：上游 t/ 只覆盖加载，
+                        真实能力在 run_tests 套件里且需调用方先加载被验收实现
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             一类 CPAN 模块的**定位是给别人用的测试套件**（如
+                        Test::Future::IO::Impl 给 Future::IO 实现方做验收）。
+                        它们有两个易被误判的特征：
+                        ①**自身上游 t/ 极小**——往往只有 `require 模块; pass`
+                        一两个用例（本包 t/ 实测 Files=2, Tests=1，且 99pod.t
+                        因缺 Test::Pod 跳过）。若照此申报，会把"几乎没测"当成
+                        "上游全过"，与 R51 要求的真实证据相差甚远。
+                        ②**存在逻辑依赖**——导出的 run_tests 各套件内部直接调用
+                        **被验收目标**的方法（本包 13 个套件全都要 Future::IO），
+                        但该目标**不在 META prereqs 里**（META 只声明
+                        Errno/IO::Handle/Socket/Time::HiRes/Test2::V0 等运行期
+                        基础依赖）。于是"依赖是否已发布"（W0/R36）用 META 与
+                        conan requires 都查不出来，跑套件时才会以
+                        `Can't locate object method "get" via package ...`
+                        或 `Can't locate Future/IO.pm in @INC` 暴露。
+affected_scope:         验收/一致性测试工具类 CPAN 模块（Test::*::Impl、
+                        规范符合性套件、跨实现通用测试等）。本批实例：
+                        test-future-io-impl 0.21（对 Future::IO 实现方的验收套件）。
+                        更一般地：任何「模块价值 = 给别人调用的测试 API」的包，
+                        其上游 t/ 都不能代表真实测试面。
+verification_cmd:       ls t/*.t | wc -l                 # 上游测试文件数（可能只有 1-2）
+                        grep -c '^sub run_.*_test' lib/**/*.pm   # 真实套件数
+                        grep -rn "Future::IO->" lib/       # 套件实际调用的被验收目标
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           stub-driven-consumer-test
+rec_description:        ①上游 t/ 仍如实申报（几个文件、几个用例、什么内容），
+                        并**显式声明覆盖边界**：13 个套件需调用方先加载被验收
+                        实现才能运行，而该目标在本环境/制品仓/本仓 main 均不可得
+                        （依赖链 Future::IO → Future，future/0.52 尚在 PR），
+                        属依赖链限制，**不得**用任何手段把套件跳过当通过。
+                        ②在 test_package 侧补齐真实行为验证：构造一份**被验收
+                        目标的桩实现**（本包为 Future::IO 的 sleep/alarm + future
+                        的 get/cancel/await/is_ready），真实驱动**自包含**套件
+                        （本包选 `sleep`：不需 socket/pipe/fork，CI 可稳定复现），
+                        并对全部套件做存在性核验（can → run_*_test）。
+                        ③桩实现须在注释中明确标注「仅供验收套件调用，不冒充真实
+                        实现」，避免被误读为已适配 Future::IO。
+rec_command:            perl -I<site> test_test_future_io_impl.pl <site>
+                        # 5 项自有断言（版本/导出/13 套件+time_about 齐备/未知套件名 die）
+                        # + sleep 套件自身 6 项断言 = 1..11
+rec_auto_fix:           false
+rec_impl:               recipe-pattern
+
+fallback_priority:      2
+fallback_approach:      blocked-by-dependency-report
+fallback_description:   若被验收目标确实无法在本环境构造桩（例如套件深度依赖
+                        真实网络/内核语义），则如实上报该包的**工具可用但套件
+                        待依赖**：包照常构建发布（它作为工具是可用的），并在
+                        notes/manifest 与 result 中写明 13 套件需待
+                        Future::IO 及某实现适配后由消费方触发，不发虚假通过率。
+fallback_command:       python3 scripts/ohc-run.py result <pkg> <ver> --status partial \
+                          --failed-reason "工具已适配可发布；N 个验收套件需被验收目标（未适配）方可运行"
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       套件.*(跳过|skip).*(即|视为).*(通过|PASS)|不申报.*13.*套件|
+                        上游.*Tests=1.*(全过|100%).*#(?!.*覆盖边界)
+forbid_1_reason:        验收套件才是本类模块的真实测试面；跳过它们并把 1 个加载
+                        用例报成"上游全过"，属申报口径失真，违反 R51。
+forbid_1_consequence:   评审无法判断模块是否真被验证过；适配可信度尽失。
+
+forbid_2_pattern:       (伪装|冒充|当作).*(真实|已适配).*Future::IO|桩.*(宣称|报告).*已适配.*实现
+forbid_2_reason:        桩实现只用于驱动套件契约，不等于已完成 Future::IO 及其
+                        实现的适配；混淆二者会误导依赖方。
+forbid_2_consequence:   依赖方误以为可依赖 Future::IO，后续集成失败。
+
+principles:             real-upstream-test-evidence, separate-upstream-denominator,
+                        upstream-source-untouched
+
+causes:                 []
+caused_by:              []
+similar_to:             [E155, DRAFT-perl-module-build-makemaker-substitution]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-perl-acceptance-test-toolkit-deps.md
+last_updated:           2026-09-18
+source_event:           test-future-io-impl 0.21 适配（上游 t/ 仅 1 用例；桩驱动 sleep 套件）
+
+authors:                ohpcd <ohpcd@localhost>
+source_pr:
+source_commit:          dc0267d77
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-18
+
+draft:                  true
+contributor_id:         1753

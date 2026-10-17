@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_enchant C)
+find_package(Enchant REQUIRED CONFIG)
+add_executable(test_enchant test_enchant.c)
+target_link_libraries(test_enchant PRIVATE Enchant::Enchant)

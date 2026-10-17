@@ -1,0 +1,56 @@
+#!/bin/bash
+
+# SPDX-FileCopyrightText: 2021-2026 Ole Tange, http://ole.tange.dk and Free Software and Foundation, Inc.
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+  
+cat <<'EOF' | sed -e 's/;$/; /;' | stdout parallel -vj0 -k --joblog /tmp/jl-`basename $0` -L1 -r
+echo '### -L -n with pipe'
+  seq 14 | parallel --pipe -k -L 3 -n 2 'cat;echo 6 Ln line record'
+
+echo '### -L -N with pipe'
+  seq 14 | parallel --pipe -k -L 3 -N 2 'cat;echo 6 LN line record'
+
+echo '### -l -N with pipe'
+  seq 14 | parallel --pipe -k -l 3 -N 2 'cat;echo 6 lN line record'
+
+echo '### -l -n with pipe'
+  seq 14 | parallel --pipe -k -l 3 -n 2 'cat;echo 6 ln line record'
+
+echo '### bug #39360: --joblog does not work with --pipe'
+  seq 100 | parallel --joblog - --pipe wc | tr '0-9' 'X'
+
+echo '### bug #39572: --tty and --joblog do not work'
+  seq 1 | parallel --joblog - -u true | tr '0-9' 'X'
+
+echo '### How do we deal with missing $HOME'
+   unset HOME; stdout perl $(which parallel) -k echo ::: 1 2 3
+
+echo '### How do we deal with missing $SHELL'
+   unset SHELL; stdout perl $(which parallel) -k echo ::: 1 2 3
+
+echo '### Test if length is computed correctly - first should give one line, second 2 lines each'
+  seq 4 | parallel -s 29 -X -kj1 echo a{}b{}c
+  seq 4 | parallel -s 28 -X -kj1 echo a{}b{}c
+  seq 4 | parallel -s 21 -X -kj1 echo {} {}
+  seq 4 | parallel -s 20 -X -kj1 echo {} {}
+  seq 4 | parallel -s 23 -m -kj1 echo a{}b{}c
+  seq 4 | parallel -s 22 -m -kj1 echo a{}b{}c
+  seq 4 | parallel -s 21 -m -kj1 echo {} {}
+  seq 4 | parallel -s 20 -m -kj1 echo {} {}
+
+echo 'bug #44144: --tagstring {=s/a/b/=} broken'
+  # Do not be confused by {} in --rpl
+  parallel --rpl '{:} s/A/D/;{}' --tagstring '{1:}{-1:}{= s/A/E/=}' echo {} ::: A/B.C
+  # Non-standard --parens 
+  parallel --parens ,, --rpl '{:} s/A/D/;{}' --tagstring '{1:}{-1:}, 's/A/E/, echo {} ::: A/B.C
+  # Non-standard --parens -i
+  parallel --rpl '{:} s/A/D/;{}' --tag --parens ,, -iDUMMY echo {} ::: A/B.C
+
+echo 'bug #45692: Easy way of cancelling a job in {= =} and'
+echo 'bug #45691: Accessing multiple arguments in {= =}'
+  parallel -k echo {= '$arg[1] eq 2 and $job->skip()' =} ::: {1..5}
+
+
+EOF

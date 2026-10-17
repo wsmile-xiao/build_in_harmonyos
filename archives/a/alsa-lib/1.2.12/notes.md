@@ -64,5 +64,5 @@ pkg-config --modversion alsa
 **最终状态**: published
 ---
 
-**编译结束**: 2026-05-22 16:56
-**最终状态**: built
+**编译结束**: 2026-10-01 12:30
+**最终状态**: published

@@ -1,0 +1,41 @@
+#====================================================================
+# Draft: GNOME 归档库（clutter/cogl 世代）在制品仓依赖包缺组件时的
+#        stub 闭合方案：cogl-pango（8 符号）与 cairo-gobject（2 符号）
+#====================================================================
+
+id:                     DRAFT-CLUTTER-1264-GNOME-ARCHIVE-COMPONENT-STUB
+trigger_tool:           conan|pkg-config|ld|configure|clang
+phase:                  compilation|link|packaging
+error_signature:        No package 'cogl-pango-1.0' found|No package 'cairo-gobject' found|undefined symbol: cogl_pango_font_map_new|undefined symbol: cairo_gobject_context_get_type|configure: error: Package requirements (cogl-pango-1.0) were not met
+
+severity:               2
+category:               platform|portability|packaging
+match_keywords:         clutter, cogl, cogl-pango, cairo-gobject, gnome, gnome archive, scene graph, CLUTTER_BASE_PC_FILES, CLUTTER_DEPS, stub, boxed type, GType, PangoCairoFontMap, glyph cache, component missing, pkg-config not found, 制品仓组件缺失
+
+title:                  GNOME 归档库硬依赖的制品仓组件缺失（cogl-pango/cairo-gobject 无 .so 无 .pc），正解不是重打包依赖库，而是按"符号面分析→上游等价 stub→转发 .pc"三步闭合：先 nm -D --undefined-only 实测消费库真正引用的符号集（远小于组件全 API），再逐符号写上游语义等价的 stub（直传/no-op/GType 注册三类），最后生成 Libs 直接带 stub .o 的转发 .pc 链接期闭合
+
+root_cause:             GNOME 同世代栈（clutter 1.26 依赖 cogl 1.22）的组件化程度高：clutter 的 CLUTTER_BASE_PC_FILES/CLUTTER_DEPS 硬性要求 cogl-pango-1.0 与 cairo-gobject >= 1.14。而制品仓的 cogl/1.22.8 二进制当年构建时禁用了 cogl-pango 组件（OHOS 无显示服务一并禁了 cairo/pango 链），cairo/1.18.4 二进制同样不含 cairo-gobject 组件。configure 的 PKG_CHECK_MODULES 在 PKG_CONFIG_PATH 全链找不到 .pc 直接 fatal；绕过 configure 后链接期又会撞 undefined symbol。第一直觉"重打包 cogl/cairo 带上组件"成本高且动了他人在档依赖；正解是接受制品仓现状，在消费方配方内就地 stub。关键洞察：nm -D --undefined-only libclutter-1.0.so 实测，cogl_pango_* 未解析符号仅 8 个、cairo_gobject_* 仅 2 个——上游 cogl-pango 是 PangoCairoFontMap 的"假子类"（qdata 挂 CoglContext），fontmap 系列全部可直传 pango 对应 API；glyph-cache/render 系列是 GL 渲染路径（OHOS 无显示服务不可达）no-op 安全；cairo-gobject 是 CAIRO_GOBJECT_BOILERPLATE 展开的引用计数 boxed 类型注册，逐行重写即与上游等价。
+
+affected_scope:         所有依赖 GNOME 归档世代库且消费制品仓裁剪版二进制的适配（clutter→cogl/cogl-pango、clutter→cairo-gobject、cogl 世代的 gtk/evince 链）；更广地适用于任何"依赖包缺组件但消费方只需组件 API 的极小子集"场景。
+
+verification_cmd:       nm -D --undefined-only libclutter-1.0.so | grep -E "cogl_pango|cairo_gobject" && pkg-config --cflags --libs cogl-pango-1.0 cairo-gobject
+
+rec_priority:           1
+rec_approach:           component-subset-stub-with-forwarding-pc
+rec_description:        三步闭合：①符号面分析——nm -D --undefined-only 实测消费库未解析符号，确认真实引用面（本例 8+2 个，远小于组件全 API）；②stub 实现源——直传类（cogl_pango_font_map_new = pango_cairo_font_map_new()）按上游源逐行对齐语义，不可达路径（GL glyph-cache/render）no-op，GType 注册类（cairo_gobject_context/surface_get_type）按上游 g_boxed_type_register_static 原样（类型名字符串也照抄，保 GType 兼容）；stub 头若缺（cogl-egl.h/cogl-pango.h）一并按上游布局放 exports_sources；③转发 .pc——在 generators_folder 写 stub 版 cogl-pango-1.0.pc / cairo-gobject.pc：prefix=stub、Libs 直接带 stub .o 绝对路径、Requires 指向真实组件链（cogl-1.0 pangocairo / cairo gobject-2.0）、Cflags 指向真实头目录。同配方先例可用真实文件时优先转发（cairo 包内若在档则 prefix=/ 重写转发，stub 仅兜底）。注意：./configure 的 --enable-egl-backend 在 OHOS 用 --disable-x11-backend --disable-gdk-backend --disable-wayland-backend --disable-quartz-backend --disable-win32-backend --disable-mir-backend --disable-cex100-backend --disable-evdev-input --disable-tslib-input 全禁 + 仅 EGL——EGL 经 cogl 封装无需直连 egl 包，egl.h 由 clang 默认 sysroot 解析（先验证 #include <EGL/egl.h> 裸编译过再决定是否加 -I）。
+rec_command:            nm -D --undefined-only <lib>.so | grep -E "cogl_pango_|cairo_gobject_" ; clang -c stub.c -o stub.o `pkg-config --cflags glib-2.0 gobject-2.0` && printf 'prefix=stub\nName: cogl-pango\nLibs: %s/stub.o\nRequires: cogl-1.0 pangocairo\n' $PWD > gens/cogl-pango-1.0.pc
+rec_auto_fix:           false
+
+# ═══ 社区 W 系字段（goblinrs 审查线：solution/fallback/verify_builds 必填）═══
+solution: >
+  三步闭合（代码级）：①符号面分析——nm -D --undefined-only libclutter-1.0.so | grep -E "cogl_pango_|cairo_gobject_" 实测引用面（8+2 符号，远小于组件全 API）；②stub 实现源——直传类逐行对齐上游 PangoCairoFontMap 调用（cogl_pango_font_map_new = pango_cairo_font_map_new()），GL 渲染路径 no-op（glyph-cache/render 在 OHOS 无显示服务下不可达），GType 注册类按上游 g_boxed_type_register_static 原样（类型名字符串照抄保 GType 兼容）；stub 头缺失时（cogl-egl.h/cogl-pango.h）按上游安装布局放 exports_sources；③generators_folder 写转发 .pc——prefix=stub、Libs 直接带 stub .o 绝对路径、Requires 指向真实组件链（cogl-1.0 pangocairo / cairo gobject-2.0）、Cflags 指真实头目录；构建期 clang -c 编译 .o。同配方先例有真实文件时优先 prefix=/ 重写转发（cairo 包内若在档），stub 仅兜底分支。后端裁剪配套：--disable-x11/gdk/wayland/quartz/win32/mir/cex100-backend --disable-evdev/tslib-input --enable-egl-backend——EGL 经 cogl 封装无需直连 egl 包，egl.h 由 clang 默认 sysroot 解析（裸编译验证过再决定 -I）。
+fallback: >
+  符号面远超子集或上游语义无法等价时：改走依赖包重打包线（cogl/cairo 带组件版本入档，cogl/1.22.8.1 重签先例 PR !13764），或在有显示能力的设备上重开渲染路径验证。
+verify_builds: "#14164（本 PR CI）+ 本机 conan create（ohos-aarch64 --build=missing EXIT=0，test_package ALL PASS 17/17）"
+draft: true
+status: pending-review
+reference_impl: cogl/1.22.8.1 PR !13764（同族前序：.pc/.la 修补与 EGL 链）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              14164
+source_commit:          45fbc05a1a

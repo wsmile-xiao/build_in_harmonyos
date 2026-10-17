@@ -1,0 +1,149 @@
+#====================================================================
+# DRAFT-cronutils-1.1-raw-makefile-ohos-cli-signing
+# Raw Makefile CLI on HarmonyOS: POSIX compatibility, package signing,
+# Conan consumer verification, and R38 command metadata
+#====================================================================
+
+id:                     DRAFT-cronutils-1.1-raw-makefile-ohos-cli-signing
+trigger_tool:           clang|conan|make|llvm-objcopy|binary-sign-tool|python3
+phase:                  source|build|package|testing|shadow-ci
+error_signature:        HOST_NAME_MAX.*undeclared|PermissionError.*Errno 13.*runalarm|
+                        Permission denied.*conan-home.*/p/.*/bin/|
+                        commands.json.*R38|L0k.*CLI tool detected
+
+severity:               3
+category:               raw-makefile|conan|cli-tool|elf-signing|consumer-test|OHOS
+match_keywords:         cronutils, runalarm, runlock, runstat, raw Makefile,
+                        HOST_NAME_MAX, _XOPEN_SOURCE=700, clock_gettime, dprintf,
+                        -lrt, OHOS, aarch64, musl, HMDFS, Conan, package_type application,
+                        bindirs, commands.json, R38, L0k, .codesign,
+                        binary-sign-tool, llvm-objcopy, PermissionError, test_package,
+                        shadow CI, run-conan-heavy
+title:                  cronutils 1.1 raw Makefile CLI on HarmonyOS requires package-time ELF signing and real Conan consumer verification
+
+root_cause:             >
+                        cronutils 1.1 is a historical C CLI project with no configure,
+                        CMake, or upstream automated test target. Its raw Makefile assumes
+                        a conventional Linux/POSIX toolchain and exposes three executable
+                        targets. On HarmonyOS, the old source needs explicit POSIX feature
+                        visibility and a guarded HOST_NAME_MAX fallback; Linux's standalone
+                        -lrt is not required by the OHOS libc. More importantly, an ELF copied
+                        into the Conan package cache with ordinary Unix execute bits but
+                        without a valid HarmonyOS .codesign section is rejected at runtime
+                        with PermissionError: [Errno 13]. A CLI package also needs the
+                        software-level commands.json metadata for R38/L0k.
+
+affected_scope:         >
+                        Historical or small raw Makefile C command-line packages that
+                        produce bin/ ELF files for HarmonyOS PC and are consumed through
+                        Conan test_package. The direct target mapping and POSIX macro fix
+                        are cronutils-specific; the package-time signing and first-failure
+                        diagnosis generalize to OHOS executable packages.
+
+verification_cmd:       >
+                        CI_PACKAGES="archives/c/cronutils/1.1" zsh ci/conan/build_and_test.sh;
+                        after package creation run llvm-readelf -S <package>/bin/runalarm
+                        and verify one .codesign section for runalarm, runlock, and runstat;
+                        test_package must report "PASS: cronutils packaged consumer test
+                        (18/18 assertions)" and the runner must exit 0.
+
+rec_priority:           1
+rec_approach:           raw-makefile-direct-clang-plus-package-elf-signing
+rec_description:        >
+                        Fix the source with a guarded HOST_NAME_MAX fallback and deterministic
+                        runlock status initialization. Reproduce the upstream three target
+                        mappings with direct clang invocations. Read the c compiler from
+                        tools.build:compiler_executables as a dict; on OHOS use the HNP linker
+                        (or user.ohos:ld_path locally) and omit -lrt. In package(), chmod the
+                        final binaries, remove any stale .codesign section, sign each binary
+                        to a temporary output with binary-sign-tool sign -selfSign 1, atomically
+                        replace the original, and restore 0755. Add software-level commands.json
+                        and make test_package execute absolute package paths with 18 behavior
+                        assertions.
+
+rec_command:            >
+                        build(): clang -O2 -Wall -Wextra -D_XOPEN_SOURCE=700
+                        -fuse-ld=/data/service/hnp/bin/ld -o runalarm runalarm.c subprocess.c;
+                        package(): llvm-objcopy --remove-section .codesign "$f" 2>/dev/null
+                        || true; binary-sign-tool sign -inFile "$f" -outFile "$f.signed"
+                        -selfSign 1; mv "$f.signed" "$f"; chmod 755 "$f";
+                        CI_PACKAGES="archives/c/cronutils/1.1" zsh ci/conan/build_and_test.sh
+                        produces PASS 18/18 and L0-L5 pass.
+
+rec_auto_fix:           false
+rec_impl:               cronutils-conan-recipe-package-signing
+
+fallback_priority:      2
+fallback_approach:      cross-build-only-with-explicit-device-blocker
+fallback_description:   >
+                        If the build host has no binary-sign-tool, complete source/build
+                        inspection and AArch64 cross-compilation only, emit a warning, and
+                        mark device execution as pending. Do not claim the package is
+                        deliverable until a real OHOS worker signs the final package files
+                        and reruns test_package.
+fallback_command:       >
+                        conan create archives/c/cronutils/1.1 --build=missing with the
+                        OHOS host profile; then defer runtime verification to an isolated
+                        OHOS shadow job.
+fallback_auto_fix:      false
+fallback_impl:          local-cross-build-only
+
+forbid_1_pattern:       chmod\s+7(5|7)5.*(sufficient|sign)|chmod.*\\.codesign
+forbid_1_reason:        >
+                        Execute permission bits do not create a valid HarmonyOS ELF signature;
+                        the kernel can reject an apparently executable file from the Conan
+                        package cache.
+forbid_1_consequence:   >
+                        test_package fails before the first command starts with
+                        PermissionError: [Errno 13], leaving L1-L2 unverified.
+
+forbid_2_pattern:       binary-sign-tool.*-inFile.*-outFile.*\\.codesign|sign.*without.*remove-section
+forbid_2_reason:        >
+                        binary-sign-tool cannot reliably overwrite an existing .codesign
+                        section; stale linker or previous signing output must be removed first.
+forbid_2_consequence:   >
+                        Signing fails with section-already-exists behavior, or the package
+                        contains a stale/invalid signature.
+
+forbid_3_pattern:       test_package.*(runalarm|runlock|runstat)|self\\.run\\(["'](runalarm|runlock|runstat)
+forbid_3_reason:        >
+                        Direct command-name execution depends on an incidental PATH and does
+                        not prove the Conan package's installed bin directory is consumable.
+forbid_3_consequence:   >
+                        Local machines may pass while isolated CI reports command not found
+                        or tests an unrelated system executable.
+
+forbid_4_pattern:       --with-lrt|LDLIBS=.*-lrt.*OHOS|skip.*test_package|no.*upstream.*test.*therefore.*pass
+forbid_4_reason:        >
+                        Linux-only linker assumptions and missing upstream tests must not
+                        become silent OHOS dependencies or a reason to remove consumer coverage.
+forbid_4_consequence:   >
+                        The package gains an invalid dependency or reports a false positive
+                        without executing any installed behavior.
+
+principles:             P001, P005, P010, P016, P020
+causes:                 []
+caused_by:              []
+similar_to:             [E392, E077, E424]
+conflicts_with:         []
+prerequisite_of:        >
+                        raw Makefile CLI adaptations that need to execute final Conan package
+                        binaries on HarmonyOS PC
+
+doc_file:               knowledge/DRAFT-cronutils-1.1-raw-makefile-ohos-cli-signing.md
+last_updated:           2026-09-11
+source_event:           cronutils/1.1 HarmonyOS PC adaptation; first shadow run failed on unsigned package ELF, signed rerun passed
+authors:                codex
+source_pr:
+source_commit:          4813041b11
+
+metrics_success_count:  1
+metrics_fail_count:     1
+metrics_confidence:     0.98
+metrics_last_used:      2026-09-11
+
+draft:                  true
+difficulty_candidate:   B
+review_boundary:        >
+                        Candidate evidence only. Formal E-number promotion and B-class
+                        recognition require knowledge-base maintainer review.

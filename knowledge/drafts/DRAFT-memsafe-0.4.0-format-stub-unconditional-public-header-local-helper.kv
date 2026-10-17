@@ -1,0 +1,87 @@
+#====================================================================
+# DRAFT-memsafe-0.4.0-format-stub-unconditional-public-header-local-helper
+#   —— 公开头无条件 std::format：__cpp_lib_format 守卫 + 零依赖本地单占位符替代
+# 触发事件: memsafe 0.4.0 HarmonyOS PC 适配（patch 0001-memsafe.h.patch）
+# 与既有条目的关系:
+#   E557                        讲 __has_include(<format>) 误判 → 改 __cpp_* 特性宏守卫（头存在≠可用）
+#   DRAFT-enchantum-...-format-stub  讲测试路径 __has_include 守卫误判（CMake 编译探测判定）
+#   DRAFT-ohos-libcxx15-format-ranges-capability-gap 讲 guard + ranges 经典算法替换（microsoft-proxy）
+#   DRAFT-stdformat-to-fmt-substitution-downstream-effects 讲替换为 fmt::format 后的链接侧下游影响
+#   本条目新增差异: 公开 API 头内**无条件**调用 std::format（非 __has_include 守卫）时，
+#   仅改守卫不够（调用点必须处理），但又不愿引入 fmt 依赖——提供零依赖本地替代函数。
+#====================================================================
+
+id:                     DRAFT-memsafe-0.4.0-format-stub-unconditional-public-header-local-helper
+source_lib:             memsafe 0.4.0
+trigger_tool:           clang++|conan|make
+phase:                  compilation
+error_signature:        no member named 'format' in namespace 'std'|
+                         no member named 'formatter' in namespace 'std'|
+                         missing 'typename' prior to dependent type name|
+                         _LIBCPP_HAS_NO_INCOMPLETE_FORMAT
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               platform, libcxx-stdlib, toolchain, cxx20, portability
+prescan_pattern:        (std::format\s*\(|#include\s*<format>)
+prescan_globs:          *.h, *.hpp, *.cpp
+match_keywords:         std::format, <format>, __cpp_lib_format, _LIBCPP_HAS_NO_INCOMPLETE_FORMAT,
+                         libcxx-ohos, OHOS SDK, clang 15, public header, header-only,
+                         unconditional include, local helper, single placeholder,
+                         zero dependency, typename, dependent type
+title:                  公开头无条件使用 std::format 时：__cpp_lib_format 守卫 + 零依赖本地单占位符替代函数（等价调用点保持可用且不加 fmt 依赖）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  OHOS SDK 26.0.0.18 的 libcxx-ohos（clang15 标准库）在 __config 定义
+  _LIBCPP_HAS_NO_INCOMPLETE_FORMAT：<format> 头物理存在但 std::format 未实现
+  （__cpp_lib_format 不导出）。与用 __has_include(<format>) 守卫的库不同，
+  部分公开头（如 memsafe.h）**无条件** #include <format> 并直接调用 std::format
+  （如错误消息构造行），任何消费者 include 该头即编译失败，
+  "no member named 'format' in namespace 'std'"。此类调用点无法只靠
+  改守卫让功能缺席（调用在正常路径上），又不宜为单点调用引入 fmt 依赖。
+affected_scope:         OHOS SDK26 clang15/libc++15 上，公开 API 头或 header-only 库
+                        直接无条件调用 std::format 的 C++20 项目——影响所有 include
+                        该头的消费者编译；与语言/构建系统无关，跨仓库可复现。
+verification_cmd:       >
+  clang++ -std=c++20 -c consumer.cpp 2>&1 | head -3   # 复现: no member named 'format'
+  printf '#include <version>\nint main(){return
+  #if defined(__cpp_lib_format)\n0\n#else\n1\n#endif\n}\n' | clang++ -std=c++20 -x c++ - -o probe && ./probe; echo $?  # 1 = format 不可用
+
+# ═══ Layer 3: 方案层 (Solution Space) ═══
+rec_priority:           1
+rec_approach:           cpp-lib-format-guard-plus-local-placeholder-helper
+rec_description: >
+  ①无条件 `#include <format>` 改为 `#ifndef __cpp_lib_format` 守卫
+  （完整工具链上照旧 include，行为不变）；
+  ②守卫内提供最小零依赖替代函数，用纯字符串"{}"单占位符替换
+  原 std::format 调用点，例如:
+      inline std::string ms_fmt1(const std::string &fmt, const std::string &a) {
+          size_t f = fmt.find("{}");
+          return f == std::string::npos ? fmt
+                 : fmt.substr(0, f) + a + fmt.substr(f + 2);
+      }
+  （多占位符/时间点等复杂参数按需扩展；仅序列化 time_point 时可用
+  to_string((long long)tp.time_since_epoch().count()) 替代）；
+  ③同头内依赖类型缺 typename（clang15 严格解析）时一并补
+  `typename T::ValueType` 等；④补丁属 libc 能力探测类（R8 例外），
+  非平台宏，完整 libc++ 工具链同样可编译，无行为差异。
+rec_command:            >
+  # memsafe 0.4.0 验证通过（patch 0001-memsafe.h.patch）:
+  #   #ifndef __cpp_lib_format / #include <format> / #endif
+  #   namespace memsafe { inline std::string ms_fmt1(...) {...} }
+  #   throw memsafe_error(ms_fmt1("try_lock{} timeout", read_only ? " read only" : ""));
+  #   inline typename T::ValueType & operator*() const {...}
+rec_auto_fix:           false
+rec_impl:               conan-recipe-patch
+
+fallback_priority:      2
+fallback_approach:      fmt-dependency-substitution-for-format
+fallback_description:   若库被替换点很多或需要完整 format 语义，可引入 fmt 依赖整体替换
+  std::format → fmt::format；但必须按 DRAFT-stdformat-to-fmt-substitution-downstream-effects
+  处理链接侧（fmt PRIVATE 链接不传播 + 对齐主版本 inline namespace）。
+fallback_command:       conan create . -pr:h ohos-aarch64 --build=missing -> exit 0（补 fmt/依赖后复跑）
+fallback_auto_fix:      false
+fallback_impl:          recipe-adds-fmt-dependency
+
+forbid_1_pattern:       `__has_include\s*\(\s*<format>\s*\)` 单独作为放行条件（该工具链上头存在但功能缺失）

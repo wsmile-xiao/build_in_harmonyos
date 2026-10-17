@@ -1,0 +1,104 @@
+#====================================================================
+# E544-draft-31E6 — 构建期代码生成器读取「构建机」/usr/include 系统头，
+#   交叉编译与鸿蒙真机上静默生成空表（shush 1.2.3 signals.h 实证）
+#   Pairs with: E544-draft-31E6.md
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E544
+trigger_tool:           make|runtime
+phase:                  compilation|runtime
+# engine 按 | 切分后做字面子串匹配（非正则），故只写日志中逐字出现的片段
+error_signature:        Invalid "timeout" signal: SIG|/usr/include/bits/signum.h 2> /dev/null|cat /usr/include/signal.h
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               cross-compile, headers, build-system, ohos, portability
+prescan_pattern:        cat[ \t]+/usr/include/
+prescan_globs:          Makefile*, *.mk, *.in
+match_keywords:         signals.h, signals.awk, /usr/include/signal.h, bits/signum.h,
+                         cat 2>/dev/null, awk, empty table, build host headers,
+                         cc -E -dM, target sysroot, multiarch, getsignumbyname,
+                         Invalid timeout signal, SIGTERM, shush
+title:                  构建期生成器 cat 构建机 /usr/include 头文件再用 awk 抽表：交叉编译与鸿蒙真机上 2>/dev/null 吞掉缺失，静默生成空表，运行期按名解析信号全部失效
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             上游 Makefile 用 `cat /usr/include/signal.h /usr/include/sys/signal.h
+                         /usr/include/bits/signum.h 2> /dev/null | awk -f signals.awk > signals.h`
+                         从构建机系统头抽取「信号名→编号」表。它读的是构建机而不是目标 sysroot：
+                         ①鸿蒙 PC 真机（CI worker）没有 /usr/include，②x86_64 交叉构建机上
+                         Debian multiarch glibc 把 bits/signum.h 放在 /usr/include/x86_64-linux-gnu/，
+                         signal.h 本身不含 #define SIGxxx 数字。两种环境 cat 都拿不到任何定义，
+                         2>/dev/null 吞掉报错、awk 照常输出只有 { NULL, 0 } 的空表，编译链接全部成功；
+                         到运行期 getsignumbyname() 对任何名字都返回 -1——shush 的
+                         timeout=...,SIGTERM 在加载配置时报 Invalid "timeout" signal，超时动作
+                         kill(-pgrp, -1) 失败，被托管作业不会被终止（实测跑满 60 s）。
+                         即便构建机头文件齐全，得到的也是构建机 libc/架构的编号而非目标机的。
+affected_scope:         Makefile/脚本在构建期直接读取 /usr/include 下系统头来生成代码表
+                         （信号表、errno 表、系统调用表等）且不校验结果的老项目；在鸿蒙真机
+                         （无 /usr/include）、x86_64 交叉构建机（头在 multiarch 目录、且属宿主 libc）
+                         上均触发。实证：archives/s/shush/1.2.3（src/Makefile.in 的 signals.h 规则）
+verification_cmd:       grep -nE 'cat[[:space:]]+/usr/include' Makefile* */Makefile* 2>/dev/null;
+                         grep -c '{ "' src/signals.h   # 0 即空表;
+                         echo '#include <signal.h>' | $CC -E -dM -x c - | grep -cE '^#define SIG[A-Z0-9]+ [0-9]+'
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           generate-from-target-preprocessor
+rec_description:        改为向目标编译器要宏定义：`echo '#include <signal.h>' | $(CC) $(CPPFLAGS)
+                         -E -dM -x c - | awk -f signals.awk > signals.h`——-dM 输出的
+                         `#define SIGHUP 1` 行恰好匹配原 awk 规则，awk 脚本无需改动；生成后
+                         grep 一个必有条目（如 "TERM"），空表即 exit 1，让问题暴露在构建期。
+                         用的是 $(CC)/$(CPPFLAGS)（Conan 工具链注入，R33），交叉机、真机、
+                         普通 Linux 三处行为一致，无需平台分支与 __OHOS__（R8）。
+rec_command:            echo '#include <signal.h>' | $(CC) $(CPPFLAGS) -E -dM -x c - | awk -f signals.awk > signals.h
+                         && grep '"TERM"' signals.h > /dev/null || { rm -f signals.h; exit 1; }
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      resolve-header-via-compiler
+fallback_description:   生成器必须读头文件本身（非宏值）时，用 `$(CC) -M` 反解头文件在目标 sysroot
+                         中的真实路径再喂给生成器（同族做法见草稿
+                         DRAFT-inputlirc-34-hardcoded-usr-include-uapi-path-resolved-via-clang-M）。
+fallback_command:       echo '#include <signal.h>' > t.c && $(CC) -M t.c | tr ' \\' '\n\n' | grep '/signal\.h$'
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+forbid_1_pattern:       -I/usr/include|CPPFLAGS=.*-I/usr/include
+forbid_1_reason:        把构建机 /usr/include 加进目标编译的搜索路径，混入宿主 glibc/架构的头文件
+forbid_1_consequence:   目标产物按宿主 libc 的结构体布局与常量编译，运行期行为错乱，且只在 x86 机器上"能编过"
+forbid_2_pattern:       2> ?/dev/null *\| *awk
+forbid_2_reason:        生成器输入缺失被吞掉而输出仍然「成功」，空表只能在运行期暴露
+forbid_2_consequence:   构建与 conan create 全绿、功能静默失效；test_package 若不跑依赖该表的路径完全发现不了
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+# E543（正式条目）：老 autotools 项目交叉/原生构建的 AC_TRY_RUN、lex/yacc、无 make check 三类适配点；
+# 本条是其未覆盖的一类——构建期生成器读取构建机系统头
+similar_to:             [E543]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E544-draft-31E6.md
+last_updated:           2026-09-29
+source_event:           archives/s/shush/1.2.3（patches/0005-src-Makefile.in.patch，test_package C6 反向对照）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                lkjing2021345 <1908499668@qq.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 31E6

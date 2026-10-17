@@ -1,0 +1,72 @@
+# ═══ Draft knowledge entry — OHOS 移植 bash 5.3 组命令 fd 重定向不传入管道元素，automake tap-driver.sh 全军覆没 ═══
+# Timestamp: 2026-09-16
+# Software: libigloo 0.9.5 (任何经 automake TAP 驱动跑 make check 的 autotools 包)
+# Gate: conan create build() 的 make check / 原生 make check
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-E553
+title: OHOS bash 5.3 下 { ... | awk 'print | "cat >&3"' } 3>log 管道元素拿不到 fd 3，
+  tap-driver.sh 把每个测试记为 ERROR "missing test plan"
+trigger_tool: make check / tap-driver.sh / automake
+phase: test
+error_signature: tap-driver\.sh: line \d+: \d+: Bad file descriptor|ERROR: .* - missing test plan|:test-result: ERROR
+severity: 3
+category: platform|toolchain|autotools|test
+match_keywords: tap-driver, Bad file descriptor, missing test plan, SHELL, fd 3, awk, cat >&3, make check
+keywords: tap-driver.sh, bad file descriptor, missing test plan, fd 3, group command, pipeline,
+  SHELL=/bin/sh, mksh, bash 5.3, aarch64-ohos, automake TAP, parallel-tests, check-TESTS
+approach: make check 全部 (或大面积) 报 ERROR 且 .log 文件为空、.trs 全为 :test-result: ERROR，
+  而"测试二进制直接运行完全正常"时,先 `grep -m1 '^SHELL' Makefile` 判断 $(SHELL) 是否为
+  profile buildenv 注入的 hnp bash;若是,在 conanfile build() 的 make check 加命令行覆盖
+  `autotools.make(target="check", args=["SHELL=/bin/sh"])`(/bin/sh 即 mksh 系,fork 子进程
+  继承 fd 3 正常);命令行变量赋值优先级最高,不改 Makefile、不改 profile
+root_cause: OHOS PC 环境的 bash 5.3 (aarch64-unknown-linux-ohos 移植, /storage/.../usr/local/bin/bash)
+  存在文件描述符继承缺陷:组命令 `{ pipeline; } 3>file` 的 fd 3 重定向不能传入管道内元素,
+  `{ echo | cat >&3; } 3>log` 报 "3: Bad file descriptor"(dup2 目标 fd 不在子进程可见集);
+  `exec 3>log` 后管道内 `cat >&3` 同样失败;子外壳 `( pipeline; ) 3>log` 则正常。
+  automake tap-driver.sh 的主结构正是 `{ (测试) | awk '{ print | "cat >&3" }' } 3>"$log_file"`,
+  $(SHELL) 为 bash 时 fd 3 丢失 → awk 的 "cat >&3" 全部失败 → 每个测试的 TAP 输出
+  一个字节都进不了 .log → tap-driver 判 "missing test plan" ERROR。原生探索构建
+  configure 检测到 /bin/sh 为 SHELL 时整条链正常,造成 "探索 763/763 全绿、conan create
+  全 ERROR" 的表象背离。与 HMDFS 无关:3>/dev/null 亦失败;与 fd 3 是否存在于 /proc/self/fd
+  无关(组内可见但 dup2 失败),是 bash 移植版管道 fork 路径的 fd 表同步 bug。
+affected_scope: 所有在 OHOS PC 经 conan(profile buildenv 把 SHELL/CONFIG_SHELL 指向 hnp bash)
+  构建、且用 automake TAP driver(parallel-tests + tap-driver.sh) 跑 make check 的包;
+  亦影响任何在 bash 5.3 ohos 移植下用 fd>=3 组重定向+管道的脚本。libigloo 0.9.5 实证:
+  bash 下 10/10 测试 ERROR,make check SHELL=/bin/sh 后 763/763 PASS。
+verification_cmd: bash -c '{ echo y | cat >&3 2>&1; } 3>/tmp/fd3probe.log; test -s /tmp/fd3probe.log && echo OK || echo BASH-FD3-BROKEN'
+rec_priority: 1
+rec_approach: make-shell-override
+rec_description: conanfile build() 的 make check 用命令行覆盖 SHELL=/bin/sh(mksh 系),
+  命令行变量赋值优先于 Makefile 内置与 env,一次修复整条 check-TESTS 链
+rec_command: autotools.make(target="check", args=["-j1", "SHELL=/bin/sh"])
+rec_auto_fix: false
+rec_impl: Autotools helper 的 make() 接受 args 透传到 make 命令行;构建阶段 make 不受影响
+  (配方 make 用默认 SHELL 亦通过,但建议统一带 SHELL=/bin/sh 保持一致)
+fallback_priority: 2
+fallback_approach: export SHELL=/bin/sh 于 build env
+fallback_description: 在 conanfile generate()/build() 设 os.environ["SHELL"]="/bin/sh"，
+  影响面大于命令行覆盖;且 conan env 聚合顺序中 profile buildenv 可能再覆盖
+fallback_command: os.environ["SHELL"] = "/bin/sh"
+fallback_auto_fix: false
+fallback_impl: 次选;若 make 命令行覆盖因 helper 限制不可用再回退
+principles: 平台 shell 缺陷优先在配方层做最小干预(命令行覆盖),不改全局 profile、不改上游脚本
+caused_by: OHOS bash 5.3 移植版组命令 fd 重定向→管道元素的 fd 表传递缺陷 + conan profile
+  buildenv 将 SHELL 指向该 bash
+causes: automake TAP 包 make check 全 ERROR(missing test plan),上游测试 0 断言实跑,
+  极易被误判为上游测试不可用而少报
+similar_to: E348(上游 GLib 测试在 OHOS 实跑的接线问题,非 shell fd 缺陷)
+conflicts_with: E551(CONFIG_SHELL=bash 老 ltmain 转义问题;本条相反,bash 是坏方,/bin/sh 是好方)
+prerequisite_of: 任何 automake TAP 包在 OHOS 的 Layer-1 上游测试实跑
+doc_file: knowledge/drafts/DRAFT-E553-ohos-bash-fd3-pipeline-tap-driver.md
+last_updated: 2026-09-16
+source_event: libigloo 0.9.5 conan create: 探索性构建 763/763 PASS(SHELL=/bin/sh 自动检测),
+  conan 构建 10/10 测试 ERROR;最小复现 { echo | cat >&3; } 3>log 定位 bash fd 3 管道缺陷;
+  make check SHELL=/bin/sh 后 763/763 PASS
+authors: AtomCode (glm-5.3)
+source_pr: (本 PR)
+source_commit: (待提交)
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.95
+metrics_last_used: 2026-09-16

@@ -1,0 +1,49 @@
+#====================================================================
+# Draft: embedmq 1.0.1 - test_package test relying on assert() for
+#        control-flow preconditions silently collapses under NDEBUG
+#        (Release build): false pass / SIGSEGV
+#====================================================================
+
+id:                     DRAFT-EMBEDMQ-0101-NDEBUG-ASSERT-CONTROL-FLOW-TEST
+trigger_tool:           conan|conan create|ctest|test_package|clang
+phase:                  testing|test_package
+error_signature:        Signal 11|core dumped|Segmentation fault|assert.*compiled out|NDEBUG|test passed.*0 delivered|delivered=0
+
+severity:               2
+category:               testing|test_package|release|ndebug
+match_keywords:         assert, NDEBUG, Release build, test_package, control flow, precondition,
+  pthread_create, join uninitialized, SIGSEGV, core dumped, false pass, explicit error code,
+  return code, consumer test, CI flags
+
+title:                  test_package/消费者测试不得用 assert() 承载控制流前置检查：
+  Release（-DNDEBUG）构建下 assert 编译为空 → 前置检查消失，崩溃（SIGSEGV）或静默假通过
+  （delivered=0 仍 PASS）；必须改为显式错误码 + 非零退出码
+
+root_cause:             C 标准 assert(EXPR) 在定义了 NDEBUG 时展开为 ((void)0)，EXPR 不求值。
+  Conan 的 build_type=Release（CI/W3 同源）默认注入 -DNDEBUG。若测试代码把
+  assert(q != NULL)、assert(pthread_create(...) == 0)、assert(delivered > 0) 当作控制流
+  前置检查，Release 构建下这些检查全部消失：错误路径不再短路 → 对 NULL/未初始化句柄继续操作
+  （如 join 未创建的 pthread_t）→ 稳定 SIGSEGV（与 -O 等级无关，-O2/-O3 均复现）；
+  或后置断言消失 → 计数为 0 仍打印 PASS（假通过，ASAN 构建实证 delivered=0 却 exit 0）。
+
+affected_scope:         所有用 C assert 做测试前置/后置检查的 test_package 或消费者用例；
+  任何以 Conan Release（-DNDEBUG）构建并运行 ctest 的配方都会命中。
+
+verification_cmd:       clang -DNDEBUG -O2 <test>.c <lib>.a -pthread -o t && ./t ; echo $?  # 139=SIGSEGV
+  clang -O2 <test>.c <lib>.a -pthread -o t && ./t ; echo $?  # 0=通过
+
+rec_priority:           1
+rec_approach:           explicit-error-codes-instead-of-assert-control-flow
+rec_description:        测试代码把全部前置检查（create/register/pthread_create 结果、NULL 守卫）
+  改为显式 if + fprintf(stderr) + return 非零退出码（如 2）；后置可观察结果断言同样用退出码表达
+  （delivered<=0 → return 2），仅打印 [PASS]/[FAIL] 文本不承载判定。断言只在"无副作用、失败即
+  中止可接受"的纯不变量处保留（或干脆全部显式化）。修改落在测试源文件，不改变被测库行为。
+rec_command:            if (!q) { fprintf(stderr, "FAIL: create NULL\n"); return 2; }
+  if (pthread_create(&th[i], NULL, producer, q) != 0) { ...; return 2; }
+  if (delivered <= 0) { fprintf(stderr, "FAIL: no delivery\n"); return 2; }
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              (embedmq 1.0.1 适配 PR，创建后回填)
+source_commit:          (embedmq 1.0.1 适配 commit，创建后回填)
+observed_by:            pc1-27 (AtomCode oh-executor embedmq 1.0.1 R01)

@@ -1,0 +1,167 @@
+# 版本级 manifest — psutil 7.2.2
+# 遵循 ARCHIVE-SPEC v3.0
+
+version: "7.2.2"
+software: psutil
+status: built
+build_date: "2026-09-19"
+build_system: custom
+
+# ============================================================
+# 源码信息
+# ============================================================
+
+source:
+  # PyPI 官方托管（R39 合规，单一官方 URL，镜像由 CI 自动加）
+  url: "https://files.pythonhosted.org/packages/aa/c6/d1ddf4abb55e93cebc4f2ed8b5d6dbad109ecb8d63748dd2b20ab5e57ebe/psutil-7.2.2.tar.gz"
+  sha256: "0746f5f8d406af344fd547f1c8daa5f5c33dbc293bb8d6a16d80b4bb88f59372"
+  compression: tar.gz
+  archive_root: "psutil-7.2.2"
+
+# ============================================================
+# 依赖信息
+# ============================================================
+
+dependencies:
+  required:
+    - "python/3.12.9"
+  optional: []
+  note: |
+    **运行时依赖仅 python/3.12.9**：psutil 的 C 扩展
+    （psutil/_psutil_linux.so）需要链接 libpython3.12（musl 不从主可执行文件
+    导出 Python 符号，只链接会得到"链接成功但 import 失败"的模块）。
+
+    构建期 tool_requires: setuptools/84.0.0 —— 上游 setup.py 顶层
+    `import setuptools`，而 Python 3.12 已移除 stdlib distutils 回退路径。
+    上游 pyproject.toml 亦声明 build-backend=setuptools.build_meta、
+    requires=["setuptools>=43"]，此处保持一致。
+
+    上游**测试期**依赖（pytest / pytest-instafail / pytest-xdist / psleak）
+    **未发布到 ohpcd**（实测 conan search 均 0 个），按 PF4 不得写成
+    test_requires → 构建期从平台 pip 镜像取到独立目录后运行（见 conanfile.py
+    的 UPSTREAM_TEST_REQUIRES）。
+
+# ============================================================
+# 构建配置
+# ============================================================
+
+build_config:
+  target: aarch64-unknown-linux-ohos
+  options:
+    - "shared=True"
+  notes: |
+    package_type=library（带 C 扩展，不能声明 python-require——python/3.12.9
+    传递带入 libffi 为 static-library，而 python-require 类型禁止依赖带类型的
+    库；与仓内 lxml 6.1.1 / greenlet 一致）。
+
+    构建：get(源码) → apply_conandata_patches → 依赖自带的 python3.12 执行
+    `setup.py build_ext --inplace` → 对 .so 签名（HMDFS 必需）→ 运行上游
+    pytest 套件 → package() 拷入 lib/python3.12/site-packages。
+
+    三个 OHOS 实测要点（详见 notes.md）：
+    ① sys.platform == "ohos"，psutil setup.py 会 `sys.exit("platform ohos is
+       not supported")` → 映射到 Linux 分支；
+    ② OHOS sysroot 的 <linux/if.h> 与 <sys/socket.h> 均定义 struct
+       sockaddr_storage（重定义）→ 改用 libc <net/if.h>；
+    ③ OHOS sysroot 无 <utmpx.h> → posix users 模块无法编译，用 PSUTIL_OHOS
+       宏显式守卫（含 init.c 方法表注册同步）。
+
+    注意 **PSUTIL_OHOS 不能用 sys.platform 判定**：实测 conan python 依赖的
+    sys.platform 报 "linux"（宿主 python 才是 "ohos"），依赖它会让守卫永不生效
+    → 由配方显式注入环境变量。
+
+# ============================================================
+# 补丁信息
+# ============================================================
+
+patches_applied:
+  - file: "patches/0001-ohos-linux-platform-support.patch"
+    description: >-
+      Add OHOS support: map sys.platform "ohos" onto the Linux branch; use libc
+      <net/if.h> instead of <linux/if.h> to avoid a sockaddr_storage
+      redefinition against the OHOS sysroot; guard out the POSIX users module
+      (OHOS sysroot has no <utmpx.h>) via a new PSUTIL_OHOS macro
+    type: portability
+
+# ============================================================
+# 兼容性
+# ============================================================
+
+compatibility:
+  level: medium
+  issues:
+    - "OHOS 上读其它进程的 /proc/<pid>/* 被拒（hidepid=invisible）→ 依赖进程树的 API（children/parents/ppid/pstree）不可用（平台限制，非适配缺陷）"
+    - "OHOS 无 /proc/self/fdinfo → Process.open_files() 恒返回空列表（平台限制）"
+    - "OHOS 内核版本串为 'HongMeng Kernel 1.12.0' → 上游按数字前缀解析版本会抛 ValueError（平台差异）"
+    - "psutil.users() 不可用：OHOS sysroot 无 <utmpx.h>（本配方已守卫）"
+  notes: |
+    核心 API 全部可用且经消费者实测（test_package 18/18）：cpu_count /
+    cpu_times / virtual_memory / swap_memory / pids / Process（name/status/
+    memory_info/cpu_times）/ disk_usage / disk_partitions / net_if_addrs /
+    net_io_counters / boot_time，C 扩展真实加载。
+
+    受限项均为 **OHOS 系统接口收紧**所致（见 issues），配方层面无法变更；
+    上游测试失败已按四类根因逐项归因并列入 ALLOWED_TEST_FAILURES（R9），
+    清单外失败一律使 conan create 失败。
+
+# ============================================================
+# 测试结果
+# ============================================================
+
+test_results:
+  type: manual
+  passed: 278
+  failed: 152
+  skipped: 279
+  note: |
+    上游 pytest 套件在 build() 内真实运行（R51），2026-09-19 设备实测
+    （profile: ci/conan/profiles/ohos-aarch64）：
+      **152 failed, 278 passed, 279 skipped, 1 deselected, 1 error**
+      （collected 700 items；串行全套 33 秒）
+
+    失败已按**四类平台根因**逐项归因（不是"缺依赖"，也不是适配缺陷）：
+      ① /proc 以 `hidepid=invisible` 挂载（/proc/mounts 实读）→ 读任何其它
+         进程的 /proc/<pid>/* 均 PermissionError（实测 /proc/1/stat、
+         /proc/1/status、/proc/1/cmdline 全被拒）→ ppid_map() 抛
+         AccessDenied，进程树类用例成片失败（46 处命中 _pslinux.py:1575）
+      ② OHOS 未暴露 /proc 语义文件：/proc/self/fdinfo 不存在（实测
+         FileNotFoundError）→ open_files() 恒空（实测 num_fds()=13 而同刻
+         open_files()=0）；/proc/filesystems、/proc/net/tcp、/sys/block、
+         /sys/class/power_supply 均 PermissionError
+      ③ 内核版本串 'HongMeng Kernel 1.12.0' 无数字前缀 → tests/__init__.py:645
+         抛 ValueError
+      ④ OHOS 自有 smaps 段 `Name: [anon:native_heap:meta]` →
+         _pslinux.py:1981 解析器不认
+    另：AF_UNIX bind 在本环境被拒（实测 PermissionError EPERM，
+    Operation not permitted）→ socket 类用例失败。
+
+    **两项会毁掉整个 run（非仅失败一项），故在命令行排除**（详见 conanfile.py）：
+      - tests/test_sudo.py 整体 --ignore：clock_settime 触发 seccomp
+        SIGSYS(31) **硬杀进程**（实测子进程 WTERMSIG=31），上游期望的
+        PermissionError→SkipTest 不成立；xdist 下 worker 死亡会连带吞掉
+        整个失败清单（node down ×18）
+      - test_open_files_mode 单独 --deselect：因②导致上游 giveup 判定写在
+        空 for 循环体内 → **无限循环**（这是此前"40 分钟仅完成 65 项、
+        外推 7 小时"的真因，套件本身只需 33 秒）
+
+    因失败计数在多次运行间存在小幅波动（149/152/160），允许清单按
+    **多轮实测并集**给出（119 项），否则 conan create 会随机失败。
+    清单外失败一律抛 ConanException 使 conan create 失败，不做豁免、
+    不静默降级。
+
+    test_package 消费者测试：**18/18 passed**（真实系统监控 API + C 扩展加载）。
+
+# ============================================================
+# 知识沉淀
+# ============================================================
+
+knowledge_gained:
+  - "OHOS 的 /proc 以 hidepid=invisible 挂载（/proc/mounts: procfs rw,gid=3009,hidepid=invisible），任何进程读其它进程的 /proc/<pid>/* 均 PermissionError；仅 /proc/self/* 可读。依赖进程表遍历的库（psutil/libgtop 等）必须据此设计降级 (ref: DRAFT-ohos-proc-hidepid-invisible)"
+  - "OHOS 无 /proc/self/fdinfo：psutil.Process().open_files() 恒返回空列表，且上游 test_open_files_mode 的 giveup 判定写在空 for 循环体内 → 在 OHOS 上变成**无限循环**；该类'轮询直到出现'的测试在受限平台会挂死而非失败（判断挂死要看 CPU 时间是否增长，不要按完成速率外推）(ref: DRAFT-ohos-poll-based-test-infinite-loop, DRAFT-ohos-proc-hidepid-invisible)"
+  - "OHOS 的 time.clock_settime() 触发 seccomp SIGSYS(31) 直接杀进程，不会抛 PermissionError；上游按 `except PermissionError → SkipTest` 写的'需要 root'跳过逻辑在 OHOS 失效，进程直接死亡 (ref: E051)"
+  - "OHOS 的 uname -r 为 'HongMeng Kernel 1.12.0'（无 major.minor 数字前缀）；按数字前缀解析内核版本的代码（psutil tests/__init__.py:645）会抛 ValueError (ref: DRAFT-ohos-kernel-version-string)"
+  - "pytest-xdist 在 worker 被信号杀死时会抛 INTERNALERROR 并**吞掉整个 short test summary**（FAILED 行归零），使逐项归因不可能；遇可疑挂死/杀进程时应先串行跑一遍取清单 (ref: DRAFT-xdist-internalerror-swallows-summary)"
+
+references:
+  - https://github.com/giampaolo/psutil
+  - https://psutil.readthedocs.io/

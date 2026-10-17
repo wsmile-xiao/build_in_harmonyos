@@ -1,0 +1,131 @@
+# ═══ Draft knowledge entry — E051 特权 id syscall 的 PF5 兼容修法：用 POSIX 空操作判定跳过 syscall，而不是 __OHOS__ 宏守卫，也不是"失败改非致命" ═══
+# Timestamp: 2026-09-22
+# Software: secpwgen 1.3（任何在启动路径上无条件调用 seteuid/setreuid/setregid/setuid 做 drop privileges 的 C/C++ 包）
+# Gate: 设备实机运行（conan create 的 test_package / 直接执行构建产物）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# 知识缺口说明（查重结论）：最接近的既有知识是 E051，它正确描述了根因（鸿蒙对未实现
+#   syscall 发不可捕获 SIGSYS，exit 159），但它给的修法（rec_approach: source-patch，
+#   "在 C 源码中用 #ifdef __OHOS__ 守卫，在 syscall 调用前直接返回 errno=ENOSYS"）
+#   已被 v12.17+ 的 R8/PF5 判废——create-pr 前置硬闸 PF5 对 patches/*.patch 新增行
+#   出现 __OHOS__ 一律 fail-closed。knowledge/principles.yaml 的 P-RUNTIME-001
+#   （level: critical）、P-PATCH-002、P-SYSCALL-001 三条原则仍在要求 __OHOS__ 守卫，
+#   与 PF5 直接冲突；DRAFT-E577 已指出"E051 的旧方案已失效"，但只给了 SysV IPC 的
+#   替代路线，未覆盖特权 id syscall 这一族。本条目补这一格。
+
+id: DRAFT-secpwgen-1.3-e051-privileged-id-noop-guard
+title: 鸿蒙对非特权进程发起的特权 id syscall（seteuid/setreuid/setregid）回以不可捕获 SIGSYS；PF5 兼容修法是先用 POSIX 语义判定该调用是否为空操作并跳过，而非 __OHOS__ 宏守卫或失败容错
+trigger_tool: runtime / cc / conan
+phase: runtime / test_package
+error_signature: 'exit code 159|Bad system call|killed.*signal 31|SIGSYS|signal 31|FATAL: system call failed|seteuid.*(killed|SIGSYS)|setreuid.*(killed|SIGSYS)|程序启动即退出且无任何输出'
+severity: 3
+category: compat|kernel|syscall|security
+match_keywords: 'seteuid, setreuid, setregid, setegid, setuid, setgid, setgroups,
+  initgroups, drop privileges, drop_privileges, relinquish, unprivileged, SIGSYS,
+  signal 31, Bad system call, exit 159, exit code 159, seccomp, E051, __OHOS__, PF5,
+  R8, ENOSYS, geteuid, getuid, seteuid(getuid())'
+approach: |
+  程序一启动就退出（exit 159 / "Bad system call"），或打出 "FATAL: system call
+  failed" 之类却查不到 errno 原因，且调用栈落在 seteuid/setreuid/setregid/setuid
+  上时：不要按普通 errno 错误排查（内核在 syscall 返回前就终止了进程，错误分支
+  永远走不到），不要装 SIGSYS handler（E051 已实测不可捕获），也不要用
+  `#ifdef __OHOS__` 守卫（R8/PF5 会拦下补丁，PR 建不出来）。
+  正确做法是先问一句：**这次调用在语义上是不是空操作？** 绝大多数 drop privileges
+  代码写的是 `seteuid(getuid())` / `setreuid(getuid(), getuid())`，对普通（非 setuid）
+  进程而言它按 POSIX 不改变任何 uid，纯属空转。于是把判定提到调用之前：
+      if (geteuid() == getuid()) return;      /* 无特权可丢，别发这个 syscall */
+      if (seteuid(getuid()) < 0) { ...原错误处理... }
+  这是纯 POSIX 写法、无任何平台宏，对非鸿蒙平台行为完全等价（空操作被消除而已），
+  因此同时满足 R8「你的修改对非鸿蒙平台必须是透明的」与 PF5。
+root_cause: |
+  鸿蒙（HarmonyOS/OpenHarmony）对应用与沙箱进程采用白名单式 seccomp 策略，特权 id
+  syscall 族（setreuid/setregid/seteuid 等）不在允许列表内；非特权进程发起时内核
+  直接以 SIGSYS（signal 31，退出码 128+31=159）终止进程，既不返回 -1 也不设 errno，
+  且该 SIGSYS 不可被任何 signal handler（含 C 层 sigaction）捕获（E051 实测）。
+  本仓已有多个独立实证：archives/u/uid-wrapper/1.2.5/notes.md（"OHOS seccomp kills
+  the real privileged-id syscall from an unprivileged process with SIGSYS instead of
+  returning -1/EPERM"，实测死于 setreuid）、archives/l/libgtop-tools/2.41.3/notes.md
+  （setreuid 处 Signal 31/SIGSYS）、archives/h/hfsutils/3.2.6/notes.md（二进制执行
+  SIGSYS，exit code 159）、archives/c/cdrkit/1.1.11/notes.md（禁用 HAVE_SETREUID）、
+  archives/p/pwsafe/1.24.0/notes.md（"seteuid 等在 OHOS 上未实现"）、
+  archives/s/screen/5.0.0/notes.md（seteuid/setegid 不可用）。
+affected_scope: |
+  一切在启动路径或常驻路径上无条件调用特权 id syscall 的包，尤其是把
+  `seteuid(getuid())` / `setreuid(uid, uid)` 当"保险"写的 drop privileges 代码：
+  口令/密钥类工具（secpwgen、pwsafe）、终端复用器（screen）、需要 suid 语义的
+  文件工具（hfsutils）、守护进程（libgtop、dante、acpid）、uid 包装层（uid-wrapper）。
+  注意与 DRAFT-E577（SysV IPC 的 shmget/semget/msgget 同样死于 SIGSYS）区分：那一族
+  无法用"空操作判定"消除，必须整体换成 POSIX 原语；本条目针对的特权 id 族通常可以
+  直接判定为空操作并跳过，改动量小得多。
+  与 E051 的关系：E051 描述根因正确、修法已失效（其 rec_description 要求 __OHOS__
+  宏守卫，PF5 会拦）；本条目给出同一根因下的 PF5 兼容修法。
+verification_cmd: |
+  1) 复现（设备）：执行未打补丁的产物，若立即退出且 `echo $?` 为 159（或 stderr 出现
+     "Bad system call"）即命中；本机无设备时可用最小 C 程序 setreuid(0,0) 旁证。
+  2) 修复后（设备）：同一命令应正常产出结果，退出码 0，且 `echo $?` != 159。
+  3) 补丁是否真编入产物（无需设备，任何构建主机都能跑）：比对**目标文件**（不是链接
+     产物）的未定义符号——未打补丁的 secure_memory_unix.o 只有 `U getuid`/`U seteuid`，
+     打补丁后多出 `U geteuid`：
+       llvm-nm -u <build>/secure_memory_unix.o | grep -E 'get(e)?uid|seteuid'
+     注意不能在链接产物上做此判定：静态 libcrypto 自身也引用 geteuid，
+     打补丁与未打补丁的 `llvm-nm -u secpwgen` 输出完全相同（实测确认）。
+  4) 本仓实证：archives/s/secpwgen/1.3（test_package/ohos_abi_check.py 的 A4 检查项
+     已把第 3 步固化成可执行断言，未打补丁时 A4 FAIL / rc=1）。
+rec_priority: 1
+rec_approach: posix-noop-guard-skip-syscall
+rec_description: |
+  在调用点之前用 POSIX 语义判定该调用是否为空操作，是则直接 return，根本不发 syscall：
+    seteuid(getuid())          → if (geteuid() == getuid()) return;
+    setegid(getgid())          → if (getegid() == getgid()) return;
+    setreuid(ruid, ruid)       → if (geteuid() == getuid()) return;
+    setregid(rgid, rgid)       → if (getegid() == getgid()) return;
+  保留原有失败分支不动（真 setuid/setgid 二进制仍走原路径并原样报错），因此对上游
+  逻辑零破坏（R8「不破坏上游逻辑」），缩进/风格随上游（R8「不偏离上游代码风格」）。
+  补丁不得出现 __OHOS__（PF5），也不得改成"失败即忽略"（对 SIGSYS 无效，见 forbid_2）。
+  若该调用不是空操作（例如守护进程真的要切到某个低权用户），本方案不适用，须改用
+  运行时能力探测（fork 子进程试调、父进程 waitpid 判 WIFSIGNALED/SIGSYS）后走替代路径。
+rec_command: 见 archives/s/secpwgen/1.3/patches/0001-secure_memory_unix.c.patch（+11/-0，单 hunk，无平台宏）
+rec_auto_fix: false
+rec_impl: source-patch（POSIX 空操作守卫，无平台宏）
+
+fallback_priority: 2
+fallback_approach: fork-probe-degrade
+fallback_description: |
+  调用确实需要改变 uid/gid（非空操作）时，先 fork 一个子进程做能力探测：子进程调用
+  目标 syscall，父进程 waitpid 判 WIFSIGNALED(sig)==SIGSYS，据此在运行期选择替代路径
+  （放弃降权并告警、或改用平台允许的机制）。与 DRAFT-E577 的 fallback 同型。
+  代价是每次启动多一个 fork，且仍需提供替代实现。
+fallback_command: pid=fork(); 子进程 seteuid(target); 父进程 waitpid 判 SIGSYS
+fallback_auto_fix: false
+fallback_impl: runtime-capability-probe
+
+forbid_1_pattern: '#if(n?def)?\s*__OHOS__|defined\s*\(\s*__OHOS__\s*\)'
+forbid_1_reason: R8/PF5 禁止在 patches/*.patch 新增行与 conanfile.py 注入 __OHOS__ 平台宏；E051 与 principles.yaml 的 P-RUNTIME-001/P-PATCH-002/P-SYSCALL-001 仍推荐该写法，已失效
+forbid_1_consequence: create-pr 前置硬闸 PF5 fail-closed，PR 建不出来（除非 --no-preflight 并在 PR 说明理由，留痕可审计）
+
+forbid_2_pattern: '(if\s*\(\s*set(e|re)?[ug]id[^;]*\)\s*(\{\s*\}|;\s*/\*\s*ignore|[^}]*continue))'
+forbid_2_reason: SIGSYS 由内核在 syscall 返回前终止进程，"失败改非致命"的分支永远走不到（screen 5.0.0 对 seteuid 用的就是这种口径，对返回 errno 的平台有效，对鸿蒙无效）
+forbid_2_consequence: 进程仍被杀（exit 159），容错代码形同不存在，表现为"打了补丁照样启动即死"
+
+forbid_3_pattern: 'signal\s*\(\s*SIGSYS|sigaction\s*\([^)]*SIGSYS'
+forbid_3_reason: E051 已实测该族 syscall 的 SIGSYS 不触发任何 signal handler（含 C 层 sigaction）
+forbid_3_consequence: handler 从不被调用，进程仍被终止，方案完全无效
+
+principles: P-RUNTIME-001, P-SYSCALL-001, P-PATCH-002, P-PATCH-003
+similar_to: E051, DRAFT-E577, E246, E237
+conflicts_with: E051 的 rec_description（__OHOS__ 宏守卫）；principles.yaml P-RUNTIME-001 的 suggest（"用 #ifdef __OHOS__ 在调用前 return ENOSYS"）——建议主编同步修订，否则引擎会把适配者导向被 PF5 拦下的写法
+prerequisite_of:
+
+doc_file: knowledge/drafts/DRAFT-secpwgen-1.3-e051-privileged-id-noop-guard.md
+last_updated: 2026-09-22
+source_event: 任务卡 secpwgen 1.3（开源鸿蒙 PC 专项积分赛，分支 feat/secpwgen-1.3）；本机 OHOS 交叉构建 + conan-verify 全绿 + test_package 产物级 A1-A4 4/4 PASS；设备端 H1-H3 待 CI worker 复跑
+authors: secpwgen-1.3 适配任务
+source_pr:
+source_commit:
+
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.75
+metrics_last_used: 2026-09-22
+
+draft: true

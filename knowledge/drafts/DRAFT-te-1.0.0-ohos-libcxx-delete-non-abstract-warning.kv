@@ -1,0 +1,86 @@
+#====================================================================
+# DRAFT-te-1.0.0-ohos-libcxx-delete-non-abstract-warning -
+# OHOS libcxx 对含虚函数无虚析构的擦除/包装类型容器化触发
+# -Wdelete-non-abstract-non-virtual-dtor（标准库实现差异，-Werror 下需抑制）
+#
+# 场景: te 1.0.0 (boost-ext/te, C++17 单头文件类型擦除库) OHOS armv8
+#       Conan 2.x 适配。上游 CMakeLists 使用 -Wall -Wextra -Werror
+#       -pedantic -pedantic-errors 严格模式；test/te.cpp 的
+#       should_support_non_owning_storage 用例将 te::poly 派生的
+#       DrawableMutable（含虚函数、无虚析构）放入 std::vector，
+#       libcxx-ohos 的 allocator 内部实例化时触发
+#       -Wdelete-non-abstract-non-virtual-dtor。
+# 适用: 所有在 OHOS 上以 -Werror 严格模式编译、将含虚函数无虚析构的
+#       类型擦除/包装对象放入标准容器（vector 等）的 C++ 库。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-te-1.0.0-ohos-libcxx-delete-non-abstract-warning
+source_lib:             te 1.0.0
+trigger_tool:           clang++|clang|cmake|conan create
+phase:                  compilation
+error_signature:        error: destructor called on non-final .* that has virtual functions but non-virtual destructor|Wdelete-non-abstract-non-virtual-dtor|qualify call to silence this warning
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               c++|libcxx|compiler|warning|type-erasure
+match_keywords:         delete-non-abstract-non-virtual-dtor, -Werror, pedantic, libcxx, OHOS, clang 15, std::allocator, destroy, virtual functions, non-virtual destructor, te::poly, type erasure, poly, std::vector, INTERFACE, header-only
+title:                  OHOS libcxx 对擦除/包装类型容器化触发 -Wdelete-non-abstract-non-virtual-dtor，需 -Wno-* 抑制
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  te 的接口包装类型（如 test 中 struct DrawableMutable : te::poly<...>）
+  含虚函数但非虚析构——对类型擦除库这是接口特征的正常形态。OHOS SDK
+  自带的 libcxx-ohos（clang 15）在标准库内部做 allocator destroy /
+  uninitialized_allocator_copy 模板实例化时（std::vector<DrawableMutable>
+  构造），对这类非 final 且有虚函数无虚析构的类型触发
+  -Wdelete-non-abstract-non-virtual-dtor 告警。该告警发自标准库头文件
+  内部实例化，并非 te 源码自身的诊断；在上游 CMakeLists 的
+  -Wall -Wextra -Werror -pedantic -pedantic-errors 严格模式下转为错误，
+  导致整仓测试编译失败。属标准库实现差异（libstdc++ 同代码不告警），
+  非三方库源码缺陷。
+
+affected_scope:         所有在 OHOS (aarch64-linux-ohos, clang 15 + libcxx) 上
+                        以 -Werror/-pedantic-errors 严格模式编译、
+                        且将含虚函数无虚析构的擦除/包装类型放入标准容器的 C++ 库
+verification_cmd:       # 复现: clang++ -std=c++17 -Wall -Wextra -Werror -pedantic
+                        #   -pedantic-errors -Iinclude -Itest test/te.cpp
+                        #   报 error: destructor called on non-final ...
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           suppress-libcxx-internal-warning
+rec_description:        保留上游严格编译标志，仅对标准库内部实例化产生的该告警
+                        增加 -Wno-delete-non-abstract-non-virtual-dtor 抑制；
+                        -Wall -Wextra -Werror -pedantic -pedantic-errors 全部保留，
+                        不降级任何其他检查。
+rec_command:            clang++ -std=c++17 -Wall -Wextra -Werror -pedantic \
+                        -pedantic-errors -Wno-delete-non-abstract-non-virtual-dtor \
+                        -Iinclude -Itest test/te.cpp -o te_tests
+rec_auto_fix:           false
+rec_impl:               add-compile-flag
+
+# ═══ Layer 4: 验证层 (Verification) ★ ═══
+verification:           |
+  te 1.0.0 实测：加 -Wno-delete-non-abstract-non-virtual-dtor 后
+  test/te.cpp 编译通过（exit 0），26/26 独立用例运行通过（C++17 实例化集，
+  源码声明 28、2 个 concepts 守卫不实例化；C++20 全集 28/28 验证）；13 个
+  example/*.cpp 同样编译运行全部 exit 0。日志:
+  /storage/Users/currentUser/zhouyu/te-r01-logs/manual-te-build2.log，
+  examples-build.log，examples-run 均 exit 0。
+
+# ═══ Layer 5: 查重层 (Dedup) — 七轴 ═══
+dedup:
+  exact_duplicate:       false
+  causal_duplicate:      false     # 与既有 libcxx 缺失头/特性类条目不同源
+  trigger_overlap:       false
+  solution_overlap:      partial   # -Wno-* 抑制类方案与既有 flags 类条目相似
+  combination_novelty:   true
+  boundary_novelty:      true      # 边界: 标准库内部实例化告警 + -Werror 严格模式
+  test_migration_novelty: false
+  similar_to:            [E257, E307, E321, DRAFT-graaf-1.1.0-ohos-libcxx-std-ranges-missing,
+                          DRAFT-libfork-3.6.0-libcxx-missing-headers,
+                          DRAFT-boost-te-1.0.0-headeronly-copy-abs-path-commit-incremental]
+  caused_by:             []
+  prerequisite_of:       []
+  conflicts_with:        []

@@ -1,0 +1,89 @@
+--- a/udiskie/cache.py
++++ b/udiskie/cache.py
+@@ -2,12 +2,81 @@
+ Utility for temporarily caching passwords.
+ """
+ 
+-import keyutils
++import logging
+ 
+-# This import fails in python-keyring-keyutils, which is a not (yet) supported
+-# alternative for the python-keyring package. This lets us distinguish between
+-# the two identically named python packages (=keyring).
+-from keyutils import KEY_SPEC_PROCESS_KEYRING
++# ─── OHOS portability: optional kernel-keyring backend ─────────────────
++# Passwords are normally cached in the Linux kernel keyring through the
++# `keyutils` C extension. On platforms that provide neither libkeyutils nor the
++# kernel keyring (e.g. OHOS) that extension cannot be built or loaded, so
++# importing this module must not require it. A minimal in-process stand-in with
++# the same API and observable semantics (temporary caching with a timeout) is
++# used instead; note that the fallback only keeps passwords for the lifetime of
++# the current process instead of a kernel-managed keyring.
++try:
++    import keyutils
++
++    # This import fails in python-keyring-keyutils, which is a not (yet)
++    # supported alternative for the python-keyring package. This lets us
++    # distinguish between the two identically named python packages (=keyring).
++    from keyutils import KEY_SPEC_PROCESS_KEYRING
++
++except ImportError:  # pragma: no cover - depends on the host platform
++    import time as _time
++
++    KEY_SPEC_PROCESS_KEYRING = -2
++
++    class _Error(Exception):
++        """Stand-in for `keyutils.Error`."""
++
++    class _FallbackKeyring:
++        """In-process substitute for the kernel keyring (keyutils API subset).
++
++        Emulates add_key/request_key/read_key/revoke/set_timeout with a plain
++        dictionary, including the timeout-refresh-on-access behaviour used by
++        PasswordCache below.
++        """
++
++        Error = _Error
++
++        def __init__(self):
++            self._store = {}
++            self._next_id = 1
++
++        def add_key(self, key, value, keyring, keyType=b"user"):
++            key_id = self._next_id
++            self._next_id += 1
++            self._store[key] = [key_id, value, None]
++            return key_id
++
++        def request_key(self, key, keyring, keyType=b"user"):
++            entry = self._store.get(key)
++            if entry is None:
++                return None
++            if entry[2] is not None and _time.time() >= entry[2]:
++                del self._store[key]
++                return None
++            return entry[0]
++
++        def read_key(self, key_id):
++            for entry in self._store.values():
++                if entry[0] == key_id:
++                    return entry[1]
++            raise _Error("Key has been revoked!")
++
++        def revoke(self, key_id):
++            for key in list(self._store):
++                if self._store[key][0] == key_id:
++                    del self._store[key]
++
++        def set_timeout(self, key_id, timeout):
++            for entry in self._store.values():
++                if entry[0] == key_id:
++                    entry[2] = (_time.time() + timeout) if timeout > 0 else None
++
++    keyutils = _FallbackKeyring()
++    logging.getLogger(__name__).warning(
++        "python-keyutils is not available: using a process-local password "
++        "cache instead of the kernel keyring")
+ 
+ 
+ class PasswordCache:

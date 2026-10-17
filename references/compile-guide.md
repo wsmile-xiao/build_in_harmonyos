@@ -64,7 +64,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py finish <name> <ver> published|built|faile
 ### 2.3 conan-init：生成 Conan 配方
 
 生成 `conanfile.py` + `conandata.yml` + `test_package/`。AI 必须检查：
-- `requirements()` 依赖引用必须 ``（R27）
+- `requirements()` 依赖引用使用 `name/version` 格式
 - `generate()` 系统同名库 `BUILD_SHARED_LIBS=OFF`（R26，避免污染 `/lib`）
 - `package_info()` 的 `cpp_info.libs` 正确声明
 - `conandata.yml` 有 SHA256 校验

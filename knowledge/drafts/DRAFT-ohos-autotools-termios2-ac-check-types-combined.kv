@@ -1,0 +1,78 @@
+#====================================================================
+# Draft: autotools termios2 特征检测需"类型+ioctl 常量"组合验证
+#        (libmodbus 3.2.0 / PR 已交付实例; OHOS 缺 TCGETS2/TCSETS2)
+#====================================================================
+
+id:                     DRAFT-ohos-autotools-termios2-ac-check-types-combined.kv
+trigger_tool:           configure|clang|make
+phase:                  configuration|compilation
+error_signature:        use of undeclared identifier 'TCGETS2'|
+                         use of undeclared identifier 'TCSETS2'|
+                         HAVE_STRUCT_TERMIOS2|cannot guess build type
+
+severity:               2
+category:               ohos, libc-headers, build-system, autotools, portability
+match_keywords:         AC_CHECK_TYPES, struct termios2, TCGETS2, TCSETS2, asm/termbits.h,
+                         HAVE_STRUCT_TERMIOS2, ioctl, termios, autotools, configure.ac,
+                         BOTHER, custom baud, undefined identifier, libmodbus
+
+title:                  autotools 用 AC_CHECK_TYPES([struct termios2]) 检测 termios2 时，
+                        OHOS 头文件有 struct 但无 TCGETS2/TCSETS2 ioctl 常量，
+                        需改为 "类型+常量" 组合编译检测，否则 termios2 代码路径编译失败
+
+root_cause:             libmodbus configure.ac 用 `AC_CHECK_TYPES([struct termios2])` 只检测
+                        struct termios2 类型是否存在；OHOS sysroot 的 asm/termbits.h 提供
+                        struct termios2 但**不定义 TCGETS2/TCSETS2 ioctl 常量**，导致
+                        HAVE_STRUCT_TERMIOS2=1 而代码里 `ioctl(fd, TCGETS2, ...)` 全部
+                        undeclared identifier，编译失败。本质：特性检测不完整——类型存在
+                        不代表配套 ioctl 常量存在。与 DRAFT-ohos-termbits-termios-fallback-knob
+                        （bootterm NO_TCGETS2 开关注入）根因同族，但该库无上游编译期开关，
+                        必须修 configure 检测本身。
+
+affected_scope:         一切 autotools 项目且上游用 AC_CHECK_TYPES/AC_CHECK_DECLS 检测
+                        termios2（libmodbus 3.2.0 为已交付实例）；无上游 NO_TCGETS2 类
+                        开关的库。同类风险：任何检测"类型"但实际使用"类型+宏常量"的
+                        configure 检测。
+
+verification_cmd:       ./configure --prefix=$DEFAULT_PREFIX && make -j1 && make check
+                        # rc=0；config.h 中 HAVE_STRUCT_TERMIOS2 为 undef；
+                        # make check PASS（unit-tests.sh 1/1, proxy-tests.sh, random-test）
+
+rec_priority:           1
+rec_approach:           ac-cache-check-combined-type-and-constants
+rec_description:        把 configure.ac 的 `AC_CHECK_TYPES([struct termios2], [], [],
+                        [[#include <asm/termbits.h>]])` 替换为 AC_CACHE_CHECK +
+                        AC_COMPILE_IFELSE 组合检测：同一测试程序同时引用
+                        `struct termios2 t; (void)TCGETS2; (void)TCSETS2;`
+                        （头文件 asm/termbits.h + sys/ioctl.h），三者齐备才
+                        AC_DEFINE(HAVE_STRUCT_TERMIOS2)。OHOS 自动回退标准
+                        termios 路径（tcgetattr/tcsetattr），行为等价——自定义
+                        波特率（BOTHER）能力在 OHOS 本就不存在。此为 libc 特性
+                        探针类修改（R8 例外可在 PR 说明），补丁不含 __OHOS__ 平台宏。
+rec_command:            configure.ac 内: AC_CACHE_CHECK([whether struct termios2 with
+                        TCGETS2/TCSETS2 is supported], [ac_cv_have_termios2],
+                        [AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <asm/termbits.h>
+                        #include <sys/ioctl.h>]], [[struct termios2 t; (void)sizeof(t);
+                        (void)TCGETS2; (void)TCSETS2; return 0;]])], ...)])
+rec_auto_fix:           false
+rec_impl:               configure-ac-feature-check-fix
+
+fallback_priority:      2
+fallback_approach:      source-patch-exclude-ohos
+fallback_description:   若无法改 configure 检测（如上游不接收），按 E102/E147/E148 模式在
+                        modbus-rtu.c 用 `#if defined(HAVE_STRUCT_TERMIOS2) &&
+                        defined(TCGETS2)` 守卫 termios2 代码路径，让无常量平台回退标准路径。
+fallback_command:       sed -i 's/#ifdef HAVE_STRUCT_TERMIOS2/#if defined(HAVE_STRUCT_TERMIOS2) \&\& defined(TCGETS2)/g' src/modbus-rtu.c
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       补丁中新增 -D__OHOS__ 或 #ifdef __OHOS__ 切换头文件路径|直接用
+                        -Wno-error 或 -Wno-undefined 压编译错误
+forbid_1_reason:        前者违反 R8/PF5（补丁平台宏默认禁止）；后者掩盖真实原型缺失。
+forbid_1_consequence:   PF5 闸拦截/CI 失败；静默质量劣化流入制品。
+
+causes:                 []
+caused_by:              []
+similar_to:             E102, E147, E148, DRAFT-ohos-termbits-termios-fallback-knob
+prerequisite_of:        []
+conflicts_with:         []

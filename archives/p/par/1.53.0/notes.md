@@ -2,9 +2,9 @@
 
 ## 编译环境
 - 构建系统: makefile (protoMakefile)
-- 编译日期: 2026-06-15
+- 编译日期: 2026-07-15
 - 编译器: clang/clang++
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
@@ -67,5 +67,5 @@ echo "Hello world test paragraph" | /storage/Users/currentUser/usr/local/bin/par
 - 构建系统类型为 makefile，不是 autotools
 ---
 
-**编译结束**: 2026-06-15 09:56
-**最终状态**: published
+**编译结束**: 2026-07-15 23:10
+**最终状态**: built

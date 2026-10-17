@@ -1,8 +1,8 @@
-# gettext 0.22.5 — OpenHarmony 编译记录
+# gettext 0.22.5.1 — OpenHarmony 编译记录
 
 ## 基本信息
 - 软件: gettext
-- 版本: 0.22.5
+- 版本: 0.22.5.1
 - 构建系统: autotools
 - 目标: ohos-aarch64
 

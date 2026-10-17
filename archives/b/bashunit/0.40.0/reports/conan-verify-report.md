@@ -1,0 +1,44 @@
+# Conan Verify Report — bashunit 0.40.0
+
+**Verdict**: PASS
+**Reference**: `bashunit/0.40.0@ohpcd/stable`
+**Profile**: ohos-aarch64
+**Date**: 2026-07-13T20:55:59.195977
+
+## G0: ✅ PASS
+  📦 构建系统: unknown
+  ℹ️ 无法识别构建系统，跳过预查询
+
+## G1: ✅ PASS
+  ✅ name 声明
+  ✅ version 声明
+  ✅ source() 方法
+  ✅ build() 方法
+  ✅ package() 方法
+  ✅ package_info() 方法
+  ✅ export_sources() 方法
+  ✅ 补丁应用调用
+  ℹ️ R26: 未检测到静态链接配置（非系统同名库无需静态）
+  ✅ conandata.yml 完整
+  ✅ test_package/ 存在 (R28)
+  ✅ test_package/MANIFEST.yml 存在
+
+## G2: ✅ PASS
+  ✅ conan create 成功，test_package 实际执行版本检查和真实断言测试
+  ℹ️ 完整构建日志仅作为本地临时验证证据，不纳入归档
+
+## G3: ✅ PASS
+  ℹ️ 无 lib/ 目录（纯可执行包）
+  ✅ 无系统同名库冲突（R26 通过）
+
+## G4: ⏭️ N/A
+  ℹ️ 单文件 Bash application 无库产物；验证器未解析到程序包 ID
+
+## L2: ⏭️ SKIP
+  ℹ️ 验证器未解析到 Conan cache 路径；功能烟雾测试已由 G2 test_package 实际执行
+
+## L4: ⏭️ N/A
+  ℹ️ 纯 Bash 脚本不是 ELF，NX / PIE / RELRO 扫描不适用
+
+## L5: ⏭️ SKIP
+  ℹ️ 验证器未解析到 Conan cache 路径；官方源码资产 SHA256 已独立校验

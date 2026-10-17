@@ -1,0 +1,121 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E257.kv，填写各字段
+# 对应的人类文档: doc/E257.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E505
+trigger_tool: configure|make|ld|clang|runtime
+phase: configuration|runtime
+error_signature: Error loading shared library [^:]+: \(needed by\)|cannot run C compiled programs|configure: error: cannot run C compiled programs|Error loading shared library .*: Permission denied
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 1
+category:               autotools, configure, dynamic-loading
+match_keywords: LD_LIBRARY_PATH,DT_RPATH,DT_RUNPATH,rpath,symlink alias,soname,needed by,materialised view,disable-new-dtags,conan create,autotools
+title: OHOS loader: LD_LIBRARY_PATH overrides DT_RPATH and symlinked soname aliases cannot resolve
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: OHOS 上 musl 加载器认 LD_LIBRARY_PATH，并且一旦该变量被设置，其查找会压过二进制内嵌的 DT_RPATH。依赖包安装的版本化别名（libfoo.so.1 -> libfoo.so.1.2.3）在 HMDFS 上无法由加载器经别名名解析，因此把 LD_LIBRARY_PATH 指向依赖包 lib 目录会让查找失败，即使 DT_RPATH 指向的实体化目录是可加载的。表现是 configure 报 cannot run C compiled programs（rc=77）或运行期 Error loading shared library X (needed by Y)，而 ls/lld 层面文件都存在。
+affected_scope: 所有在 OHOS 上用 Autotools/CMake 构建、且 autoconf 运行探测或测试程序会链接共享依赖闭包的包（X.Org 客户端库、cairo、pango、fontconfig/freetype 下游等）。与内核版本和 HMMAC 策略相关，换设备须按 verification_cmd 重新实测。
+verification_cmd: clang -o probe probe.c -lfontconfig -L$VIEW -Wl,--disable-new-dtags -Wl,-rpath,$VIEW && env -u LD_LIBRARY_PATH ./probe; echo $?; LD_LIBRARY_PATH=$VIEW ./probe; echo $?
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: materialised-signed-runtime-view
+rec_description: 在任务私有构建目录里为依赖共享库闭包建立实体化视图：按依赖 cpp_info.libdirs 遍历，resolve 符号链接后以真实文件名复制为普通文件（保留 owner 可执行位），然后只把该视图嵌入所构建二进制的 DT_RPATH（-Wl,--disable-new-dtags,-rpath,<view>）。不要为此导出全局 LD_LIBRARY_PATH：无论指向包目录还是视图目录都有害（包目录因符号链接别名解析失败，视图目录会毒化被继承的工具链子进程，见 forbid_2）。
+rec_command: mkdir -p $BUILD/runtime-libs && for e in $(ls $DEP/lib | grep -E '\.so(\.[0-9]+)*'); do cp -p $DEP/lib/$(readlink -f $DEP/lib/$e 2>/dev/null || echo $DEP/lib/$e) $BUILD/runtime-libs/$e; done; export LDFLAGS="$LDFLAGS -L$BUILD/runtime-libs -Wl,--disable-new-dtags -Wl,-rpath,$BUILD/runtime-libs"; unset LD_LIBRARY_PATH
+rec_auto_fix: false
+rec_impl:
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach: probe-without-ld-library-path
+
+fallback_description: 先在不设 LD_LIBRARY_PATH、仅嵌 rpath 的条件下重跑同一个失败二进制，确认变量确实在压制 DT_RPATH，再调整视图；避免误改为静态链接。
+
+fallback_command: env -u LD_LIBRARY_PATH ./conftest; echo $?
+
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern: 用 --host= 让 cross_compiling=yes 跳过运行探测来掩盖加载失败
+forbid_1_reason: 绕过 AC_RUN 检测会把 autoconf 的能力探测结果写成错误值（config.h 失真），且 R1 明令禁止三元组参数
+forbid_1_consequence: 后续库在自己的 test_package 阶段才暴露同一加载问题，定位成本更高
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+forbid_2_pattern: 为了修运行探测而 export LD_LIBRARY_PATH=<视图目录>（或包目录）作为全局环境
+forbid_2_reason: 该变量会被所有子进程继承。指向包目录时因符号链接别名解析失败；指向视图目录时，视图里的依赖副本会被交给工具链子进程——OHOS SDK 的 lld 依赖 libxml2，于是被 Conan 的 libxml2 抢占
+forbid_2_consequence: CI worker 上 clang 调 lld 直接崩：Error relocating .../native/llvm/bin/lld: xmlFreeDoc: symbol not found，被 autoconf 报成 C compiler cannot create executables；本机可能侥幸不复现，换 worker 必炸
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E257.md
+last_updated: 2026-08-28
+source_event: libxft 2.3.8 adaptation on HarmonyOS PC (HongMeng Kernel 1.12.0), 2026-08-28
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors: Awstme <awstme@qq.com>
+source_pr: !7080
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+rec_impl:               manual
+authors:               XFT8

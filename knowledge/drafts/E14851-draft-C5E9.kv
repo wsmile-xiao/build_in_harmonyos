@@ -1,0 +1,110 @@
+# DRAFT — Autoconf 探测结果与手写链接列表分裂造成双数学提供者
+
+id:                     E14851
+trigger_tool:           autoconf|make|clang|lld|llvm-readelf|llvm-nm
+phase:                  configuration|linking|runtime|testing
+error_signature:        undefined symbol: _FortranA.*|
+                        checking for library containing wrapper_sgesv_\.\.\. none required|
+                        NEEDED.*libarmadillo.*(?:dgemm_|dgesv_|dgetrf_)
+
+severity:               2
+category:               autotools, conan, blas, lapack, armadillo, fortran-runtime, elf, abi, testing
+match_keywords:         AC_SEARCH_LIBS, AC_CHECK_LIB, AutotoolsDeps, LIBS, @LIBS@,
+                        hard-coded -llapack -lblas, armadillo, openblas, FortranRuntime,
+                        _FortranAioBeginExternalFormattedOutput, dgemm_, dgesv_, dgetrf_,
+                        DT_NEEDED, dual provider, symbol interposition, deterministic output
+title:                  Autoconf 已探测科学计算依赖但手写 Makefile 链接线忽略 @LIBS@：
+                        追加 FortranRuntime 只能掩盖链接失败，并会让 reference
+                        BLAS/LAPACK 与 Armadillo 的 OpenBLAS 后端共存于同一进程
+prescan_pattern:        AC_SEARCH_LIBS|AC_CHECK_LIB|CPP_LIBS.*-l(?:blas|lapack)|@LIBS@
+prescan_globs:          configure.ac, configure.in, Makefile.in, Makefile.am
+
+root_cause:             这是三个可独立验证的契约断裂叠加。① configure.ac 用
+                        AC_CHECK_LIB(nlopt) 与 AC_SEARCH_LIBS(wrapper_sgesv_, armadillo)
+                        探测依赖；后者把 Armadillo 提供者写入全局 LIBS，但手写 Makefile.in 的
+                        CPP_LIBS 另起一套硬编码 `-llapack -lblas ... -larmadillo`，
+                        完全不消费 @LIBS@；因此 configure 的 yes 并不能约束真实
+                        目标链接线。② OHOS 仓库里的 reference LAPACK/BLAS 是静态
+                        Fortran 实现，硬链后出现 `_FortranA*` 未解析。机械追加
+                        -lFortranRuntime -lFortranDecimal 虽可链接，却会把 dgemm_/
+                        dgesv_/dgetrf_ 等实现静态嵌入可执行文件；同时 libarmadillo.so
+                        的 DT_NEEDED 继续装载 libopenblas.so.0，形成两个同名数学
+                        符号提供者，最终绑定受 ELF 装载/链接顺序影响。③ 直接使用
+                        Conan AutotoolsDeps 又会预先把完整库闭包塞进 LIBS：
+                        AC_SEARCH_LIBS 因符号已可解析而返回 `none required`，且 native
+                        configure 的早期 conftest 会携带共享依赖并因加载路径缺失而
+                        报 cannot run C++ compiled programs。故正确做法不是继续拼库，
+                        而是只给探针 -I/-L 搜索目录，让宏自己生成 @LIBS@，真实链接
+                        线唯一消费该结果。
+affected_scope:         configure.ac 负责 AC_CHECK_LIB/AC_SEARCH_LIBS 探测、但
+                        Makefile.in/手写 Makefile 另设 CPP_LIBS/LDLIBS 并硬编码 BLAS、
+                        LAPACK 或其它可替代实现的 Autotools 科学计算程序；也适用于
+                        任意“configure 探测通道与最终链接通道分裂”的多提供者依赖。
+verification_cmd:       grep -nE 'AC_(CHECK_LIB|SEARCH_LIBS)' configure.ac;
+                        grep -nE 'CPP_LIBS|LDLIBS|@LIBS@' Makefile.in;
+                        llvm-readelf -d <heavy-bin> | grep NEEDED;
+                        llvm-nm --defined-only <heavy-bin> | grep -E ' (dgemm_|dgesv_|dgetrf_)$';
+                        python3 run_tests.py
+
+rec_priority:           1
+rec_approach:           preserve-autoconf-provider-result-and-audit-elf-topology
+rec_description:        给 AutotoolsToolchain 只追加每个 Conan 依赖的 include/lib
+                        搜索目录（CFLAGS/CXXFLAGS/LDFLAGS），不要用完整 AutotoolsDeps
+                        LIBS 闭包预回答 AC_SEARCH_LIBS；补丁把最终目标的手写链接变量
+                        改为 `@LIBS@`（另加真正的系统线程库，并按 AC_CHECK_LIB 的
+                        HNLOPT 结果保留 -lnlopt）。这样 AC_SEARCH_LIBS 的实际提供者
+                        结论成为唯一数学链接事实来源。构建后对
+                        数值重目标做双视角机械门禁：readelf 动态段不得出现 reference
+                        blas/lapack/FortranRuntime，nm 普通符号表不得定义 dgemm_、dgesv_、
+                        dgetrf_；随后执行固定输入的确定性数值/数据测试，证明不仅可装载，
+                        输出也未因提供者变化漂移。
+rec_command:            tc.extra_cflags/cxxflags += -I<dep.include>;
+                        tc.extra_ldflags += -L<dep.lib>;
+                        Makefile.in: CPP_LIBS = @LIBS@ -lpthread [+ -lnlopt when HNLOPT=Y];
+                        llvm-readelf -d pxseqgen;
+                        llvm-nm --defined-only pxseqgen
+rec_auto_fix:           false
+rec_impl:               conan-recipe-and-portability-patch
+
+fallback_priority:      2
+fallback_approach:      explicit-single-provider-list
+fallback_description:   若上游不生成 @LIBS@，按探针实际结论显式写一套且仅一套
+                        提供者链接列表，并保留同样的 ELF/符号门禁；这比同时添加
+                        reference BLAS/LAPACK 与 wrapper 库安全，但维护成本较高。
+fallback_command:       make CPP_LIBS='-larmadillo -lnlopt -lm -lpthread'
+fallback_auto_fix:      false
+fallback_impl:          make-variable-override
+
+forbid_1_pattern:       -llapack.*-lblas.*-larmadillo|-larmadillo.*-llapack.*-lblas
+forbid_1_reason:        reference BLAS/LAPACK 与 Armadillo 的 OpenBLAS 后端进入同一进程，
+                        同名 Fortran ABI 符号的实际绑定不再由包依赖图唯一决定。
+forbid_1_consequence:   链接失败，或链接成功但数值实现随顺序/装载环境变化。
+forbid_2_pattern:       -lFortranRuntime.*-lFortranDecimal.*(?:-larmadillo|-lopenblas)
+forbid_2_reason:        Fortran runtime 只满足 reference 实现的运行时符号，不能消除
+                        双数学提供者；“能链接”不是拓扑正确性的证据。
+forbid_2_consequence:   ELF 同时含静态 reference 数学符号与动态 OpenBLAS 闭包。
+forbid_3_pattern:       AutotoolsDeps\(self\).*generate\(\).*(?:AC_SEARCH_LIBS|none required)
+forbid_3_reason:        完整 LIBS 闭包预先满足探针会丢失具体提供者名，并污染早期
+                        native conftest 的运行时依赖。
+forbid_3_consequence:   configure 报 cannot run compiled programs，或 @LIBS@ 缺失提供者。
+
+principles:             P005, P012
+causes:                 []
+caused_by:              []
+similar_to:             E566, E577, E667, E677
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/E14851-draft-C5E9.md
+last_updated:           2026-10-11
+source_event:           phyx/1.3.2 HarmonyOS PC 适配；原始链接失败、机械追加
+                        FortranRuntime 后的双提供者反例、单提供者修复三臂实证；
+                        原始日志 SHA256 5a20094e3977b9726db529253af8f11453e6dfc859ce833f15da5bf9e5a5c5c5
+authors:                ohpcd <ohpcd@localhost>
+source_pr:
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     2
+metrics_confidence:     0.9
+metrics_last_used:      2026-10-11
+draft:                  true

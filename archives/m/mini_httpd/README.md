@@ -6,7 +6,7 @@
 
 | Version | Status | Date |
 |---------|--------|------|
-| 1.30 | built | 2026-06-10 |
+| 1.30 | built | 2026-07-15 |
 
 ## Source
 
@@ -27,10 +27,10 @@ mini_httpd requires platform-specific adaptations for OpenHarmony:
 
 1. **int64_t type**: System headers define int64_t, avoid redefinition
 2. **getpass() function**: Not available on OpenHarmony, fallback implementation needed
-3. **TMPDIR**: Use `$HOME/tmp` instead of `/tmp` (read-only on OHOS)
-4. **DESTDIR support**: Makefile modified to support staged installation
+3. **TMPDIR**: Use `getenv("TMPDIR")` with fallback to `/tmp` (portable, CI-friendly)
+4. **Install paths**: Conan recipe overrides BINDIR/MANDIR via make variables (no Makefile patch needed)
 
 ## Binaries
 
-- `/usr/local/sbin/mini_httpd` - HTTP server
-- `/usr/local/sbin/htpasswd` - Password file management utility
+- `bin/mini_httpd` - HTTP server
+- `bin/htpasswd` - Password file management utility

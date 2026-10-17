@@ -1,63 +1,68 @@
 # p8-platform 2.1.0 适配笔记
 
 ## 编译环境
-- 构建系统: cmake
-- 编译日期: 2026-06-08
+- 构建系统: CMake
+- 编译日期: 2026-08-07
 - 编译器: clang/clang++ 15.0.4
-- 状态: built
+- 状态: built (conan-verify passed, CI upload pending)
+
+## 源码
+- 上游: Pulse-Eight/platform (p8-platform-2.1.0 tag)
+- URL: https://github.com/Pulse-Eight/platform/archive/refs/tags/p8-platform-2.1.0.tar.gz
+- SHA256: 88711f1b949285867538a0b2e4189532778e1515325dfa1851eae9d18b6affd9
 
 ## 编译步骤
 
-1. 克隆源码
+1. 下载源码 (init-build 自动下载)
+2. CMake 配置:
    ```bash
-   git clone https://github.com/Pulse-Eight/platform.git ~/builds/p8-platform-2.1.0
+   cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+   ```
+   - 需要 CMAKE_POLICY_VERSION_MINIMUM=3.5 (上游 cmake_minimum_required 2.8.9 与 CMake 4.x 不兼容)
+   - 需要 CMAKE_SYSTEM_NAME=Linux (E092: CMake 不识别 HarmonyOS 平台)
+
+3. 编译:
+   ```bash
+   make -j2
    ```
 
-2. 创建构建目录
+4. 安装 (staging):
    ```bash
-   mkdir -p ~/builds/p8-platform-2.1.0/build && cd ~/builds/p8-platform-2.1.0/build
+   make install DESTDIR=$TEST_PREFIX
    ```
 
-3. 配置
-   ```bash
-   cmake .. -DCMAKE_INSTALL_PREFIX=$HOME/usr/local
-   ```
+## 补丁
 
-4. 编译
-   ```bash
-   make -j1
-   ```
+### 0001-src-util-StringUtils.cpp.patch
+- 问题: std::ptr_fun 在 C++17 中已移除 (profile 使用 compiler.cppstd=17)
+- 修复: 将 `::not1(::ptr_fun(isspace_c))` 替换为 lambda `[](unsigned char c) { return !isspace_c(c); }`
+- 影响行: StringUtils::TrimLeft 和 StringUtils::TrimRight
 
-5. 安装（staging）
-   ```bash
-   make install DESTDIR=$HOME/tmp/test-install-p8-platform-2.1.0
-   ```
+## Conan 配方
 
-6. 本地安装
-   ```bash
-   make install
-   ```
+- conanfile.py: CMakeToolchain, BUILD_SHARED_LIBS=OFF (static), CMAKE_SYSTEM_NAME=Linux
+- conandata.yml: 官方 GitHub tar.gz URL + sha256
+- test_package: 调用 StringUtils::ToUpper, Trim, EqualsNoCase (R34 实质测试)
+- 依赖: 无 (仅系统 pthread)
 
 ## 验证结果
 
-```bash
-ls -lh ~/usr/local/lib/libp8-platform.a
-# -rw-rw---- 1 file_manager 288K 2026-06-08 18:00 libp8-platform.a
-
-ls ~/usr/local/include/p8-platform/
-# os.h  posix/  sockets/  threads/  util/
-```
+- conan-verify G2 (conan create): PASS
+- conan-verify G3 (R26 系统同名库隔离): PASS
+- conan-verify G4 (产物完整性): PASS
+- W3 本地 CI 模拟: PASS
+- test_package: PASS (3 assertions: ToUpper, Trim, EqualsNoCase)
 
 ## 交付物
 
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| libp8-platform.a | 288KB | 静态库 |
-| include/p8-platform/ | - | 头文件目录 |
-| lib/pkgconfig/p8-platform.pc | - | pkg-config 配置 |
+| 文件 | 说明 |
+|------|------|
+| libp8-platform.a | 静态库 |
+| include/p8-platform/ | 头文件目录 (os.h, posix/, sockets/, threads/, util/) |
+| lib/pkgconfig/p8-platform.pc | pkg-config 配置 |
+| lib/p8-platform/p8-platform-config.cmake | CMake 配置 |
 
-## 注意事项
+---
 
-1. **静态库**：编译为静态库，无运行时依赖
-2. **CMake 自动识别平台**：无需特殊配置
-3. **需要 Threads 支持**：系统 pthread 已满足
+**编译结束**: 2026-08-07 07:45
+**最终状态**: built

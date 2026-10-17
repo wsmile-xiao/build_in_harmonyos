@@ -1,0 +1,56 @@
+#include <cstring>
+
+#include <clthreads.h>
+
+int main()
+{
+    Bmutex basic_mutex;
+    basic_mutex.lock();
+    if (basic_mutex.trylock() == 0)
+        return 1;
+    basic_mutex.unlock();
+    if (basic_mutex.trylock() != 0)
+        return 1;
+    basic_mutex.unlock();
+
+    Cmutex recursive_mutex;
+    recursive_mutex.lock();
+    recursive_mutex.lock();
+    recursive_mutex.unlock();
+    recursive_mutex.unlock();
+
+    ITC_ip1q queue;
+    // The two-argument form is required: the default arguments for
+    // put_event() are declared on the Edest base class only, so through an
+    // ITC_ip1q object both overloads need two arguments. put_event(3, 1)
+    // selects the (evid, unsigned incr) overload, which only sets event
+    // bits and never touches the message FIFO.
+    if (queue.put_event(3, 1) != Edest::NO_ERROR)
+        return 1;
+    if (queue.get_event_nowait() != 3)
+        return 1;
+    if (queue.get_event_nowait() != Esync::EV_TIME)
+        return 1;
+
+    Textmsg *message = new Textmsg(64);
+    message->printf("value=%d", 42);
+    if (message->strlen() != std::strlen("value=42"))
+        return 1;
+    if (std::strcmp(message->text(), "value=42") != 0)
+        return 1;
+    if (queue.put_event(0, message) != Edest::NO_ERROR)
+        return 1;
+    if (queue.get_event_nowait() != 0)
+        return 1;
+
+    Textmsg *received = static_cast<Textmsg *>(queue.get_message());
+    if (received != message)
+        return 1;
+    if (received->type() != Textmsg::ITM_CLLIB_TEXT)
+        return 1;
+    delete received;
+    if (Textmsg::object_counter() != 0)
+        return 1;
+
+    return 0;
+}

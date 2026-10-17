@@ -1,0 +1,142 @@
+# ═══ Draft knowledge entry — CMAKE_SYSTEM_NAME=HarmonyOS 静默掉出 Linux 分支；以及"失败被归一化成同一错误码"时如何证明 dlopen 真的发生了 ═══
+# Timestamp: 2026-09-20
+# Software: openxr 1.1.63 (OpenXR-SDK-Source, loader)
+# Gate: G2 (conan create)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-openxr-1.1.63-harmonyos-must-join-linux-branch-and-runtime-negotiation-proof
+trigger_tool:           cmake|conan|clang|ctest
+phase:                  configure|build|link|run
+error_signature:        'LoadDynamicLibrary' was not declared in this scope|
+                         'GetSymbol' was not declared in this scope|
+                         PlatformUtilsGetEnv was not declared in this scope|
+                         XR_ERROR_RUNTIME_UNAVAILABLE|failed to determine
+                         active runtime file path|Skipped - no runtime
+                         installed|Manually-specified variables were not used
+                         by the project|negotiation failed with error
+severity:               4
+category:               platform-detection|silent-branch-miss|dynamic-loading|
+                         runtime-discovery|test-harness|error-code-normalization
+match_keywords:         CMAKE_SYSTEM_NAME, HarmonyOS, XR_OS_LINUX, get_gnu_triplet,
+                         dlopen, dlsym, LoadDynamicLibrary, PlatformUtilsGetEnv,
+                         XDG_CONFIG_HOME, XR_RUNTIME_JSON, XR_ERROR_RUNTIME_UNAVAILABLE,
+                         xrNegotiateLoaderRuntimeInterface, version script,
+                         Catch2, SKIP, ctest exit 0, LD_LIBRARY_PATH, bare
+                         library_path, HarmonyOS PC, OHOS
+title:                  Conan OHOS 工具链把 CMAKE_SYSTEM_NAME 设成 HarmonyOS，
+                         使上游所有 `STREQUAL "Linux"` 的平台分支静默失效；
+                         以及当被加载方把一切失败归一化成同一错误码时，
+                         如何用"被加载方自己留下的痕迹"证明 dlopen 真的发生
+
+root_cause: >
+  两类同源的"证据不足导致误判"。 (a) 平台族判定用字符串比较时，HarmonyOS 是
+  一个**新**字符串，既不等于 Linux 也不等于 Android/Windows/Apple。上游
+  OpenXR 用 `elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux") add_definitions(
+  -DXR_OS_LINUX)`（src/CMakeLists.txt:219）来定义 XR_OS_LINUX，Conan 的 OHOS
+  工具链把 os=OHOS 映射成 CMAKE_SYSTEM_NAME=HarmonyOS，于是 XR_OS_LINUX 不
+  定义：loader_platform.hpp:28 的 dlopen/dlclose/dlsym 封装、
+  common/platform_utils.hpp:85 的 PlatformUtilsGetEnv 整段不编译；
+  即使侥幸编过，manifest_file.cpp:675 的 XDG_CONFIG_HOME 运行时发现分支也会
+  掉到 PlatformGetGlobalRuntimeFileName（"系统预装运行时"路径）。后果是
+  loader 这个"专职 dlopen 运行时"的库变成空壳——而 API 表面看不出来。
+  (b) loader 的 RuntimeInterface::LoadRuntime（runtime_interface.cpp:226-260）
+  在末尾把它自己与 negotiate 的任何失败**统一归一化**成
+  XR_ERROR_RUNTIME_UNAVAILABLE，与"清单都没找到"完全同码。于是"OHOS 上
+  dlopen 到底通不通"这个本适配的核心问题，**无法用 xrCreateInstance 的返回码
+  回答**——必须换成"被加载方（运行时 stub）自己留下的可观测痕迹"。
+affected_scope: >
+  所有用 `STREQUAL "<platform>"` 判定平台族、且在 HarmonyOS 下需要走 Linux/
+  POSIX 分支的上游工程（OpenXR-SDK-Source 全系、任何把 dlopen/dlsym/XDG 放在
+  `#if defined(XR_OS_LINUX)` 之类 guard 后的库）；以及所有"运行时插件把多种
+  失败归一化成同一个错误码"的场景（XR loader/runtime 协商、Vulkan layer、
+  Wayland/NVIDIA 驱动加载等）——这些场景下返回码不能作为链路是否走通的判据。
+verification_cmd: >
+  grep -n 'STREQUAL "Linux"' src/CMakeLists.txt
+  grep -rn "XR_OS_LINUX" src/ | head
+  grep -n "Error.*failed to determine active runtime file path" <run log>
+  grep -n "RuntimeInterface::LoadRuntime skipping manifest file" <run log>
+rec_priority:           1
+rec_approach:           join-harmonyos-into-the-linux-branch-and-use-an-out-of-band-sentinel
+rec_description: >
+  两步：(a) 用补丁把 HarmonyOS 并入 Linux 分支
+  ——`elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL
+  "HarmonyOS")`，只做平台并集、不引入平台宏、不依赖 HarmonyOS 特性，可直接
+  向上游提交。(b) 验证"被加载方真的被 dlopen+dlsym+调用"时，**不要**用宿主
+  API 的返回码（它被归一化了），改成让被加载方自己留痕：本适配的 stub 运行时
+  在 `xrNegotiateLoaderRuntimeInterface` 里先把 `OPENXR_STUB_MARKER` 指向的
+  文件写出来，再返回失败——哨兵文件出现 ⟺ dlopen + dlsym + 调用链全通。
+  顺带：被测程序按场景 setenv，且在 finally 里恢复继承来的环境变量。
+  另注意"上游测试可能静默 SKIP 仍退出 0"：loader_test 的 6 个 TEST_CASE 有 4
+  个以 `if (!g_has_installed_runtime) SKIP(...)` 开头，而该标志取决于 loader
+  能否发现上游生成的 test_runtime 清单；清单里的 library_path 是**裸文件名**
+  （`$<TARGET_FILE_NAME:test_runtime>`），OHOS 加载器无兜底搜索路径时会
+  dlopen 失败 → 4/6 静默 SKIP 而 ctest 仍退出 0。对策是把构建树里所有含 .so
+  的目录与 OHOS SDK 的 llvm/lib 拼进 LD_LIBRARY_PATH，并读回
+  `Testing/Temporary/LastTest.log` 的 Catch2 汇总行，把 skipped != 0 与
+  total < 6 钉成硬失败。
+rec_command: >
+  # 配方：（补丁随包，不在此列）
+  tc.variables["BUILD_TESTS"] = "ON"          # vendored Catch2 只在 BUILD_TESTS OR CONFORMANCE 时 add_subdirectory
+  tc.variables["BUILD_API_LAYERS"] = "ON"     # loader_test 的 add_dependencies 需要
+  # build() 内：CTest(self).test(output_on_failure=True) 后读回 LastTest.log 的 Catch2 汇总行
+  # test_package 内：写运行时 JSON + 设 OPENXR_STUB_MARKER，断言哨兵文件出现
+rec_auto_fix:           true
+rec_impl:               recipe-side-patch-plus-out-of-band-sentinel
+
+fallback_priority:      2
+fallback_approach:      broaden-the-guard-at-the-consumer-side
+fallback_description: >
+  若不能修改上游源码（例如必须原样使用制品仓里的预编译 tarball），退而求其次
+  在消费者/工具链侧补齐：把 `-DXR_OS_LINUX` 通过 CMAKE_CXX_FLAGS 注入，或在
+  Conan 里覆写 CMAKE_SYSTEM_NAME=Linux。代价是后者会让上游的 Linux 分支语义
+  与实际平台不一致（presentation 探测会重新参与、CMAKE_SYSTEM_NAME 不再反映
+  真实平台），且不再是"可直接上游"的修复——只能作为临时通道。
+fallback_command:       cmake ... -DCMAKE_CXX_FLAGS="-DXR_OS_LINUX"   # 或覆写 CMAKE_SYSTEM_NAME
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       为通过编译.*直接删掉 XR_OS_LINUX 的 guard|
+                         把 loader_platform.hpp 里的.*#if.*改成无条件编译|
+                         注释掉 dlopen 封装
+forbid_1_reason:        dlopen/dlsym 封装与 PlatformUtilsGetEnv 只是**症状**，
+                         根因是 CMake 平台族判定漏了 HarmonyOS；改 guard 会
+                         让同一份源码在其它平台（Android/Apple）上编译出错误
+                         实现，且无法上游化。
+forbid_1_consequence:   适配"成功"但源码与上游分叉，后续版本无法直接跟进；
+                         换个平台或换上游版本即再次炸。
+forbid_2_pattern:       用 xrCreateInstance.*返回码.*证明.*dlopen.*成功|
+                         断言 xrCreateInstance 返回码.*区分.*negotiate
+forbid_2_reason:        RuntimeInterface::LoadRuntime 会把 negotiate 失败与
+                         "没找到运行时"统一归一化成 XR_ERROR_RUNTIME_UNAVAILABLE
+                         ——返回码在原理上分不出这两者。
+forbid_2_consequence:   要么写出永远为真/永不为真的断言（假通过），要么把一个
+                         真实链路问题误判成"没配运行时常量"而白烧 CI 轮次。
+forbid_3_pattern:       只看 ctest 退出码就断言.*上游测试全绿|
+                         不检查.*skipped.*就宣布通过
+forbid_3_reason:        loader_test 4/6 的用例以 `if (!g_has_installed_runtime)
+                         SKIP(...)` 开头，清单不可发现时静默 SKIP，ctest 退出
+                         码仍为 0；Catch2 只在日志里写一行 skipped。
+forbid_3_consequence:   把"只跑了 2/6"当成"6/6 全绿"，上游回归套件的价值归零。
+forbid_4_pattern:       grep .*libopenxr_loader.so.*断言.*符号|对二进制做 grep
+                         代替运行时断言
+forbid_4_reason:        OHOS 上"符号在不在"与"运行期能不能 dlopen 到"是两件
+                         事；本适配的核心命题是后者，只有真实运行才能证。
+forbid_4_consequence:   拿到的是静态证据却宣称验证了动态加载链路，属于伪证。
+
+principles:             P-BUILD-001
+similar_to:             DRAFT-fltk-1.4.5-silent-option-rename-and-default-on-backend-switch
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-openxr-1.1.63-harmonyos-must-join-linux-branch-and-runtime-negotiation-proof.md
+last_updated:           2026-09-20
+source_event:           archives/o/openxr/1.1.63
+
+authors:                2301_76770579
+source_pr:              11492
+source_commit:          7878974dff
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-20

@@ -1,0 +1,102 @@
+# ═══ Draft knowledge entry — Tcl 系老式 Makefile 无 DESTDIR 约定、只认自有 INSTALL_ROOT 变量：conan package() 必须改用被测包实际支持的暂存变量 ═══
+# Timestamp: 2026-09-22
+# Software: xpa 2.1.20（通用：Tcl/Tk 家族 configure 生成物及一切"安装路径只由自有根变量前缀"的包）
+# Gate: 配方 package() 内真实执行上游 install 目标（conan create / CI 同源）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-xpa-2.1.20-legacy-makefile-install-root-override
+title: 非 GNU 约定的老式 Makefile（Tcl 系 INSTALL_ROOT 风格）忽略 DESTDIR，conan 默认 `make install DESTDIR=<pkg>` 展开出 //include 等根级路径报 Permission denied；改用上游自有的根前缀变量 INSTALL_ROOT=<package_folder> 完成暂存
+trigger_tool: make / conan
+phase: installation
+error_signature: 'mkdir: cannot create directory .*: Permission denied'
+severity: 2
+category: makefile|packaging|installation|conan
+root_cause: 'xpa 的 Makefile 由 Tcl/Tk 风格 configure 模板生成，安装路径体系完全不走 GNU 的 DESTDIR 约定：Makefile.in:35-43 明写 "INSTALL_ROOT is prepended to $prefix and $exec_prefix when installing files"，LIB_INSTALL_DIR=$(INSTALL_ROOT)$(exec_prefix)/lib、BIN_INSTALL_DIR=$(INSTALL_ROOT)$(exec_prefix)/bin。整份 Makefile 里没有一处 DESTDIR 展开，所以 conan/Autotools 默认注入的 `make install DESTDIR=<package_folder>` 被静默忽略，install 按原生 prefix（configure 期默认或 --prefix 传入的绝对路径）直接落盘；当 prefix 解析为空或根路径时拼出 //include 这样的根级目录，HMDFS 根目录只读 ⇒ `mkdir: cannot create directory //include: Permission denied`。判据：Makefile(.in) 里 `grep DESTDIR` 无命中、`grep INSTALL_ROOT` 命中，且失败发生在 install recipe（编译链接已成功）。因为 INSTALL_ROOT 正是上游预留的"安装期根前缀"把手（注释自述用于 AFS 等安装路径≠运行路径的场景），make 命令行传 INSTALL_ROOT=<package_folder> 即把整棵安装树整体前缀到包文件夹，语义与 DESTDIR 暂存完全等价。'
+affected_scope: |-
+  所有"安装路径由自有根变量前缀、无 DESTDIR 展开"的 Makefile 包：Tcl/Tk 家族 configure 生成物
+  （xpa、expect、tkcon 等 Tcl 生态）、沿用同模板的老项目。
+  不适用：标准 automake/libtool 项目（天然支持 DESTDIR）；安装命令缺失属另一机制
+  （E098/E108/通用草稿 makefile-install-cmd-absent-makevar-override）。
+verification_cmd: |-
+  grep -n "DESTDIR" Makefile.in        # 无命中 ⇒ 无 DESTDIR 约定
+  grep -n "INSTALL_ROOT" Makefile.in   # 命中 $(INSTALL_ROOT)$(exec_prefix)/lib 之类 ⇒ 有把手
+  make install DESTDIR=<t>             # 复现：mkdir: cannot create directory //include: Permission denied
+  make install INSTALL_ROOT=<t>        # 通过：产物落 <t>/<exec_prefix>/…，find <t> 复验落点
+
+match_keywords: INSTALL_ROOT, DESTDIR ignored, mkdir cannot create directory, Permission denied,
+  Tcl style Makefile, conan package(), autotools.install args, 暂存变量, prefix 展开
+keywords: INSTALL_ROOT 前缀, DESTDIR 不存在, Tcl/Tk configure 模板, AFS 安装变量, package_folder 暂存,
+  老式 Makefile, conan Autotools 助手
+prescan_pattern: "INSTALL_ROOT|LIB_INSTALL_DIR[[:space:]]*=[[:space:]]*\\$\\(INSTALL_ROOT\\)|mkdir: cannot create directory"
+prescan_globs: "**/Makefile.in, **/Makefile, **/conanfile.py"
+safety_boundary: |-
+  ①仅当上游确有该根变量把手时使用——若安装路径是内联字面量（直接写死 /usr/local/lib），
+  变量覆盖无效，需退回配方侧 Python 复制或补丁；
+  ②INSTALL_ROOT 与 DESTDIR 语义差异：INSTALL_ROOT 前缀的是 prefix/exec_prefix 的**展开结果**，
+  产物落 <t>/<exec_prefix>/bin 而非 <t>/bin，package_info 的 bindirs/libdirs 声明与 package_folder
+  相对路径需按实际落点核对；
+  ③确认 conan Autotools 助手默认注入的 DESTDIR 会被忽略而不是报错——失败是**落点错误**而非
+  命令不存在，别误诊成"设备缺权限"；
+  ④不得用于掩盖交叉编译错误——只在编译链接成功、install 落点失败时适用。
+approach: upstream-install-root-override
+rec_priority: 1
+rec_auto_fix: false
+rec_impl: 配方侧 package() 改传上游支持的根前缀变量
+rec_description: |-
+  package() 里不再依赖 conan 默认 DESTDIR 暂存，改为把上游预留的安装根变量指向包文件夹：
+  autotools.install(args=["INSTALL_ROOT=<package_folder>"])（等价 make install INSTALL_ROOT=...）。
+  上游 install 目标、目录创建与清单语义全部保留，只改落点前缀。
+rec_command: |-
+  autotools.install(args=["INSTALL_ROOT=%s" % self.package_folder])
+fallback_priority: 2
+fallback_auto_fix: false
+fallback_impl: 配方侧 Python 复制 / 上游补丁
+fallback_approach: recipe-side-copy-or-patch
+fallback_description: |-
+  上游无任何可覆盖根变量时：package() 放弃上游 install 目标，按 Makefile 的安装清单用
+  shutil/copy 复制产物（需自维护目录结构与模式位）；或打补丁给 Makefile.in 增加 DESTDIR 展开
+  （需随版本维护）。
+fallback_command: |-
+  make install INSTALL_ROOT=<t>   # 主选
+  # 兜底 A: python shutil 按清单复制；兜底 B: 补丁加 DESTDIR 支持（strip: 1）
+principles: |-
+  "暂存变量以被测包实际支持者为准"：GNU DESTDIR 是惯例不是义务，Tcl/Tk 系（及部分 X11 老包）
+  用 INSTALL_ROOT / prefix 重定义等自有机制。判断口诀：install 阶段失败先 `grep -n "DESTDIR\|INSTALL_ROOT\|^prefix" Makefile.in`
+  ——认 DESTDIR 用 DESTDIR，认 INSTALL_ROOT 用 INSTALL_ROOT，都没有才自己复制。
+caused_by: 上游 Makefile（Tcl/Tk 风格 configure 模板生成）安装路径仅由 INSTALL_ROOT 前缀（Makefile.in:35-43），
+  无 DESTDIR 展开；conan Autotools 助手默认注入 make install DESTDIR=<package_folder>
+causes: conan package() 阶段 mkdir //include Permission denied（install 落点在只读根级路径），
+  配方无法交付产物
+similar_to: |-
+  查重结论（2026-09-22，knowledge/graph/index.tsv + knowledge/drafts/ 四范围）：
+  E098（cp-chmod-replace）与通用草稿 makefile-install-cmd-absent-makevar-override（M13）：同在
+  package() install 阶段失败，但那族是**安装命令缺失**（`install: inaccessible or not found`，
+  Error 127）；本条命令存在、编译链接成功，失败是**落点体系不同**（DESTDIR 被忽略 ⇒ 根级路径
+  Permission denied），机制与修法均不同 ⇒ 非 hit。
+  E108（patch-makefile-in-ginstall）：同为 install 命令族补丁解法，无关本条的落点语义 ⇒ 非 hit。
+  M7（config 脚本烧死绝对 prefix）：那是**运行期**路径问题（安装后二进制指向构建期 prefix），
+  本条是**暂存期**落点问题，阶段不同 ⇒ 非 hit。
+  E011/E114（HMDFS 权限/umask 族）：症状同为 Permission denied，但本条根因是路径拼接错误
+  （//include）而非文件系统权限位语义，修法不同 ⇒ 非 hit。
+  新增价值：给出"认 DESTDIR 用 DESTDIR、认 INSTALL_ROOT 用 INSTALL_ROOT"的暂存变量判别口诀
+  与 prescan 判据（grep Makefile.in 双 grep），覆盖 DESTDIR 惯例不成立时的打包路径。
+conflicts_with:
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-xpa-2.1.20-legacy-makefile-install-root-override.md
+last_updated: 2026-09-22
+source_event: |-
+  xpa 2.1.20 配方（GLM-63 起草、Q-10 修复、DS-31 接手收尾）真机实测：conan create 默认
+  DESTDIR 安装阶段报 `mkdir: cannot create directory '//include': Permission denied` 与
+  `make: *** No rule to make target 'Makefile.in'`（后者为 out-of-source 次生错，另经
+  in-source 布局修复）。定位：Makefile.in:35 注释自述 INSTALL_ROOT 用于"安装路径≠运行路径"场景，
+  :37 `INSTALL_ROOT =`，:40/:43 `$(INSTALL_ROOT)$(exec_prefix)/lib|bin`。修复读数：改
+  `autotools.install(args=["INSTALL_ROOT=<package_folder>"])` + in-source 布局后 conan create
+  主体通过，`make -j1 testall` 与 stest/xpaset/xpaget/ctest 往返实测跑通（verify8→verify12 链，
+  日志 ~/tmp/uc2/xpa-2.1.20/verify*.log 与 archives/x/xpa/2.1.20/reports/conan-create.log）。
+authors: Q-10（判定与证据）/ DS-31（成稿）
+source_pr: xpa 2.1.20 交付 PR（本机制随该 PR 申报）
+source_commit: (提交后回填)
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 1.0
+metrics_last_used: 2026-09-22

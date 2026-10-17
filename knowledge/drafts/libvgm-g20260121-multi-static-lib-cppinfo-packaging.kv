@@ -1,0 +1,59 @@
+# ═══ Draft knowledge entry — 单 Conan 包聚合上游多个兄弟静态库的 cpp_info 四件套
+# libs 依赖序（静态链接从左到右）、公共头探测宏 defines、头前缀安装的
+# includedirs 双拼写、间接依赖 requires 传递；照抄 add_subdirectory 顺序
+# 会让下游链接报未定义符号
+# Software: libvgm g20260121（vgm-utils/audio/emu/player 四静态库单包实证）
+# Gate: 真机 conan create + test_package 36/36（ohos-aarch64，clang 15.0.4）
+# Status: DRAFT
+
+id: libvgm-g20260121-multi-static-lib-cppinfo-packaging
+severity: 2
+category: packaging|build-system|conan
+trigger_tool: conan|cmake
+phase: package
+
+keywords: cpp_info.libs, 静态链接顺序, undefined symbol, 多静态库, add_subdirectory, cpp_info.defines, HAVE_STDINT_H, includedirs, cpp_info.requires, 传递依赖, cmake_target_name, 单包多库
+error_signature: '(undefined (symbol|reference).*(vgm|utils|emu|player))|(cannot find -l)'
+match_keywords: 多个静态库, cpp_info, libs 顺序, undefined symbol 静态库, HAVE_, defines 传播, includedirs 前缀, requires 传递, 聚合包
+
+root_cause: |
+  上游一个 CMake 工程 add_subdirectory 出多个兄弟静态库时，库间依赖由
+  target_link_libraries 表达，CMake 构建正确不代表下游可用；Conan 把它们
+  聚成一个包后，cpp_info 要独立承担全部依赖表达，四个易错点：
+  (1) cpp_info.libs 顺序即静态链接顺序——传统链接器（ld/lld 传统模式）从左
+  到右解析符号，被依赖库必须排在依赖者之后；照抄 add_subdirectory 顺序
+  （往往基础设施库在前）会让下游未定义符号。
+  (2) configure 期探测宏（check_include_file → HAVE_STDINT_H 之类）只注入
+  库内目标，公共头按它切换 typedef/结构布局时，下游没有该宏即编出不一致代码。
+  (3) 头文件带目录前缀安装（include/vgm/...）时，单 includedirs 只支持一种
+  include 拼写，与上游示例代码的拼写（相对源码根 "player/x.hpp"）冲突。
+  (4) 兄弟库静态链里嵌的间接依赖（zlib/pthread/m）不写 cpp_info.requires /
+  system_libs，消费者链接期缺符号或缺 -lpthread。
+
+rec_approach: cppinfo-dependent-first-full-propagation
+rec_description: |
+  package_info() 四件套：libs 按依赖者在前排列（对照上游
+  target_link_libraries 图）；grep 公共头里 #ifdef HAVE_*/探测宏，公共头用到的
+  全部加入 cpp_info.defines（仅 .c 私有使用的不必）；头带前缀安装时
+  includedirs 同时给 [前缀目录, include] 双拼写；上游 find_package 的外部
+  依赖写 cpp_info.requires（静态嵌入场景必须），Threads/Math 写 system_libs。
+  自检：test_package 用最依赖的库做消费者（本例 PlayerA 播放链路）链接通过
+  即序对；能覆盖间接依赖的运行时路径（如 DataLoader 的 gzip 解压）更好。
+rec_command: |
+  # conanfile.py package_info()：
+  self.cpp_info.libs = ["vgm-player", "vgm-audio", "vgm-emu", "vgm-utils"]  # 依赖者在前
+  self.cpp_info.includedirs = ["include/vgm", "include"]   # #include "player/x.hpp" 与 "vgm/player/x.hpp" 双拼写
+  self.cpp_info.defines = ["HAVE_STDINT_H"]                # 公共头 stdtype.h 探测宏
+  self.cpp_info.requires = ["zlib::zlib"]                  # vgm-utils 静态嵌入 zlib
+  self.cpp_info.system_libs = ["pthread", "m"]             # Linux/OHOS
+rec_auto_fix: false
+
+affected_scope: |
+  任何上游 CMake 单工程产多静态库、配方聚合成单 Conan 包的场景。
+  已实证：libvgm g20260121（utils/audio/emu/player 四库 + zlib/pthread/m），
+  两个消费者目标（test_libvgm、consumer_vgm_to_wav）以单 target
+  libvgm::libvgm 链接全绿，gzip 输入路径运行时消费 zlib 成功。
+
+verification: |
+  真机 conan create archives/l/libvgm/g20260121（ohos-aarch64，clang 15.0.4）
+  + test_package 36/36（test_libvgm 17 + consumer_vgm_to_wav 19）。

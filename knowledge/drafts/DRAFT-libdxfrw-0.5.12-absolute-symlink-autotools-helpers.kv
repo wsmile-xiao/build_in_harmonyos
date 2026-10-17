@@ -1,0 +1,112 @@
+#====================================================================
+# DRAFT-libdxfrw-0.5.12-absolute-symlink-autotools-helpers
+# GitHub tag 归档内 automake 辅助脚本为绝对路径符号链接的 Conan 适配
+#====================================================================
+
+id:                     DRAFT-libdxfrw-0.5.12-absolute-symlink-autotools-helpers
+trigger_tool:           conan|conan create|init-build|tarfile|configure|libtool
+phase:                  source|configuration|build
+error_signature:        is a link to an absolute path|
+                        cannot find install-sh, install\.sh, or shtool|
+                        libtool: Version mismatch error\. This is libtool .*, but the|
+                        definition of this LT_INIT comes from libtool .*\.
+severity:               2
+category:               autotools, symlink, tarfile, conan, libtool, filesystem
+match_keywords:         absolute path symlink, dangling symlink, ar-lib, config.guess,
+                        config.sub, install-sh, ltmain.sh, missing, tarfile filter data,
+                        link to an absolute path, cannot find install-sh, libtool version
+                        mismatch, LT_INIT, macro_revision, export_sources, build-aux,
+                        GitHub tag archive, 符号链接, 绝对路径
+
+title:                  GitHub tag 归档内 automake/libtool 辅助脚本为绝对路径符号链接时，配方需随包携带真实脚本并在 source() 中替换，ltmain.sh 版本须与 configure 内嵌 LT_INIT 一致
+
+root_cause:             上游仓库将 automake/libtool 辅助脚本（ar-lib/config.guess/config.sub/
+                        depcomp/install-sh/ltmain.sh/missing）以符号链接形式提交进 git，
+                        链接目标是开发者机器的绝对路径（如 /usr/share/automake-1.12/*）。
+                        git archive 生成的官方 tag 归档原样保留这些链接，在本机/CI 均为
+                        悬空链接。Python tarfile filter='data' 安全过滤拒绝绝对路径链接
+                        （CVE-2007-4559 防路径逃逸附带结果）导致本地解压失败；conan unzip
+                        保留链接但 configure 找不到 install-sh 等辅助脚本而失败。另外替换
+                        ltmain.sh 若版本与 configure 内嵌 LT_INIT 宏（macro_version/
+                        macro_revision）不一致，libtool 运行时报 Version mismatch。
+
+affected_scope:         官方 GitHub tag 归档（git archive 产物）内含绝对路径符号链接的
+                        autotools 项目在 HarmonyOS PC / CI 上的 Conan 适配。
+
+verification_cmd:       ohc-run.py conan-verify <软件> <版本>；conan create 干净构建通过；
+                        test_package 消费者测试通过；grep macro_version configure 与
+                        ltmain.sh 的 VERSION/package_revision 一致。
+
+rec_priority:           1
+rec_approach:           bundle-real-helper-scripts-and-replace-in-source
+rec_description:        ①配方目录建 build-aux/ 放 7 个真实辅助脚本，export_sources() 用
+                        copy(self, "build-aux/*", self.recipe_folder, self.export_sources_folder)
+                        随包导出（注意 src/dst 不能相同）；②source() 在 get() 解压后遍历
+                        这 7 个名字，用 os.path.islink(target)（悬空链接 os.path.exists 为
+                        False，须用 islink 判）检测，os.unlink + shutil.copy2 从
+                        export_sources_folder/build-aux 替换为实体文件；③ltmain.sh 必须选
+                        与 configure 内嵌 LT_INIT 宏版本完全一致的官方版本（如 libtool
+                        2.4.2 的 libltdl/config/ltmain.sh，package_revision=1.3337 与
+                        configure 的 macro_revision 一致），否则 libtool Version mismatch。
+rec_command:            |
+  # conanfile.py
+  def export_sources(self):
+      export_conandata_patches(self)
+      copy(self, "build-aux/*", self.recipe_folder, self.export_sources_folder)
+  def source(self):
+      get(self, **self.conan_data["sources"], strip_root=True)
+      for name in ("ar-lib", "config.guess", "config.sub", "depcomp",
+                   "install-sh", "ltmain.sh", "missing"):
+          target = os.path.join(self.source_folder, name)
+          if os.path.islink(target) or not os.path.exists(target):
+              here = os.path.join(self.export_sources_folder, "build-aux", name)
+              if os.path.isfile(here):
+                  if os.path.lexists(target):
+                      os.unlink(target)
+                  shutil.copy2(here, target)
+                  os.chmod(target, 0o755)
+  # 验证 configure 期望的 libtool 版本
+  grep -E '^macro_version=|^macro_revision=' configure
+  # 取官方对应版本 ltmain.sh（示例 libtool 2.4.2）
+  tar -xzf libtool-2.4.2.tar.gz libtool-2.4.2/libltdl/config/ltmain.sh
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      gnu-tar-manual-extract
+fallback_description:   本地 init-build 阶段可用 GNU tar 手动解压（GNU tar 保留链接），
+                        再配合配方 source() 修复；但 CI conan create 仍须走配方自包含修复。
+fallback_command:       tar -xzf <tarball> -C <dir> && 按上方 source() 逻辑替换悬空链接
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+forbid_1_pattern:       conandata\.yml.*url.*(gh-proxy|镜像|gitee|搬运)|改 URL 绕绝对路径链接
+forbid_1_reason:        R39：源码 URL 必须官方源；镜像/搬运源不解决符号链接本身。
+forbid_1_consequence:   CI 从镜像下载同样保留悬空链接，构建依旧失败，且违反 R39。
+forbid_2_pattern:       把悬空符号链接删除后不补实体文件|expect.*configure.*系统 install
+forbid_2_reason:        autotools AC_CONFIG_AUX_DIR 检查需要真实辅助脚本，删除不补必失败。
+forbid_2_consequence:   configure 报 cannot find install-sh 等，浪费构建轮次。
+forbid_3_pattern:       copy\(self, .*self\.export_sources_folder.*self\.export_sources_folder\)
+forbid_3_reason:        Conan copy() src 与 dst 相同报错（'src' and 'dst' must be different）。
+forbid_3_consequence:   export_sources() 阶段直接失败。
+
+principles:             P016
+
+causes:                 []
+caused_by:              []
+similar_to:             [E255, E382, E362, E490, E276]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-libdxfrw-0.5.12-absolute-symlink-autotools-helpers.md
+last_updated:           2026-09-23
+source_event:           libdxfrw 0.5.12 适配 HarmonyOS PC（task libdxfrw-0.5.12-r01）
+
+authors:                pc2-29
+source_pr:
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:

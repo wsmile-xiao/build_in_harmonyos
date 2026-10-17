@@ -1,0 +1,27 @@
+E: DRAFT
+title: "meson 消费 GLib/Pango 栈的 .pc 传递链断裂：隐形传递静态依赖（pcre2/libffi）不生成 .pc 导致 pkg-config 解析失败——正解为信任 PkgConfigDeps 组件级生成而非手工修上游 .pc"
+category: build-system, pkg-config, glib, meson, conan, linking, ohos-toolchain
+match_keywords: Package libpcre2-8 was not found, Package 'libpcre2-8' required by 'glib-2.0' not found, Package 'libffi' required by 'gobject-2.0' not found, pkg-config search path, Could not generate cflags, meson Dependency lookup failed, PkgConfigDeps, Requires.private, pc-fix, prefix rewrite, glib-2.0.pc, gobject-2.0.pc, pangoft2, pangocairo, invisible transitive dependency, GLib stack, GNOME stack meson consumer
+error_signature: Package 'libpcre2-8', required by 'glib-2.0', not found|Package 'libffi', required by 'gobject-2\.0', not found|Could not generate cflags for \w+:|ERROR: Dependency lookup for \w+ with method 'pkg-config' failed
+root_cause: GLib/Pango 系 conan 包的上游 .pc 文件携带跨包 Requires(.private) 链：glib-2.0.pc 的 Requires.private 引用 libpcre2-8（pcre2 包），gobject-2.0.pc 引用 libffi——而 pcre2/libffi 在 GLib 栈消费场景中是"隐形传递静态依赖"（用户配方不直接 requires 它们），Conan 的 PkgConfigDeps 只为**直接可见的依赖图**生成组件级 .pc，不为隐形传递依赖生成。结果：当 meson 项目的依赖（如 pangoft2）通过 pkg-config 解析时，链条在 glib-2.0 → libpcre2-8 处断裂，报 "Package not found"。深层原因有两类：(1) 若配方用上游包自带的 .pc（拷贝+改 prefix），上游 .pc 的 Requires 链引用了用户依赖图中不存在的包；(2) 若 PkgConfigDeps 生成 .pc 但依赖图只含 GLib 不含 pcre2（pcre2 是 glib 的 requires 而非用户配方直接 requires——在 glib 以 shared binary 消费时其 requires 图可能被扁平化省略传递静态依赖）。
+affected_scope: 所有 meson 系构建、依赖 GLib/Pango/GObject 栈的 C/C++ 包（GNOME 系消费者：paps/gnumeric/goffice/gtk 消费端等），当配方声明 pango/glib 系依赖但未显式 requires pcre2/libffi 时
+rec_priority: 1
+rec_approach: trust-pkgconfigdeps-component-pcs
+rec_description: 不要手工拷贝/改写上游 .pc 文件（"pc-fix" 死路——上游 .pc 携带的跨包 Requires.private 链会把你没依赖的包引进来炸掉）。正确做法：(1) 确保配方 requirements() 声明**完整的直接依赖集**（pango/gangoft2 场景声明 pango 包即可，其组件 pc 会生成）；(2) 信任 conan 标准流：PkgConfigDeps 会为整个可见依赖图生成组件级 .pc（glib-2.0/gobject-2.0/pangoft2/pangocairo/fmt 等，prefix 已指向真实包目录，Requires 链只含可见组件）；(3) MesonToolchain 默认把 pkg_config_path 指到 generators 目录——不要手动覆盖；(4) 验证方法：source conanbuild.sh 后 `pkg-config --cflags --libs pangoft2` 应全部解析成功。若确需传递静态依赖的 .pc，在配方中显式 self.requires 那个传递包（使其进入可见依赖图），而非手工造 .pc。
+rec_command: # 验证（在 conan create 的 build 阶段或手动复现时）:
+source $generators_folder/conanbuild.sh
+pkg-config --cflags --libs pangoft2   # 应成功，无 "Package not found"
+# 死路警示（不要做）:
+# cp <上游包>/lib/pkgconfig/*.pc <pc-fix>/ && sed -i 's|^prefix=.*|prefix=<包目录>|'
+# ——上游 .pc 的 Requires.private: glib-2.0 -> libpcre2-8 链会引入未依赖的包，pkg-config 依旧断裂
+rec_auto_fix: false
+rec_impl: manual-hint
+fallback_priority: 2
+fallback_approach: explicit-requires-transitive-dep
+fallback_description: 若标准流仍缺某个传递依赖的 .pc（极端场景），在配方 requirements() 中显式声明该传递包（如 self.requires("pcre2/10.45")），使其进入可见依赖图、由 PkgConfigDeps 生成 .pc——而不是手工造 .pc 文件
+verification_cmd: source $HOME/.conan2/p/b/<pkg-build>/b/build-release/conan/conanbuild.sh && pkg-config --cflags --libs pangoft2 && pkg-config --variable=prefix glib-2.0
+evidence_prs: "paps PR #8328（9 轮 conan create 实证：前 8 轮走 pc-fix 弯路全部失败，第 9 轮改信任标准流通过）；对照 E348/E321（别名 pc 转发，不同问题）、E247（Libs.private 静态运行时，不重合）"
+severity: 2
+phase: configuration
+prescan_pattern: "Requires\\.private.*libpcre2|Package 'libpcre2-8'.*not found"
+last_updated: 2026-09-05

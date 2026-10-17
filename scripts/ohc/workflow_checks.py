@@ -1,10 +1,11 @@
-"""W1-W4 workflow enforcement checks.
+"""W1-W5 workflow enforcement checks.
 
 Implements the 4 mandatory workflow rules defined in SKILL.md §0.2:
   W1 — Sync main before adaptation
   W2 — PR atomicity (one recipe per PR, framework changes separate)
   W3 — Local CI simulation before PR
-  W4 — Knowledge graph completeness check
+  W4 — Pre-PR independent audit (enforced in submission.py gates)
+  W5 — Knowledge graph completeness check (this module)
 """
 from __future__ import annotations
 
@@ -83,7 +84,7 @@ def check_git_sync(pdir: str | None = None, *, blocking: bool = False) -> int:
 
 _FRAMEWORK_PATHS = {
     "scripts/", "templates/", "ci/", "references/", "docs/",
-    "SKILL.md", "README.md", "CONTRIBUTING.md", "KNOW_HOW_WHY.md",
+    "SKILL.md", "README.md", "CONTRIBUTING.md", "KNOW_YOUR_WHY.md",
     ".gitignore", "SUMMARY.md",
     "knowledge/graph/index.tsv", "knowledge/graph/principles.kv",
     "knowledge/graph/pre-scan-rules.yaml", "knowledge/graph/_template.kv",
@@ -157,8 +158,14 @@ def run_local_ci(software: str, version: str, pdir: str | None = None) -> int:
     """W3: Run CI scripts locally before submitting PR.
 
     Executes ci/conan/setup.sh + ci/conan/build_and_test.sh.
+    Timeout budget comes from ci/config/build_timeouts.txt (same source as
+    remote CI); override locally with OHC_W3_TIMEOUT=<seconds>.
+    Full output is persisted to <archive>/reports/w3-local-ci.log for
+    diagnosis and integrity hashing.
     Returns 0 if pass, 1 if fail.
     """
+    from .build_timeout import local_w3_timeout, DEFAULT_BUILD_TIMEOUT
+
     project = Path(pdir) if pdir else Path(find_project_dir())
     setup_sh = project / "ci" / "conan" / "setup.sh"
     build_sh = project / "ci" / "conan" / "build_and_test.sh"
@@ -167,14 +174,23 @@ def run_local_ci(software: str, version: str, pdir: str | None = None) -> int:
         log_warn("W3: ci/conan/build_and_test.sh 不存在，跳过本地 CI 模拟")
         return 0
 
-    log_info(f"W3: 本地 CI 模拟验证 ({software}/{version})...")
+    timeout_budget = local_w3_timeout(software, version, str(project))
+    log_info(f"W3: 本地 CI 模拟验证 ({software}/{version}), 超时预算 {timeout_budget}s ...")
+
+    # Persist full output for diagnosis / .ci-result.json hashing
+    letter = software[0].lower()
+    report_dir = project / "archives" / letter / software / version / "reports"
+    w3_log = report_dir / "w3-local-ci.log"
+    combined_output: list[str] = []
 
     # Run setup.sh
     if setup_sh.exists():
         log_info("  [1/2] setup.sh...")
         rc, out = _run(["zsh", str(setup_sh)], cwd=str(project), timeout=120)
+        combined_output.append(f"$ setup.sh (RC={rc})\n{out}")
         if rc != 0:
             log_fail(f"  ❌ setup.sh 失败 (RC={rc})")
+            _save_w3_log(w3_log, combined_output)
             return 1
         log_ok("  ✅ setup.sh 通过")
 
@@ -185,27 +201,44 @@ def run_local_ci(software: str, version: str, pdir: str | None = None) -> int:
         ["zsh", str(build_sh), pkg_spec],
         cwd=str(project),
         env_extra={"CI_PACKAGES": pkg_spec, "CI_REPO_ROOT": str(project)},
-        timeout=600,
+        timeout=timeout_budget,
     )
+    combined_output.append(f"$ build_and_test.sh {pkg_spec} (RC={rc})\n{out}")
+    _save_w3_log(w3_log, combined_output)
+
     if rc != 0:
-        log_fail(f"  ❌ build_and_test.sh 失败 (RC={rc})")
-        log_fail("  本地 CI 模拟未通过，不要提交 PR！")
+        if out.strip() == "TIMEOUT":
+            log_fail(f"  ❌ build_and_test.sh 超时（{timeout_budget}s 预算耗尽，与真实失败不同）")
+            log_fail(f"  💡 扩展预算: python3 scripts/ohc-run.py timeout set {software} {version} "
+                     f"<3600-57600 之间的秒数>（CI 与 W3 同源配置，合并后 CI 同样生效）")
+            log_fail("     或临时覆盖: OHC_W3_TIMEOUT=<seconds> 仅调本地预算")
+        else:
+            log_fail(f"  ❌ build_and_test.sh 失败 (RC={rc})")
+            log_fail("  本地 CI 模拟未通过，不要提交 PR！")
         # Print last 20 lines of output for debugging
-        if out:
+        if out and out.strip() != "TIMEOUT":
             for line in out.split("\n")[-20:]:
                 log_fail(f"    {line}")
         return 1
 
-    log_ok("  ✅ 本地 CI 模拟通过")
+    log_ok(f"  ✅ 本地 CI 模拟通过 (日志: {w3_log})")
     return 0
 
 
-# ── W4: Knowledge graph completeness ──
+def _save_w3_log(w3_log: Path, chunks: list[str]) -> None:
+    try:
+        w3_log.parent.mkdir(parents=True, exist_ok=True)
+        w3_log.write_text("\n\n".join(chunks), encoding="utf-8")
+    except OSError:
+        pass  # 日志落盘失败不阻塞 W3 结果
+
+
+# ── W5: Knowledge graph completeness ──
 
 _REQUIRED_KV_FIELDS = ["error_signature", "root_cause", "rec_approach"]
 
 def check_knowledge_completeness(pdir: str | None = None) -> int:
-    """W4: Check knowledge graph completeness and compliance.
+    """W5: Check knowledge graph completeness and compliance.
 
     - doc/E###.md ↔ graph/E###.kv pairing
     - Required fields non-empty in each .kv
@@ -216,7 +249,7 @@ def check_knowledge_completeness(pdir: str | None = None) -> int:
     graph_dir = project / "knowledge" / "graph"
     doc_dir = project / "knowledge" / "doc"
 
-    log_info("W4: 知识图谱完整性检查...")
+    log_info("W5: 知识图谱完整性检查...")
 
     issues = 0
 
@@ -293,14 +326,19 @@ def check_knowledge_completeness(pdir: str | None = None) -> int:
         else:
             log_ok("  ✅ graph validate 通过")
 
-    # 4. Check drafts if any new ones exist
+    # 4. Check drafts if any new ones exist (两种历史命名: DRAFT-*.kv 与 E###-draft-*.kv)
     drafts_dir = project / "knowledge" / "drafts"
     if drafts_dir.exists():
-        drafts = list(drafts_dir.glob("DRAFT-*.kv"))
+        drafts = sorted(set(drafts_dir.glob("DRAFT-*.kv"))
+                        | set(drafts_dir.glob("*-draft-*.kv")))
         if drafts:
             log_info(f"  📝 发现 {len(drafts)} 个草稿待审:")
             for d in drafts[:5]:
                 log_info(f"     {d.name}")
+            if len(drafts) > 5:
+                log_info(f"     ... 还有 {len(drafts) - 5} 个")
+            if len(drafts) > 5:
+                log_info(f"     ... 还有 {len(drafts) - 5} 个")
 
     if issues > 0:
         log_fail(f"  ❌ 知识图谱完整性检查发现 {issues} 类问题")
@@ -315,6 +353,9 @@ def check_knowledge_completeness(pdir: str | None = None) -> int:
 def _run(cmd: list[str], *, cwd: str | None = None,
          env_extra: dict | None = None, timeout: int = 60) -> tuple[int, str]:
     env = os.environ.copy()
+    # v12.6: W3 为验证门禁，无条件禁用 ccache（结果必须可在干净 CI 复现）
+    from .utils import ccache_disable_env
+    env.update(ccache_disable_env())
     if env_extra:
         env.update(env_extra)
     try:
@@ -327,3 +368,4 @@ def _run(cmd: list[str], *, cwd: str | None = None,
         return 1, "TIMEOUT"
     except FileNotFoundError:
         return 1, ""
+

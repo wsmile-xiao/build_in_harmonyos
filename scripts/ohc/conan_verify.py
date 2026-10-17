@@ -24,9 +24,11 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +47,27 @@ class VerifyResult:
 
     def ok(self) -> bool:
         return self.passed
+
+
+def _recover_ghfast_bak(conandata_path: Path, bak_path: Path) -> None:
+    """G2 镜像注入的崩溃恢复（带陈旧守卫）。
+
+    仅当当前 conandata 仍含 ghfast.top（注入未回滚，即上次进程被杀
+    finally 未执行）才回滚；否则 .bak 是上一轮的陈旧残留，直接清理，
+    防止覆盖本轮内容（websocketpp PR #7052 教训：陈旧 .bak 无条件
+    覆盖 → 编译了旧配置的假失败）。
+    """
+    if not (bak_path.exists() and conandata_path.exists()):
+        return
+    current = conandata_path.read_text(encoding="utf-8")
+    if "ghfast.top" in current:
+        conandata_path.write_text(bak_path.read_text(encoding="utf-8"),
+                                  encoding="utf-8")
+        bak_path.unlink()
+        log_warn("  🔄 已恢复上次崩溃残留的 conandata.yml（镜像注入回滚）")
+    else:
+        log_warn("  🧹 已清理陈旧 conandata.yml.ghfast-bak（当前无镜像注入）")
+        bak_path.unlink()
 
 
 class ConanVerifier:
@@ -68,19 +91,46 @@ class ConanVerifier:
         self.report_dir = self.archive_dir / "reports"
         self._draft_count = 0
 
+    # v12.18 H2: conan 网络类失败特征——registry 抖动（111 例 unreachable 同源）
+    _NET_ERR_RE = re.compile(
+        r"(?:connection\s*(?:reset|refused|timed?\s*out)|ssl.*(?:handshake|error)"
+        r"|(?:408|502|503|504)\b|unreachable|network\s*(?:is\s*)?unreachable"
+        r"|temporar\w+ failure|name\s+or\s+service\s+not\s+known|broken\s+pipe)",
+        re.IGNORECASE)
+
     def _run(self, cmd: list[str] | str, **kw) -> tuple[int, str]:
-        """Run command, return (exit_code, combined_output)."""
+        """Run command, return (exit_code, combined_output).
+
+        v12.18 H2: conan 命令遇网络类失败特征时退避重试 2 次
+        （registry 抖动不应被误判为缺包/配方错误——依赖解析 git fetch
+        已有同类重试 v12.15，此处补齐 conan 侧）。
+        """
         if isinstance(cmd, str):
             cmd = ["/bin/sh", "-c", cmd]
-        try:
-            timeout = kw.pop("timeout", 1800)  # 30 min default
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               timeout=timeout, **kw)
-            return r.returncode, (r.stdout or "") + (r.stderr or "")
-        except subprocess.TimeoutExpired:
-            return 1, "TIMEOUT"
-        except FileNotFoundError as e:
-            return 1, str(e)
+        timeout = kw.pop("timeout", 1800)  # 30 min default
+        is_conan = bool(cmd) and "conan" in os.path.basename(str(cmd[0]))
+        attempts = 3 if is_conan else 1
+        backoff = (15, 30)
+        last_rc, last_out = 1, ""
+        for i in range(attempts):
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True,
+                                   timeout=timeout, **kw)
+                last_rc, last_out = r.returncode, (r.stdout or "") + (r.stderr or "")
+            except subprocess.TimeoutExpired:
+                return 1, "TIMEOUT"
+            except FileNotFoundError as e:
+                return 1, str(e)
+            if last_rc == 0:
+                return last_rc, last_out
+            if i < attempts - 1 and self._NET_ERR_RE.search(last_out or ""):
+                wait = backoff[i] if i < len(backoff) else backoff[-1]
+                log_warn(f"  conan 网络类失败（尝试 {i + 1}/{attempts}），"
+                         f"{wait}s 后重试: {(last_out or '')[:120]}")
+                time.sleep(wait)
+            else:
+                break
+        return last_rc, last_out
 
     def _check_conan_available(self) -> bool:
         """Check if conan CLI is available."""
@@ -504,17 +554,22 @@ authors: {git_author}
 
         profile_file = self.pdir / "ci" / "conan" / "profiles" / self.profile
         if profile_file.exists():
-            pr_args = f"-pr:h={profile_file} -pr:b={profile_file}"
+            pr_args = f"-pr:h={shlex.quote(str(profile_file))} -pr:b={shlex.quote(str(profile_file))}"
         else:
             pr_args = f"-pr:h={self.profile} -pr:b={self.profile}"
 
         # ── E017 prevention: inject ghfast.top mirror for GitHub URLs ──
+        # 崩溃恢复：上次进程被杀时 finally 未执行，残留的 .bak 先恢复
+        # （守卫逻辑见 _recover_ghfast_bak：仅当前含 ghfast.top 才回滚）
         conandata_path = self.archive_dir / "conandata.yml"
+        bak_path = conandata_path.with_name("conandata.yml.ghfast-bak")
+        _recover_ghfast_bak(conandata_path, bak_path)
         _url_injected = False
         _original_conandata = None
         if conandata_path.exists():
             _original_conandata = conandata_path.read_text(encoding="utf-8")
             if "github.com" in _original_conandata and "ghfast.top" not in _original_conandata:
+                bak_path.write_text(_original_conandata, encoding="utf-8")
                 modified = _original_conandata.replace("https://github.com", "https://ghfast.top/https://github.com")
                 conandata_path.write_text(modified, encoding="utf-8")
                 _url_injected = True
@@ -522,7 +577,7 @@ authors: {git_author}
 
         try:
             cmd = (
-                f"{self._conan_path} create {self.archive_dir} "
+                f"{self._conan_path} create {shlex.quote(str(self.archive_dir))} "
                 f"{pr_args} "
                 f"--build=missing "
                 f"--user={self.user} --channel={self.channel}"
@@ -1056,4 +1111,13 @@ def conan_verify_cli(argv: list[str] | None = None) -> int:
         conan_channel=args.channel,
         pdir=getattr(args, "project_dir", None),
     )
-    return verifier.run()
+    rc = verifier.run()
+    if rc == 0:
+        # R46: conan-verify 全绿 → 里程碑草稿
+        try:
+            from .result_report import write_lifecycle_draft
+            write_lifecycle_draft(args.software, args.version,
+                                  "conan_verify_passed")
+        except Exception:
+            pass
+    return rc

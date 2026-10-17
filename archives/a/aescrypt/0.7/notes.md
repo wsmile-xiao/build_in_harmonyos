@@ -61,5 +61,5 @@ ELF shared object, 64-bit LSB arm64, dynamic (/lib/ld-musl-aarch64.so.1), not st
 - Makefile install 目标不支持 DESTDIR，需要手动创建 staging 目录
 ---
 
-**编译结束**: 2026-06-13 11:53
-**最终状态**: built
+**编译结束**: 2026-07-21 14:51
+**最终状态**: published

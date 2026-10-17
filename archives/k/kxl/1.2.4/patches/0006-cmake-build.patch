@@ -1,0 +1,130 @@
+--- /dev/null
++++ CMakeLists.txt
+@@ -0,0 +1,127 @@
++# Top-level CMakeLists.txt for libKXL 1.2.4 on HarmonyOS.
++#
++# Upstream KXL ships an autotools build (configure.ac + Makefile.am)
++# whose bootstrap (aclocal, automake, libtoolize) is not present on the
++# OHOS SDK image; the conan worker here has autoconf+autoreconf but no
++# automake.  We replace the autotools build with this CMakeLists.txt
++# and rely on conan CMakeDeps to wire in libx11/libxcb/libxau/libxdmcp
++# /xtrans.
++#
++# Audio (KXLsound.c): the upstream OSS/PulseAudio implementation is
++# out of scope for OHOS (no /dev/dsp, no <linux/soundcard.h>, no
++# libpulse-simple).  On OHOS the conanfile replaces KXLsound.c with a
++# no-op stub before invoking CMake, so we always compile that file.
++
++cmake_minimum_required(VERSION 3.15)
++project(libKXL
++    VERSION 1.2.4
++    DESCRIPTION "Kacchan X Windows System Library"
++    LANGUAGES C)
++
++option(KXL_BUILD_SHARED "Build libKXL as a shared library" ON)
++option(KXL_BUILD_STATIC "Build libKXL as a static library" ON)
++
++# --- Override the OHOS toolchain's CMAKE_RANLIB ------------------------
++# The bundled ohos.toolchain.cmake pins CMAKE_RANLIB to
++# ${OHOS_SDK_NATIVE}/llvm/bin/llvm-ranlib -- but that path does NOT ship
++# in the OHOS SDK image used by this conan worker (only llvm-ar is
++# present).  Static library builds fail with "Error running link command:
++# No such file or directory" without this override.  Detect llvm-ranlib
++# at configure time and fall back to system ranlib if absent.
++if(NOT EXISTS "${CMAKE_RANLIB}")
++    find_program(_kxl_ranlib NAMES llvm-ranlib ranlib)
++    if(_kxl_ranlib)
++        unset(CMAKE_RANLIB CACHE)
++        set(CMAKE_RANLIB "${_kxl_ranlib}"
++            CACHE FILEPATH "Ranlib (overridden from OHOS toolchain default)")
++        message(STATUS "kxl: overriding CMAKE_RANLIB to ${CMAKE_RANLIB}")
++    endif()
++endif()
++
++# --- Public compile flags -----------------------------------------------
++# KXL's headers (Xlib.h, Xutil.h) trigger a flurry of -Wall warnings
++# on the unused parameters and implicit conversions that the upstream
++# code intentionally leaves in place.  Don't make the build noisy --
++# silence them locally.  Do NOT hardcode -O* here: target_compile_options
++# appends after toolchain CMAKE_C_FLAGS_<CONFIG>, and Clang/GCC use
++# last-wins for -O, which would override Debug (-O0) / Release (-O3).
++set(KXL_CFLAGS
++    -fPIC
++    -Wall
++    -Wextra
++    -Wno-unused-parameter
++    -Wno-sign-compare)
++
++# --- Conan-generated dependencies ---------------------------------------
++# CMakeDeps emits <name>Config.cmake / <name>Targets.cmake into the
++# generators folder that the toolchain layers on top of CMAKE_PREFIX_PATH.
++find_package(libx11 REQUIRED CONFIG)
++if(NOT TARGET libx11::libx11)
++    message(FATAL_ERROR "libx11::libx11 target was not declared by the conan generators")
++endif()
++find_package(xorgproto REQUIRED CONFIG)
++if(NOT TARGET xorgproto::xorgproto)
++    message(FATAL_ERROR "xorgproto::xorgproto target was not declared by the conan generators")
++endif()
++
++# --- Build libKXL -------------------------------------------------------
++# KXLmisc.c, KXLvisual.c, KXLimage.c drive the graphics side; KXLsound.c
++# is replaced with a no-op stub by the conanfile on OHOS.
++set(KXL_SRCS
++    src/KXLmisc.c
++    src/KXLsound.c
++    src/KXLvisual.c
++    src/KXLimage.c)
++
++# Always build both shared and static so the test_package consumer can
++# statically link against libKXL.a (OHOS loader refuses to dlopen()
++# shared libs from conan's cache path).  Two separate targets avoid
++# the "add_library cannot be both SHARED and STATIC" restriction.
++if(KXL_BUILD_SHARED)
++    add_library(KXL SHARED ${KXL_SRCS})
++    add_library(kxl::kxl ALIAS KXL)
++endif()
++if(KXL_BUILD_STATIC)
++    add_library(KXL_static STATIC ${KXL_SRCS})
++    add_library(kxl::kxl_static ALIAS KXL_static)
++endif()
++
++if(KXL_BUILD_SHARED)
++    target_include_directories(KXL PUBLIC
++        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
++    target_link_libraries(KXL
++        PUBLIC libx11::libx11 xorgproto::xorgproto)
++    target_compile_options(KXL PRIVATE ${KXL_CFLAGS})
++    set_target_properties(KXL PROPERTIES
++        VERSION ${PROJECT_VERSION}
++        SOVERSION 0)
++endif()
++if(KXL_BUILD_STATIC)
++    target_include_directories(KXL_static PUBLIC
++        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
++    target_link_libraries(KXL_static
++        PUBLIC libx11::libx11 xorgproto::xorgproto)
++    target_compile_options(KXL_static PRIVATE ${KXL_CFLAGS})
++endif()
++
++include(GNUInstallDirs)
++if(KXL_BUILD_SHARED)
++    install(TARGETS KXL
++        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
++        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
++        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
++endif()
++if(KXL_BUILD_STATIC)
++    install(TARGETS KXL_static
++        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
++endif()
++install(FILES src/KXL.h
++    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
++
++# --- Consumer-facing pkg-config ----------------------------------------
++# Emit a kxl.pc that downstream XKB / libXt-style packages can consume
++# without depending on Conan's CMakeDeps.
++configure_file(${CMAKE_CURRENT_SOURCE_DIR}/kxl.pc.in
++    ${CMAKE_CURRENT_BINARY_DIR}/kxl.pc @ONLY)
++install(FILES ${CMAKE_CURRENT_BINARY_DIR}/kxl.pc
++    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)

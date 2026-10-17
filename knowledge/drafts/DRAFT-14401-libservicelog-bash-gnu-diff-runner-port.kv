@@ -1,0 +1,42 @@
+#====================================================================
+# DRAFT-14401-libservicelog-bash-gnu-diff-runner-port - 上游 bash 测试器依赖 GNU coreutils（diff -y、[[ ]]、bash 数组）在 OHOS 设备 toybox 不可用 → POSIX 移植驱动 + python 行级容差比较器复刻上游比较语义
+#====================================================================
+
+id:                     DRAFT-14401-libservicelog-bash-gnu-diff-runner-port
+trigger_tool:           test|sh|diff
+phase:                  test-execution
+error_signature:        diff: invalid option -- 'y'|diff: unrecognized option|Unknown option|sh: \[\[: not found|Syntax error: bad substitution|run_tests: not found
+
+severity:               2
+category:               test|portability|gnu-coreutils|toybox
+match_keywords:         diff -y, suppress-common-line, run_tests, bashism, GNU coreutils, toybox, busybox, POSIX port, 测试器移植, 容差比较, 时间戳容差, make check, bash 数组, [[ ]], source
+title:                  上游 bash 测试器依赖 GNU coreutils（diff -y / [[ ]] / bash 数组）在 OHOS 设备 toybox 不可用 → POSIX 移植驱动 + python 行级容差比较器逐条复刻上游比较语义（含 cut -f1,2 字段名陷阱）
+
+root_cause:             大量上游包的测试执行器是 bash 脚本并依赖 GNU coreutils 特性：diff -a -y --suppress-common-line（并排比对、仅输出差异行）、[[ ]] 条件、source、数组等；OHOS 设备自带 toybox，其 diff 不支持 -y/--suppress-common-line，bash 4 特性缺失，执行器整体不可用（libservicelog 上游 src/tests/run_tests 即如此）。移植的坑在比较语义复刻：上游 diff_with_result_without_timestamp 用 diff -y | cut -d ' ' -f1,2 取差异行的行首字段名，与 5 个易变字段名（Log/Event/Update Timestamp:、Platform:、Node Name:）比较——注意 cut -f1,2 对单词字段名（"Platform:"）后接多空格时第二字段为空串，产出"Platform: "带尾随空格；移植成"取前两个词拼接"会拿 "Platform: ppc64le" 去比 → 平台差异被误报为功能失败（真机迭代 10 实测踩中，scenario 004/005 误 FAIL）。正确语义是**行首字段名前缀匹配**（line.lstrip().startswith(易变字段名)），忽略字段名命中行的值差异，其余差异行任一出现即失败。
+affected_scope:         所有上游测试器依赖 GNU diff -y / bash 特性的包（OHOS/toybox、musl/busybox 环境均可能命中）；同构模式：依赖 source/bash 数组/[[ ]] 的测试脚本同理可用 POSIX 移植路径处理，不必引入 bash 依赖。
+verification_cmd:       设备执行 sh run_upstream_tests.sh ./test_libservicelog <pkg>/share/.../tests-results cmp_tolerant.py → 断言 SUITE PASS 6/6；比较器单测：'Platform:           ppc64le' vs 'Platform:           aarch64' 必须忽略、'DESCRIPTION:  foo' vs 'DESCRIPTION:  bar' 必须失败、行数不等必须失败。
+rec_priority:           1
+rec_approach:           posix-port-plus-tolerant-comparator
+rec_description:        ① 用 POSIX sh 重写上游执行器的最小驱动循环：逐场景调驱动二进制（同源 C 驱动 test_libservicelog.c 原样编译为消费者）、输出落临时目录；② python 行级容差比较器复刻上游 diff 语义：逐行字节比对，差异行按行首字段名前缀匹配易变字段名集合则忽略，其余差异行计失败，行数不等也失败；③ 比较器随 test_package 提交进包，场景脚本/期望输出用上游原文件，驱动用上游原码——移植只改执行器与比较逻辑，测试内容零改动。
+rec_command:            sh run_upstream_tests.sh ./test_libservicelog <pkg>/share/libservicelog/upstream-tests/tests-results cmp_tolerant.py
+rec_auto_fix:           false
+rec_impl:               posix-runner-port
+
+fallback_priority:      2
+fallback_approach:      tool-dep-diffutils
+fallback_description:   若平台制品仓提供 diffutils/busybox 完整版（含 -y 支持），可把该工具设为 test_requires 并在 test() 前置 PATH，直接跑上游 bash 执行器；但需 bash 亦可用，且工具包体积/可用性不定，移植驱动仍是首选。
+fallback_command:       test_requires("diffutils/<ver>") + test() 内 PATH 前缀后执行上游 run_tests
+fallback_auto_fix:      false
+fallback_impl:          tool-dep-path
+
+forbid_1_pattern:       (diff -y|--suppress-common-line).*toybox
+forbid_1_reason:        设备 toybox 的 diff 不支持 -y/--suppress-common-line，直接跑上游执行器必失败；不要试图给 toybox 塞 GNU 选项或 sed 伪造输出。
+forbid_1_consequence:   误判上游测试失败，反复改库代码追不存在的问题；或放弃上游测试只留自写探针，丢失上游覆盖（rule12 要求）。
+
+forbid_2_pattern:       容差比较器忽略.*(description|refcode|severity|machine_serial)
+forbid_2_reason:        移植比较器只应忽略上游明确豁免的易变字段（时间戳/平台/节点名）；扩大忽略范围会放过真实功能差异，比较器失去回归意义。
+forbid_2_consequence:   测试放水：场景形式通过但事件内容回归不可见，审查员按 rule12 否决。
+
+ref_pr:                 14401
+ref_package:            libservicelog/1.1.19
+ref_ci_run:             真机 conan-verify 迭代 11（2026-09-27，SUITE PASS 6/6）

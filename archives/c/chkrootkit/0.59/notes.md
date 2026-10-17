@@ -1,5 +1,10 @@
 # chkrootkit 0.59 适配笔记
 
+## 源码来源
+
+- 主下载地址使用 Debian HTTPS `orig.tar.gz` 镜像，避免 CI 优先访问明文 FTP。
+- chkrootkit 官方 FTP 地址保留为回退源；两个地址使用同一固定 SHA256 校验。
+
 ## 编译环境
 - 构建系统: makefile（自定义 Makefile，无 configure 脀cript，无 install target）
 - 编译日期: 2026-06-02

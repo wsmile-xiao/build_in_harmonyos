@@ -1,0 +1,143 @@
+# test_package/MANIFEST.yml
+# 上游官方测试声明文件（CI build_and_test.sh L0e 强制要求存在）
+# 详见: docs/TEST_QUALITY_SPEC.md 与 references/iron-rules.md R51（上游测试三步法）
+
+package: mdspan/0.6.0
+homepage: "https://github.com/kokkos/mdspan"
+
+# ── 上游测试入口 ─────────────────────────────────────────────────────────────
+# 上游 tarball 自带顶层 CMakeLists.txt：MDSPAN_ENABLE_TESTS=ON 时
+# `enable_testing()` + `add_subdirectory(tests)`（gtest，13 个 mdspan_add_test
+# → 13 个 ctest 注册项）+ `add_subdirectory(compilation_tests)`（14 个
+# add_compilation_test，只 add_executable 不 add_test）。上游无 `make check`，
+# CMake 项目的等价入口是 ctest。
+upstream_check_command: "ctest --test-dir <build-dir> -N   # Total Tests: 13"
+upstream_test_command: "ctest --test-dir <build-dir> --output-on-failure -j1"
+
+# conanfile.py build() 中是否已集成上游测试
+# 未集成（上游测试树默认会在 configure 阶段用 ExternalProject 联网克隆 googletest
+# 且 GIT_TAG 为移动靶 main，G2 干净轮必须离线）——设备端按
+# 「上游测试套件原生 CMake 构建」单独执行，取数命令见下。
+upstream_test_in_build: false
+
+# 上游测试套件的原生构建参数（= manifest.yaml build.configure_options）
+upstream_build_command: >-
+  cmake -S <src> -B <build> -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++
+  -DCMAKE_CXX_STANDARD=20 -DMDSPAN_CXX_STANDARD=20 -DMDSPAN_ENABLE_TESTS=ON
+  -DMDSPAN_ENABLE_EXAMPLES=OFF -DMDSPAN_ENABLE_BENCHMARKS=OFF
+  -DMDSPAN_ENABLE_COMP_BENCH=OFF -DMDSPAN_USE_SYSTEM_GTEST=ON
+  -DCMAKE_PREFIX_PATH=<gtest-1.14.0-prefix>
+  && cmake --build <build> --parallel 2
+
+# ── 统计单位与 N 的取数命令（R51 候选数法：同一单位取最大值，差额逐项归因）──
+# 统计单位 = **上游测试用例（test case）**；四口径分列、不与断言口径混用：
+#   1) 源码宏数        : grep -rhoE '(?<![A-Z_])TEST\(' tests/*.cpp | wc -l   → 148
+#                          （TEST( 116 + TYPED_TEST( 32；TYPED_TEST_SUITE 17 个套件不计）
+#                       宽口径 grep -o 'TEST(' tests/*.cpp compilation_tests/*.cpp → 309
+#                       （含 TYPED_TEST 与 MDSPAN_STATIC_TEST 词面）
+#                       grep -rho 'MDSPAN_STATIC_TEST' compilation_tests/*.cpp → 151
+#   2) 框架注册数      : ctest -N                                   → 13 个 ctest 注册项
+#                       13 个 gtest 可执行的运行期用例（XML tests= 求和） → 474
+#                       compilation_tests 14 个可执行 → 14（每条通过的
+#                       MDSPAN_STATIC_TEST 即一条编译期用例，实编译 135）
+#   3) 断言数（不同单位，不作 N）
+#                       grep -rhoE '\b(ASSERT|EXPECT)_[A-Z_]+\(' tests/*.cpp → 541
+#                       grep -rho 'MDSPAN_STATIC_TEST' compilation_tests/*.cpp → 151
+#                       grep -rhoE '\bconstexpr_assert[a-z_]*\(' compilation_tests/*.cpp → 21
+#                       实编译：static_assert 预处理计数 135（C++20）、constexpr_assert 12
+#   4) 消费者断言      : test_package 运行输出（见下 test_package_tests）
+# N = max(148, 309, 151, 474, 135) = **609 = 474（运行期用例）+ 135（编译期用例）**
+# N′ = 实跑 609 → 四分项 PASS=609 / FAIL=0 / SKIP=0 / NOT_RUN=0（差额 0）
+# 全部数字来自 2026-09-28 设备端（HarmonyOS PC aarch64 / clang 15.0.4）实测日志，
+# 原始日志留存于设备任务私有目录 $HOME/tmp/mdspan-0.6.0/logs/（reports/ 被
+# 仓库 .gitignore 忽略，不入 PR）。
+
+# ── 候选值清单（§7.3 规则 2：N 取候选数法最大值，差额逐项归因）──────────────
+upstream_test_counts:
+  - name: "tests/ 源码用例宏（TEST + TYPED_TEST）"
+    count: 148
+    basis: source_macro
+    status: EXPANDED
+    note: "TYPED_TEST 按类型表展开为运行期 474 个用例，差 +326"
+  - name: "两目录宽口径 grep -o 'TEST(' 词面"
+    count: 309
+    basis: source_macro_naive
+    status: SUBSUMED
+    note: "含 TYPED_TEST 与 MDSPAN_STATIC_TEST 词面，≤ N"
+  - name: "tests/ gtest 运行期注册并执行的用例（C++20）"
+    count: 474
+    basis: framework_registered
+    status: PASS
+    note: "13 个可执行；failures=0 disabled=0；ctest 注册 13"
+  - name: "compilation_tests/ 编译期用例（MDSPAN_STATIC_TEST 实编译）"
+    count: 135
+    basis: framework_registered
+    status: PASS
+    note: "源码 151 条，预处理计数实编译 135；14/14 可执行构建并运行通过"
+  - name: "compilation_tests/ 源码编译期用例（未编译 16 条逐项归因）"
+    count: 151
+    basis: source_macro
+    status: PARTIAL_NOT_RUN
+    reason: "MDSPAN_ENABLE_EXPENSIVE_COMPILATION_TESTS=0 默认关闭 10 条；`#if !defined(__GNUC__) || (__GNUC__ > 10)`（clang 自报 __GNUC__=4）恒假 4 条；`#if 0` 死块 1 条；_MDSPAN_COMPILER_MSVC 分支 1 条——均属上游默认配置/上游编译器条件，上游 clang CI 同口径不编译，零补丁不改上游测试源"
+  - name: "断言口径（不同统计单位，按四口径不混用不作 N）"
+    count: 713
+    basis: assertion
+    status: N_A
+    note: "运行期语面 541 + MDSPAN_STATIC_TEST 151 + constexpr_assert 21；实编译 135+12；其中 test_mdarray_ctors 的 102 条位于 `#ifdef __cpp_lib_memory_resource`（OHOS libc++15 无 <memory_resource>）区块"
+
+# 上游实际运行的测试（tests/ 13 个 gtest 可执行 + compilation_tests/ 14 个编译期可执行）
+upstream_tests:
+  - file: tests/test_extents.cpp
+    description: "gtest 132 个运行期用例（C++20）：extents 静态/动态构造、extent/static_extent、兼容转换"
+    command: "./test_extents"
+  - file: tests/test_layout_ctors.cpp
+    description: "gtest 96 个运行期用例：layout_left/right/stride 的 mapping 构造与转换"
+    command: "./test_layout_ctors"
+  - file: tests/test_exhaustive_layouts.cpp
+    description: "gtest 76 个运行期用例：3D 布局穷举映射与布局转换"
+    command: "./test_exhaustive_layouts"
+  - file: tests/test_mdarray_ctors.cpp
+    description: "gtest 35 个运行期用例：mdarray 容器构造（pmr 分支因 OHOS libc++15 无 <memory_resource> 不编译）"
+    command: "./test_mdarray_ctors"
+  - file: tests/test_submdspan.cpp
+    description: "gtest 68 个运行期用例：submdspan 各类切片语义"
+    command: "./test_submdspan"
+  - file: tests/test_submdspan_static_slice.cpp
+    description: "gtest 24 个运行期用例：静态切片"
+    command: "./test_submdspan_static_slice"
+  - file: tests/test_mdspan_ctors.cpp
+    description: "gtest 21 个运行期用例：mdspan 构造/CTAD/SFINAE"
+    command: "./test_mdspan_ctors"
+  - file: tests/test_layout_stride.cpp
+    description: "gtest 14 个运行期用例：layout_stride 手工 strides"
+    command: "./test_layout_stride"
+  - file: tests/test_mdspan_swap.cpp
+    description: "gtest 3 个运行期用例：swap 语义"
+    command: "./test_mdspan_swap"
+  - file: tests/test_element_access.cpp
+    description: "gtest 1 个运行期用例：元素访问"
+    command: "./test_element_access"
+  - file: tests/test_mdspan_conversion.cpp
+    description: "gtest 1 个运行期用例：mdspan 之间的转换"
+    command: "./test_mdspan_conversion"
+  - file: tests/test_mdspan_size.cpp
+    description: "gtest 1 个运行期用例：size 计算"
+    command: "./test_mdspan_size"
+  - file: tests/test_mdarray_to_mdspan.cpp
+    description: "gtest 1 个运行期用例：mdarray → mdspan 视图"
+    command: "./test_mdarray_to_mdspan"
+  - file: compilation_tests/
+    description: "14 个编译期测试可执行（ctest_*），共 135 条实编译 static_assert：constructor_sfinae / extents_ctors / layout|mdspan|mdarray 类型与可转换性 / standard_layout / trivially_copyable / no_unique_address / compressed_pair_layout / constexpr dereference·layouts·submdspan"
+    command: "./ctest_*   # 逐个直跑（上游只 add_executable 不 add_test）"
+
+# test_package 中自带的测试（消费者视角验证，鸿蒙特有测试行的来源；不进上游分母）
+test_package_tests:
+  - file: consumer.cpp
+    description: "已安装包消费者：安装头 sha256 指纹 + 交付文件数 21 双断言；静态/动态 extents、layout_left/right/stride、submdspan、mdarray 往返、零 extent 边界、constexpr 求值；运行期断言 50 条 + 编译期 static_assert 11 条"
+    command: "./consumer"
+  - file: ohos_special_test.cpp
+    description: "HarmonyOS 专项（`#ifdef __OHOS__` 真实质校验）：__OHOS__/__OHOS_FAMILY__ 宏、aarch64 小端与 64 位指针、libc++ 能力、mdspan 平凡拷贝 ABI（sizeof/standard layout + memcpy 往返）、8 MiB 堆视图读写与跨行回读、64 元素栈视图、layout_left/right 同存储别名；运行期断言 24 条 + 编译期 static_assert 1 条"
+    command: "./ohos_special_test"
+
+# 测试断言总数（断言口径；不与上游用例口径 N 混用）
+assertion_count: 74   # = test_package 运行期断言 50 + 24；另编译期 static_assert 12 单列

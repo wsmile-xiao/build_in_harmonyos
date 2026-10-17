@@ -1,0 +1,169 @@
+#====================================================================
+# DRAFT-gcc9-ohos-dejagnu-torture-evidence — 在 OHOS 上对 conan 构建树跑
+#   gcc.c-torture 全量 dejagnu：四坑装配 + 失败面判读（trampoline 内核签名
+#   / musl tmpnam 只读 /tmp / 分阶段覆盖 gcc.sum）
+# 对应人类文档: knowledge/drafts/DRAFT-gcc9-ohos-dejagnu-torture-evidence.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: gcc/9.5.0.1@ohpcd/stable 全量证据固化（execute 15761/41/307/15）
+#====================================================================
+
+id:                     DRAFT-gcc9-ohos-dejagnu-torture-evidence
+trigger_tool:           runtest|dejagnu|expect|tcl|gcc|make|conan
+phase:                  testing
+error_signature:        /bin/stty: inaccessible or not found|
+                         Read-only file system.*fopen for writing|
+                         couldn't open.*builtins-config\.h.*c99_runtime|
+                         ERROR: Couldn't find the global config file|
+                         Bogus build triplet|
+                         internal compiler error: Segmentation fault.*limits-|
+                         internal compiler error: Illegal instruction|
+                         unrecognized DWARF version in .debug_info|
+                         test for errors.*size32plus|pr46534
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               testing, dejagnu, gcc, ohos, kernel, musl
+match_keywords:         dejagnu, runtest, GCC_UNDER_TEST, site.exp, xgcc,
+                         gcc.c-torture, execute.exp, compile.exp, gcc.sum,
+                         trampoline, nestfunc, tmpnam, /tmp 只读,
+                         shebang, pkill, config.guess, stty, prune.exp
+title:                  OHOS 上对 conan 构建树跑 gcc.c-torture 全量 dejagnu
+                        的装配四坑与失败面判读：shell/stty/triplet/自杀式 pkill +
+                        trampoline 内核签名与 musl tmpnam 两类平台级失败
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             装配面（四坑，任一命中即全量不可跑）：
+                         ① shebang `/bin/bash` 不存在（OHOS /bin 只读软链
+                         缺失）→ 所有脚本必须 `#!/data/service/hnp/bin/bash`；
+                         ② 后台主控脚本用 `pkill -f runtest` 清场会匹配自身
+                         命令行自杀 → 用精确 PID 管理；
+                         ③ config.guess 双失败（无 /bin/sh 可执行 + HMDFS 拒
+                         umask 700 目录）→ site.exp 预置 build_triplet/
+                         host_triplet=aarch64-unknown-linux-ohos、
+                         target_triplet=aarch64-linux-ohos 跳过猜测；
+                         ④ expect spawn pty 初始化硬编码 /bin/stty → 噪声行
+                         "sh: /bin/stty: inaccessible or not found" 混入
+                         编译输出被判 excess errors → 测试库 prune.exp 加
+                         regsub 过滤（仅本地证据用，不入包）。
+                         判读面（两类平台级失败，勿记为编译器缺陷）：
+                         ⑤ GNU trampoline（嵌套函数取址）在栈上运行时生成
+                         代码，OHOS 内核强制签名校验拒绝执行——与 lld 自动
+                         签名同源的平台级限制，`-z execstack` 无效（GNU_STACK
+                         本就 RW）；-O1+ 若内联规避了 trampoline 物化则通过，
+                         故 nestfunc-1/2、921215-1、931002-1 仅 -O0 失败；
+                         带 dg-require-effective-target trampolines 的源
+                         （comp-goto-2/nestfunc-4/7/pr24135）探测程序同样被拒
+                         → 正确判 UNSUPPORTED。
+                         ⑥ musl tmpnam() 源码硬编码 /tmp（只读）→
+                         fprintf-2/printf-2/user-printf freopen 失败 exit 1
+                         （注意是 exit 1 非段错误），TMPDIR 不生效。
+                         ⑦ 分阶段串行 runtest（execute.exp、compile.exp）
+                         后一阶段覆盖 gcc.sum/gcc.log → 每阶段 stdout 重定向
+                         保存，终局统计以各阶段 stdout log 为准。
+                         ⑧ limits-exprparen/structnest（10^4 层病态嵌套）触发
+                         stage-1 cc1（SDK clang 构建，--disable-bootstrap）ICE
+                         SIGSEGV/SIGILL 混现——非栈耗尽（256MB 有限栈复现
+                         不变；注意 musl 陷阱：RLIMIT_STACK=unlimited 时 musl
+                         反而回退 128KB 默认栈，调栈必须用有限大值）；上游
+                         gcc9 自举构建通过此二测试；崩溃在宿主侧解析阶段，
+                         与目标代码生成/PIE/签名无关。ICE 附带 "unrecognized
+                         DWARF version in .debug_info at 6" = libbacktrace
+                         读不了 clang 默认 DWARF5（gcc9 仅 DWARF4），纯崩溃
+                         转储噪声。
+                         ⑨ stty 噪声同样污染 check_no_compiler_messages 型
+                         effective-target 探针（要求零输出）→ size32plus 在
+                         LP64 目标上误判为假 → pr46534 的 { target { !
+                         size32plus } } dg-error 被错误激活而失败；探针片段
+                         （char dummy[16777217]）手工编译 rc=0/零 stderr 证明
+                         编译器行为正确。
+                         ⑩ 病态慢编译源（pr61159/981001-2/20011119-1/2/
+                         pr49735/pr44197/20040323-1）单线程串行下撞 dejagnu
+                         默认 300s 单测超时 → UNRESOLVED，非编译失败。
+affected_scope:         OHOS 上所有 gcc 系工具链的 dejagnu 上游套件证据固化
+                         （首例：gcc/9.5.0.1，execute 15761 PASS/41 FAIL/
+                         307 UNSUPPORTED/15 unresolved，41 失败全部归因⑤⑥）
+verification_cmd:       # 终局统计（每阶段）
+                         grep -c '^PASS' <phase>.stdout.log
+                         grep -c '^FAIL' <phase>.stdout.log
+                         # trampoline 根因最小复现（-z execstack 仍崩）
+                         xgcc-ohos -O0 nestfunc.c -o nf.exe -z execstack && ./nf.exe
+                         # tmpnam 根因（返回 /tmp 路径，freopen 失败）
+                         echo 'char b[L_tmpnam]; tmpnam(b); printf("%s\n", b);' | xgcc-ohos -x c - -o t && ./t
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           staged-runtest-with-preseeded-site-exp
+rec_description:        1) runtest/expect/tcl 用本地 conan 缓存包
+                         （dejagnu/1.6.3.1 + expect/5.45.4 + tcl/8.6.14，
+                         TCL_LIBRARY 必须与 expect 编译版本一致——
+                         详见 DRAFT-dejagnu-toolchain-assembly-ohos）。
+                         2) env：CONFIG_SHELL=/data/service/hnp/bin/bash、
+                         GCC_UNDER_TEST=<build>/.ohos-wrappers/xgcc-ohos、
+                         PATH 前置 SDK llvm/bin（ld.lld）。
+                         3) site.exp 预置三个 triplet（绕 config.guess）。
+                         4) prune.exp 加 stty 噪声过滤（构建树内，不入包）。
+                         5) 分阶段调用并把 stdout 各自存档：
+                         `runtest --tool gcc GXX=false gcc.c-torture/execute/execute.exp`
+                         `runtest --tool gcc GXX=false gcc.c-torture/compile/compile.exp`
+                         6) 失败面对照表归因（见 root_cause ⑤⑥），manifest
+                         test_note 如实声明，不伪造通过率、不整体 N/A。
+rec_command:            cd <build>/build-release/gcc-dejagnu && \
+                         . ../../../rtb-verify/dj/conanrun.sh env && \
+                         runtest --tool gcc GXX=false gcc.c-torture/execute/execute.exp > execute.stdout.log 2>&1
+rec_auto_fix:           false
+rec_impl:               explicit-eligible-test-inventory
+
+fallback_priority:      2
+fallback_approach:      torturesubset-in-recipe
+fallback_description:   conan 配方内无法跑全量 dejagnu（依赖 expect/tcl 运行环境
+                         与构建树），用字母序前 50 源 × (-O0,-O2) torture 子集
+                         100 次 + .codesign 断言作为包内门禁；全量 dejagnu 作为
+                         本地证据固化另行执行（本条目主路径）
+fallback_command:       # 配方内子集（已在 conanfile.py test() 实现）
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       pkill -f runtest|pkill -f dejagnu
+forbid_1_reason:        pkill -f 按命令行全文匹配，会杀死包含该模式的后台主控
+                         脚本自身（本次实证主进程被误杀）
+forbid_1_consequence:   全量跑到一半静默终止，gcc.sum 停在中途且无错误提示
+forbid_2_pattern:       trampoline.*失败.*=.*编译器缺陷|nestfunc.*FAIL.*记为缺陷
+forbid_2_reason:        OHOS 内核对栈上运行时生成代码强制签名校验是平台级行为，
+                         GNU/Linux 语义的 trampoline 不可用；与 lld 自动签名同源
+forbid_2_consequence:   把平台限制记成编译器缺陷，误判适配质量、误导后续版本决策
+forbid_3_pattern:       只看最终 gcc.sum（分阶段跑）
+forbid_3_reason:        runtest 每次调用覆盖 gcc.sum；compile 阶段会抹掉 execute 结果
+forbid_3_consequence:   execute 终局统计丢失，只能重跑（构建树随时可能被清理）
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              DRAFT-dejagnu-toolchain-assembly-ohos,
+                         DRAFT-gcc9-ohos-lld-autocodesign-toolchain-route
+similar_to:             DRAFT-dejagnu-toolchain-assembly-ohos, E272
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-gcc9-ohos-dejagnu-torture-evidence.md
+last_updated:           2026-09-22
+source_event:           gcc/9.5.0.1@ohpcd/stable 全量 dejagnu 证据固化
+                         （archives/g/gcc/9.5.0.1/reports/）
+
+# ═══ 知识协作 ═══
+
+authors:                ohpcd <ohpcd@localhost>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-22
+
+draft:                  true

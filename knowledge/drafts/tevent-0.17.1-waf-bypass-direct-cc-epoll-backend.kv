@@ -1,0 +1,31 @@
+#====================================================================
+# Draft: tevent 0.17.1 - bypass Samba waf with direct-cc; two traps in
+#        that route: HAVE_EPOLL silently degrades the loop to poll, and
+#        TEVENT_NUM_SIGNALS cannot be derived at compile time on OHOS
+#        because SIGRTMIN/SIGRTMAX are runtime functions
+#====================================================================
+
+id:                     DRAFT-TEVENT-0171-WAF-BYPASS-DIRECT-CC-EPOLL-BACKEND
+trigger_tool:           conan|clang|configure|make
+phase:                  configuration|compilation|testing
+error_signature:        tevent_backend_list|HAVE_EPOLL|TEVENT_NUM_SIGNALS|CHECK_VALUEOF|SIGRTMIN|__libc_current_sigrtmin|mandatory.*probe|/tmp.*read-?only|AC_LIBREPLACE
+
+severity:               2
+category:               build-system|waf|portability|ohos-platform
+match_keywords:         tevent, samba, waf, wafsamba, configure, direct-cc, NO_CONFIG_H, HAVE_EPOLL, tevent_epoll.c, poll backend, tevent_backend_list, TEVENT_NUM_SIGNALS, NSIG, _NSIG, SIGRTMIN, SIGRTMAX, CHECK_VALUEOF, runtime constant, standalone tarball, cmocka third_party
+
+title:                  Samba waf 包的 direct-cc 绕行范式：源文件清单必须镜像 wscript 的条件分支（漏 tevent_epoll.c 会静默退化到 poll 后端），且 waf 用运行探针算出的常量（TEVENT_NUM_SIGNALS=65）必须人工落定
+
+root_cause:             tevent standalone tarball 的构建入口是 waf，在 OHOS worker 上不可直接用：configure 通过 wafsamba 跑 mandatory 运行探针，需要可写 /tmp，并 RECURSE lib/replace / lib/talloc / third_party/cmocka，还会调用 SAMBA_CHECK_PYTHON(_HEADERS)。绕开 waf（direct-cc + -DNO_CONFIG_H）虽然可行，但把 wscript 里所有"探测后决定"的东西变成了移植者的责任，其中两类最危险：(1) 源文件清单是条件式的——SRC 基础列表 14 个文件，HAVE_EPOLL 时才追加 tevent_epoll.c；漏掉不会编译失败，只会让事件循环静默退化到 poll 后端，tevent_backend_list() 里不再出现 epoll，性能与语义都变了却没有报错；(2) 有些宏是 waf 运行探针算出来的，不是 config.h 里的简单 flag——TEVENT_NUM_SIGNALS = max(64, NSIG, _NSIG, SIGRTMAX, SIGRTMIN*2)，其中 SIGRTMIN/SIGRTMAX 在 OHOS 上展开为运行时函数 __libc_current_sigrtmin/max，CHECK_VALUEOF 无法折叠成编译期常量，最终值由 _NSIG=65 决定。
+affected_scope:         所有 Samba standalone tarball（tevent / talloc / tdb / ldb）以及一般 waf 项目的 OHOS 移植；尤其是"能编过就算完"的验收方式——silent backend degradation 与猜测的常量都不会在编译期暴露。
+verification_cmd:       ./test_tevent | grep "epoll backend present" && grep -c "tevent_epoll" conanfile.py
+
+rec_priority:           1
+rec_approach:           mirror-wscript-conditions-and-port-run-probe-constants
+rec_description:        绕开 waf 前先把 wscript 的 build()/configure() 读一遍，把三类内容抄进 direct-cc 配置：(a) 基础源文件清单；(b) 条件追加的源文件（HAVE_EPOLL -> tevent_epoll.c）及其判定的 HAVE_* 宏；(c) 用运行探针算出的常量（TEVENT_NUM_SIGNALS=65，来源 _NSIG）。抄完必须用"可观测行为"验收而不是"编译通过"：在 test_package 里调用 tevent_backend_list() 断言 epoll 在列表里，这样后端退化会变成一次测试失败而不是一个沉默的性能回归。测试框架同理——上游把 cmocka 放在 third_party/cmocka 随 tarball 分发，应直接编译该目录下的 cmocka.c（与上游一致），不要依赖外部 cmocka 包；两个 cmocka 单测（test_tevent_tag 5 例 / test_tevent_trace 24 例）与 test_package 消费者测试一起构成 L1 证据。musl 上 cmocka.h 会重复 typedef uintptr_t，补 -D_UINTPTR_T 即可，属上游 cmocka 守卫不完整，不要改上游头文件。
+rec_command:            conan create archives/t/tevent/0.17.1 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing -nr
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              11281
+source_commit:          526708c983

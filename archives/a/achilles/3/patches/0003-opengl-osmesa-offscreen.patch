@@ -1,0 +1,137 @@
+--- a/opengl.h
++++ b/opengl.h
+@@ -29,6 +29,10 @@
+ #include<SDL.h>
+ #endif
+ 
++#ifdef OSMESA_RENDER
++#include<GL/osmesa.h>
++#endif
++
+ class OrganismClass;
+ struct EventStack;
+ 
+@@ -36,6 +40,13 @@
+ private:
+   SDL_Surface *surface;
+   bool took_screenshot;
++#ifdef OSMESA_RENDER
++  /* Offscreen rendering state: platforms without a window-system GL
++     (HarmonyOS PC) get their GL context from OSMesa, and the rendered
++     frame is blitted onto the SDL software surface. */
++  OSMesaContext ctx;
++  unsigned char *glbuffer;
++#endif
+ public:
+   OpenGLClass(int,char **);
+   ~OpenGLClass();
+--- a/opengl.cc
++++ b/opengl.cc
+@@ -19,6 +19,10 @@
+ */
+ using namespace std;
+ #include"opengl.h"
++#ifdef OSMESA_RENDER
++#include<string.h>
++#include<stddef.h>
++#endif
+ #include<GL/gl.h>
+ #include<GL/glu.h>
+ //#include<SDL/SDL.h>
+@@ -38,11 +42,45 @@
+     fprintf(stderr, "Unable to initialize SDL: %s\n", SDL_GetError());
+     exit(1);
+   }
++#ifdef OSMESA_RENDER
++  /* No window-system GL on this platform: keep the SDL video surface but
++     make it a plain software surface, and take the GL context from OSMesa
++     (offscreen softpipe rendering).  A software SDL driver (SDL_VIDEODRIVER
++     =dummy) is sufficient. */
++  if ( (surface=SDL_SetVideoMode(SCREEN_W, SCREEN_H, 32, SDL_SWSURFACE)) == NULL ) {
++    fprintf(stderr, "Unable to create SDL software surface: %s\n", SDL_GetError());
++    SDL_Quit();
++    exit(2);
++  }
++  glbuffer = new unsigned char[SCREEN_W * SCREEN_H * 4];
++  if(glbuffer == NULL) {
++    fprintf(stderr, "Unable to allocate %dx%d render buffer\n", SCREEN_W, SCREEN_H);
++    SDL_Quit();
++    exit(2);
++  }
++  memset(glbuffer, 0, (size_t)SCREEN_W * SCREEN_H * 4);
++  /* 16-bit depth buffer, no stencil/accum -- matches what the fixed
++     function pipeline below and the screenshot path need. */
++  ctx = OSMesaCreateContextExt(OSMESA_RGBA, 16, 0, 0, NULL);
++  if ( ctx == NULL ) {
++    fprintf(stderr, "Unable to create OSMesa context\n");
++    SDL_Quit();
++    exit(2);
++  }
++  if ( !OSMesaMakeCurrent(ctx, glbuffer, GL_UNSIGNED_BYTE, SCREEN_W, SCREEN_H) ) {
++    fprintf(stderr, "Unable to make OSMesa context current\n");
++    OSMesaDestroyContext(ctx);
++    SDL_Quit();
++    exit(2);
++  }
++  OSMesaPixelStore(OSMESA_Y_UP, 0);
++#else
+   if ( (surface=SDL_SetVideoMode(SCREEN_W, SCREEN_H, 0, SDL_OPENGL)) == NULL ) {
+     fprintf(stderr, "Unable to create OpenGL screen: %s\n", SDL_GetError());
+     SDL_Quit();
+     exit(2);
+   }
++#endif
+ 
+   SDL_WM_SetCaption("Achilles", NULL);
+ 
+@@ -82,6 +120,14 @@
+ 
+ 
+ OpenGLClass::~OpenGLClass() {
++#ifdef OSMESA_RENDER
++  if ( ctx != NULL ) {
++    OSMesaDestroyContext(ctx);
++    ctx = NULL;
++  }
++  delete [] glbuffer;
++  glbuffer = NULL;
++#endif
+   SDL_Quit();
+ }
+ 
+@@ -92,7 +138,35 @@
+ }
+ 
+ bool OpenGLClass::SwapBuffers() {
++#ifdef OSMESA_RENDER
++  int x,y;
++  unsigned char *dst0;
++
++  /* There is no on-screen buffer to swap: the frame just rendered by the
++     OSMesa softpipe backend is copied onto the SDL software surface so the
++     rest of the application (and anything holding the surface) can see it. */
++  glFinish();
++  if ( surface != NULL ) {
++    if ( SDL_MUSTLOCK(surface) && SDL_LockSurface(surface) < 0 ) {
++      return false;
++    }
++    dst0 = (unsigned char *)surface->pixels;
++    for(y=0;y<SCREEN_H;y++) {
++      Uint32 *dst = (Uint32 *)(dst0 + (size_t)y * surface->pitch);
++      const unsigned char *src = glbuffer + (size_t)y * SCREEN_W * 4;
++      for(x=0;x<SCREEN_W;x++) {
++        dst[x] = SDL_MapRGBA(surface->format, src[0], src[1], src[2], src[3]);
++        src += 4;
++      }
++    }
++    if ( SDL_MUSTLOCK(surface) ) {
++      SDL_UnlockSurface(surface);
++    }
++    SDL_UpdateRect(surface, 0, 0, 0, 0);
++  }
++#else
+   SDL_GL_SwapBuffers();
++#endif
+   return true;
+ }
+ 

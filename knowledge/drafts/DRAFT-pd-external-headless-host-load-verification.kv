@@ -1,0 +1,112 @@
+#====================================================================
+# DRAFT-pd-external-headless-host-load-verification.kv
+# 宿主加载型插件（Pd external）在 OHOS 上的验证方法：用真机 pd 无头加载并驱动
+# 确定性类；不要在补丁里用 `; pd quit;`（与 loadbang 输出竞争，print 会丢）
+# 路径 B 草稿，一/二之二
+# 来源: pd-maxlib 1.6.0 / pd-mjlib 0.2.0 OHOS aarch64 适配
+# 状态: 草稿（待主编审核 promote 为正式 E 条目）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-pd-external-headless-host-load-verification
+trigger_tool:           test|runtime|pd
+phase:                  testing|runtime
+error_signature:        couldn't create object: .*|
+                         .*\.pd_linux: cannot open shared object|
+                         pd: command not found|
+                         (loadbang|print).*missing
+
+# ═══ Layer 1: 识别面 (Recognition) ═══
+severity:               2
+category:               ohos, testing, runtime, plugins, portability
+match_keywords:         Pd external, pd_linux, -nogui, -nosound, headless, loadbang,
+                         pd quit, timeout, PD_BIN, EXT_DIR, 消费者测试, 宿主加载,
+                         插件验证, couldn't create object
+title:                  宿主加载型插件的 OHOS 验证：用真机宿主无头加载 + 驱动确定性类；
+                         补丁内 `; pd quit;` 会与 loadbang 输出竞争导致 print 丢失，
+                         应改由外部 timeout 结束进程
+prescan_pattern:        -nogui|-nosound|; pd quit;|loadbang|timeout \d+ .*pd
+prescan_globs:          *.sh, *.pd, conanfile.py
+
+# ═══ Layer 2: 诊断面 (Diagnosis) ═══
+root_cause:             插件交付物是「宿主运行时 dlopen 的模块」，没有独立可执行入口，
+                         因此不能用「链接一个 test_package 可执行文件」来证明可用性——
+                         必须让**真机宿主**加载它（R34：测试真实依赖被测包）。三个坑：
+                         (1) 宿主可能不在 PATH：应取 `<host_dep>.package_folder/bin/pd`
+                         的绝对路径（PD_BIN），不要写裸名 `pd`（conanrun 环境不保证）。
+                         (2) 交互/常驻：pd 是无头也常驻的事件循环；若在补丁里用
+                         `; pd quit;` 主动退出，quit 消息会与 loadbang 触发的 print
+                         输出竞争、个别 print 尚未落到 stdout 进程就退出 → 断言 grep 不到，
+                         误判失败。正确做法是**不在补丁内退出**，用 `timeout N pd ...`
+                         运行一段时间（输出在退出前已落地）后终止。
+                         (3) 断言要落在**确定性类**上：maxlib 取 `[divide 10 20]`→0.5、
+                         `[plus 3 4]`→7；mjlib 取 `[n2m]` note C5→72、D#3→51。
+affected_scope:         所有「宿主 dlopen 模块」型插件的消费者/验收测试（Pure Data
+                         externals；同理 GIMP/LV2/VST 等宿主加载型插件）。
+                         适配实证：pd-maxlib 1.6.0（divide/plus）、pd-mjlib 0.2.0（n2m）。
+verification_cmd:       PD=<host_dep>/bin/pd; EXT=<pkg>/lib/pd-externals
+                         timeout 20 "$PD" -nogui -nosound -path "$EXT" -open test_patch.pd > log 2>&1 || true
+                         grep -q 'MAXLIB_DIVIDE: 0.5' log && grep -q 'MAXLIB_PLUS: 7' log
+                         # mjlib: grep -q 'MJLIB_N2M: 72' / 'MJLIB_N2M: 51'
+
+# ═══ Layer 3: 方案空间 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           explicit-host-bin-headless-load-timeout-drive-deterministic-class
+rec_description:        消费者测试三步：
+                         (a) 显式取宿主绝对路径 `PD_BIN=<host_dep>/package_folder/bin/pd`，
+                         校验可执行；显式 `EXT_DIR=<pkg>/lib/pd-externals`，先断言目标
+                         对象的 `.pd_linux` 存在；
+                         (b) 用一个最小补丁（`loadbang` → 对象 → `print <TAG>`）无头运行
+                         `PD_BIN -nogui -nosound -path "$EXT_DIR" -open patch.pd`，
+                         外层 `timeout 20`（不 `command -v timeout` 时直接跑）；
+                         (c) 对确定性类的期望输出（如 `DIVIDE: 0.5`）做 grep 断言，全部
+                         命中才 rc=0。
+rec_command:            timeout 20 "$PD_BIN" -nogui -nosound -path "$EXT_DIR" -open test.pd
+rec_auto_fix:           false
+rec_impl:               test_package/*.sh + *.pd（无头加载 + 超时 + grep 断言）
+
+fallback_priority:      2
+fallback_approach:      load-only-smoke
+fallback_description:   无法构造确定性输入时，至少断言对象能被加载：无头 pd 加载
+                         `[<class>]` 后日志不出现 `couldn't create object: <class>`。
+fallback_auto_fix:      false
+fallback_impl:          grep -v "couldn't create object" + 退出码
+
+# ★ 禁止策略（均以实测为依据）★
+forbid_1_pattern:       运行\s+pd\s+[-]|PATH.*pd.*裸名|command\s+pd\s
+forbid_1_reason:        conanrun 环境不保证宿主在 PATH；裸名会 `pd: command not found`。
+                        必须用 `<host_dep>.package_folder/bin/pd` 的绝对路径。
+forbid_1_consequence:   测试假失败，或误测到系统里另一个 pd。
+forbid_2_pattern:       补丁.*;\s*pd\s+quit;|;\s*pd\s+quit;.*断言
+forbid_2_reason:        本任务实测：`; pd quit;` 的退出与 `loadbang` 触发的 print 输出
+                        竞争，个别 print 在进程退出前未落盘 → grep 断言随机失败。
+forbid_2_consequence:   消费者测试 flaky / 假失败。
+forbid_3_pattern:       测试.*断言.*非确定性对象|用\s+[\[ ]noise|random\s+类做断言
+forbid_3_reason:        外部对象里大量类带随机/时基行为；断言必须选纯函数类。
+forbid_3_consequence:   偶发失败，无法作为验收判据。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             R34, R51
+
+# ═══ 关系图 (Relations) ═══
+causes:                 宿主加载型插件缺乏独立可执行入口时的验收方法
+caused_by:              插件是运行时模块 + 宿主常驻事件循环 + 补丁内退出的输出竞争
+similar_to:             E280
+conflicts_with:         []
+prerequisite_of:
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-pd-external-headless-host-load-verification.md
+last_updated:           2026-09-29
+source_event:           pd-maxlib 1.6.0 / pd-mjlib 0.2.0 消费者无头加载测试（真机 OHOS pd）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                frj__
+source_pr:              (本分支 feat/pd-maxlib-1.6.0，PR #13770；第二库 pd-mjlib #13771)
+source_commit:
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-29
+draft:                  true
+contributor_id:         frj__

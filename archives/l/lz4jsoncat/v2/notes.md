@@ -10,7 +10,7 @@
 | 软件 | lz4jsoncat |
 | 版本 | v2 |
 | 状态 | ⚠️ partial |
-| 构建系统 | autotools |
+| 构建系统 | makefile |
 | 源码路径 | https://github.com/andikleen/lz4json/archive/refs/tags/v2.tar.gz |
 
 ## 二、编译阶段（checkbox 实时更新）
@@ -64,3 +64,7 @@
 ## 六、结束记录
 - **最终状态**: partial
 - **结束时间**: 2026-04-24
+---
+
+**编译结束**: 2026-07-15 23:52
+**最终状态**: built

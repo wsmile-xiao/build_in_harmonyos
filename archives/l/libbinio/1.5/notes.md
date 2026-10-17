@@ -105,5 +105,5 @@ L2: PASS  L4: PASS  L5: PASS
 - string literal to char* 转换警告 (binfile.cpp)
 ---
 
-**编译结束**: 2026-06-26 16:02
-**最终状态**: published
+**编译结束**: 2026-08-06 01:31
+**最终状态**: built

@@ -1513,6 +1513,7 @@
 | **mdns-scan** | 0.5 | ✅ 已发布 |  |  | - | - | [📄](archives/m/mdns-scan/0.5/) |
 | **mecab** | 0.996 | partial |  | Autotools | 3 | libc++ (替换 libstdc++) | [📄](archives/m/mecab/0.996/) |
 | **mecab-ko** | 0.996-ko-0.9.2 | ✅ 已编译 |  |  | 8 | - | [📄](archives/m/mecab-ko/0.996-ko-0.9.2/) |
+| **mecab-ko-dic** | 2.1.1-20180720 | ✅ 已编译 |  | none | - | mecab-ko | [📄](archives/m/mecab-ko-dic/2.1.1-20180720/) |
 | **mediamtx** | 1.11.3 | ✅ 已发布 |  | go | - | - | [📄](archives/m/mediamtx/1.11.3/) |
 | **melange** | 0.23.4、0.53.2、v0.53.2 | ✅ 已编译 |  |  | - | - | [📄](archives/m/melange/v0.53.2/) |
 | **memcached** | 1.6.42 | partial |  |  | - | - | [📄](archives/m/memcached/1.6.42/) |
@@ -2117,6 +2118,7 @@
 | **qtshadertools** | 6.11.1 | ✅ 已编译 |  | CMake | 1 | - | [📄](archives/q/qtshadertools/6.11.1/) |
 | **quilt** | 0.69 | ✅ 已发布 |  | autoconf | 1 | GNU patch >= 2.5,bash,gawk,sed (GNU),diff (GNU) | [📄](archives/q/quilt/0.69/) |
 | **qxlsx** | 1.4.7 | ✅ 已编译 |  |  | - | - | [📄](archives/q/qxlsx/1.4.7/) |
+| **qzxing** | 3.3.0 | ✅ 已编译 |  | CMake | 1 | qt5-qtbase 5.15.2 | [📄](archives/q/qzxing/3.3.0/) |
 | **rabbitmq-c** | 0.13.0、0.15.0 | ✅ 已编译 |  | CMake | - | openssl/1.1.1w | [📄](archives/r/rabbitmq-c/0.15.0/) |
 | **radare2** | 6.0.7 | ✅ 已编译 |  | Autotools | 3 | name: capstone | [📄](archives/r/radare2/6.0.7/) |
 | **radsecproxy** | 1.11.2 | ✅ 已发布 |  |  | - | - | [📄](archives/r/radsecproxy/1.11.2/) |

@@ -1,0 +1,101 @@
+#====================================================================
+# DRAFT-boost184-component-pack-static-libcxx-testbin.kv
+# boost1.84 组件包拆分：b2 不可用下的单组件手动编译 + test_package 上游测试二进制
+# 用 -static-libstdc++ 烘入 libc++ 解决 OHOS conan buildenv 加载不了 libc++_shared.so
+# 触发事件: boost1.84-system 1.84.0 HarmonyOS PC 适配（archives/b/boost1.84-system/1.84.0）
+#           同模式已在 boost1.84-url（PR #8436, CI 绿）复用
+#====================================================================
+
+id:                     DRAFT-boost184-component-pack-static-libcxx-testbin
+trigger_tool:           conan|cmake|ctest|clang|ld|b2
+phase:                  build|test_package|testing
+error_signature:        Error loading shared library libc\+\+_shared\.so.*needed by.*test|
+                         Error relocating.*__cxa_begin_catch.*symbol not found|
+                         ConanException: Error 2 while executing.*cmake\.test|
+                         boost.*b2.*common\.jam:1164.*match-command-output|
+                         bootstrap\.sh.*clang\+\+ --version.*failed
+
+severity:               3
+category:               boost|conan|component-pack|test-package|libcxx|static-libstdc|compat
+match_keywords:         boost1.84, boost component, 组件包, b2 incompatible, E068,
+                         libs/system/src, single translation unit, error_code.cpp,
+                         pthread/thread.cpp, once.cpp, future.cpp, chrono inline,
+                         libc++_shared.so, static-libstdc++, target_link_options,
+                         aarch64-linux-ohos/c++, test_package CMakeLists, 上游测试
+title:                  boost 1.84 组件包拆分配方模式：绕 b2 手动编译组件 TU 集合 + 上游测试/test_package 二进制 -static-libstdc++ 烘入 libc++（OHOS buildenv 无 libc++_shared.so 搜索路径）
+
+root_cause: >
+  两个叠加根因：①Boost.Build(b2) 的 SHELL 执行机制在 OHOS 不兼容（E068 已知），
+  无法用 b2 --with-<lib> 裁剪构建，任何需要编译的 boost 组件只能手动编译其
+  libs/<lib>/src/*.cpp 翻译单元集合（system 仅 error_code.cpp 桩；thread 为
+  pthread/thread.cpp + pthread/once.cpp + future.cpp；chrono 为 chrono.cpp +
+  thread_clock.cpp + process_cpu_clocks.cpp）；②OHOS SDK 的 libc++_shared.so 位于
+  llvm/lib/aarch64-linux-ohos/c++ 子目录，而 conan profile buildenv 的
+  LD_LIBRARY_PATH 只前置 llvm/lib（不含 c++ 子目录），test_package 与 build()
+  中编译运行的上游测试二进制动态链接 libc++ 后运行时 rc=127/ relocation 报错
+  （__cxa_begin_catch 等 libc++abi 符号未定义），ctest 直接判 FAIL。
+affected_scope: >
+  所有在 OHOS 上适配 boost 1.84（以及 b2 不可用需手动编译的 boost 版本）组件的
+  配方；所有 conan test_package / build() 阶段需要真实运行 C++ 测试二进制、且
+  运行环境无 libc++_shared.so 搜索路径的配方（不限于 boost：任何 libc++ 动态
+  链接的测试可执行文件都会踩）。
+verification_cmd: >
+  conan create . -pr:h ~/.conan2/profiles/ohos-aarch64 -pr:b
+  ~/.conan2/profiles/ohos-aarch64 --build=missing → exit 0；
+  上游测试报告 build_folder/upstream-tests-report.txt：94 项 93 PASS；
+  test_package：ctest 100% + 显式 self.run 二进制输出 smoke OK
+
+rec_priority:           1
+rec_approach:           component-pack-manual-tu-plus-static-libcxx-testbin
+rec_description: >
+  组件包配方模式（4 要点）：①独立包名 boost1.84-<comp>/1.84.0，conandata 与
+  聚合 boost/1.84.0 同源同 sha256，复用已验证 patch；②build() 用
+  tools.build:compiler_executables 的 clang++/llvm-ar 手动编译组件 TU 集合并
+  llvm-ar rcs 成 libboost_<comp>.a（绕 b2），-std=c++17 -stdlib=libc++ -fPIC
+  -DBOOST_ALL_NO_LIB + 组件专属宏（system: BOOST_SYSTEM_SOURCE/NO_DEPRECATED；
+  thread: BOOST_THREAD_BUILD_LIB；chrono: BOOST_CHRONO_SOURCE）；③package()
+  安装全量 boost/ 头目录（包自包含，头文件 ~244MB 源码树）；package_info 组件
+  名 boost_<comp>，cmake_file_name 用 <comp>_pkg 避免与聚合包 Boost config 冲突；
+  ④上游测试（libs/<lib>/test/*.cpp，lightweight_test/test_suite 框架无需 b2）在
+  build() 内逐个编译运行，测试与 test_package 可执行文件统一加
+  -static-libstdc++（test_package 在 CMakeLists 里
+  if(CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS") target_link_options(... PRIVATE
+  -static-libstdc++)），静态烘入 libc++ 后二进制仅依赖 libc.so，干净环境直接可跑。
+rec_command: >
+  test_package/CMakeLists.txt:
+  if(CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS" OR CMAKE_SYSTEM_NAME STREQUAL "OHOS")
+      target_link_options(test_xxx PRIVATE -static-libstdc++)
+  endif()
+  build() 上游测试编译: cxx + " -static-libstdc++ " + 源文件 + -L<lib_dir> -lboost_<comp>
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      meta-package-requires-aggregate
+fallback_description: >
+  若组件无实质编译内容（纯 header-only 且聚合包已暴露该组件），可用元包
+  requires boost/1.84.0 只 re-export 组件，但积分赛审计可能判"无实质适配"；
+  且聚合包未编译的组件（url/thread 等）物理不可行。
+fallback_command:       self.requires("boost/1.84.0")
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       LD_LIBRARY_PATH=.*llvm/lib/aarch64-linux-ohos/c\+\+
+forbid_1_reason: >
+  禁止在配方或测试脚本里硬编码 OHOS SDK libc++_shared.so 路径修补运行环境
+  （该路径属 worker 环境细节，随 SDK 版本变化）；正确做法是 -static-libstdc++
+  消除对共享 libc++ 的运行时依赖。
+forbid_1_consequence: >
+  硬编码路径在 CI clean 环境或其他 SDK 版本上失效，测试运行 rc=127 反复红 CI。
+
+cross_ref:              E068 (b2 OHOS 不兼容根条目), E298 (test_package 运行环境通用条目,
+                         本条目是其 libc++_shared.so/static-libstdc++ 特化),
+                         DRAFT-boost-headeronly-vendor-meson-boostroot-staging (header-only vendor 模式)
+evidence: >
+  boost1.84-system: 上游 94 测试 93 PASS（error_code_test 2 处 strerror 文本断言
+  为 glibc vs musl 平台差异豁免），test_package PASS；
+  boost1.84-url（另一协作者）: PR #8436 CI PASSED，同 -static-libstdc++ 方案；
+  boost/thread 探针: pthread TU + chrono TU 编译链接运行 PASS（thread/mutex/
+  condition_variable/sleep_for 全通）。
+last_updated:           2026-09-05
+contributor:            j669539

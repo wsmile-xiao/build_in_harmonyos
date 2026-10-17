@@ -1,0 +1,43 @@
+id: DRAFT-EA-headeronly-dependency-chain
+severity: 2
+category: cmake,conan,packaging,header-only,dependency
+trigger_tool: conan|cmake
+phase: configuration|link|package
+approach: 配方 package_info 层显式传播 header-only 依赖 include——self.cpp_info.requires + 把依赖包 includedirs 追加进本包 cpp_info.includedirs（绝对路径），并用 CMakeDeps + find_package(namespaced target) 替换上游裸链接目标
+
+keywords: header-only, EABase, EAAssert, EA, cpp_info.requires, includedirs, CMakeDeps, eabase::eabase, find_package, INTERFACE_INCLUDE_DIRECTORIES, dependency chain, consumer, public header include
+
+error_signature: fatal error: 'EABase/eabase.h' file not found|include could not find requested file|target_link_libraries.*bare.*target|No compatible configuration found
+
+match_keywords: EABase, eabase.h, file not found, include, CMakeDeps, header-only, cpp_info.requires, includedirs, consumer
+
+root_cause: EA 系列库（EABase/EAAssert/EASTL/EAStdC 等）的公开头文件相互 include（eaassert.h → "EABase/eabase.h"）。上游 CMakeLists 用裸目标名（target_link_libraries(EAAssert EABase)）假设依赖以 add_subdirectory 内嵌源码树；干净 Conan 构建无该目标，且 header-only 依赖（eabase）经 CMakeDeps 生成的 INCLUDE_DIRS 为空，导致依赖 include 目录不传播到消费者编译行，消费者/库本体编译报 'EABase/eabase.h' file not found。另有上游 CMakeLists include() 子模块内 .cmake 模块（CommonCppFlags 位于 test/packages/EASTL/scripts/CMake）因子模块缺失而失败的连带问题。
+
+rec_approach: 三层修复组合：
+  1) 上游裸目标桥接：补丁把 target_link_libraries(EAAssert EABase) 改为 find_package(eabase REQUIRED) + target_link_libraries(EAAssert eabase::eabase)，配方声明 generators="CMakeDeps" + requires="eabase/0699a15"。
+  2) 配方 package_info 显式传播：self.cpp_info.requires = ["eabase::eabase"]，并把依赖包 includedirs（绝对路径，经 self.dependencies["eabase"].cpp_info.includedirs + package_folder）追加进 self.cpp_info.includedirs——保证消费者只链接 eaassert::eaassert 也能 resolve <EABase/eabase.h>（CMakeDeps 对 header-only 依赖可能生成空 INCLUDE_DIRS，不能只依赖 requires 传递）。
+  3) 子模块 cmake 模块守卫：若上游 include() 的文件位于 git 子模块（tarball 缺失），用 if(EXISTS ...cmake) include() endif() 守卫，干净构建不依赖子模块。
+
+solution_cmds: |
+  # conanfile.py 片段（依赖方配方）
+  generators = "CMakeDeps"
+  requires = "eabase/0699a15"
+  def package_info(self):
+      self.cpp_info.requires = ["eabase::eabase"]
+      if "eabase" in self.dependencies:
+          for rel in self.dependencies["eabase"].cpp_info.includedirs:
+              abs_dir = os.path.join(self.dependencies["eabase"].package_folder, rel)
+              if abs_dir not in self.cpp_info.includedirs:
+                  self.cpp_info.includedirs.append(abs_dir)
+      self.cpp_info.libs = ["EAAssert"]
+  # CMake 补丁
+  # -find_package(eabase REQUIRED) / target_link_libraries(EAAssert eabase::eabase)
+  # -if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/packages/EASTL/scripts/CMake/CommonCppFlags.cmake") include(CommonCppFlags) endif()
+
+verification: conan-verify G2 conan create 全链：库本体编译链接通过；test_package 消费者仅链接 eaassert::eaassert 即 resolve <EABase/eabase.h>，编译链接运行成功且 12 项断言语义断言 errors=0。
+
+fallback: 若依赖包 recipe 无法修改，可在 test_package/CMakeLists 侧 file(GLOB) 定位依赖包 include 目录（E216 glob-fallback 方案）；但配方层 cpp_info.requires+includedirs 追加是根治方案，下游每个消费者都受益。
+
+doc_refs: E216,E322,E150,E221,E300,E103,E211
+applies_to: EA 系列库（EABase→EAAssert→eastl/EAStdC/EATest/EAThread 依赖链）、任何公开头文件 include header-only 依赖头文件的库
+last_updated: 2026-09-15

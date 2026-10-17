@@ -1,0 +1,110 @@
+# ═══ Draft knowledge entry — samhain 4.1.4 本地 file: 形态五类平台断点修复链 ═══
+# Timestamp: 2026-09-23
+# Software: samhain 4.1.4
+# Gate: 任务卡 10371（configure/make/运行期/测试期连锁失败）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-E681
+trigger_tool:           configure|autotools|make|conan
+phase:                  configure|build|test_package
+error_signature:        'assertion failed \(.*\): hashval < AMOUNTHASH|invalid token at start of a preprocessor expression|expr: non-integer argument|Signal 31 \(core dumped\)|Bad system call \(core dumped\)|use of undeclared identifier ._PATH_MOUNTED.|could not setup config files machinery|subs1\.awk: Permission denied'
+prescan_pattern:        'hashval < AMOUNTHASH|invalid token at start of a preprocessor expression|Signal 31 \(core dumped\)|Bad system call|_PATH_MOUNTED|subs1\.awk: Permission denied'
+
+severity:               2
+category:               autotools|configure|entropy|allocator|seccomp|portability|hmdfs
+match_keywords:         POS_TF, c_random.sh, sum(1), dnmalloc, hashval, AMOUNTHASH,
+                        message-queue, msgget, SysV IPC, SIGSYS, Signal 31,
+                        _PATH_MOUNTED, paths.h, mntent, config.status, subs1.awk,
+                        mktemp -d, AS_TMPDIR, AC_SUBST, preprocessor expression
+title:                  samhain 4.1.4（HIDS）在 OHOS 上 configure/运行/测试五类断点：
+                        sum 缺失致 AC_SUBST 空宏、dnmalloc 断言、seccomp 禁 SysV IPC、
+                        glibc 传递 include 假设、hmmac mktemp 权限坏的修复链
+
+root_cause: >
+  1) 熵源空宏：c_random.sh 用 sum(1) 计算 16 位校验当熵源，设备（toybox）无 sum →
+     命令not found 被 2>/dev/null 吞掉 → configure 里 my_key_*/POS_TF 的
+     `expr` 链拿到空串（`expr % 65536` 报 non-integer、`expr / 32768` 报
+     Unexpected extra input）→ AC_SUBST/AC_DEFINEUNQUOTED 写出空宏 →
+     源码 `#if (POS_TF == 1)` 展开成 `#if ( == 1)` →
+     invalid token at start of a preprocessor expression，make 期集中爆炸。
+  2) dnmalloc 运行期断言：samhain 自带的 dnmalloc 分配器哈希假设
+     （hash(p)=(p-startheap)>>7 与 AMOUNTHASH 上界）在 OHOS 上失配，
+     任何 samhain 调用（含 -v）启动即 `assertion failed ... hashval < AMOUNTHASH`。
+  3) seccomp 禁 SysV IPC：OHOS 应用层 seccomp 拒绝 msgget（C 探针直接
+     Bad system call / rc=159）。上游 `--enable-message-queue` 变体编译出的
+     sh_err_console.c 在启动早期 msgget → 进程被 SIGSYS 杀（samhain 信号处理器
+     打印 `Signal 31 (core dumped)`），表现为「测试 9 条 hash 向量全部崩溃」，
+     极易误判成 hash 实现坏了。
+  4) glibc 传递 include 假设：老 C 代码靠上游系统的传递包含拿宏/类型
+     （_PATH_MOUNTED 经 glibc 链、u_int 经 glibc sys/time.h 链），OHOS libc
+     头文件不传递 → undeclared identifier / unknown type name。
+  5) hmmac mktemp：`mktemp -d`（umask 077）产出 2700+属主映射的目录，
+     config.status 写 confXXXX/subs1.awk Permission denied →
+     could not setup config files machinery。
+
+affected_scope: >
+  1) 一切用 shell 脚本采熵并 AC_SUBST 的 autotools 老项目（sum/dd/od 族命令缺失
+     即中招）；2) 打包自定义分配器的老 C 项目；3) 启用 SysV IPC 的守护类程序
+     （测试期运行即崩）；4) 所有假设 glibc 头文件传递关系的可移植性差的 C 代码；
+  5) 本设备上**所有** autotools 项目（config.status 普遍命中）。
+
+verification_cmd:       |-
+                        # 全部落 $TASK_DIR，设备可直接执行
+                        # 1) 熵源回退
+                        cd $WORKSPACE_ROOT/tmp/builds/samhain-4.1.4.orig
+                        sh ./c_random.sh; sh ./c_random.sh   # 预期: 非空数字，逐次不同
+                        # 2) dnmalloc 断言复现（修前构建）与 --disable-dnmalloc 后
+                        ./samhain -v | head -3              # 修前: assertion failed hashval < AMOUNTHASH
+                        # 3) seccomp 探针
+                        printf '#include <sys/ipc.h>\n#include <sys/msg.h>\nint main(){return msgget(IPC_PRIVATE,0600);}\n' > /storage/Users/currentUser/tmp/mq.c
+                        clang /storage/Users/currentUser/tmp/mq.c -o /storage/Users/currentUser/tmp/mq
+                        /storage/Users/currentUser/tmp/mq; echo rc=$?
+                        # 预期: Bad system call (core dumped), rc=159
+                        # 4) _PATH_MOUNTED
+                        grep -c _PATH_MOUNTED $(dirname $(command -v clang))/../sysroot/usr/include/paths.h
+                        # 预期: 1（宏在，缺的是 include）
+                        # 5) mktemp 复现：./configure 不带 shim → could not setup config files machinery
+
+rec_priority:           1
+rec_approach:           local-file-mode-five-fix（回退熵源 + 关自定义分配器 + 摘 IPC 旗标 + 补显式 include + mktemp shim）
+rec_description: >
+  1) c_random.sh 加 sum_portable()：`command -v sum` 可用则原样调用，否则
+     `od -An -v -tu1 "$1" | awk '{for(i=1;i<=NF;i++)s=(s+$i)%65535}END{print s+0, NR}'`
+     产出同形（首字段=数值）输出；三处调用点统一改走它。空宏类症状（
+     invalid token / expr: non-integer argument）即查 AC_SUBST 链上游的
+     外部命令是否静默失败（2>/dev/null 是重灾区）。
+  2) `--disable-dnmalloc`（上游 testhash.sh 同款旗标）——自定义分配器平台失配
+     时优先退回系统分配器，不调试分配器本身。
+  3) 测试 harness 的 `--enable-message-queue` 摘除（行尾 SECCOMP-FIX 注记 +
+     PR 声明「上游测试用例修改」），hash 断言原封不动；配方侧本就
+     `--disable-message-queue`。区分「功能被 seccomp 杀」与「功能逻辑坏」：
+     Signal 31/Bad system call 一律先跑最小 syscall 探针定性。
+  4) 缺宏/类型先在 sysroot 头文件里 grep 确认「宏在、include 缺」，补显式
+     include + #ifndef 兜底（不引平台宏，过 PF5）。
+  5) config.status 权限错 → PATH 前置 mktemp shim（exit 1）强制 AS_TMPDIR
+     mkdir 回退（acct 配方同款；在 generate() 里注入 build 期 PATH）。
+
+rec_command:            |-
+                        # 关键单点（完整旗标集见配方 notes.md 台账）
+                        ./configure --disable-dnmalloc --disable-message-queue ...
+rec_auto_fix:           false
+rec_impl:               conan-recipe-autotools-harmonyos
+
+fallback_priority:      2
+fallback_approach:      printf-based-entropy（直接给 --enable-base= B1,B2）
+fallback_description: >
+  若熵源脚本不可改，可给 configure 显式 `--enable-base=B1,B2`（0..2147483647）
+  走「用户给键」分支，绕开 c_random.sh 的 expr 熵链（POS_TF 仍走 c_random.sh，
+  需另行兜底——仅当问题 1) 只影响键位时可用）。
+fallback_command:       ./configure --enable-base=123456789,987654321
+fallback_auto_fix:      false
+fallback_impl:          configure-flag-explicit-base-key
+
+principles:             P003, P011
+similar_to:             E007, DRAFT-6048

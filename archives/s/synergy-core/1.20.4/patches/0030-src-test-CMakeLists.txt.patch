@@ -1,0 +1,559 @@
+--- a/src/test/CMakeLists.txt
++++ b/src/test/CMakeLists.txt
+@@ -34,8 +34,11 @@
+     ${test_base_dir}
+     ${src_dir}
+     ${src_dir}/lib
+-    ${gui_dir}
+     ${ext_dir})
++
++  if(BUILD_GUI)
++    include_directories(${gui_dir})
++  endif()
+
+   set_sources()
+
+@@ -57,6 +60,16 @@
+
+   list(APPEND headers ${mock_headers})
+   list(APPEND sources ${mock_sources})
++
++  if(NOT BUILD_GUI)
++    file(GLOB_RECURSE gui_headers ${CMAKE_CURRENT_SOURCE_DIR}/gui/*.h)
++    file(GLOB_RECURSE gui_sources ${CMAKE_CURRENT_SOURCE_DIR}/gui/*.cpp)
++    file(GLOB_RECURSE shared_gui_headers ${test_base_dir}/shared/gui/*.h)
++    file(GLOB_RECURSE shared_gui_sources ${test_base_dir}/shared/gui/*.cpp)
++
++    list(REMOVE_ITEM headers ${gui_headers} ${shared_gui_headers})
++    list(REMOVE_ITEM sources ${gui_sources} ${shared_gui_sources})
++  endif()
+
+   if(ADD_HEADERS_TO_SOURCES)
+     list(APPEND sources ${headers})
+@@ -82,7 +95,10 @@
+   list(REMOVE_ITEM headers ${all_platform_files})
+   list(REMOVE_ITEM sources ${all_platform_files})
+
+-  if(WIN32)
++  if(HAVE_NATIVE_DESKFLOW_BACKEND)
++    file(GLOB platform_sources ${platform_dir}/OHOS*.cpp)
++    file(GLOB platform_headers ${platform_dir}/OHOS*.h)
++  elseif(WIN32)
+     file(GLOB platform_sources ${platform_dir}/MSWindows*.cpp)
+     file(GLOB platform_headers ${platform_dir}/MSWindows*.h)
+   elseif(APPLE)
+@@ -112,7 +128,7 @@
+   if(WIN32)
+     file(GLOB arch_sources ${arch_dir}/win32/*.cpp)
+     file(GLOB arch_headers ${arch_dir}/win32/*.h)
+-  elseif(UNIX)
++  elseif(HAVE_POSIX_DESKFLOW_API)
+     file(GLOB arch_sources ${arch_dir}/unix/*.cpp)
+     file(GLOB arch_headers ${arch_dir}/unix/*.h)
+   endif()
+@@ -140,11 +156,24 @@
+       app
+       mt
+       ipc
+-      gui
+       ${GMOCK_LIB}
+       ${GTEST_LIB}
+       ${libs})
+
++  if(BUILD_GUI)
++    list(APPEND test_libs gui)
++  endif()
++
+ endmacro()
+
+ config_all_tests()
++if(BUILD_TESTS)
++  add_executable(ohos-screen-state-tests platformstate/OHOSScreenStateTests.cpp)
++  target_include_directories(ohos-screen-state-tests PRIVATE ${PROJECT_SOURCE_DIR}/src/lib)
++  add_test(NAME ohos-screen-state-tests COMMAND ohos-screen-state-tests)
++
++  add_test(
++    NAME ohos-backend-selection-tests
++    COMMAND ${CMAKE_COMMAND} -P
++            ${CMAKE_CURRENT_SOURCE_DIR}/platformstate/DeskflowBackendSelectionTests.cmake)
++endif()
+
+--- /dev/null
++++ b/src/test/platformstate/DeskflowBackendSelectionTests.cmake
+@@ -0,0 +1,50 @@
++cmake_minimum_required(VERSION 3.16)
++
++include("${CMAKE_CURRENT_LIST_DIR}/../../../cmake/DeskflowBackendSelection.cmake")
++
++set(test_count 0)
++set(pass_count 0)
++
++macro(check_selection test_id expected)
++  math(EXPR test_count "${test_count} + 1")
++  deskflow_select_backend(${ARGN} actual)
++  if("${actual}" STREQUAL "${expected}")
++    math(EXPR pass_count "${pass_count} + 1")
++    message("TEST_PASS id=${test_id}")
++  else()
++    message("TEST_FAIL id=${test_id} expected=${expected} actual=${actual}")
++  endif()
++endmacro()
++
++check_selection(cmake_win32_no_native_probe WIN32 TRUE FALSE FALSE FALSE FALSE FALSE)
++check_selection(cmake_posix_fallback_none POSIX FALSE TRUE FALSE FALSE FALSE FALSE)
++check_selection(cmake_native_complete NATIVE FALSE TRUE TRUE TRUE TRUE TRUE)
++check_selection(cmake_native_partial_rejected INVALID_PARTIAL FALSE TRUE TRUE FALSE TRUE TRUE)
++
++math(EXPR test_count "${test_count} + 1")
++file(READ "${CMAKE_CURRENT_LIST_DIR}/../../../cmake/Libraries.cmake" libraries_source)
++set(expected_posix_probe
++    "  if(WIN32)\n    set(HAVE_POSIX_DESKFLOW_API FALSE)\n  else()")
++string(FIND "${libraries_source}" "${expected_posix_probe}" posix_probe_index)
++if(posix_probe_index EQUAL -1)
++  message("TEST_FAIL id=cmake_posix_probe_not_preseeded")
++else()
++  math(EXPR pass_count "${pass_count} + 1")
++  message("TEST_PASS id=cmake_posix_probe_not_preseeded")
++endif()
++
++math(EXPR test_count "${test_count} + 1")
++set(expected_posix_gate "  if(NOT WIN32 AND NOT HAVE_POSIX_DESKFLOW_API)")
++string(FIND "${libraries_source}" "${expected_posix_gate}" posix_gate_index)
++if(posix_gate_index EQUAL -1)
++  message("TEST_FAIL id=cmake_win32_posix_gate_scoped")
++else()
++  math(EXPR pass_count "${pass_count} + 1")
++  message("TEST_PASS id=cmake_win32_posix_gate_scoped")
++endif()
++
++math(EXPR failed_count "${test_count} - ${pass_count}")
++message("DESKFLOW_BACKEND_SELECTION_TESTS tests=${test_count} passed=${pass_count} failed=${failed_count}")
++if(NOT failed_count EQUAL 0)
++  message(FATAL_ERROR "Deskflow backend selection tests failed")
++endif()
+--- /dev/null
++++ b/src/test/platformstate/OHOSScreenStateTests.cpp
+@@ -0,0 +1,423 @@
++#include "platform/OHOSScreenState.h"
++
++#include <array>
++#include <cstdint>
++#include <cstdlib>
++#include <iostream>
++#include <limits>
++#include <stdexcept>
++#include <string>
++
++namespace {
++
++using namespace deskflow::platform;
++
++struct FakeNativeResource
++{
++  int *m_destroyCount;
++};
++
++void destroyFakeNativeResource(FakeNativeResource *resource)
++{
++  ++*resource->m_destroyCount;
++}
++
++class TestFailure : public std::runtime_error
++{
++public:
++  TestFailure(const char *expression, int line)
++      : std::runtime_error(
++            "line=" + std::to_string(line) + " expression=" + expression
++        )
++  {
++  }
++};
++
++[[noreturn]] void fail(const char *expression, int line) { throw TestFailure(expression, line); }
++
++#define CHECK(expression) ((expression) ? static_cast<void>(0) : fail(#expression, __LINE__))
++
++ClipboardFingerprint fingerprint(std::uint8_t value)
++{
++  ClipboardFingerprint result{};
++  result.fill(value);
++  return result;
++}
++
++ClipboardSnapshot snapshot(
++    bool hasData, std::uint8_t digest, std::uint32_t count,
++    bool readable = true, bool getDataWasNull = false
++)
++{
++  return ClipboardSnapshot{readable, hasData, getDataWasNull, fingerprint(digest), count};
++}
++
++void testAuthorization()
++{
++  AuthorizationCoordinator coordinator;
++  const auto first = coordinator.begin();
++  coordinator.hint(2);
++  CHECK(!coordinator.ready(first));
++  CHECK(coordinator.publishReady(first));
++  CHECK(coordinator.ready(first));
++
++  const auto second = coordinator.begin();
++  coordinator.hint(1);
++  CHECK(coordinator.waiting(second));
++  coordinator.disable(second);
++  coordinator.hint(2);
++  CHECK(!coordinator.publishReady(second));
++
++  const auto third = coordinator.begin();
++  coordinator.hint(99);
++  CHECK(coordinator.waiting(third));
++  coordinator.fail(third);
++  CHECK(!coordinator.publishReady(third));
++
++  const auto fourth = coordinator.begin();
++  const auto sequence = coordinator.sequence();
++  coordinator.hint(1);
++  CHECK(coordinator.sequence() != sequence);
++  CHECK(coordinator.waiting(fourth));
++  coordinator.disable(fourth);
++  coordinator.hint(2);
++  CHECK(!coordinator.publishReady(fourth));
++}
++
++void testInjectionEcho()
++{
++  InjectionEchoTracker tracker(8, 100);
++  InjectionFingerprint key;
++  key.m_epoch = 7;
++  key.m_class = InjectionTokenClass::kKey;
++  key.m_action = 1;
++  key.m_code = 42;
++  key.m_actionTime = tracker.begin(1000, key, true);
++  CHECK(key.m_actionTime > 0);
++
++  auto realInterleaved = key;
++  realInterleaved.m_code = 43;
++  CHECK(!tracker.consume(1001, realInterleaved));
++  CHECK(tracker.consume(1001, key));
++  CHECK(!tracker.consume(1001, key));
++
++  InjectionFingerprint mouse;
++  mouse.m_epoch = 7;
++  mouse.m_class = InjectionTokenClass::kMouse;
++  mouse.m_action = 2;
++  mouse.m_code = 1;
++  mouse.m_x = 10;
++  mouse.m_y = 20;
++  mouse.m_actionTime = tracker.begin(1100, mouse, true);
++  auto wrongEpoch = mouse;
++  ++wrongEpoch.m_epoch;
++  CHECK(!tracker.consume(1101, wrongEpoch));
++  auto wrongClass = mouse;
++  wrongClass.m_class = InjectionTokenClass::kAxis;
++  CHECK(!tracker.consume(1101, wrongClass));
++  CHECK(tracker.consume(1101, mouse));
++
++  InjectionFingerprint expired = key;
++  expired.m_code = 99;
++  expired.m_actionTime = tracker.begin(1200, expired, true);
++  CHECK(!tracker.consume(1300, expired));
++
++  InjectionFingerprint failed = key;
++  failed.m_code = 100;
++  failed.m_actionTime = tracker.begin(1400, failed, true);
++  tracker.finish(failed.m_actionTime, false);
++  CHECK(!tracker.consume(1401, failed));
++
++  InjectionFingerprint untrusted = key;
++  untrusted.m_code = 101;
++  untrusted.m_actionTime = tracker.begin(1500, untrusted, false);
++  CHECK(untrusted.m_actionTime != 0);
++  CHECK(!tracker.consume(1501, untrusted));
++}
++
++void testInputRolePolicy()
++{
++  CHECK(NativeInputRolePolicy::capturesRawInput(NativeInputRole::kCaptureServer));
++  CHECK(!NativeInputRolePolicy::capturesRawInput(NativeInputRole::kInjectClient));
++  CHECK(!NativeInputRolePolicy::allowsInjection(
++      NativeInputRole::kCaptureServer, InjectionTokenClass::kKey, false
++  ));
++  CHECK(!NativeInputRolePolicy::allowsInjection(
++      NativeInputRole::kCaptureServer, InjectionTokenClass::kMouse, false
++  ));
++  CHECK(!NativeInputRolePolicy::allowsInjection(
++      NativeInputRole::kCaptureServer, InjectionTokenClass::kAxis, false
++  ));
++  CHECK(NativeInputRolePolicy::allowsInjection(
++      NativeInputRole::kCaptureServer, InjectionTokenClass::kMouse, true
++  ));
++  CHECK(NativeInputRolePolicy::allowsInjection(
++      NativeInputRole::kInjectClient, InjectionTokenClass::kKey, false
++  ));
++  CHECK(NativeInputRolePolicy::allowsInjection(
++      NativeInputRole::kInjectClient, InjectionTokenClass::kMouse, false
++  ));
++  CHECK(NativeInputRolePolicy::allowsInjection(
++      NativeInputRole::kInjectClient, InjectionTokenClass::kAxis, false
++  ));
++}
++
++void testPointerCoordinates()
++{
++  std::int32_t coordinate = 123;
++  CHECK(checkedPointerCoordinate(10, 1.5, coordinate));
++  CHECK(coordinate == 12);
++  CHECK(checkedPointerCoordinate(std::numeric_limits<std::int32_t>::max(), 0.49, coordinate));
++  CHECK(coordinate == std::numeric_limits<std::int32_t>::max());
++  coordinate = 123;
++  CHECK(!checkedPointerCoordinate(std::numeric_limits<std::int32_t>::max(), 0.5, coordinate));
++  CHECK(coordinate == 123);
++  CHECK(!checkedPointerCoordinate(std::numeric_limits<std::int32_t>::min(), -0.5, coordinate));
++  CHECK(!checkedPointerCoordinate(0, std::numeric_limits<double>::infinity(), coordinate));
++  CHECK(!checkedPointerCoordinate(0, std::numeric_limits<double>::quiet_NaN(), coordinate));
++
++  CHECK(checkedPointerDelta(std::numeric_limits<std::int32_t>::max(), -1, coordinate));
++  CHECK(coordinate == std::numeric_limits<std::int32_t>::max() - 1);
++  coordinate = 123;
++  CHECK(!checkedPointerDelta(std::numeric_limits<std::int32_t>::max(), 1, coordinate));
++  CHECK(coordinate == 123);
++  CHECK(!checkedPointerDelta(std::numeric_limits<std::int32_t>::min(), -1, coordinate));
++  CHECK(checkedPointerDelta(std::numeric_limits<std::int32_t>::min(), 1, coordinate));
++  CHECK(coordinate == std::numeric_limits<std::int32_t>::min() + 1);
++
++  coordinate = 123;
++  CHECK(!checkedPointerDifference(
++      std::numeric_limits<std::int32_t>::max(),
++      std::numeric_limits<std::int32_t>::min(), coordinate
++  ));
++  CHECK(coordinate == 123);
++  CHECK(!checkedPointerDifference(
++      std::numeric_limits<std::int32_t>::min(),
++      std::numeric_limits<std::int32_t>::max(), coordinate
++  ));
++  CHECK(coordinate == 123);
++  CHECK(checkedPointerDifference(
++      std::numeric_limits<std::int32_t>::max(),
++      std::numeric_limits<std::int32_t>::max() - 1, coordinate
++  ));
++  CHECK(coordinate == 1);
++  CHECK(pointerDistanceExceeds(
++      std::numeric_limits<std::int32_t>::min(),
++      std::numeric_limits<std::int32_t>::max(), 32
++  ));
++}
++
++void testAxisConversions()
++{
++  std::int32_t wheel = 123;
++  CHECK(checkedAxisConversion(1.5, 120.0L, wheel));
++  CHECK(wheel == 180);
++  CHECK(checkedAxisConversion(2147483647.0, 1.0L, wheel));
++  CHECK(wheel == std::numeric_limits<std::int32_t>::max());
++  CHECK(checkedAxisConversion(-2147483648.0, 1.0L, wheel));
++  CHECK(wheel == std::numeric_limits<std::int32_t>::min());
++  wheel = 123;
++  CHECK(!checkedAxisConversion(2147483648.0, 1.0L, wheel));
++  CHECK(wheel == 123);
++  CHECK(!checkedAxisConversion(-2147483649.0, 1.0L, wheel));
++  CHECK(!checkedAxisConversion(std::numeric_limits<double>::quiet_NaN(), 120.0L, wheel));
++  CHECK(!checkedAxisConversion(std::numeric_limits<double>::infinity(), 120.0L, wheel));
++  CHECK(!checkedAxisConversion(-std::numeric_limits<double>::infinity(), 120.0L, wheel));
++  CHECK(!checkedAxisConversion(std::numeric_limits<double>::max(), 120.0L, wheel));
++
++  std::int64_t fingerprint = 0;
++  CHECK(checkedAxisConversion(-std::ldexp(1.0, 63), 1.0L, fingerprint));
++  CHECK(fingerprint == std::numeric_limits<std::int64_t>::min());
++  CHECK(!checkedAxisConversion(std::ldexp(1.0, 63), 1.0L, fingerprint));
++}
++
++void testNativeFailureOutputCleanup()
++{
++  int destroyCount = 0;
++  FakeNativeResource resource{&destroyCount};
++  const int createResult = -1;
++  {
++    NativeResourceOwner<FakeNativeResource, decltype(&destroyFakeNativeResource)> owner(
++        &resource, &destroyFakeNativeResource
++    );
++    CHECK(createResult != 0);
++    CHECK(owner.get() == &resource);
++  }
++  CHECK(destroyCount == 1);
++}
++
++void testClipboardSet()
++{
++  ClipboardWriteTracker tracker;
++  const auto before = snapshot(true, 1, 10);
++  const auto after = snapshot(true, 2, 11);
++  tracker.reset(before);
++  auto generation = tracker.begin(ClipboardWriteKind::kSet, before, after.m_fingerprint, 2000);
++  CHECK(generation != 0);
++  CHECK(tracker.observe(after, true, 1000) == ClipboardObservation::kSuppressSelfWrite);
++  auto finish = tracker.finishSet(generation, true, after, 1001);
++  CHECK(finish.m_succeeded && !finish.m_notifyExternal);
++
++  tracker.reset(before);
++  generation = tracker.begin(ClipboardWriteKind::kSet, before, fingerprint(2), 2000);
++  CHECK(tracker.observe(snapshot(true, 3, 11), true, 1000) == ClipboardObservation::kNotifyExternal);
++
++  tracker.reset(before);
++  generation = tracker.begin(ClipboardWriteKind::kSet, before, fingerprint(2), 2000);
++  CHECK(tracker.observe(snapshot(true, 2, 12), true, 1000) == ClipboardObservation::kNotifyExternal);
++
++  const auto wrapBefore = snapshot(true, 1, std::numeric_limits<std::uint32_t>::max());
++  tracker.reset(wrapBefore);
++  generation = tracker.begin(ClipboardWriteKind::kSet, wrapBefore, fingerprint(2), 2000);
++  CHECK(tracker.observe(snapshot(true, 2, 0), true, 1000) == ClipboardObservation::kNotifyExternal);
++
++  tracker.reset(before);
++  generation = tracker.begin(ClipboardWriteKind::kSet, before, fingerprint(2), 2000);
++  CHECK(tracker.observe(after, false, 1000) == ClipboardObservation::kNotifyExternal);
++
++  tracker.reset(before);
++  generation = tracker.begin(ClipboardWriteKind::kSet, before, fingerprint(2), 2000);
++  CHECK(tracker.observe(snapshot(false, 0, 0, false), true, 1000) == ClipboardObservation::kNotifyExternal);
++
++  tracker.reset(after);
++  generation = tracker.begin(ClipboardWriteKind::kSet, after, after.m_fingerprint, 2000);
++  finish = tracker.finishSet(generation, true, after, 1000);
++  CHECK(finish.m_succeeded && !finish.m_notifyExternal);
++
++  tracker.reset(before);
++  generation = tracker.begin(ClipboardWriteKind::kSet, before, fingerprint(2), 1000);
++  CHECK(tracker.observe(after, true, 1000) == ClipboardObservation::kNotifyExternal);
++
++  tracker.reset(before);
++  generation = tracker.begin(ClipboardWriteKind::kSet, before, fingerprint(2), 2000);
++  CHECK(tracker.observe(after, true, 1000) == ClipboardObservation::kSuppressSelfWrite);
++  CHECK(tracker.observe(after, true, 1001) == ClipboardObservation::kNotifyExternal);
++
++  tracker.reset(before);
++  generation = tracker.begin(ClipboardWriteKind::kSet, before, fingerprint(2), 2000);
++  finish = tracker.finishSet(generation, true, after, 1000);
++  CHECK(finish.m_succeeded && tracker.generation() == generation);
++  CHECK(tracker.observe(after, true, 1001) == ClipboardObservation::kSuppressSelfWrite);
++  CHECK(tracker.generation() == 0);
++}
++
++void testClipboardClear()
++{
++  ClipboardWriteTracker tracker;
++  const auto before = snapshot(true, 4, 20);
++  const auto empty = snapshot(false, 0, 20, true, true);
++  tracker.reset(before);
++  auto generation = tracker.begin(ClipboardWriteKind::kClear, before, empty.m_fingerprint, 2000);
++  CHECK(generation != 0);
++  CHECK(tracker.observe(empty, true, 1000) == ClipboardObservation::kSuppressSelfWrite);
++  auto finish = tracker.finishClear(generation, true, empty, empty, 1001);
++  CHECK(finish.m_succeeded && !finish.m_notifyExternal);
++
++  tracker.reset(before);
++  generation = tracker.begin(ClipboardWriteKind::kClear, before, empty.m_fingerprint, 2000);
++  finish = tracker.finishClear(generation, true, before, before, 1001);
++  CHECK(!finish.m_succeeded && finish.m_notifyExternal);
++
++  tracker.reset(empty);
++  CHECK(tracker.begin(ClipboardWriteKind::kClear, empty, empty.m_fingerprint, 2000) == 0);
++
++  tracker.reset(before);
++  generation = tracker.begin(ClipboardWriteKind::kClear, before, empty.m_fingerprint, 2000);
++  finish = tracker.finishClear(generation, true, empty, empty, 1001);
++  CHECK(!finish.m_succeeded && finish.m_notifyExternal);
++
++  tracker.reset(before);
++  generation = tracker.begin(ClipboardWriteKind::kClear, before, empty.m_fingerprint, 1000);
++  CHECK(tracker.observe(empty, true, 1000) == ClipboardObservation::kNotifyExternal);
++}
++
++void testHotKeys()
++{
++  HotKeyRegistry registry;
++  HotKeyTicket first{7, registry.add(7)};
++  CHECK(registry.registered(first));
++  CHECK(registry.beginCallback(first));
++  CHECK(registry.beginRemove(first));
++  CHECK(!registry.beginRemove(first));
++  CHECK(!registry.canErase(first));
++  CHECK(!registry.endCallback(first));
++  CHECK(!registry.canErase(first));
++  CHECK(registry.removeSucceeded(first));
++  CHECK(registry.canErase(first));
++  CHECK(registry.erase(first));
++  CHECK(!registry.registered(first));
++
++  HotKeyTicket second{7, registry.add(7)};
++  CHECK(!registry.beginCallback(first));
++  CHECK(registry.beginRemove(second));
++  CHECK(registry.removeFailed(second));
++  CHECK(registry.registered(second));
++
++  HotKeyTicket third{8, registry.add(8)};
++  CHECK(registry.beginCallback(third));
++  CHECK(registry.beginRemove(third));
++  CHECK(registry.removeSucceeded(third));
++  CHECK(!registry.registered(third));
++  CHECK(registry.endCallback(third));
++  CHECK(registry.erase(third));
++  CHECK(!registry.beginCallback(third));
++}
++
++void testCanonicalClipboardEncoding()
++{
++  const std::string text = "A";
++  const std::array<const std::uint8_t *, 3> data{
++      reinterpret_cast<const std::uint8_t *>(text.data()), nullptr, nullptr
++  };
++  const std::array<std::size_t, 3> lengths{text.size(), 0, 0};
++  const std::array<bool, 3> present{true, false, false};
++  std::vector<std::uint8_t> bytes;
++  CHECK(canonicalClipboardBytes(data, lengths, present, bytes));
++  const std::vector<std::uint8_t> expected{1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 'A'};
++  CHECK(bytes == expected);
++
++  const std::array<const std::uint8_t *, 3> invalidData{nullptr, nullptr, nullptr};
++  bytes = {42};
++  CHECK(!canonicalClipboardBytes(invalidData, lengths, present, bytes));
++  CHECK(bytes.empty());
++}
++
++} // namespace
++
++int main()
++{
++  struct TestCase
++  {
++    const char *m_id;
++    void (*m_run)();
++  };
++  const std::array<TestCase, 10> tests{
++      TestCase{"authorization_fail_closed", testAuthorization},
++      TestCase{"injection_echo_untrusted_policy", testInjectionEcho},
++      TestCase{"input_role_policy", testInputRolePolicy},
++      TestCase{"pointer_coordinate_bounds", testPointerCoordinates},
++      TestCase{"axis_numeric_boundaries", testAxisConversions},
++      TestCase{"native_failure_output_cleanup", testNativeFailureOutputCleanup},
++      TestCase{"clipboard_set_state", testClipboardSet},
++      TestCase{"clipboard_clear_state", testClipboardClear},
++      TestCase{"hotkey_deferred_cleanup", testHotKeys},
++      TestCase{"canonical_clipboard_encoding", testCanonicalClipboardEncoding},
++  };
++
++  std::size_t passed = 0;
++  for (const auto &test : tests) {
++    try {
++      test.m_run();
++      ++passed;
++      std::cout << "TEST_PASS id=" << test.m_id << '\n';
++    } catch (const std::exception &error) {
++      std::cout << "TEST_FAIL id=" << test.m_id << " reason=" << error.what() << '\n';
++    } catch (...) {
++      std::cout << "TEST_FAIL id=" << test.m_id << " reason=unknown\n";
++    }
++  }
++  const std::size_t failed = tests.size() - passed;
++  std::cout << "OHOS_SCREEN_STATE_TESTS tests=" << tests.size() << " passed=" << passed
++            << " failed=" << failed << '\n';
++  return failed == 0 ? 0 : 1;
++}

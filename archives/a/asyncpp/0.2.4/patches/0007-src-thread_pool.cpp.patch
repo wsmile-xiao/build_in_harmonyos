@@ -1,0 +1,72 @@
+--- a/src/thread_pool.cpp
++++ b/src/thread_pool.cpp
+@@ -4,20 +4,23 @@
+ 
+ namespace asyncpp {
+ 
+ 
+ thread_pool::worker::worker()
+     : m_sema(0) {}
+ 
+ 
+ thread_pool::worker::~worker() {
+     cancel();
++    if (m_thread.joinable()) {
++        m_thread.join();
++    }
+ }
+ 
+ 
+ void thread_pool::worker::insert(schedulable_promise& promise) {
+     std::unique_lock lk(m_spinlock, std::defer_lock);
+     INTERLEAVED_ACQUIRE(lk.lock());
+     const auto previous = m_promises.push_back(&promise);
+     const auto blocked = m_blocked.test(std::memory_order_relaxed);
+     INTERLEAVED(lk.unlock());
+ 
+@@ -69,21 +72,21 @@
+ 
+ schedulable_promise* thread_pool::worker::steal_from_other(pack& pack, size_t& stealing_attempt) const {
+     const size_t pack_size = pack.workers.size();
+     const size_t my_index = this - pack.workers.data();
+     const size_t victim_index = (my_index + stealing_attempt) % pack_size;
+     return pack.workers[victim_index].steal_from_this();
+ }
+ 
+ 
+ void thread_pool::worker::start(pack& pack) {
+-    m_thread = std::jthread([this, &pack] {
++    m_thread = std::thread([this, &pack] {
+         run(pack);
+     });
+ }
+ 
+ 
+ void thread_pool::worker::cancel() {
+     std::unique_lock lk(m_spinlock, std::defer_lock);
+     INTERLEAVED_ACQUIRE(lk.lock());
+     INTERLEAVED(m_cancelled.test_and_set(std::memory_order_relaxed));
+     const auto blocked = INTERLEAVED(m_blocked.test(std::memory_order_relaxed));
+@@ -101,21 +104,21 @@
+     while (!exit_loop) {
+         const auto promise = try_get_promise(pack, stealing_attempt, exit_loop);
+         if (promise) {
+             promise->resume_now();
+         }
+     }
+ }
+ 
+ 
+ thread_pool::thread_pool(size_t num_threads)
+-    : m_pack(std::vector<worker>(num_threads)), m_next_in_schedule(0) {
++    : m_pack{std::vector<worker>(num_threads)}, m_next_in_schedule(0) {
+     for (auto& worker : m_pack.workers) {
+         worker.start(m_pack);
+     }
+ }
+ 
+ 
+ void thread_pool::schedule(schedulable_promise& promise) {
+     size_t num_blocked = m_pack.num_blocked.load(std::memory_order_relaxed);
+     const auto blocked = num_blocked > 0 ? m_pack.blocked.pop() : nullptr;
+     if (blocked) {

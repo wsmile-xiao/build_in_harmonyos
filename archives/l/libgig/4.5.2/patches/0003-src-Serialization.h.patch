@@ -1,0 +1,165 @@
+--- a/src/Serialization.h
++++ b/src/Serialization.h
+@@ -532,22 +532,22 @@
+          * In most cases the result is equal to C++ sizeof(data). However for
+          * polymomorphic objects being referenced as (some) base pointer, the
+          * C++ sizeof(data) operator would potentially return a value that's
+          * smaller than the actual size of the referenced object. In such kind
+          * of scenarios this method instead returns the correct, actual (larger)
+          * size of the referenced object.
+          */
+         template<typename T>
+         static size_t sizeOf(const T& data) {
+             DataType type = dataTypeOf(data);
+-            const auto itNativeType = m_nativeTypes.find(type.internalID());
+-            return (itNativeType != m_nativeTypes.end()) ?
++            const auto itNativeType = nativeTypes().find(type.internalID());
++            return (itNativeType != nativeTypes().end()) ?
+                    itNativeType->second.size : sizeof(data);
+         }
+ 
+         /** @brief Manual registration of native C++ data types.
+          *
+          * This method allows applications to explicitly register native C/C++
+          * data types to this framework, for the purpose to allow creating new
+          * instances of those data types by this framework's reflection API at
+          * runtime.
+          *
+@@ -808,21 +808,38 @@
+         struct NativeType {
+             size_t size;
+             std::function<Object(Archive*)> allocFn;
+         };
+ 
+         String m_baseTypeName;
+         String m_customTypeName;
+         String m_customTypeName2;
+         int m_size;
+         bool m_isPointer;
+-        static std::map<String,NativeType> m_nativeTypes;
++        /** @brief Registered native data types, keyed by internal ID.
++         *
++         * Deliberately a function-local static (constructed on first use)
++         * instead of a namespace scope static data member: a static data member
++         * is dynamically initialized, while global NativeDataTypeRegistry<>
++         * instances in other translation units run their constructors as part of
++         * their own translation unit's dynamic initialization. When this library
++         * is linked statically the registrar of the consuming translation unit can
++         * run before this map is constructed (static initialization order fiasco),
++         * which made the member lookup dereference a not-yet-constructed map and
++         * crashed with SIGSEGV before main() was entered. A function-local static
++         * is initialized on first use and is therefore independent of the link
++         * order of the translation units.
++         */
++        static std::map<String,NativeType>& nativeTypes() {
++            static std::map<String,NativeType> instance;
++            return instance;
++        }
+ 
+ #if LIBGIG_SERIALIZATION_INTERNAL
+         friend DataType _popDataTypeBlob(const char*& p, const char* end);
+ #endif
+         friend class Archive;
+     };
+ 
+     /** @brief Abstract reflection of a native C++ class/struct's member variable.
+      *
+      * Provides detailed information about a specific C++ member variable of
+@@ -2020,47 +2037,47 @@
+     void DataType::registerNativeDataType() {
+         static_assert(
+             std::is_default_constructible<T>::value,
+             "missing default constructor for type: registration of data "
+             "types is only needed for creating instances of that type at "
+             "runtime by this framework's reflection API; which in turn "
+             "requires the type to provide a default constructor."
+         );
+         const DataType staticType = DataType::dataType<T>(false);
+         assert(staticType);
+-        const auto itType = m_nativeTypes.find(staticType.internalID());
+-        if (itType != m_nativeTypes.end()) {
++        const auto itType = nativeTypes().find(staticType.internalID());
++        if (itType != nativeTypes().end()) {
+             assert(itType->second.size >= sizeof(T));
+             return;
+         }
+ 
+         // register lambda function for allocating a new instance of this type
+-        m_nativeTypes[staticType.internalID()] = {
++        nativeTypes()[staticType.internalID()] = {
+             /*.size =*/ sizeof(T),
+             /*.allocFn =*/ [](Archive* archive) -> Object {
+                 T* instance = new T;
+                 Archive::SerializationRecursion<T>::serializeObject(archive, *instance);
+                 const UIDChain uids = Archive::UIDChainResolver<T>(*instance);
+                 Object& obj = archive->objectByUID(uids[0]);
+                 if (obj) return obj;
+                 const DataType type = DataType::dataTypeOf(*instance);
+                 return Object(uids, type, Object());
+             }
+         };
+     }
+ 
+     // Automatic self-registration of native data types by this framework.
+     // (SFINAE variant for types WITH default constructor)
+     template<typename T, typename std::enable_if<std::is_default_constructible<T>::value, bool>::type>
+     void DataType::registerNativeDataType(const DataType& rttiType, const T& nativeData) {
+         if (!rttiType) return;
+-        if (m_nativeTypes.find(rttiType.internalID()) != m_nativeTypes.end())
++        if (nativeTypes().find(rttiType.internalID()) != nativeTypes().end())
+             return;
+ 
+         // Ensure compile-time native data type 'T' matches passed runtime
+         // native data type 'nativeData', because we can only offer to create
+         // new instances of native data types by our reflection API if this
+         // framework is aware about the data type already. Usually this happens
+         // automatically without applications having to do anything. But
+         // this only works for types this framework gets in touch with at
+         // compile-time.
+         //
+@@ -2077,42 +2094,42 @@
+             fprintf(stderr, "Serialization Failure: run-time data type '%s' does not match compile-time data type '%s'!\n",
+                     rttiType.asLongDescr().c_str(),
+                     staticType.asLongDescr().c_str());
+             assert(false && "You may need to explicitly register this run-time "
+                             "data type by either calling "
+                             "DataType::registerNativeType<T>() or using class "
+                             "NativeDataTypeRegistry");
+         }
+ 
+         // register lambda function for allocating a new instance of this type
+-        m_nativeTypes[rttiType.internalID()] = {
++        nativeTypes()[rttiType.internalID()] = {
+             /*.size =*/ sizeof(T),
+             /*.allocFn =*/ [](Archive* archive) -> Object {
+                 T* instance = new T;
+                 Archive::SerializationRecursion<T>::serializeObject(archive, *instance);
+                 const UIDChain uids = Archive::UIDChainResolver<T>(*instance);
+                 Object& obj = archive->objectByUID(uids[0]);
+                 if (obj) return obj;
+                 const DataType type = DataType::dataTypeOf(*instance);
+                 return Object(uids, type, Object());
+             }
+         };
+     }
+ 
+     // Automatic self-registration of native data types by this framework.
+     // (SFINAE variant for types WITHOUT default constructor)
+     template<typename T, typename std::enable_if<!std::is_default_constructible<T>::value, bool>::type>
+     void DataType::registerNativeDataType(const DataType& type, const T& nativeData) {
+         if (!type) return;
+-        if (m_nativeTypes.find(type.internalID()) != m_nativeTypes.end())
++        if (nativeTypes().find(type.internalID()) != nativeTypes().end())
+             return;
+-        m_nativeTypes[type.internalID()] = {
++        nativeTypes()[type.internalID()] = {
+             /*.size =*/ sizeof(T),
+             /*.allocFn =*/ [](Archive*) -> Object {
+                 assert(false && "instance not possible: native data type does not have default constructor");
+                 return Object();
+             }
+         };
+     }
+ 
+     /**
+      * Will be thrown whenever an error occurs during an serialization or

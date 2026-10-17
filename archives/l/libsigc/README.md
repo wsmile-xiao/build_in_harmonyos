@@ -6,6 +6,7 @@ libsigc++ 为标准 C++ 提供类型安全的信号/槽（signal-slot）回调�
 
 ## 版本
 
+- **2.12.1** (2026-07-19) — Windows 交叉构建验证，状态 built
 - **2.10.8** (2026-07-12) — 适配 HarmonyOS PC (aarch64)，状态 built
 
 ## 构建系统

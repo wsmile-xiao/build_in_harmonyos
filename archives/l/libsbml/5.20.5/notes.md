@@ -1,0 +1,60 @@
+# libsbml 5.20.5 适配笔记
+
+## 编译环境
+- 构建系统: cmake
+- 编译日期: 2026-09-19
+- 编译器: clang/clang++ 15 (HarmonyOS aarch64)
+- 状态: built (待真机预检确认)
+
+## 上游
+- 仓库: https://github.com/sbmlteam/libsbml
+- 版本: v5.20.5 (2025-05-05)
+- 源码: https://github.com/sbmlteam/libsbml/archive/refs/tags/v5.20.5.tar.gz
+- sha256: 21c88c753a4a031f157a033de3810488b86f003e684c6ca7aa3d6e26e7e0acfc
+- 许可证: LGPL
+
+## 依赖版本
+- libxml2/2.15.3 (XML 解析后端, WITH_LIBXML=ON)
+- zlib/1.3.1 (压缩支持, WITH_ZLIB=ON)
+- bzip2/1.0.8 (压缩支持, WITH_BZIP2=ON)
+- check/0.15.2 (仅上游测试, test_requires, WITH_CHECK=ON)
+
+## 关键适配
+- 关闭 SWIG/语言绑定 (WITH_SWIG=OFF), 关闭示例 (WITH_EXAMPLES=OFF), 启用稳定 L3 包 (WITH_STABLE_PACKAGES=ON)。
+- 通过 CMakeToolchain cache 变量显式传入 LIBXML/LIBBZ/ZLIB/LIBCHECK 的库与头文件路径, 适配上游自定义 Find 模块在交叉环境的查找。
+- FindLIBXML 的 ZLIB::ZLIB 改明文路径修复直接在 source() 内做子串替换 (无 patches/ 目录, 无 unified diff hunk, 不受行号/上下文漂移影响): 内层 try_compile 不继承 imported target, CMake 4.x 下用 ${ZLIB_LIBRARY} 明文路径原样传递, 链接语义不变。
+- libcheck 分支测试在 OHOS 上设 CK_FORK=no, TMPDIR/TMP/TEMP 指向 build 内 tmp, 与 ding-libs 同法。
+- OHOS 产物 .so 经 llvm-objcopy 剥旧 .codesign 后 binary-sign-tool 重签。
+- 无 patches/ 补丁 (原 unified diff 补丁因 hunk 失配被移除, 改为 source() 内子串替换), 无平台宏注入。
+
+## 上游测试审计
+- 上游测试框架: ctest + libcheck, 开关 WITH_CHECK=ON。
+- 每个 src/*/test 目录构建一个 ctest 可执行文件 (核心 sbml/xml/util/validator/math/units/annotation 及 L3 包 comp/fbc/groups/layout/multi/qual/render/distrib/spatial)。
+- conanfile build() 运行 ctest --output-on-failure 并输出 HMBS_UPSTREAM_TEST_RESULT, 计数来自真机 CTestTestfile 实际发现数。
+- test_package 消费者测试: test_libsbml.c 2 个用例 (核心建模 + 写读回环), 输出 HMBS_TEST_PACKAGE_RESULT。
+
+## 验证结果
+- 待 HMBS 真机预检返回后如实回填 ctest 执行数/通过数与 test_package 计数。
+
+## 遇到的问题与解决方案
+| # | 问题 | 根因 | 解决方案 |
+|---|------|------|----------|
+| 1 | 上游 Find 模块在 Conan 交叉环境找不到依赖 | 自定义 FindLIBXML/FindBZ2/FindCHECK 只搜标准路径 | generate() 显式设置 LIBXML_LIBRARY 等 cache 变量 |
+| 2 | 真机 cmake 4.4.3 在 project() 前中断, 编译器识别 unknown (clang/clang++) | 上游 `cmake_minimum_required(VERSION 3.1...3.19)` 下限 < 3.5, CMake ≥ 4.0 已移除该兼容档 | 主配方与 test_package 均经 `tc.cache_variables["CMAKE_POLICY_VERSION_MINIMUM"]="3.5"` 透传 (同 oystr/wxWidgets/type-safe), manifest 同步该开关 |
+| 3 | 上轮 POLICY 修复后同指纹复现, 仍在 project() 报编译器识别 unknown | 真机摘要截断了编译器路径后的关键行, 真实细节未知; 同工具链下 ls-hpack/2.3.5 (PR #7487) 实证过宿主 lld 因 libxml2.so.16 无法启动导致 CMake 探针失败 (E557) | 主配方与 test_package 在 build() 前加真实 compile+link 门禁: ambient 通过则无操作, 否则从工具链派生宿主运行时并局部 prepend LD_LIBRARY_PATH, 非宿主库问题则 fail-closed 输出真实探针日志 (无编译器检查绕过, 无硬编码路径) |
+| 4 | E557 门禁上线后同指纹第 3 次复现, 且回溯仍定位到 cmake.configure() (而非门禁抛错) | 回溯证据链: 门禁探针在 configure 之前运行, 未抛错即证明同编译器独立 compile+link 成功, 宿主运行时 (E557) 不是根因, 故障在 CMake 调用链自身; 另 libsbml 是唯一同时经 cache_variables 与 tc.variables 双通道设置 CMAKE_SYSTEM_NAME 的配方 | 主配方与 test_package 改为单通道覆盖 (仅 cache_variables, 对齐已合入 oystr/0.2.0); 主配方 configure/build 失败时把 CMakeError.log/CMakeOutput.log 尾部打进 conan 输出, 下轮基于真实编译器报错而非摘要猜测 (仅诊断, 不掩盖失败) |
+| 5 | 上轮诊断补丁上线后同指纹第 4 次复现, 且回溯新增 `AttributeError: 'CMake' object has no attribute 'build_folder'` (conanfile.py:471) | 新直接证据: Conan 2.30 的 CMake helper 根本没有 `build_folder` 属性, except 分支的取证调用自身抛错并掩盖了原始 cmake.configure 异常, 故三轮始终看不到 CMakeError.log 真实内容; 另裸探针 (`cc src -o bin`, 无 toolchain flags) 与 CMake 带 flags 调用 (OHOS-adapted conan 的 sysroot/target/arch + conan_toolchain.cmake) 不可比, ambient 通过不能证伪工具链调用链, 且 profile 已全局提供 SDK llvm/lib 的 LD_LIBRARY_PATH, E557 假设三轮无一次触发 | 第二策略周期新路线: 主配方 build() 不再调用 E557 裸探针 (helpers 保留未调用); 新增 `_cmake_binary_dir()` 经 self.build_folder + CMakeCache.txt 发现真实二进制目录, 全面替代 `cmake.build_folder` (configure/build 失败取证与 ctest 发现/执行目录); `_dump_cmake_diagnostics()` 改为永不掩盖原始异常, 并追加 conan_toolchain.cmake 关键行 (SYSTEM_NAME/PROCESSOR/COMPILER/SYSROOT/FLAGS/POLICY), 下轮按真实工具链证据而非摘要定因 |
+| 6 | 上轮取证修复生效 (AttributeError 消失, 回到干净 `cmake.configure()` Error 1) 但仍同指纹失败, 且取证报 `CMakeError.log/CMakeOutput.log not found`、40 行工具链原文被摘要截断 | 新直接证据: 诊断行已存活到日志尾部, 证明取证通道可用, 但搜寻范围仅限 build/Release 单目录、输出过长被截断, 故拿不到真实编译器错误; 裸 flags 与带 flags 调用的分歧仍是唯一未验证的差异通道 | 本轮换策略为证据前置+短行取证: build() 在 configure 之前运行只取证不阻断的 `_flagged_probe_evidence()` (从已生成 toolchain 提取 --target/--sysroot/-stdlib/-march 复现 CMake 真实调用并打印 `clang -v` 身份); 诊断改为先打印目录结构 (含父目录)、向父目录扩展搜索、工具链压缩为每键一行短行 (≤14 行×220 字符) |
+| 7 | 真机 compile 阶段 `tar: child process: Cannot fork: Out of memory` (2026-09-20, 上游测试 0/0/0) | 小内存盒峰值 RSS 证据: 连 `tar` fork 子进程都失败, 说明整机内存耗尽而非单一命令参数错误; libsbml 大生成 TU (ASTNode/SBMLDocument) 在默认 Release -O3 下单 TU 即达 GB 级, 大共享库链接再叠一层峰值 | generate() 经 per-config cache 通道把 Release/RelWithDebInfo 钳到 `-O1 -DNDEBUG -g0`、MinSizeRel 钳到 `-Os -DNDEBUG -g0`, 另经 `extra_cflags/extra_cxxflags` (hasattr 守卫) 给其他配置加 `-O1 -g0` 兜底; WITH_CHECK 保持 ON, 不为内存关闭上游测试; 头文件/库路径透传与诊断取证逻辑不动 |
+| 8 | 真机 compile 阶段 `CMAKE_C_COMPILER: /data/service/hnp/bin/clang` 不存在, flagged 探针 `exec failed: [Errno 2] No such file` 且 `clang -v failed` (2026-09-20) | 直接证据: profile 写死该路径 (ci/conan/profiles/ohos-aarch64), 预检机上该文件缺失且 PATH 内无 clang (故 _get_cc 回退仍返回原缺失路径); 另 flagged 探针正则 `\S+` 把工具链引号尾 `")` 吃进 token (`-stdlib=libc++")`), 编译器恢复后会毒化探针调用 | 只取证不阻断: `_flagged_probe_evidence()` 清洗 token 尾部 `"')`/`;` 并拆分 `--sysroot <path>` 为双 argv, 另新增 `cc_exists/which` 一行证据以区分环境缺失与配方问题 (仍不绕过 CMake 真实探针); test_package OHOS 运行壳按 CONFIG_SHELL→SHELL(/bin/sh, HMBS 注入)→/bin/sh→SDK bash 选首个存在文件, 避免工具链挂载异常时硬编码 bash 路径先失败 |
+| 9 | 真机 compile 阶段 CMAKE_C/CXX_COMPILER 仍指向缺失的 /data/service/hnp/bin/clang{,++}，flagged 探针 cc_exists=False 但 which 解析到 harmonybrew clang，且工具链仍为旧路径 (2026-09-20 16:48) | 上轮只取证不阻断：generate() 内 _resolve_compilers 在 generate 进程环境执行，此时 hmbs/Conan buildenv 尚未 source，PATH 看不到迁移后的 harmonybrew 编译器，故 fallback 未触发；build() 内探针虽看到 PATH 编译器但只记录不修复，conan_toolchain.cmake 仍携带旧绝对路径导致 project() 识别失败 | 双阶段 miss-only 修复：保留 generate() 透传；新增 build() 内 _repair_stale_toolchain_compilers()，在 configure 前重写已生成 conan_toolchain.cmake 中缺失的 CMAKE_C/CXX_COMPILER（basename+PATH 派生、clang++ 取 C 同目录兄弟，缺失才覆盖、无硬编码 SDK 路径，找不到则 fail-closed 进诊断）；主配方与 test_package 同步该逻辑，探针后移用于验证修复后编译器 |
+| 10 | 真机 configure 在 FindLIBXML.cmake:125 的 CHECK_C_SOURCE_COMPILES 内层 try_compile 报 Target cmTC_* links to ZLIB::ZLIB but the target was not found (2026-09-21，编译器回退已生效，工具链为 harmonybrew clang) | 上轮编译器修复有效但暴露下一层：FindLIBXML 把 imported target 名 ZLIB::ZLIB 填入 CMAKE_REQUIRED_LIBRARIES，而内层 try_compile 是全新工程、未执行 find_package(ZLIB)，故目标不可见；CMake 4.4 下直接报错。配方注入 ZLIB_LIBRARY 缓存使 EXISTS 分支恒真，触发该路径 | 新路线：conandata 新增 patches/0001-findlibxml-zlib-plain-lib.patch，仅把 FindLIBXML 中 ADDITIONAL_LIBS 的 ZLIB::ZLIB 换为同文件的 ${ZLIB_LIBRARY} 明文路径（try_compile 可原样传递，链接语义不变；LIBXML::LIBXML 接口同步为明文路径）；编译器双阶段修复保留，不回退 |
+| 11 | Signal 9 empty-log OOM in compile (2026-09-21, after -O1 guard, upstream 0/0/0) | OOM-killer took compiler: Release -O1 still too heavy for ASTNode/SBMLDocument TUs plus shared link, Debug unclamped (default -g), link flags unclamped | ALL configs to -O0 -g0 (Release down from -O1, MinSizeRel down from -Os, Debug newly clamped), base C/CXXFLAGS plus EXE/SHARED/MODULE linker -g0, extra belt -O0/-g0, VERBOSE per-file evidence, cmake.build -j1 serial; WITH_CHECK stays ON |
+| 12 | 真机 compile 阶段 `Failed to apply patch: patches/0001-findlibxml-zlib-plain-lib.patch` + `source file is different - CMakeModules/FindLIBXML.cmake` (2026-09-21, 编译器回退已生效) | 直接证据: 原 unified diff 的 hunk 头/上下文与 v5.20.5 真实文件失配 (raw 文件该段无缩进, hunk 行号 -70 漂移), conan 严格打补丁直接失败; 另本轮摘要同时报 github 源码下载 connect timeout (重试后成功, 非致命但需按守则加镜像回退) | 删除 patches/ 目录与 conandata patches 段, 改为 source() 内 `_patch_findlibxml_zlib()` 精确子串替换 (无 hunk, 幂等, 缺失时 fail-closed 警告); conandata sources.url 改为有序镜像列表 (gh-proxy 系 6 个镜像在前, 官方 github 在最后回退, sha256 不变, 与 zopfli/fvm 既有配方同式) |
+| 13 | 真机 configure 生成步 Target sbml links to ZLIB::ZLIB but target was not found，外加全部 CHECK::CHECK 测试目标同样缺失 (2026-09-21) | Conan CMakeToolchain 默认 CMAKE_FIND_PACKAGE_PREFER_CONFIG=ON，find_package 走 CMakeDeps CONFIG 文件而非上游 CMakeModules Find 模块；仓内 zlib/bzip2 默认小写目标、libxml2 为 LibXml2::LibXml2、check 为 Check::check，与上游全大写目标失配 | generate() 经 CMakeDeps.set_property 把四依赖的 cmake_file_name/cmake_target_name 重映射为上游拼写：ZLIB/ZLIB::ZLIB、BZ2/BZ2::BZ2、LIBXML/LIBXML::LIBXML、CHECK/CHECK::CHECK（同 quazip/groonga 既有写法）；FindLIBXML 子串补丁与 cache 变量透传保留为兜底 |
+| 14 | Preflight 2026-09-21 shared link fails: ld.lld relocation R_AARCH64_ADR_PREL_PG_HI21 against z_errmsg (libz.a(zutil.o), referenced by zError); libsbml.so link pulls static non-PIC zlib | OHOS zlib/1.3.1 is static-only by design (R26, no shared option, no -fPIC) and bzip2/1.0.8 rejects shared=True on OHOS (validate, HMDFS symlink); shared libsbml cannot link static non-PIC compression deps on aarch64 (same signature as bacula-fd/E005) | configure() forced shared=False on OHOS (superseded by row 15: the assignment itself crashes when shared=True is requested externally); static archive has no shared-link step, WITH_ZLIB/WITH_BZIP2 stay ON (static path unchanged) |
+| 15 | 真机 computing dependency graph 直接失败: `ERROR: libsbml/5.20.5: Error in configure() method, line 51 self.options.shared = False / ConanException: Incorrect attempt to modify option 'shared' from 'True' to 'False'` (2026-09-21, 上游测试 0/0/0) | 直接证据: row 14 的强制静态赋值与外部请求的 shared=True 冲突, Conan 禁止在 configure() 内覆盖外部显式选项值, 故整个依赖图计算在编译前即中断; 另 zlib 静态无 PIC 是既定设计 (R26), 不能为单个库修改 | 删除 configure() 内的强制赋值 (仅保留 shared 下 rm_safe fPIC); generate() 内 OHOS+shared 时 WITH_ZLIB/WITH_BZIP2=OFF (上游以此二开关门控压缩库链接, OFF 即跳过失败的共享链接, 无其他构建变化), OHOS 静态仍为 ON 保持压缩功能; package_info 注释同步 (按 live shared 选项暴露 sbml/sbml-static) |
+| 16 | shared libsbml.so built OK (56pct Built target sbml) then test link fails: ld.lld unable to find library -lsbml-static (2026-09-23, upstream 0/0/0) | row15 only fixed the shared link (WITH_ZLIB/WITH_BZIP2=OFF lets libsbml.so link), exposing next layer: top CMakeLists maps DEFINED BUILD_SHARED_LIBS=ON to LIBSBML_SKIP_STATIC_LIBRARY=ON while every upstream test CMakeLists hardcodes TEST_LIB=${LIBSBML_LIBRARY}-static, so shared builds define no sbml-static target and each test link must fail; toolchain always defines BUILD_SHARED_LIBS so a -D override would be overwritten by the earlier plain set() | new route: source() adds _patch_keep_static_for_tests() appending set(LIBSBML_SKIP_STATIC_LIBRARY OFF) after find_package(CHECK REQUIRED) and before add_subdirectory(src); shared+static dual build when WITH_CHECK, packaging still announces shared lib per live option; idempotent, fail-closed on missing anchor; compression and compiler fixes kept |
+| 17 | 2026-09-24 preflight repeats -lsbml-static link failure at cmake.build line 966 with the row16 patch present in the exported recipe (export hash changed) | row16 root-cause and dual-build route were correct, but its idempotency guard checked the generic string set(LIBSBML_SKIP_STATIC_LIBRARY OFF), which already exists in the pristine top CMakeLists else-branch, so the patch self-skipped on every fresh source tree and never inserted the override; simulated pristine check confirms old guard skips True | different implementation of the same correct route: guard now checks the unique HMBS sentinel comment instead of the generic set line; verified by simulation (pristine applies, second run skips); no test-scope change |
+| 18 | 2026-09-24 preflight package() fails Error 127 `/bin/sh: /data/service/hnp/bin/binary-sign-tool: inaccessible or not found` while build + install + upstream 35/35 ctest already passed | 硬编码签名路径在新预检机上不存在 (工具链已迁移至 harmonybrew, PATH 有 clang 而 /data/service/hnp/bin 缺失); 配方把签名当硬门禁, 单点失败掩盖了已成功的构建与测试 | 新增 _resolve_sign_tool (legacy 存在则用, 否则 PATH 查找, 找不到不抛错) + _sign_shared_libs 改为 best-effort (缺工具仅警告跳过, 单文件失败仅警告继续, 与 knowledge/operations/packaging.md fallback 一致); 正式签名仍由 ci/artifacts/sign.sh 负责 |
+| 19 | 2026-09-24 preflight compile Signal 9 during UniqueSpatialIds.cpp.o (sbml-static, 24%) despite -O0 -g0 -j1 VERBOSE; same dual build had passed 35/35 once | row16-17 双编路线正确但使每个 TU 编译两次, 小内存盒峰值 flaky: -O0 -g0 -j1 已是单 TU 最低档, 仍被 OOM-killer 杀掉, 说明需减少总编译量而非再压 flags; E557/工具链/Find 模块均已排除 (编译器回退生效, configure 已过) | 同测试口径换轻路线: source() 内 _patch_keep_static_for_tests 改为把各 */test/CMakeLists 的 ${LIBSBML_LIBRARY}-static 换为共享 ${LIBSBML_LIBRARY} (仅测试链接目标, 断言与用例不变), 恢复 shared-only 单编 (回滚 row16 双编开关时只删哨兵两行, 不动上游原生 SKIP_STATIC 行); -O0 -g0 -j1 与压缩/签名修复保留 |

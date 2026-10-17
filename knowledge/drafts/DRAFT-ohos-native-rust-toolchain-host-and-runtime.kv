@@ -1,0 +1,64 @@
+id: ohos-native-rust-toolchain-host-and-runtime
+title: OHOS PC 上跑 Rust 工具链——必须选官方 aarch64-unknown-linux-ohos host，并补齐签名/链接器/CA/SONAME 四件套
+category: rust, toolchain, ohos, signing, cargo, cross-platform
+severity: 3
+error_signature: |
+  症状链（同一台鸿蒙 PC、同一版本号，逐个踩过去）：
+  1. rustup-init（aarch64-unknown-linux-musl）签名后运行 → `Signal 11 (core dumped)`，
+     连 `--version` / `--help` 都在打印任何输出之前就崩。
+  2. rustc（aarch64-unknown-linux-musl）→
+     `Error loading shared library libgcc_s.so.1: (needed by librustc_driver-*.so)` + SIGSEGV。
+  3. cargo → `error: linker 'cc' not found`
+  4. cargo → `failed to get serde ... download of config.json failed ... SSL certificate
+     OpenSSL verify result: unable to get local issuer certificate (20)`
+  5. cargo → `Error loading shared library libssl.so` / `libcrypto.so`
+  6. 签名后的 rustc/cargo → `can't execute: Permission denied`
+root_cause: |
+  (1)(2) 是**host 选择错误**，不是平台缺陷。Rust 官方为三个 aarch64 host 都发了
+  tarball，但只有 `aarch64-unknown-linux-ohos` 的运行时与本内核兼容；
+  `-musl` / `-gnu` host 的二进制启动即崩。
+  排除平台因素的对照实验：同一台机器上用设备自带 clang 编出的
+  静态（`-static`）、static-PIE、多线程（pthread_create/join）、以及
+  带 20 MB 附加段的二进制**全部正常运行**——所以不是"OHOS 不支持静态链接/static-PIE"。
+  另：musl host 的 `librustc_driver.so` 需要 GCC 版本化的
+  `_Unwind_Resume@GCC_3.0` 等符号，而 OHOS 的 `libc.so` / `libc++_shared.so`
+  **都不导出** `_Unwind_*`（其 unwinder 是静态链进各二进制的）。
+  但这条在选对 host 后自动消失：`-ohos` host 的 rustc 只 `NEEDED libc.so`。
+
+  (3) 设备上没有 `cc`（只有 clang/clang++），Rust 默认 linker 名是 `cc`。
+  (4) cargo 链接的 OpenSSL 找不到 CA bundle（curl 能联网不代表 cargo 能，
+      curl 有自己的 CAfile 探测）。
+  (5) OHOS 的 openssl@3 只提供 `libssl.so.3` / `libcrypto.so.3`（SONAME 即 .so.3），
+      而 cargo 的 DT_NEEDED 写的是 `libssl.so` / `libcrypto.so`，名字对不上。
+  (6) `binary-sign-tool sign` 输出的文件**丢失可执行位**（须补 `chmod +x`）。
+solution: |
+  0. 先确认是 OHOS host 支持：`https://static.rust-lang.org/dist/` 下
+     `rustc-<ver>-aarch64-unknown-linux-ohos.tar.xz`、`cargo-...`、`rust-std-...`
+     都要 HTTP 200；`channel-rust-nightly.toml` 里也能搜到该 target 段。
+  1. 下 rustc + cargo + rust-std 三个 **-ohos** 组件，各自 `./install.sh
+     --prefix=<P> --disable-ldconfig`。
+  2. 签名 + 补可执行位（两件事都要做）：
+     `binary-sign-tool sign -inFile X -outFile X.s -selfSign 1 && chmod +x X.s && mv X.s X`
+     对 `<P>/bin/*` 与 `<P>/lib/**/*.so` 全量执行。
+  3. `<P>/bin/rustc -vV | grep host` 应输出 `aarch64-unknown-linux-ohos`。
+  4. 写 `$HOME/.cargo/config.toml`：
+     `[target.aarch64-unknown-linux-ohos]` / `linker = "/data/service/hnp/bin/clang"`
+  5. 造 OpenSSL 桥接目录（符号链接，不改 SONAME）：
+     `libssl.so -> .../libssl.so.3`，`libcrypto.so -> .../libcrypto.so.3`，
+     `libz.so -> .../libz.so`；运行时 `LD_LIBRARY_PATH` 指向它 + `<P>/lib`。
+  6. 联网构建时导出 `SSL_CERT_FILE=/etc/ssl/certs/cacert.pem`
+     （`CARGO_HTTP_CAINFO` 同值）。
+  7. C/C++ 依赖（`cc` crate）用环境变量指到设备工具链：
+     `CC_aarch64_unknown_linux_ohos=/data/service/hnp/bin/clang`、
+     `AR_...=/data/service/hnp/bin/ar`。
+  8. 上游 crate 若要 `cargo test` 全绿，注意 **rustdoc 未随 -ohos host 发布**，
+     doc-tests 必然失败；用 `cargo test --lib` 跑单元测试即可拿到退出码 0，
+     且 doc-test 本就不计入用例数。
+fallback: |
+  - 只在 CI 里要 Rust 结果、不想装原生工具链时：可在 Linux aarch64 上跑同一套
+    `cargo test --lib` 作为基线对照，但**真机执行证据仍需在鸿蒙上出**，两者不可互替。
+  - 若某 crate 的 `build.rs` 需要真正的交叉链接器而非 clang 驱动，可在
+    `.cargo/config.toml` 里改用 `-C linker=<clang> -C link-arg=--target=aarch64-linux-ohos`。
+  - 遇到 `_Unwind_*@GCC_*` 未定义时，**不要**去造 libgcc_s shim：先检查是不是
+    选错了 host。选对 `-ohos` host 后该依赖不存在。
+verify_builds: "blst 0.3.17 Rust 绑定 29/29 真机通过（cargo test --lib，rustc 1.98.1 aarch64-unknown-linux-ohos host）"

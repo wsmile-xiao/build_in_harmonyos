@@ -1,0 +1,188 @@
+# ═══ Draft knowledge entry — automake 树内 make check 直接执行刚链接出的二进制，
+#     而它的共享依赖只在 conan 包目录里：加载器在 main() 之前就判死，
+#     5 个场景输出全空 → 看起来像「用例断言不通过」实为加载器限制 ═══
+# Timestamp: 2026-09-20
+# Software: xauth 1.1.4 (X.Org Xauthority CLI；同族：ezstream 1.0.2, aaphoto 0.45)
+# Gate: G2 (conan create 的 build() 内实跑上游 make check)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-xauth-1.1.4-in-tree-check-binary-loader-cannot-find-conan-shared-deps
+trigger_tool:           clang|llvm|autotools|conan
+phase:                  test|build
+error_signature:        Error loading shared library .*\.so\.\d*: .needed by|
+                         Error relocating .*: .*: symbol not found|
+                         FAIL: test_\w+|#### TOTAL: .* / PASS: 0 / FAIL: \d+
+error_signature_2:      Tests?uite summary.*FAIL: \d+|Error 2 while executing
+
+severity:               3
+category:               autotools, make-check, dynamic-linker, conan, run-environment, ohos
+
+match_keywords:         Error loading shared library, Error relocating, symbol not found,
+                        needed by, make check, TESTS =, automake parallel-tests,
+                        LD_LIBRARY_PATH, VirtualRunEnv, conanrun, DT_NEEDED, ldd,
+                        llvm-readelf -d, check-TESTS, test-suite.log, erofs 只读,
+                        树内测试, 刚链接出的二进制, 5/5 FAIL, 夹具全不匹配,
+                        xauth, libX11.so.6, libxau, libxcb, libxdmcp
+
+title:                  automake 的 `make check` 直接执行**刚链接出来的**测试二进制时，
+                        它的共享依赖只在 conan 包目录里而加载器搜不到 →
+                        场景输出全空、diff 全不匹配，看起来像「用例不通过」，
+                        实际是「进程根本没起来」
+
+root_cause: >
+  automake 的 parallel-tests 驱动（check-TESTS → test-driver）在**构建树内**直接
+  执行被测程序（xauth 的 tests/test_xauth 里是 `../xauth "$@"`），没有任何包装层。
+  而 conan 配方链接出的二进制把 libX11.so.6 / libXau.so.6 记成 DT_NEEDED，
+  这些 .so 只存在于 conan 包缓存目录，**不在** OHOS 加载器（musl ld.so）的默认
+  搜索路径里，配方也从未为 `make check` 注入过运行环境（Autotools 助手走的是
+  conanbuild 环境，那是 CPPFLAGS/LDFLAGS 一类的**编译期**变量，不含
+  LD_LIBRARY_PATH）。
+  于是加载器在 main() 之前就拒绝启动进程，stderr 里只有
+      Error loading shared library libX11.so.6: (needed by ../xauth)
+      Error relocating ../xauth: XCloseDisplay: symbol not found
+  这一族加载器报文。夹具驱动的测试把每个场景的 stdout/stderr 重定向到文件后
+  与随包 .stdout/.stderr 逐一 diff：进程压根没跑，产物文件是空的（或只剩
+  加载器报文），于是**夹具里的每一行**都变成 diff 的 `>` 行，报告成
+  「N 个用例全 FAIL」。
+  辨识要点：这是一条**假失败**——它与「用例断言不通过」在日志上长得几乎一样，
+  唯一的硬证据是 diff 里出现「期望行全为 `>`、实际行全是 loading/relocating
+  报文」，以及该二进制在**换 worker 后同现象复现**（因为这不是执行环境抖动，
+  而是缺失环境变量这个确定性事实）。
+
+affected_scope: >
+  所有「上游 make check / ctest 在构建树内直接执行产物、产物动态链接 conan
+  包提供的 .so」的 autotools 适配包；OHOS 上尤其普遍，因为 X11/glib/ffmpeg
+  一族的 conan 包都是 shared-only，且加载器没有 /usr/local/lib 之类的兜底
+  搜索路径。xauth 1.1.4 实证：5 个 *.script 场景在两个不同 worker 上同时
+  FAIL（CI #53739 CI-016 / #53741 CI-032），日志一模一样。
+  同族先例：ezstream 1.0.2（make check 14/14 FAIL，exit 127）、
+  aaphoto 0.45（configure conftest 阶段就报 Error loading shared library），
+  机制完全相同、失败时机不同（conftest / 测试程序）。
+
+verification_cmd: >
+  # (1) 取 CI 构建日志尾部，不要只信评论里的「失败诊断/类别」（常写成「编译失败」）
+  GET /api/ci/builds/<id>/log   # → logTail 里搜下面这条，命中即本条
+  #   grep -n "Error loading shared library\|Error relocating" <<< "$logTail"
+  # (2) 在本地/worker 上核对二进制的 DT_NEEDED 与实际可解析性
+  llvm-readelf -d build/tests/test_xauth 2>/dev/null || llvm-readelf -d build/xauth
+  #   → NEEDED 里出现 libX11.so.6 / libXau.so.6 / libXcb.so.1
+  LD_LIBRARY_PATH=<各依赖包>/lib llvm-readelf -d build/xauth >/dev/null  # 无输出=OK
+  # (3) 反向确认是环境而非用例：给 make check 补上运行环境后同一份夹具应全过
+  #     LD_LIBRARY_PATH=$PWD/<...>/lib make check -j1
+  # (4) 确认递归 NEEDED 面（决定了要拼哪些 libdir）
+  llvm-readelf -d <依赖包>/lib/libX11.so.6 | grep NEEDED   # → libxcb.so.1 …
+  llvm-readelf -d <依赖包>/lib/libxcb.so.1 | grep NEEDED   # → libXdmcp.so.6 …
+
+rec_priority:           1
+rec_approach:           scope-LD_LIBRARY_PATH-over-whole-dep-graph-around-the-check-call
+rec_description: >
+  做法：(a) 在 build() 里、`make check` 调用**前后**用 try/finally 设置/恢复
+  `LD_LIBRARY_PATH`，值 = 依赖图里**全部**包的 libdir 拼上原有值
+  （Conan 2: `for _, dep in self.dependencies.items():
+  dep.cpp_info.aggregated_components().libdirs`，按图序去重）。
+  注意必须取**整张图**而不是只取参与链接的那几个包：xauth 链接行只有
+  libX11/libXext/libXau，但运行期 ld.so 还要沿 DT_NEEDED 递归找到
+  libxcb.so.1 与 libXdmcp.so.6（它们一个符号都不参与链接，却必须有路径）。
+  (b) 用 `os.pathsep` 拼接并把原值放在**末尾**，不要覆盖外部已有的
+  LD_LIBRARY_PATH（CI worker 可能已为 libc++_shared 设置过）。
+  (c) 作用域只包住测试调用，`make install`/`package()` 不受影响
+  （与 TMPDIR/DATADIR 的注入合并进同一份 try/finally 恢复表最省事）。
+  (d) 若日志里还同时出现加载器找不到 `libc++_shared.so`，再把工具链的 libc++
+  目录一并拼入（`clang++ -print-file-name=libc++_shared.so` 取绝对路径，
+  同 ezstream）。
+  (e) 配方里保留「check 失败时把 tests/out.stdout|out.stderr|test_xauth.log
+  倒到构建控制台」的取证代码：CI 只回传约 4000 字符的日志尾，
+  而这条线索恰好出现在 Testsuite summary 之前，不主动打印就永远看不到。
+rec_command: >
+  # conanfile.py —— 与 TMPDIR/DATADIR 合并进同一张恢复表
+  prior = {k: os.environ.get(k) for k in ("TMPDIR", "DATADIR", "LD_LIBRARY_PATH")}
+  libdirs = self._dependency_libdirs()          # 整图，含仅递归 NEEDED 的包
+  os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(
+      libdirs + ([prior["LD_LIBRARY_PATH"]] if prior["LD_LIBRARY_PATH"] else []))
+  try:
+      autotools.make(target="check", args=["-j1"])
+  finally:
+      for k, v in prior.items():
+          os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+  # def _dependency_libdirs(self):
+  #     out = []
+  #     for _, dep in self.dependencies.items():
+  #         for p in dep.cpp_info.aggregated_components().libdirs:
+  #             if p not in out: out.append(p)
+  #     return out
+rec_auto_fix:           true
+rec_impl:               recipe-side-build
+
+fallback_priority:      2
+fallback_approach:      generate-virtualrunenv-and-source-conanrun-before-check
+fallback_description: >
+  不用手拼 libdir，而是让 Conan 自己算：在 generate() 里 `VirtualRunEnv(self).generate()`
+  （或在 build() 里 `Environment` + `env.vars(self, scope="build").save_script(...)`，
+  同 aaphoto 0.45），再把 `source conanrun.sh && make check` 串成一条命令。
+  语义上更「Conan 正统」（run 环境由 cpp_info 推导，未来依赖变化自动跟随），
+  代价是多一次文件往返、且要确认 conanrun.sh 的 scope 与 Autotools 助手的
+  conanbuild 环境不会互相覆盖。手拼 libdir 的版本更短、更易读日志（失败时
+  能把实际 LD_LIBRARY_PATH 打进诊断区），因此列为首选。
+fallback_command:       source conanrun.sh && make check -j1
+fallback_auto_fix:      true
+fallback_impl:          recipe-side-generate
+
+forbid_1_pattern:       把.*make check.*改成.*\|\| true|check.*non-blocking|
+                        output\.warning.*make check
+forbid_1_reason:        这条是**假失败**，把它降级成 warn 就等于永久放弃上游
+                        回归套件（rule4 明确禁止「因为环境问题而静默/降级跳过」）；
+                        而且真出问题时再也收不到信号——降级掩盖的恰好是
+                        「二进制根本没跑起来」这种最严重的情形。
+forbid_1_consequence:   门禁绿了但没有任何上游用例被真正执行；评审视为规避。
+forbid_2_pattern:       LD_LIBRARY_PATH.*=.*_LINK_DEPS|只.*_LINK_DEPS.*libdir
+forbid_2_reason:        只把「参与链接行的包」拼进 LD_LIBRARY_PATH 会漏掉
+                        **仅被递归 NEEDED** 的包：xauth 的链接行没有
+                        libxcb/libxdmcp，但 libX11.so.6 的 DT_NEEDED 指向
+                        libxcb.so.1、libxcb 又指向 libXdmcp.so.6。
+forbid_2_consequence:   症状从「libX11 找不到」变成「libX11 找到了但它的依赖
+                        找不到」，同样的假失败换个库名再来一轮 CI。
+forbid_3_pattern:       改.*tests/test_xauth|patch.*setup-sourced|sed.*\.script|
+                        cp .*fixtures.*'
+forbid_3_reason:        上游测试脚本与夹具是**逐字节比对**契约的一部分；
+                        改动它们等于把「验证上游行为」换成「验证我改过的行为」。
+                        本条的干预点全部是运行期环境变量，不碰脚本与夹具。
+forbid_3_consequence:   评审不可信；夹具与脚本的 sha256 对不上官方 tarball。
+forbid_4_pattern:       rpath.*conan2/p/|-Wl,-rpath,.*\.cache/conan|patchelf --set-rpath
+forbid_4_reason:        conan 包缓存路径是**机器相关**的绝对路径，写进 ELF 的
+                        DT_RPATH/DT_RUNPATH 会让产物不可重定位（换机器/换缓存
+                        目录即失效），也违反 conan 包「二进制可移动」的基本约定。
+                        运行期定位共享库的正解是运行环境（LD_LIBRARY_PATH /
+                        conanrun），不是把构建机路径烧进二进制。
+forbid_4_consequence:   包在构建机上能用、装到别的机器上就加载失败；
+                        且掩盖了「应通过 package_info/runenv 暴露依赖」这个真问题。
+
+principles:             P006, P005
+causes:                 []
+caused_by:              []
+similar_to:             ezstream/1.0.2（make check 14/14 FAIL、exit 127，
+                        根因同为本条：测试二进制动态链接 conan 依赖的 .so 而
+                        LD_LIBRARY_PATH 未含包缓存目录）、
+                        aaphoto/0.45（同机制但在 configure 的 conftest 阶段
+                        就爆发：conftest 链接共享 libpng16 后运行失败，
+                        解法同样是 generate() 里注入依赖 libdir）、
+                        DRAFT-xauth-1.1.4-missing-pkgconfig-module-vendor-upstream-sublib
+                        （同一次 xauth 适配的另一条独立教训：xmuu 模块无包 →
+                        vendored 最小闭包。两者前后脚出现，且都会表现成
+                        「make check 失败」，但一条在 configure/链接期、
+                        一条在测试运行期，诊断入口完全不同）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-xauth-1.1.4-in-tree-check-binary-loader-cannot-find-conan-shared-deps.md
+last_updated:           2026-09-20
+source_event:           archives/x/xauth/1.1.4 适配（make check 5 场景集体 FAIL 实为加载器找不到 conan 共享依赖）
+
+authors:                2301_76770579
+source_pr:              11388
+source_commit:          cff10a6b591a22315d07d5f6aa2477f167b3cdc6
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20

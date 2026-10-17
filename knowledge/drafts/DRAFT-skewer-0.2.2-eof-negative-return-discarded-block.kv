@@ -1,0 +1,93 @@
+# ═══ Draft knowledge entry — EOF 负返回值被调用侧当错误分支 ⇒ 按批静默丢数据（char/EOF 家族第二档外显）═══
+# Timestamp: 2026-09-26
+# Software: skewer 0.2.2（NGS adapter 修剪 CLI；结论适用于任何 reader 用负值表 EOF、调用方对负值另有语义的解析器）
+# Gate: 本地 conan create + conan-verify（G1/G2/G3 PASS）+ test_package 10 断言 + 奇偶条数正反例 + 未打补丁件反向验证
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-skewer-0.2.2-eof-negative-return-discarded-block
+trigger_tool:           make|conan|clang|patch|test_package
+phase:                  build|link|runtime|test
+error_signature:        |-
+  warning: result of comparison of constant -1 with expression of type 'char' is always (false|true)|
+  -Wtautological-constant-out-of-range-compare|
+  input=([0-9]+) output=[^ ]* rc=0 malformed=[1-9]|
+  rc < -1
+
+severity:               3
+category:               c-language, portability, abi, parsing, data-loss, ohos, testing
+match_keywords:         plain char, CHAR_MIN, __CHAR_UNSIGNED__, EOF sentinel, fgetc, getc, readRecord, 静默丢弃, 奇数条, 偶数条, malformed, block size, nBasicSize, 负返回值语义, silent data loss, aarch64-unknown-linux-ohos, 批处理解析器
+title:                  reader 用负返回值区分 EOF 与错误、调用方以 rc < -1 一概判错时，plain-char-unsigned 目标上的 EOF 哨兵失效会被放大成「按批静默丢弃已读记录」（表现为奇偶相关的丢数据，而非死循环）
+
+root_cause: "两层叠加，缺一层都解释不了「只有奇数条少最后一条、且 rc=0 无任何报错」。 第一层（已知家族）：C 允许 plain char 的符号性由实现决定。OHOS 目标 clang -dumpmachine = aarch64-unknown-linux-ohos，实测 limits.h 的 CHAR_MIN == 0 且预定义 __CHAR_UNSIGNED__， 故 fgetc() 返回的 EOF(-1) 存入 char 后变成 255，任何 c == EOF / tag == EOF 判定永不成立。 本包落点是 src/fastq.h:91 的成员 cFQ::tag 与 src/fastq.cpp:93 的局部 c，共覆盖 :87、:96、:104 三条死比较（全树 fgetc|getc|getchar 仅 4 处命中，均在 cFQ::readRecord() 内；另一处 char chr 不承载 EOF，不改，改了只会引入无关 diff）。 第二层（本条新增价值）：cFQ::readRecord() 在 EOF 时返回 -2 而不是 -1，而调用侧 main.cpp:936-940 写的是 if (rc < -1) continue; —— 即把「读到文件尾」当成「这一批出错」，于是**丢弃该批已读记录**。 批大小 = nBasicSize * n_threads，而 nBasicSize = (len > 800MB) ? 10 : (len/100MB + 2)， 对 KB/MB 级输入 nBasicSize 恒为 2 ⇒ 奇数条时最后一批只有 1 条、撞上 EOF 就被整批丢掉； 偶数条恰好对齐故不丢。同根因在不同调用方语义下外显完全不同（挂起 / 死循环 / 静默丢数据 / 丢一整块），所以处置不能只把 char 改 int 收工，必须回看调用侧如何解释 reader 的负返回值。"
+
+affected_scope: >
+  任何「reader 用负值/哨兵表 EOF 结束，调用方对负返回值另有分支语义（rc < -1、rc == -2、
+  rc < 0 即错误）」的上游解析器：手写词法/数值扫描器、FASTQ/FASTA/CSV/日志解析器、行读取回退
+  路径、按批消费的流式解析器。在 plain char 默认无符号的目标（OHOS aarch64、ARM32、RISC-V 等）
+  上必然触发；在 plain char 默认有符号的 x86-64 Linux 开发机上通常隐形。丢失是静默的（rc=0、
+  无诊断），因此比崩溃更危险——只在条数/记录数与输入不匹配时才暴露。
+
+rec_priority:           1
+rec_impl:               manual
+rec_auto_fix:           false
+rec_command: |
+  最小补丁只改两行声明（把 EOF 接收变量从 char 改 int），并回看调用侧负返回值分支：
+    -    char tag;            /* src/fastq.h:91  cFQ::tag  */
+    +    int  tag;
+    -        char c;          /* src/fastq.cpp:93 readRecord() 内局部 c  */
+    +        int  c;
+  补丁以 patch_type: portability 登记进 conandata.yml，由 build() 里的 apply_conandata_patches(self) 应用；
+  conanfile.py 的 export_sources() 需含 patches/**。补丁不带平台特判（任何 plain-char-unsigned 目标都需要），
+  故文件名不加 -ohos 后缀。
+rec_description: >
+  把 EOF 哨兵的接收变量类型从 plain char 放宽到 int，使 EOF(-1) 可表示；随后必须核查调用方对该
+  reader 负返回值的解释，确认 EOF 不再被误路由到错误分支。
+rec_fix_code: ""
+
+fallback_priority:      2
+fallback_approach:      不改上游源码时的绕行
+fallback_impl:          manual
+fallback_command:       在调用侧把「EOF 专用码」与「错误码」分开判断（例如把 rc < -1 改成显式比较各码值），或让解析器整体走带符号的读取接口；仅在不允许打上游补丁时使用。
+fallback_description: >
+  绕行会扩大改动面并偏离上游语义，优先用 rec_command 的类型放宽；本包最终采 rec_command（0 处调用侧改写）。
+
+verification_cmd: |
+  # 1) 符号性依据（探针须含 #include <limits.h>）
+  clang -dM -E probe.c | grep -i CHAR_UNSIGNED ; printf '%d %d\n' CHAR_MIN CHAR_MAX   # 期望 CHAR_MIN=0 CHAR_MAX=255
+  # 2) 判据本身：奇数条与偶数条各跑一次，比对输入/输出记录数与 malformed 计数
+  sh test_skewer.sh <package_folder>/bin/skewer <scratch>     # A9 偶数(8) + A10 奇数(5) 回归断言
+  # 3) 反向验证：最终版脚本打**未打补丁**的旧产物，A10 必须转红
+  #    实测：[FAIL] A10 奇数条记录被丢弃（EOF 哨兵缺陷复发） — rc=0 in=5 out=4 ⇒ 9/10 passed, rc=1
+
+boundary: >
+  适用：EOF/负哨兵的接收变量是 plain char，且调用方对负返回值另有错误语义。
+  不适用：reader 返回 size_t/计数而非负哨兵；或 EOF 已走正常出口（那属 DRAFT-8543 的死循环/超时形态）。
+  ⛔ 不要泛化成「所有 char 都改 int」——只改承载 EOF/负哨兵的接收变量，其余 char 保留以免引入无关 diff。
+  最省事的复现判据是奇偶条数对照；但只证「会丢」，要定量必须把批大小公式里的常量算清（本包 nBasicSize 在 <100MB 恒为 2）。
+  未覆盖（如实申报）：≥100MB 与多线程（丢 1..block-1 条）未实测；src/fastq.cpp:93 属 FASTA 读取分支，
+  只有编译器判决与类型推理支撑、无运行期正反例；gzip 输入输出与 build_type=Debug 变体未测。
+
+principles:             P001, P004
+similar_to:             [DRAFT-8543-plain-char-eof-sentinel-infinite-loop, E419]
+conflicts_with:         []
+prerequisite_of:        所有在 OHOS 上解析流式数据并自定义 EOF 码的上游解析器
+
+applicable_libs:        skewer, 任何 reader 以负值表 EOF 且调用方判错的 C/C++ 解析器（bioinformatics/CSV/log/lexical scanner 类）
+reuse_existing:         false
+new_draft:              true
+
+doc_file:               knowledge/drafts/DRAFT-skewer-0.2.2-eof-negative-return-discarded-block.md
+last_updated:           2026-09-26
+source_event:           archives/s/skewer/0.2.2
+source_pr:              本包交付分支 feat/skewer-0.2.2（PR 号由平台按分支自动关联，与本 Issue 双向互链）
+source_commit:          ed992a59ed99561e14eb01ba4110161203100888
+authors:                主理-63
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.8

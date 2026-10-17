@@ -1,0 +1,69 @@
+# ═══ Draft knowledge entry — conan native build with shared dependency:
+# configure sanity conftest links the dep and cannot run without its libdir
+# Software: libtheora 1.2.0-alpha1
+# Gate: conan-verify G2 (conan create, ohos-aarch64)
+# Status: DRAFT
+
+id: libtheora-1.2.0-alpha1-shared-dep-conftest-runtime-path
+severity: 3
+category: build-system|conan|linking|ohos
+trigger_tool: configure|conan|ld
+phase: configure
+
+keywords: cannot run C compiled programs, LD_LIBRARY_PATH, shared dependency, conftest, AutotoolsDeps, LDFLAGS, Error loading shared library, native build
+error_signature: checking whether the C compiler works\.\.\. configure: error: cannot run C compiled programs|Error loading shared library [A-Za-z0-9_.+-]+\.so[0-9.]*: \(needed by \./a\.out\)
+match_keywords: cannot run C compiled programs, a.out, Error loading shared library, conftest, LD_LIBRARY_PATH, AutotoolsDeps, LIBS, -l<dep>, pkg-config, native, shared
+
+root_cause: |
+  In a conan 2 native build (build profile == host profile, e.g. ohos-aarch64
+  on the OHOS CI worker), AutotoolsDeps aggregates every dependency's
+  cpp_info into global env: LDFLAGS="-L<conan cache>/lib" and LIBS="-l<dep>".
+  configure's very first sanity check ("checking whether the C compiler
+  works") therefore compiles AND RUNS a conftest linked against the shared
+  dependency (e.g. libogg.so.0). The conanbuild environment does not put the
+  dependency libdir on LD_LIBRARY_PATH, so the OHOS dynamic loader fails
+  with "Error loading shared library libogg.so.0: (needed by ./a.out)" and
+  configure aborts with "cannot run C compiled programs" long before any
+  pkg-config probe runs. This looks like a toolchain failure but is purely a
+  runtime library path issue.
+
+rec_approach: build-time-dependency-libdir-injection
+rec_description: |
+  In build(), before autotools.configure(), prepend every direct dependency's
+  package libdir to LD_LIBRARY_PATH in os.environ (conanbuild env entries are
+  prepended on top of the process env, so the injected value survives):
+
+      def _inject_runtime_lib_path(self):
+          extra = []
+          for _, dep in self.dependencies.items():
+              if not dep.package_folder:
+                  continue
+              for libdir in dep.cpp_info.libdirs:
+                  extra.append(os.path.join(dep.package_folder, libdir))
+          if extra:
+              current = os.environ.get("LD_LIBRARY_PATH", "")
+              os.environ["LD_LIBRARY_PATH"] = (
+                  os.pathsep.join(extra) +
+                  (os.pathsep + current if current else ""))
+
+  With that, the sanity conftest (and every later compile+run probe) resolves
+  the shared dependency and configure proceeds normally. Do NOT work around
+  this by forcing cross mode (--host/--build): on packages whose optional-dep
+  fallback macros "assume OK" when cross compiling that merely moves the
+  failure elsewhere (see companion draft
+  libtheora-1.2.0-alpha1-cross-mode-assumed-optional-deps).
+
+rec_commands:
+  - "conan create archives/l/libtheora/1.2.0-alpha1 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing"
+
+verification: |
+  libtheora 1.2.0-alpha1 conan create on ohos-aarch64 (clang 15): configure
+  sanity check passes, full autotools build + 9/9 upstream tests +
+  test_package encode/decode roundtrip all green after the injection; the
+  same command failed at "cannot run C compiled programs" before it.
+
+related:
+  - archives/l/libtheora/1.2.0-alpha1/conanfile.py (_inject_runtime_lib_path)
+  - knowledge/graph/E537.kv (absolute DT_NEEDED leakage — different failure, same "Error loading shared library" surface; check a.out NEEDED before blaming paths)
+  - knowledge/graph/E001.kv (cc not found — compile failure, not runtime exec failure)
+last_updated: 2026-09-18

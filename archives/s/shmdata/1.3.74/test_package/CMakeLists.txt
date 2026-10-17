@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.5)
+project(test_shmdata CXX)
+find_package(shmdata REQUIRED CONFIG)
+add_executable(test_shmdata test.cpp)
+target_link_libraries(test_shmdata PRIVATE shmdata::shmdata)

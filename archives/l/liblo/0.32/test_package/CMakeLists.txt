@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(liblo_consumer C)
+find_package(liblo CONFIG REQUIRED)
+add_executable(liblo_consumer consumer.c)
+target_link_libraries(liblo_consumer PRIVATE liblo::liblo)

@@ -1,0 +1,72 @@
+# ═══ Draft knowledge entry — 4.2BSD 信号接口在 OHOS musl 缺失 ═══
+# Timestamp: 2026-09-23
+# Software: multitee 3.0（sigdfl.c / sigsched.c）
+# Gate: 交叉编译（OHOS clang 15 + musl sysroot）
+# Status: DRAFT — 主编审核后 promote
+
+id:                     E634
+title:                  4.2BSD 信号接口 sigvec/sigblock/sigsetmask/sigmask 在 OHOS musl 缺失，须改写为 POSIX sigaction/sigprocmask
+trigger_tool:           clang
+phase:                  compilation
+error_signature:        variable has incomplete type 'struct sigvec'|call to undeclared function 'sigvec'|call to undeclared function 'sigblock'|call to undeclared function 'sigsetmask'|call to undeclared function 'sigmask'|implicit declaration of function 'sigvec'|implicit declaration of function 'sigblock'|implicit declaration of function 'sigsetmask'|undefined symbol: sigvec|undefined symbol: sigblock|undefined symbol: sigsetmask|undefined reference to `sigvec'|undefined reference to `sigblock'|undefined reference to `sigsetmask'
+severity:               3
+category:               libc, musl, posix, portability, compat
+match_keywords:         struct sigvec, sigvec, sigblock, sigsetmask, sigmask, sv_handler, sv_mask, sv_flags, 4.2BSD signal
+prescan_pattern:        struct sigvec|\bsig(vec|block|setmask)\s*\(
+prescan_globs:          *.c, *.h
+
+root_cause:             4.2BSD 的 struct sigvec 与 sigvec()/sigblock()/sigsetmask()/sigmask() 从未进入 POSIX；
+  OHOS 的 musl libc 一个都不提供（glibc 2.21 起也移除了 sigvec），1990 年代 BSD 风格 C 代码在编译期
+  即报 struct sigvec 不完整类型，其余三者为隐式声明、链接期缺符号。与编译器无关，换 gcc 同样失败
+affected_scope:         按 4.2/4.3BSD 信号接口编写的老 C 程序与库：multitee 3.0（sigdfl.c 3 处 struct sigvec、
+  sigsched.c 的 sigc_* 宏与 ss_exec）、DJB 1991 年前后的 sigsched/sigdfl 库及同期 BSD 守护进程；
+  常见伴随特征是用 int 位图当信号集（typedef int sigc_set; 1 << (sig-1)）
+verification_cmd:       grep -rnE 'struct sigvec|\bsig(vec|block|setmask|mask)[[:space:]]*\(' --include='*.[ch]' <src>
+
+rec_priority:           1
+rec_approach:           port-bsd-signals-to-posix-sigaction
+rec_description:        按 POSIX 逐点改写，不加平台宏：struct sigvec→struct sigaction（sv_handler→sa_handler；
+  int 位图 sv_mask→sigset_t sa_mask，用 sigfillset/sigemptyset/sigaddset 构造；sv_flags 按语义映射：
+  不含 SV_INTERRUPT（BSD 默认自动重启慢速系统调用）→SA_RESTART，SV_INTERRUPT→不带 SA_RESTART，
+  SV_ONSTACK→SA_ONSTACK，SV_RESETHAND→SA_RESETHAND；只有 handler 仅在 select/pselect 窗口或无系统调用的
+  忙等中触发时，sa_flags=0 才与 BSD 默认等价——Linux 上 select 无论 SA_RESTART 都不重启）；
+  sigvec(s,&n,&o)→sigaction(s,&n,&o)；old=sigblock(m)→sigprocmask(SIG_BLOCK,&set,&old)；
+  sigsetmask(m)→sigprocmask(SIG_SETMASK,&set,NULL)；~(sigmask(a)|sigmask(b))→sigfillset+sigdelset；
+  int 信号集 typedef 换 sigset_t，成员判断写 sigismember()==1（glibc 对 0 号信号返回 -1）；
+  handler 签名改 void (*)(int)；handler 置位、主流程忙等的标志改 volatile sig_atomic_t
+  （-O2/-O3 下非 volatile 的 while(!flag); 会被优化成死循环）
+rec_command:            grep -rnE 'struct sigvec|sig(vec|block|setmask|mask)\(' --include='*.[ch]' . ; 逐处改写后 track-edit add + refresh-patch --auto
+rec_auto_fix:           false
+rec_impl:               manual-source-patch
+
+fallback_priority:      2
+fallback_approach:      posix-shim-wrappers
+fallback_description:   调用点极多、逐点改写代价过高时，在补丁中新增私有兼容头，用 sigprocmask/sigaction
+  实现同名 static 包装（sigblock/sigsetmask 以 int 掩码与 sigset_t 前 32 个信号互转）；只覆盖 1-32 号信号，
+  实时信号语义会丢失，优先级低于逐点改写
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          compat-header-patch
+
+forbid_1_pattern:       #define\s+sig(vec|block|setmask)\b|-D__OHOS__|-std=gnu89|-Wno-error=implicit-function-declaration
+forbid_1_reason:        把 sigvec/sigblock 定义成空宏或返回 0、加 __OHOS__ 空分支、或靠 -std=gnu89/-Wno-error 压告警，
+  都只让编译通过而信号处理器根本没装上（缺的是符号，不是告警）
+forbid_1_consequence:   运行期行为静默改变：multitee 写断管时本应捕获 SIGPIPE 只告警并继续其它输出，结果被默认动作
+  直接杀死；配方侧 PF5/R8 也会拦平台宏
+
+principles:             P005, P015
+
+causes:                 []
+caused_by:              []
+similar_to:             [E102]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/E634-draft-62B2.md
+last_updated:           2026-09-23
+source_event:           multitee 3.0 适配：sigdfl.c:30:16 / sigsched.c:365:16 报 variable has incomplete type 'struct sigvec'，
+  另有 sigblock/sigsetmask/sigmask/sigvec 隐式声明；补丁 0004/0005 按本条改写后编译通过，test_package F7
+  （'-' 输出 EPIPE 仅告警）与 F8（':' 输出 SIGPIPE 致死）验证两条信号路径
+authors:                lkjing2021345 <1908499668@qq.com>
+source_pr:              (本 PR)
+source_commit:          (待合入后回填)

@@ -1,0 +1,4 @@
+cmake_minimum_required(VERSION 3.15)
+project(openkim_models_test LANGUAGES CXX)
+add_executable(openkim_models_probe openkim_models_probe.cpp)
+target_compile_features(openkim_models_probe PRIVATE cxx_std_11)

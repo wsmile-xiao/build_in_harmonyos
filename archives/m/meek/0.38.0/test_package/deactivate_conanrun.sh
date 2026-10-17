@@ -1,0 +1,1 @@
+. "/storage/Users/currentUser/pccpc2/build_in_harmonyos/archives/m/meek/0.38.0/test_package/deactivate_conanrunenv-release-armv8.sh"

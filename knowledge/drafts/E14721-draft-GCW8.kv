@@ -1,0 +1,89 @@
+#====================================================================
+# E14721-draft-GCW8 —— autotools 包装的纯 Perl 包：目标架构 perl 在 x86 构建机/runner 上不可执行
+# 对应人类文档: knowledge/drafts/E14721-draft-GCW8.md
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: sproxy 1.02 适配（configure 用 $PERL utils/modtest 探测 perl 模块；test_package 选 perl）
+#
+# 与既有草稿的差异边界（draft-review: review-similar，最相近 E155 得分 0.35）:
+#   DRAFT-ohos-perl-script-package-conan-adaptation —— 讲 shebang 改写与 conan perl 的 @INC 双斜杠陷阱；
+#     本条讲「conan perl 是 aarch64 ELF，x86 构建机/runner 根本无法执行它」引出的两个具体问题：
+#     ① 上游 configure/Makefile 里 `$PERL utils/modtest` 类模块探测在交叉构建下返回空 → 自带模块被静默跳过；
+#     ② 消费者测试里 conanrun 导出的 PERL5LIB 污染改用的主机 perl（aarch64 XS .so 加载失败）。
+#   DRAFT-ohos-autotools-maintainer-noregen / DRAFT-E661-validns-perl-testmodule-perl5lib ——
+#     分别讲 automake 版本冲突、Test 模块 PERL5LIB 注入，均不涉及「目标架构 perl 不可执行」。
+#====================================================================
+
+id:                     E14721
+trigger_tool:           configure|test
+phase:                  configuration|testing
+error_signature:        aarch64-binfmt-P: Could not open '/lib/ld-musl-aarch64.so.1'|Can't load '.*aarch64-linux-thread-multi/auto/.*\.so' for module|modtest.*(no|yes)|checking for JoeDog::Config support|Can't locate JoeDog/Config\.pm in @INC
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               autotools, build-system, cross-compile, testing
+match_keywords:         perl, modtest, PERL5LIB, cross-compile, aarch64-binfmt-P, ld-musl-aarch64, binfmt, autotools, configure, XS, aarch64-linux-thread-multi, conanrun, sproxy, JoeDog::Config, Makefile.PL, 目标架构 perl
+title:                  纯 Perl 包的 autotools 探测/测试执行目标架构 perl，x86 构建机无法运行（模块探测为空 + PERL5LIB 污染主机 perl）
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause: 仓库的 perl 依赖（perl/5.42.2.x）是 aarch64-linux-ohos 的 musl 动态 ELF。x86 构建机/runner 上 binfmt 只能
+  拉起 qemu-aarch64，却没有 /lib/ld-musl-aarch64.so.1，执行即报 `aarch64-binfmt-P: Could not open ...`（E544）。
+  两类脚本包因此踩坑：
+  (1) 上游 configure.in 用 `$PERL utils/modtest <Module>` 探测 perl 模块（如 JoeDog::Config），输出 yes/no 写入
+      Makefile 变量；交叉构建时 `$PERL` 无法执行，输出为空，`test $(haveconfig) = "no"` 为假，自带的纯 Perl
+      模块（lib/*.tar.gz）被静默跳过、不安装，运行期 `Can't locate JoeDog/Config.pm in @INC`。
+  (2) test_package 为了真正运行脚本，改用主机 perl（/usr/bin/perl）时，conanrun 环境已把依赖 perl 的 PERL5LIB
+      （…/lib/perl5/5.42.2/aarch64-linux-thread-multi）导出；主机 perl 继承后在加载 XS 模块（Socket/Cwd 等）时
+      `Can't load '…/aarch64-linux-thread-multi/auto/…so'`，连 `use LWP::UserAgent` 都失败。
+affected_scope: |
+  所有「autotools/Makefile 包装的纯 Perl 脚本包」（sproxy、siege 系工具、各类 *.pl 分发包），只要上游在
+  configure/Makefile 里执行 `$PERL`，或消费者测试需要运行 perl 脚本；x86 构建机/runner + 交叉 profile（ohos-aarch64）。
+verification_cmd: |
+  $CONAN_HOME/p/perl*/p/bin/perl -e 1   # 期望在 x86 runner 上报 aarch64-binfmt-P ... ld-musl-aarch64.so.1
+  grep -n 'modtest\|\$PERL' configure.in Makefile.am lib/Makefile.am   # 上游是否在 configure/make 期执行 perl
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           recipe-equivalent-substitution-and-scoped-perl5lib
+rec_description:        不跑上游 configure/Makefile，在 build() 用 Python 复刻 sed 替换与自带模块安装；测试里逐候选 perl 单独设 PERL5LIB
+rec_command:            "build(): 读 src/*.in 做 %_VAR% 替换、shebang 指向依赖 perl 绝对路径、用 tarfile 直接取出自带 .pm 装到 lib/<pkg>/；test: 对每个 perl 候选用 subprocess 试 `perl -e 'use LWP::UserAgent'`，仅对 shebang 所指依赖 perl 继承 conanrun 的 PERL5LIB，其余候选剔除之"
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      tool-requires-host-perl
+fallback_description:   模块探测必须保留时，用构建机（build profile）perl 探测：tool_requires 的 perl 走 -pr:b，并把探测结果通过 configure 变量（如 haveconfig=no）显式传入
+fallback_command:       "./configure PERL=<build-perl> haveconfig=no havemime=no havelwp=no --prefix=$PKG"
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       ln -s /usr/bin/perl|PERL5LIB=.*aarch64.*(/usr/bin/perl|perl )|skip.*modtest|assert True|只 grep .pm
+forbid_1_reason:        把目标架构 perl 硬塞给主机跑、把污染的 PERL5LIB 原样带给主机 perl，或用存在性检查冒充测试，都掩盖真实缺陷
+forbid_1_consequence:   模块静默缺失的包能 conan create 通过却在设备上一运行即崩；测试变成纸面声明，被 rule12 判 N=0
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E544]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E14721-draft-GCW8.md
+last_updated:           2026-09-29
+source_event:           sproxy 1.02 conan-verify（G2 test 阶段 no perl found → 三次迭代定位 PERL5LIB 污染）
+
+# ═══ 知识协作 ═══
+authors:                nyaco3 <aqjCItYW1QmEJQuF.gcw_XDpqZ8sO@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: GCW8

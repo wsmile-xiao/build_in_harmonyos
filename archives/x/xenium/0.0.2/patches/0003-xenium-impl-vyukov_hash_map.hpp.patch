@@ -1,0 +1,243 @@
+--- a/xenium/impl/vyukov_hash_map.hpp
++++ b/xenium/impl/vyukov_hash_map.hpp
+@@ -6,20 +6,21 @@
+ #ifndef XENIUM_VYUKOV_HASH_MAP_IMPL
+ #error "This is an impl file and must not be included directly!"
+ #endif
+ 
+ #include <xenium/acquire_guard.hpp>
+ #include <xenium/backoff.hpp>
+ #include <xenium/parameter.hpp>
+ #include <xenium/policy.hpp>
+ 
+ #include <atomic>
++#include <cassert>
+ #include <cstring>
+ 
+ #ifdef _MSC_VER
+ #pragma warning(push)
+ #pragma warning(disable: 26495) // uninitialized member variable
+ #pragma warning(disable: 4324) // structure was padded due to alignment specifier
+ #endif
+ 
+ namespace xenium {
+ 
+@@ -246,22 +247,24 @@
+   std::uint32_t item_count = state.item_count();
+ 
+   for (std::uint32_t i = 0; i != item_count; ++i)
+     if (traits::template compare_key<AcquireAccessor>(bucket.key[i], bucket.value[i], key, h, acc)) {
+       callback(std::move(acc), bucket.value[i]);
+       unlocker.unlock(state, std::memory_order_relaxed);
+       return false;
+     }
+ 
+   if (item_count < bucket_item_count) {
++    // (42) - these release-store synchronize-with the acquire-loads (41) (key) and (24) (value)
++    // we need to use release even though we have lock because concurrent find can still observe our changes
+     traits::template store_item<AcquireAccessor>(bucket.key[item_count], bucket.value[item_count], h,
+-      std::move(key), factory(), std::memory_order_relaxed, acc);
++      std::move(key), factory(), std::memory_order_release, acc);
+     callback(std::move(acc), bucket.value[item_count]);
+     // release the bucket lock and increment the item count
+     // (3) - this release-store synchronizes-with the acquire-CAS (7, 30, 34, 37) and the acquire-load (23)
+     unlocker.unlock(state.inc_item_count(), std::memory_order_release);
+     return true;
+   }
+ 
+   // TODO - keep extension items sorted
+   for (extension_item* extension = bucket.head.load(std::memory_order_relaxed);
+        extension != nullptr;
+@@ -273,22 +276,28 @@
+     }
+   }
+ 
+   extension_item* extension = allocate_extension_item(b.get(), h);
+   if (extension == nullptr) {
+     unlocker.disable(); // bucket is unlocked in grow()
+     grow(bucket, state);
+     goto retry;
+   }
+   try {
++    // we need to use memory_order_release here because the extension item could be reused,
++    // so a concurrent lookup could potentially observe our writes. Without a release-store
++    // we would have no happens-before relation to ensure that the lookup operation also observes
++    // the update to the bucket state to realize that the values it just read from our extension
++    // item cannot be used.
++    // (43) - these release-store synchronize-with the acquire-load (44) (key) and (26) (value)
+     traits::template store_item<AcquireAccessor>(extension->key, extension->value, h,
+-      std::move(key), factory(), std::memory_order_relaxed, acc);
++      std::move(key), factory(), std::memory_order_release, acc);
+   } catch(...) {
+     free_extension_item(extension);
+     throw;
+   }
+   callback(std::move(acc), extension->value);
+   auto old_head = bucket.head.load(std::memory_order_relaxed);
+   extension->next.store(old_head, std::memory_order_relaxed);
+   // (4) - this release-store synchronizes-with the acquire-load (25)
+   bucket.head.store(extension, std::memory_order_release);
+   // release the bucket lock
+@@ -347,23 +356,24 @@
+ 
+   for (std::uint32_t i = 0; i != item_count; ++i) {
+     if (traits::template compare_key<true>(bucket.key[i], bucket.value[i], key, h, result)) {
+       extension_item* extension = bucket.head.load(std::memory_order_relaxed);
+       if (extension) {
+         // signal which item we are deleting
+         bucket.state.store(locked_state.set_delete_marker(i + 1), std::memory_order_relaxed);
+ 
+         auto k = extension->key.load(std::memory_order_relaxed);
+         auto v = extension->value.load(std::memory_order_relaxed);
+-        bucket.key[i].store(k, std::memory_order_relaxed);
+         // (8)  - this release-store synchronizes-with the acquire-load (24)
+         bucket.value[i].store(v, std::memory_order_release);
++        // (39) - this release-store synchronizes-with the acquire-load (41)
++        bucket.key[i].store(k, std::memory_order_release);
+ 
+         // reset the delete marker
+         locked_state = locked_state.new_version();
+         // (9) - this release-store synchronizes-with the acquire-load (23)
+         bucket.state.store(locked_state, std::memory_order_release);
+ 
+         extension_item* extension_next = extension->next.load(std::memory_order_relaxed);
+         // (10) - this release-store synchronizes-with the acquire-load (25)
+         bucket.head.store(extension_next, std::memory_order_release);
+ 
+@@ -372,23 +382,24 @@
+         unlocker.unlock(locked_state.new_version().clear_lock(), std::memory_order_release);
+ 
+         free_extension_item(extension);
+       } else {
+         if (i != item_count - 1) {
+           // signal which item we are deleting
+           bucket.state.store(locked_state.set_delete_marker(i + 1), std::memory_order_relaxed);
+ 
+           auto k = bucket.key[item_count - 1].load(std::memory_order_relaxed);
+           auto v = bucket.value[item_count - 1].load(std::memory_order_relaxed);
+-          bucket.key[i].store(k, std::memory_order_relaxed);
+           // (12) - this release-store synchronizes-with the acquire-load (24)
+           bucket.value[i].store(v, std::memory_order_release);
++          // (40) - this release-store synchronizes-with the acquire-load (41)
++          bucket.key[i].store(k, std::memory_order_release);
+         }
+ 
+         // release the bucket lock, reset the delete marker (if it is set), increase the version
+         // and decrement the item counter.
+         // (13) - this release-store synchronizes-with the acquire-CAS (7, 30, 34, 37) and the acquire-load (23)
+         unlocker.unlock(state.new_version().dec_item_count(), std::memory_order_release);
+       }
+       return true;
+     }
+   }
+@@ -440,23 +451,24 @@
+ 
+   auto extension = it.current_bucket->head.load(std::memory_order_relaxed);
+   if (extension) {
+     auto locked_state = it.current_bucket_state.locked();
+     auto marked_state = locked_state.set_delete_marker(it.index + 1);
+     it.current_bucket->state.store(marked_state, std::memory_order_relaxed);
+     assert(it.current_bucket->state.load().is_locked());
+ 
+     auto k = extension->key.load(std::memory_order_relaxed);
+     auto v = extension->value.load(std::memory_order_relaxed);
+-    it.current_bucket->key[it.index].store(k, std::memory_order_relaxed);
+     // (16) - this release-store synchronizes-with the acquire-load (24)
+     it.current_bucket->value[it.index].store(v, std::memory_order_release);
++    // (45) - this release-store synchronizes-with the acquire-load (41)
++    it.current_bucket->key[it.index].store(k, std::memory_order_release);
+ 
+     // reset the delete marker
+     locked_state = locked_state.new_version();
+     // (17) - this release-store synchronizes-with the acquire-load (23)
+     it.current_bucket->state.store(locked_state, std::memory_order_release);
+     assert(it.current_bucket->state.load().is_locked());
+ 
+     auto next = extension->next.load(std::memory_order_relaxed);
+     // (18) - this release-store synchronizes-with the acquire-load (25)
+     it.current_bucket->head.store(next, std::memory_order_release);
+@@ -470,23 +482,24 @@
+     auto max_index = it.current_bucket_state.item_count() - 1;
+     if (it.index != max_index) {
+       // signal which item we are deleting
+       auto locked_state = it.current_bucket_state.locked();
+       auto marked_state = locked_state.set_delete_marker(it.index + 1);
+       it.current_bucket->state.store(marked_state, std::memory_order_relaxed);
+       assert(it.current_bucket->state.load().is_locked());
+ 
+       auto k = it.current_bucket->key[max_index].load(std::memory_order_relaxed);
+       auto v = it.current_bucket->value[max_index].load(std::memory_order_relaxed);
+-      it.current_bucket->key[it.index].store(k, std::memory_order_relaxed);
+-      // (20) - this release-store synchronizes-with the acquire-load  (24)
++      // (20) - this release-store synchronizes-with the acquire-load (24)
+       it.current_bucket->value[it.index].store(v, std::memory_order_release);
++      // (46) - this release-store synchronizes-with the acquire-load (41)
++      it.current_bucket->key[it.index].store(k, std::memory_order_release);
+     }
+ 
+     auto new_state = it.current_bucket_state.new_version().dec_item_count();
+     it.current_bucket_state = new_state;
+ 
+     // (21) - this release store synchronizes-with the acquire-load (23)
+     it.current_bucket->state.store(new_state.locked(), std::memory_order_release);
+     assert(it.current_bucket->state.load().is_locked());
+     if (it.index == new_state.item_count()) {
+       it.prev = &it.current_bucket->head;
+@@ -509,25 +522,26 @@
+ retry:
+   // data_block (and therefore the bucket) can only change due to a concurrent grow()
+   // operation, but since grow() does not change the content of a bucket we can ignore
+   // it and don't have to reread everything during a retry.
+ 
+   // (23) - this acquire-load synchronizes-with the release-store (3, 5, 9, 11, 13, 14, 15, 17, 19, 21, 36, 38)
+   bucket_state state = bucket.state.load(std::memory_order_acquire);
+ 
+   std::uint32_t item_count = state.item_count();
+   for (std::uint32_t i = 0; i != item_count; ++i) {
+-    if (traits::compare_trivial_key(bucket.key[i], key, h)) {
++    // (41) - this acquire-load synchronizes-with the release-store (39, 40, 42)
++    if (traits::compare_trivial_key(bucket.key[i].load(std::memory_order_acquire), key, h)) {
+       // use acquire semantic here - should synchronize-with the release store to value
+       // in remove() to ensure that if we see the changed value here we also see the
+       // changed state in the subsequent reload of state
+-      // (24) - this acquire-load synchronizes-with the release-store (8, 12, 16, 20)
++      // (24) - this acquire-load synchronizes-with the release-store (8, 12, 16, 20, 42)
+       accessor acc = traits::acquire(bucket.value[i], std::memory_order_acquire);
+ 
+       // ensure that we can use the value we just read
+       const auto state2 = bucket.state.load(std::memory_order_relaxed);
+       if (state.version() != state2.version()) {
+         // a deletion has occured in the meantime -> we have to retry
+         state = state2;
+         goto retry;
+       }
+ 
+@@ -549,25 +563,23 @@
+         continue;
+ 
+       value = std::move(acc);
+       return true;
+     }
+   }
+ 
+   // (25) - this acquire-load synchronizes-with the release-store (4, 10, 18)
+   extension_item* extension = bucket.head.load(std::memory_order_acquire);
+   while (extension) {
+-    if (traits::compare_trivial_key(extension->key, key, h)) {
+-      // TODO - this acquire does not synchronize with anything ATM.
+-      // However, this is probably required when introducing an update-method that
+-      // allows to store a new value.
+-      // (26) - this acquire-load synchronizes-with <nothing>
++    // (44) - this acquire-load synchronize-with the release-store (43)
++    if (traits::compare_trivial_key(extension->key.load(std::memory_order_acquire), key, h)) {
++      // (26) - this acquire-load synchronizes-with the release-store (43)
+       accessor acc = traits::acquire(extension->value, std::memory_order_acquire);
+ 
+       auto state2 = bucket.state.load(std::memory_order_relaxed);
+       if (state.version() != state2.version()) {
+         // a deletion has occured in the meantime -> we have to retry
+         state = state2;
+         goto retry;
+       }
+ 
+       if (!traits::compare_nontrivial_key(acc, key))

@@ -1,0 +1,114 @@
+# ═══ Draft knowledge entry — 静态库 Conan 包的鸿蒙特有测试：归档直接验证 + 消费者链接产物断言 ═══
+# Timestamp: 2026-09-10 (rev 3: CI #42924——conanrun LD_LIBRARY_PATH 污染宿主工具,环境分裂修复)
+# Software: libsvg-cairo 0.1.6(所有仅产出静态库 .a 的 OHOS Conan 包)
+# Gate: conan create/test 的 test()(rule12 / L1e 鸿蒙特有测试)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-E2175
+title: 静态 Conan 包的鸿蒙特有测试：先对 .a 归档直接验证成员架构,再链接消费者 ELF 后对消费者产物断言 SONAME/INTERP/code_signature 并运行真实流程
+trigger_tool: conan test / readelf / ar / clang
+phase: test
+error_signature: CONAN_LIB_DIRS_[A-Z0-9_]+: unbound variable|grep: INTERP: no match|cannot open.*libsvg-cairo\.a|svg_cairo symbols exported: 0|relocation R_AARCH64_.* cannot be used against symbol.*recompile with -fPIC|cannot link derived shared lib from package archive
+severity: 3
+category: conan|packaging|testing|ohos-platform
+match_keywords: rule12,静态库,whole-archive,SONAME,codesign,INTERP,tested_reference_str,package_folder,conanrun,ar archive,归档成员,PIC,OHOS_TOOL_LD_LIBRARY_PATH,环境分裂
+keywords: rule12, L1e, 静态库, whole-archive, SONAME, .code_signature, .codesign, INTERP,
+  ld-musl-aarch64, readelf, ar t, ar p, ELF64 little-endian, REL, AArch64,
+  tested_reference_str, package_folder, VirtualRunEnv, conanrun, 空壳库,
+  鸿蒙特有测试, NEEDED 宿主机路径, PIC 边界, 非 PIC 回退, 消费者产物,
+  OHOS_TOOL_LD_LIBRARY_PATH, 环境分裂, VirtualBuildEnv, 宿主工具链
+approach: 静态 Conan 包的鸿蒙特有测试须严格区分三类对象,分别施加适用的断言(rule12 要求
+  验证最终包产物而非源码):
+  [P] 最终 Conan 包产物 libfoo.a —— 静态归档本身没有 SONAME/PT_INTERP/.code_signature/
+  dynamic 段,这些 ELF 动态元数据只存在于链接后的动态对象上;对 [P] 做归档级直接验证:
+  文件确为 ar archive(magic "!<arch>")、归档非空、提取/遍历成员(ar t / ar p)、
+  每个成员均为 ELF64 little-endian AArch64 REL(relocatable)对象。
+  [S] 测试派生的共享库 libfoo-ohos.so.0 —— 消费者把静态库打进自己 .so 的场景模拟;
+  DT_SONAME、导出符号、.so NEEDED 等 .so 级断言只施加于 [S],不宣称属于静态包。
+  [E] 消费者可执行文件 —— OHOS 运行时消费者产物;PT_INTERP(/lib/ld-musl-aarch64.so.1)、
+  .code_signature 段、NEEDED/RUNPATH 洁净性断言只施加于 [E];真实功能流程由 [E] 完成。
+  实现要点:在 test() 中用 self.dependencies[self.tested_reference_str].package_folder
+  拿到 conan cache 里最终包目录(VirtualRunEnv 不导出 CONAN_LIB_DIRS_* 变量,不可依赖),
+  通过 env OHOS_PKG_LIBDIR=... 显式传给测试脚本;脚本用 OHOS 交叉 clang 链接 [S] 与 [E],
+  在 OHOS PC 上运行 [E] 完成真实功能流程。任一断言失败非零退出,不得 skip。
+root_cause: 1) Conan 2.x VirtualRunEnv 生成的 conanrun 环境只有 PATH/LD_LIBRARY_PATH 等,
+  不导出 CONAN_LIB_DIRS_<PKG> 变量,测试脚本无法从 env 拿到被测包目录,必须经
+  self.dependencies[self.tested_reference_str].package_folder 显式传参;
+  2) 静态归档是 ar 容器而非动态 ELF:SONAME/INTERP/.code_signature 段在 .a 上不存在,
+  若把它们说成静态包的属性即技术边界错误;对 .a 唯一直接可验的是归档身份与成员
+  目标文件的 ELF 头(Class ELF64、little endian、Type REL、Machine AArch64);
+  3) ld 默认按需抽取归档成员,若不用 --whole-archive,未被命令行直接引用的成员会被
+  丢弃,产出零导出的空壳 .so(动态符号表里包符号数为 0);--whole-archive 的用途
+  仅是确认归档成员确实进入派生产物,并非给静态库"赋予".so 属性;
+  4) --whole-archive 生成共享库要求归档成员满足 PIC:非 PIC 归档成员在 -shared 链接时
+  报 relocation R_AARCH64_* cannot be used against symbol ...; recompile with -fPIC
+  而失败(实测 ld.lld),此时应构建直接引用公开 API 的可执行消费者(它对 PIC 无要求),
+  不能强行生成共享库;
+  5) readelf -l 的 INTERP 信息在 "Requesting program interpreter: /lib/ld-musl-aarch64.so.1"
+  行,grep "INTERP" 只命中 segment 标题行,必须 grep "Requesting program interpreter";
+  6) readelf -d 的 rpath 行格式是圆括号 "(RUNPATH) Library runpath: [...]",grep
+  "\\[(RPATH|RUNPATH)\\]" 匹配方括号永远失配,得到假通过;正确做法是链接时就不注入
+  -Wl,-rpath(会把本机输出目录写成 DT_RUNPATH 宿主路径),运行期用 LD_LIBRARY_PATH
+  定位派生库,断言用 grep -E '\\((RPATH|RUNPATH)\\)';
+  7) OHOS lld 对消费者链接生成的动态对象注入的签名段实际名为 .codesign
+  (readelf -SW 输出 .codesign),不是 .code_signature;断言应统一为实际验证的
+  精确段名——脚本断言写 grep -qE "\.code_signature|\.codesign" 兼容两种写法;
+  8) OHOS PC 的 grep 是 toybox 0.8.x,BRE 不支持 \| 交替:grep -q "A\|B" 恒失配
+  (即使 B 存在),得到假失败;所有含交替的断言必须用 grep -E;
+  9) conanrun 的 LD_LIBRARY_PATH 前置目标依赖包 lib/ 目录,宿主 clang/lld/
+  llvm-ar/readelf 继承它会从目标目录加载目标包 libxml2.so.16 而非 SDK 宿主版,
+  符号重定位失败崩溃,且该崩溃曾被误报为 non-PIC members——宿主工具加载器
+  错误会伪装成链接/PIC 错误;修复为环境分裂:conanfile.py 以 VirtualBuildEnv
+  (不是 Environment().vars,后者取不到 profile [buildenv])组合 conanbuild 的
+  LD_LIBRARY_PATH 并剔除目标依赖目录,经 OHOS_TOOL_LD_LIBRARY_PATH 传脚本,
+  脚本内宿主工具统一 env LD_LIBRARY_PATH="$OHOS_TOOL_LD_LIBRARY_PATH" 包装,
+  目标依赖只经 -L/绝对路径进链接行,仅在运行目标消费者时才临时设目标
+  LD_LIBRARY_PATH;另 set -e 下 cmd;rc=$? 是死代码,须写 rc=0;cmd || rc=$?。
+affected_scope: 所有在 OHOS 上以静态库交付、需要 rule12/L1e 鸿蒙特有测试的 Conan 包
+  (libsvg-cairo、libsvg 及同模式包);仅修改 PR 描述数字而不验证包产物的测试会被
+  web-review 判为空壳。
+verification_cmd: head -c 8 <pkg>/lib/libfoo.a; ar t <pkg>/lib/libfoo.a; ar p <pkg>/lib/libfoo.a <member>.o | readelf -h -; readelf -d <derived>.so.0 | grep SONAME; readelf --dyn-syms <derived>.so.0 | grep -c <pkg_prefix>; readelf -l <consumer-exe> | grep "Requesting program interpreter"
+rec_priority: 1
+rec_approach: archive-verify-then-consumer-link-assert
+rec_description: test() 里以 package_folder 定位最终包静态归档,先直接验证归档身份与
+  成员架构(ar magic/非空/成员 ELF64 LE AArch64 REL),再链接消费者 ELF(共享库+可执行
+  文件)后对消费者产物做 SONAME/INTERP/.code_signature/依赖路径/真实功能断言,
+  全部失败即 fail-closed;静态归档本身不宣称拥有任何动态 ELF 元数据
+rec_command: env OHOS_PKG_LIBDIR=<pkg>/lib OHOS_PKG_INCDIR=<pkg>/include OHOS_DEP_LIBS=... OHOS_DEP_INCS=... bash test_ohos.sh
+rec_auto_fix: false
+rec_impl: conanfile.py test() 用 self.dependencies[self.tested_reference_str] 取
+  package_folder 与 cpp_info.libdirs/includedirs,shell_quote 后经 env 前缀传给脚本;
+  脚本内 [P] 归档直接验证 + [S]/[E] 消费者链接断言分层实施
+fallback_priority: 2
+fallback_approach: 非 PIC 静态归档时的消费者形态降级
+fallback_description: 归档成员不满足 PIC 时,-shared --whole-archive 链接必然失败
+  (recompile with -fPIC);此时不能强行生成共享库,应构建直接引用包公开 API 的
+  可执行消费者完成链接级+运行级验证(可执行文件对成员 PIC 无要求)
+fallback_command: "$CC" <consumer.c> -o <consumer> <pkg>/lib/libfoo.a $(deps...)
+fallback_auto_fix: false
+fallback_impl: 跳过 [S] 派生共享库,只保留 [E] 可执行消费者链路
+principles: rule12 检验的是最终 Conan 包产物;静态归档与动态 ELF 的元数据边界必须分清:
+  .a 只能验归档身份与成员 ELF 头,SONAME/INTERP/.code_signature 只存在于消费者
+  链接产物上;--whole-archive 仅用于确认归档成员确实进入派生产物(防零导出空壳),
+  且以归档成员满足 PIC 为前提,非 PIC 归档走可执行消费者路径
+caused_by: 上游仅提供静态库交付 + rule12 要求验证包产物 + VirtualRunEnv 不导出包目录变量
+causes: L1e 空壳测试、CONAN_LIB_DIRS_* unbound、INTERP 断言假失败、.code_signature
+  段名不匹配、把 .so 属性错安在 .a 上的边界错误、非 PIC 归档强行生成 .so 失败
+similar_to: E234(whole-archive 链接), E298(conanrun 显式运行), E236(thin archive 成员), E241(package_folder 数据清单), libharu DRAFT(SONAME 缺失)
+conflicts_with:
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-E2175-static-pkg-ohos-artifact-test-link-assert.kv
+last_updated: 2026-09-10
+source_event: libsvg-cairo 0.1.6 PR rule12 修复:消费端测试只验证 API,被要求补鸿蒙特有
+  包产物测试;经历 CONAN_LIB_DIRS 未导出、空壳库、INTERP grep 假失败、.codesign 段名、
+  RUNPATH 方括号假通过、非 PIC 归档生成 .so 失败六个坑后全链路通过;R2 修订把
+  包产物/派生共享库/消费者可执行文件三类对象的断言边界表述修正;R3 修订由远端 CI
+  #42924 触发:conanrun LD_LIBRARY_PATH 污染宿主 lld,确立宿主工具/目标运行环境分裂
+  修复模式(坑 9)
+authors: goblinrs
+source_pr: (本 PR)
+source_commit: f63e6d6f53
+metrics_success_count: 0
+metrics_fail_count: 0
+metrics_confidence: 0.9
+metrics_last_used: 2026-09-09

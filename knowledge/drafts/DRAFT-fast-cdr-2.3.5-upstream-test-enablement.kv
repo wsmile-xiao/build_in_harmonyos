@@ -1,0 +1,84 @@
+#====================================================================
+# DRAFT-fast-cdr-2.3.5-upstream-test-enablement — 启用被 CMakeLists 顶层 FORCE OFF 的上游 GTest 测试套件
+# 触发事件: fast-cdr 2.3.5 R02 返工任务启用上游测试门禁（R01 以 BUILD_TESTING=OFF 未达标）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-fast-cdr-2.3.5-upstream-test-enablement
+trigger_tool:           conan-verify|cmake|ctest|find_package
+phase:                  conan_verify|configure|test_package|upstream_tests
+error_signature:        Tests not compiled by default|
+                         GTest::gtest_main|target was not found|
+                         find_or_add_gtest.*find_package\(GTest\)|
+                         Could not find a package configuration file provided by "GTest"
+
+severity:               2
+category:               build-system|cmake|conan|testing|gtest
+match_keywords:         BUILD_TESTING, CTest, CMakeToolchain, tc.variables, cache,
+                         FORCE, project(), toolchain, GTest, gtest_main,
+                         GTestConfig.cmake, CMakeDeps, GTest_DIR,
+                         find_or_add_gtest, upstream tests, configure variables
+title:                  Enable upstream GTest tests on OHOS by passing BUILD_TESTING=ON as a -D configure variable and pointing GTest_DIR at the package's official GTestConfig.cmake
+
+topic: >
+  Fast-CDR 2.3.5 的 test/CMakeLists.txt 在 BUILD_TESTING=ON 时编译上游 GTest
+  测试套件（test/cdr、test/xcdr 及 cmake.force_standard 模块测试），但 CMakeLists.txt
+  顶层在 project() 之前执行 `if(NOT BUILD_TESTING) set(BUILD_TESTING OFF CACHE BOOL
+  FORCE) endif()`。Conan 配方的 CMakeToolchain tc.variables 把 BUILD_TESTING 写入
+  生成的 conan_toolchain.cmake（set(... CACHE STRING)），而 toolchain 文件在
+  project() 阶段才被加载，晚于顶层 if 求值——顶层已 FORCE 出 OFF，toolchain 的
+  非 FORCE set 不会覆盖，测试永不编译（日志可见 "Tests not compiled by default"）。
+
+root_cause: >
+  1) CMakeLists.txt 顶层 `if(NOT BUILD_TESTING)` 在 project()（toolchain 加载点）
+     之前求值，BUILD_TESTING 未定义时 FORCE 写入 OFF 缓存；
+  2) conan tc.variables 生成的 toolchain set(BUILD_TESTING ... CACHE) 在 project()
+     后执行，因缓存已有值且非 FORCE 而不覆盖 → 必须经 cmake 命令行 -D 传入才能
+     在顶层 if 前生效；
+  3) 即使 BUILD_TESTING=ON 生效，上游 find_or_add_gtest()（非 ROS 分支）执行
+     find_package(GTest CONFIG REQUIRED) 并链接 GTest::gtest_main；ohpcd 的
+     gtest/1.17.0 配方 package_info 只声明单个 gtest::gtest target，CMakeDeps
+     生成的 gtest-config.cmake 不含 GTest::gtest_main → 链接期 target was not found。
+
+durable_solution: >
+  1) build() 中调用 cmake.configure(variables={"BUILD_TESTING": "ON"})，让
+     -DBUILD_TESTING=ON 进入命令行，在顶层 if 之前即可见 ON；
+  2) generate() 中把 GTest_DIR 指向 gtest 包内官方
+     lib/cmake/GTest/GTestConfig.cmake（gtest 配方虽只声明 gtest::gtest，但包内
+     由 googletest 上游 CMake 安装生成 GTestConfig.cmake，含 GTest::gtest /
+     gtest_main / gmock / gmock_main 完整 IMPORTED targets，指向 libgtest*.a）：
+       gtest_pkg = self.dependencies["gtest"].package_folder
+       tc.variables["GTest_DIR"] = os.path.join(gtest_pkg, "lib", "cmake", "GTest")
+  3) 不要给 CMakeLists.txt 打补丁改顶层 if（FORCE 是上游语义），也不用 --no-preflight 绕过。
+
+impact: >
+  配方变更仅影响测试构建路径：库本体（libfastcdr.a）产物、安装内容、package_info
+  完全不变；新增 gtest/1.17.0 为 build 依赖（transitive_headers/libs 随 requires）。
+  修复后 conan-verify G2 通过，上游 4 个 GTest 可执行入口 + 4 个 ctest 模块测试
+  构建运行，ctest 全量 2107/2107 通过（20.02s，exit 0）。
+
+recovery: >
+  编译期问题无运行时恢复需求。后续 OHOS 上任何 "链接 GTest::gtest_main /
+  building 上游 GTest 套件" 的 CMake 库可复用同一模式：
+  BUILD_TESTING 经 -D 注入 + GTest_DIR 指向包内官方 config。
+
+evidence_chain: >
+  task fast-cdr-2.3.5-r02-upstream-test-gate-recovery-pc1-11-20260903T025121Z
+    - R01 conan-verify 报告 G2 通过但日志 "Tests not compiled by default"；
+    - R02 第一次尝试 tc.variables["BUILD_TESTING"]="ON" → 仍 "Tests not compiled
+      by default"；改用 configure(variables=) 后 test/ 子目录编译；
+    - R02 GTest 阶段 find_package(GTest CONFIG) 找不到 → CMakeDeps 生成的
+      gtest-config.cmake 只有 gtest::gtest → 设置 GTest_DIR 指向包内官方
+      GTestConfig.cmake 后构建链接成功；
+    - ctest 全量日志 /storage/Users/currentUser/tmp/fast-cdr-r02-upstream-ctest.log
+      SHA-256 1a1f8dbeb60c114bed274563aa13cc783fcb286335329e8c415aa6a6f2e1375a
+      （100% tests passed, 0 tests failed out of 2107）。
+
+verification_cmd: >
+  cd archives/f/fast-cdr/2.3.5 && python3 <SKILL_ROOT>/scripts/ohc-run.py conan-verify fast-cdr 2.3.5
+
+limitations: >
+  依赖 gtest 包内包含官方 GTestConfig.cmake（googletest 安装产物）；若某 gtest
+  发布版未安装 GTestConfig.cmake，则需改走 replace_in_file 把 GTest::gtest_main
+  替换为 gtest::gtest + 自定义 main，或要求 gtest 配方补组件。BUILD_TESTING 顶层
+  FORCE 模式为 Fast-CDR 特有，其它项目若无顶层 if 则不适用 -D 注入要求。

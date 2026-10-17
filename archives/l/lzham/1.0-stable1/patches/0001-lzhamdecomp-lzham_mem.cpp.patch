@@ -1,0 +1,90 @@
+--- a/lzhamdecomp/lzham_mem.cpp
++++ b/lzhamdecomp/lzham_mem.cpp
+@@ -79,21 +79,28 @@
+    #endif // LZHAM_MEM_STATS
+ 
+    static void* lzham_default_realloc(void* p, size_t size, size_t* pActual_size, lzham_bool movable, void* pUser_data)
+    {
+       LZHAM_NOTE_UNUSED(pUser_data);
+ 
+       void* p_new;
+ 
+       if (!p)
+       {
++#ifdef WIN32
+          p_new = malloc(size);
++#else
++         // musl (HarmonyOS) does not guarantee 16-byte alignment for very
++         // small allocations (e.g. 2-3 bytes can be 8-aligned), while LZHAM
++         // requires every block to be LZHAM_MIN_ALLOC_ALIGNMENT aligned.
++         p_new = memalign(LZHAM_MIN_ALLOC_ALIGNMENT, size);
++#endif
+          LZHAM_ASSERT( (reinterpret_cast<ptr_bits_t>(p_new) & (LZHAM_MIN_ALLOC_ALIGNMENT - 1)) == 0 );
+ 
+          if (pActual_size)
+             *pActual_size = p_new ? _msize(p_new) : 0;
+       }
+       else if (!size)
+       {
+          free(p);
+          p_new = NULL;
+ 
+@@ -112,20 +119,36 @@
+ 
+          if (p_new)
+          {
+             LZHAM_ASSERT( (reinterpret_cast<ptr_bits_t>(p_new) & (LZHAM_MIN_ALLOC_ALIGNMENT - 1)) == 0 );
+             p_final_block = p_new;
+          }
+          else if (movable)
+          {
+             p_new = realloc(p, size);
+ 
++#ifndef WIN32
++            if ((p_new) && (reinterpret_cast<ptr_bits_t>(p_new) & (LZHAM_MIN_ALLOC_ALIGNMENT - 1)))
++            {
++               // musl realloc may move a block to an 8-aligned tiny chunk;
++               // reallocate into an aligned block and copy the contents.
++               size_t old_size = _msize(p);
++               void* p_aligned = memalign(LZHAM_MIN_ALLOC_ALIGNMENT, size);
++               if (p_aligned)
++               {
++                  size_t copy_size = (size < old_size) ? size : old_size;
++                  memcpy(p_aligned, p_new, copy_size);
++                  free(p_new);
++                  p_new = p_aligned;
++               }
++            }
++#endif
+             if (p_new)
+             {
+                LZHAM_ASSERT( (reinterpret_cast<ptr_bits_t>(p_new) & (LZHAM_MIN_ALLOC_ALIGNMENT - 1)) == 0 );
+                p_final_block = p_new;
+             }
+          }
+ 
+          if (pActual_size)
+             *pActual_size = _msize(p_final_block);
+       }
+@@ -167,20 +190,21 @@
+          *pActual_size = actual_size;
+ 
+       if ((!p_new) || (actual_size < size))
+       {
+          lzham_mem_error("lzham_malloc: out of memory");
+          return NULL;
+       }
+ 
+       LZHAM_ASSERT((reinterpret_cast<ptr_bits_t>(p_new) & (LZHAM_MIN_ALLOC_ALIGNMENT - 1)) == 0);
+ 
++
+ #if LZHAM_MEM_STATS
+       update_total_allocated(1, static_cast<mem_stat_t>(actual_size));
+ #endif
+ 
+       return p_new;
+    }
+ 
+    void* lzham_realloc(void* p, size_t size, size_t* pActual_size, bool movable)
+    {
+       if ((ptr_bits_t)p & (LZHAM_MIN_ALLOC_ALIGNMENT - 1))

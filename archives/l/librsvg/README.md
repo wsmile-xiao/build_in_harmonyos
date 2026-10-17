@@ -33,5 +33,5 @@ librsvg 提供了一个 C API，用于解析和渲染 SVG 文件。它是 GNOME 
 ## OHOS 适配注意事项
 1. 使用 OHOS SDK 的 clang-15 作为编译器（跳过 shell wrapper）
 2. 需要设置 RUSTFLAGS 指定链接器
-3. 需要禁用测试（-Dtests=false）避免链接问题
+3. 上游测试经 meson test 真实运行（C API tests + Rust cargo test），doctest 因 OHOS rust 工具链缺 rustdoc 组件排除（patch 0003 --tests）
 4. 需要禁用 introspection 和 rsvg-convert

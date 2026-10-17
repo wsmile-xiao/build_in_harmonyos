@@ -2,38 +2,28 @@
 
 ## 概述
 
-pstree 是显示进程树的工具，属于 psmisc 包的一部分。由于 psmisc 整包编译失败，本次采用单独编译 pstree.c 的方式。
+pstree 是显示进程树的命令行工具，属于 psmisc 包的一部分。由于 psmisc 的
+autotools 构建系统需要 automake（鸿蒙环境不可用），采用单文件编译 pstree.c。
 
 ## 编译信息
 
 - **版本**: 23.7 (基于 psmisc v23.7)
-- **编译日期**: 2026-04-28
-- **目标平台**: aarch64-unknown-linux-ohos
-- **编译器**: clang
-- **构建方式**: 单文件编译（非标准 autotools）
+- **构建方式**: 单文件编译（clang 直接编译 src/pstree.c）
+- **依赖**: ncurses/6.6 (from OHPCD 制品仓, 静态链接 libncursesw.a)
 
-## 编译步骤
+## 构建方式
 
 ```bash
-# 1. 克隆源码
-git clone https://gitlab.com/psmisc/psmisc.git
-cd psmisc/src
-
-# 2. 单独编译 pstree.c
-clang -DVERSION="23.7" \
-      -o pstree \
-      pstree.c \
-      -I$HOME/usr/local/include \
-      -L$HOME/usr/local/lib \
-      -lncursesw
-
-# 3. 验证
-./pstree --version
+# Conan 驱动构建
+conan create . -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing
 ```
 
-## 依赖
+## 适配说明
 
-- **ncursesw**: 用于终端显示（已预装）
+1. **单文件编译**: autotools 不可用，直接编译 pstree.c
+2. **VERSION 宏**: 手动定义 `-DVERSION='"23.7"'`
+3. **跳过 config.h**: 不定义 `HAVE_CONFIG_H`
+4. **ncurses 依赖**: 使用 conan 制品仓的 ncurses/6.6
 
 ## 验证
 
@@ -41,21 +31,4 @@ clang -DVERSION="23.7" \
 $ pstree --version
 pstree (PSmisc) 23.7
 Copyright (C) 1993-2024 Werner Almesberger and Craig Small
-
-# 显示进程树
-$ pstree -p
-systemd(1)─┬─dbus-daemon(1234)
-           ├─sshd(2345)
-           └─bash(3456)───pstree(4567)
 ```
-
-## 特殊说明
-
-1. **单文件编译**: 由于 psmisc 整包编译失败，仅编译 pstree.c
-2. **VERSION 宏**: 需要手动定义，通常由 configure 脚本自动生成
-3. **ncursesw**: 使用带宽字符支持的 ncurses 库
-
-## 注意事项
-
-- 仅包含 pstree 工具，不包含 psmisc 的其他工具（killall, fuser, peekfd 等）
-- 如需其他工具，需单独编译对应的 .c 文件

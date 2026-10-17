@@ -1,0 +1,63 @@
+#====================================================================
+# E525 — libtool -Wl flag 重排导致 -Bstatic 静态链接失效 + 私有目录方案
+# 对应的人类文档: doc/E525.md
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E525
+trigger_tool:           make|ld
+phase:                  linking
+error_signature:        Error loading shared library libzstd\.so\.1|undefined symbol: ZSTD_.*|archive member .*\.a is neither ET_REL nor LLVM bitcode
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               linking, toolchain
+match_keywords:         libtool, Bstatic, static linking, shared library NEEDED, convenience library, nested archive, private libdir
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             libtool 链接时把所有 -Wl,* 参数聚合重排到 -L/-l 之前，导致 "-Wl,-Bstatic ... -lzstd ... -Wl,-Bdynamic" 的包裹对变成空操作（-lzstd 落在 -Bdynamic 之后按默认动态解析）；而传 .a 绝对路径时 libtool 又把整个归档嵌套拷贝进静态库产物（ld.lld 报 neither ET_REL）
+affected_scope:         所有需要把 conan 动态库依赖静态链入可执行产物的 autotools 包（制品仓包仅含 .so 时更常见）
+verification_cmd:       readelf -d <binary> | grep NEEDED
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           private-static-libdir
+rec_description:        在 generate() 中把依赖的 libX.a 复制到 build_folder 下的私有目录（不含任何 .so），ZSTD_LIBS 等仅指向该私有目录 "-L<private> -lzstd"；同时从 AutotoolsToolchain extra_ldflags 中排除该依赖的原 libdir（否则原目录 .so 会先于私有目录被找到）。坑1: -Wl,-Bstatic/-Bdynamic 对被 libtool 前置重排而失效；坑2: .a 绝对路径被 libtool 作为 convenience library 嵌套拷贝进 .a 产物
+rec_command:            mkdir -p $BUILD/zstd_static && cp $(conan cache path zstd/1.5.7.1)/lib/libzstd.a $BUILD/zstd_static/ && export ZSTD_LIBS="-L$BUILD/zstd_static -lzstd"
+rec_auto_fix:           false
+rec_impl:               conanfile-generate
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       -Wl,-Bstatic.*-l.*-Wl,-Bdynamic
+forbid_1_reason:        libtool 将 -Wl 参数前置重排，包裹对失效，静默链接 .so
+forbid_1_consequence:   交付物 NEEDED libX.so，脱离 conan 环境运行 exit 127（L2 平台冒烟失败）
+forbid_2_pattern:       ZSTD_LIBS=.*libzstd\.a($|\s)
+forbid_2_reason:        绝对路径 .a 被 libtool 嵌套拷贝进静态库归档
+forbid_2_consequence:   ld.lld 报 archive member neither ET_REL，链接失败
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P012
+
+# ═══ Layer 5: 关系图 (Relations) ═══
+causes:                 libtool argument reordering, libtool convenience library semantics
+caused_by:
+similar_to:             E524
+conflicts_with:
+prerequisite_of:
+
+# ═══ Layer 6: 元数据 ═══
+doc_file:               doc/E525.md
+last_updated:           2026-09-18
+source_event:           squashfs-tools-ng 1.3.2 适配 PR #6230 CI 修复
+prescan_pattern:        -Wl,-Bstatic
+
+# ═══ Layer 7: 知识协作 (Authorship & Provenance) ═══
+authors:                B756
+source_pr:              6230
+source_commit:
+
+# ═══ Layer 8: 质量度量 (Quality Metrics) ═══
+metrics_success_count: 1
+metrics_fail_count: 3
+metrics_confidence: 0.25
+metrics_last_used: 2026-09-18

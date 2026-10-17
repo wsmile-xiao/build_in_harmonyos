@@ -1,0 +1,146 @@
+# ═══ Draft knowledge entry — `enable_testing()` 落在子目录 ⇒ build 根目录 ctest 零执行却退出码 0（假绿）；install(TARGETS ... LIBRARY) 漏发静态库与 PUBLIC_HEADER；Conan CMakeDeps 的 GTestConfig 顶掉 FindGTest 旧式 target 名 ═══
+# Timestamp: 2026-09-20
+# Software: memtailor 1.4
+# Gate: G2 (conan create)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-memtailor-1.4-subdir-ctest-false-pass-install-static-and-conan-gtest-targets
+trigger_tool:           ctest|cmake|conan|clang
+phase:                  testing|installation|configuration
+error_signature:        No tests were found!+|0 tests failed out of|target .* links to:
+                         .*but the target was not found|GTest::GTest|GTest::Main|
+                         No such file or directory.*libmemtailor\.a|
+                         'memtailor\.h' file not found|
+                         Did not find a suitable C\+\+ compiler
+severity:               3
+category:               build-system, cmake, testing, install, packaging
+match_keywords:         ctest, enable_testing, include(CTest), add_subdirectory,
+                         No tests were found, CTestTestfile.cmake, exit code 0,
+                         false pass, silent green, install(TARGETS), ARCHIVE
+                         DESTINATION, LIBRARY DESTINATION, PUBLIC_HEADER
+                         DESTINATION, umbrella header, static library not
+                         installed, find_package(GTest), FindGTest, GTestConfig.cmake,
+                         CMakeDeps, GTest::GTest, GTest::Main, GTest::gtest,
+                         GTest::gtest_main, FetchContent googletest offline
+title:                  `enable_testing()` 写在子目录 ⇒ build 根目录 `ctest` 零执行
+                         却退出码 0（假绿）；`install(TARGETS ... LIBRARY DESTINATION
+                         lib)` 漏发静态库与 PUBLIC_HEADER 伞头文件；Conan
+                         CMakeDeps 的 GTestConfig 顶掉 FindGTest 旧式 target 名
+
+root_cause: >
+  (a) 上游把 include(CTest) 写在 src/CMakeLists.txt（子目录）里。CMake 只在
+  「调用 enable_testing() 的那个目录及其子目录」生成 CTestTestfile.cmake，
+  于是 <build>/src/CTestTestfile.cmake 存在而 <build>/CTestTestfile.cmake 不存在；
+  在 build 根目录跑 ctest 打印 "No tests were found!!!"，**退出码是 0** —— 只判
+  退出码的配方会拿到绿色假阳性。(b) install(TARGETS memtailor LIBRARY
+  DESTINATION lib) 只声明 LIBRARY 类别，静态库属于 ARCHIVE，CMake 不会安装它，
+  包目录里 lib/libmemtailor.a 根本不存在；memtailor.h 只挂在 PUBLIC_HEADER
+  **属性**上而 install 规则里没有 PUBLIC_HEADER DESTINATION，伞头文件同样漏装。
+  (c) 上游测试链接 find_package(GTest) 提供的旧式 target 名 GTest::GTest /
+  GTest::Main（来自 CMake 自带 FindGTest.cmake）；Conan 的 gtest 由 CMakeDeps
+  生成 GTestConfig.cmake，只声明 GTest::gtest / GTest::gtest_main / GTest::gmock
+  / GTest::gmock_main，一旦 GTestConfig.cmake 先被找到，GTEST_FOUND 为 TRUE、
+  FindGTest.cmake 不再加载，两个旧名字不存在 → configure 期 target not found。
+  (d) find_package(GTest) 失败时上游退回 FetchContent 在 configure 期 git clone
+  googletest v1.16.0，CI worker 不可联网。
+affected_scope: >
+  所有在子目录里 include(CTest)/enable_testing() 的 CMake 工程（build 根目录的
+  ctest 会零执行却返回 0）；所有 install(TARGETS ...) 只写 LIBRARY 而目标其实是
+  静态库的工程，以及把 PUBLIC_HEADER 只当属性写、不给 DESTINATION 的伞头文件；
+  所有用 Conan CMakeDeps 的 gtest 来满足上游 find_package(GTest) 的配方（旧式
+  GTest::GTest / GTest::Main 必然 not found）。
+verification_cmd: >
+  # (a) 复现假绿：在 build 根目录跑，看输出与退出码
+  ctest --output-on-failure ; echo "exit=$?"          # 未打补丁：No tests were found!!! / exit=0
+  ls <build>/CTestTestfile.cmake <build>/src/CTestTestfile.cmake   # 后者在、前者不在
+  # (b) 复现漏装
+  cmake --install <build> --prefix <pkg> && ls <pkg>/lib <pkg>/include
+  # (c) 复现旧式 target 名不存在
+  cmake -B<build> -S. -DCMAKE_TOOLCHAIN_FILE=<conan_toolchain.cmake> -DBUILD_TESTING=ON
+rec_priority:           1
+rec_approach:           toplevel-enable-testing-plus-primary-install-plus-conan-targets
+rec_description: >
+  三步补丁：(a) 把 include(CTest)（= enable_testing()）从子目录提到顶层，让 build
+  根目录的 ctest 真正能看到用例 —— 这是可向上游提交的正当修复，不是测试绕过；
+  同时配方 build() 里**解析 ctest 汇总行**（先对 "No tests were found" 单独判失败，
+  再要求 failed==0 且 total >= 预期用例数），绝不只依赖退出码。(b) install(TARGETS)
+  补齐 ARCHIVE DESTINATION lib 与 PUBLIC_HEADER DESTINATION include，让静态库与
+  伞头文件都进包。(c) 把 GTest::GTest / GTest::Main 换成 Conan 声明的
+  GTest::gtest / GTest::gtest_main，并用 test_requires("gtest/…") 让
+  find_package(GTest) 命中 CMakeDeps 配置，FetchContent 分支不会被走到。
+rec_command: >
+  # patch 0001（顶层 CMakeLists.txt）
+  include(CTest)
+  install(TARGETS memtailor
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
+    PUBLIC_HEADER DESTINATION include
+    )
+  # patch 0002（src/CMakeLists.txt）
+  -    target_link_libraries(memtailor-unit-tests memtailor GTest::GTest GTest::Main)
+  +    target_link_libraries(memtailor-unit-tests memtailor GTest::gtest GTest::gtest_main)
+  # conanfile.py build(): 解析汇总行而不是只看退出码
+  m = re.search(r"(\d+)% tests passed, (\d+) tests failed out of (\d+)", text)
+  if "No tests were found" in text:      raise ConanException(...)
+  if int(m.group(2)) != 0:               raise ConanException(...)
+  if int(m.group(3)) < CTEST_EXPECTED:   raise ConanException(...)
+rec_auto_fix:           false
+rec_impl:               conan-patch-recipe
+
+fallback_priority:      2
+fallback_approach:      direct-test-binary-execution
+fallback_description: >
+  若上游坚持把 enable_testing() 留在子目录、或 ctest 驱动在你的探针下仍不可信，
+  退而像 Box2D 那样不走 ctest：build() 内用 self.run() 直接执行上游测试可执行文件
+  （本包是 src/memtailor-unit-tests），对 gtest 汇总行做 hard check。代价是丢掉
+  gtest_discover_tests 展开出的逐用例粒度与 ctest 的 --output-on-failure 归因。
+fallback_command:       self.run(f'"{os.path.join(self.build_folder, "src", "memtailor-unit-tests")}"')
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe-build-test
+
+forbid_1_pattern:       self\.run\("ctest[^"]*"\)\s*$|subprocess.*ctest.*returncode\s*==\s*0
+forbid_1_reason:        ctest 对空套件打印 "No tests were found!!!" 且**退出码为 0**。
+                        只判退出码 = 在"一个用例都没跑"的情况下拿到绿色。
+forbid_1_consequence:   上游 22 个 gtest 用例（需从子目录 enable_testing 提上来才
+                        可见）从未执行却被记录为通过，回归缺陷无法被发现；PR 模板
+                        的"测试用例对比表"数字是假的。
+forbid_2_pattern:       install\(TARGETS\s+\w+\s+LIBRARY\s+DESTINATION[^)]*\)\s*$
+forbid_2_reason:        install(TARGETS ...) 只声明 LIBRARY 类别；静态库(.a)属于
+                        ARCHIVE 类别，CMake 不会把它装出去；且 PUBLIC_HEADER 只是
+                        **属性**，没有 PUBLIC_HEADER DESTINATION 就不会安装。
+forbid_2_consequence:   包目录里没有 lib/libmemtailor.a，消费者 -lmemtailor 直接
+                        链接失败；伞头文件 memtailor.h 也不在，消费者
+                        #include <memtailor.h> 命中 file not found —— 但库其实
+                        编得好好的，容易误判成"上游库有问题"。
+forbid_3_pattern:       GTest::GTest|GTest::Main
+forbid_3_reason:        这两个是 CMake 自带 FindGTest.cmake 创建的旧式别名。Conan
+                        的 gtest 经 CMakeDeps 生成 GTestConfig.cmake，只声明
+                        GTest::gtest / GTest::gtest_main / GTest::gmock /
+                        GTest::gmock_main；GTestConfig.cmake 一旦先被找到，
+                        GTEST_FOUND=TRUE，FindGTest.cmake 不会再加载。
+forbid_3_consequence:   configure 期 "target not found"，白跑一轮 CI；若改用
+                        FetchContent 兜底则在不可联网的 CI worker 上 configure 失败。
+forbid_4_pattern:       GIT_REPOSITORY.*googletest|FetchContent_Declare\(googletest
+forbid_4_reason:        上游 find_package(GTest) 失败时退回 FetchContent 在
+                        configure 期 git clone googletest（本包钉 v1.16.0）。CI worker
+                        不可联网，且钉的版本与包内其他测试依赖不一致。
+forbid_4_consequence:   configure 阶段网络超时失败；即使能拉，多一份 gtest 源码
+                        也意味着"上游用例数"会因为 gtest 版本不同而漂移。
+
+principles:             P005
+similar_to:             [DRAFT-box2d-2.4.1-ctest-empty-suite-false-pass, DRAFT-tiny-dnn-1.0.0a3-header-only-triple-include-root-and-network-gtest-substitution]
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-memtailor-1.4-subdir-ctest-false-pass-install-static-and-conan-gtest-targets.md
+last_updated:           2026-09-20
+source_event:           archives/m/memtailor/1.4
+
+authors:                2301_76770579
+source_pr:              11303
+source_commit:          ae5208a70a2c607824d78f65c1a6b3c3321c9562
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20

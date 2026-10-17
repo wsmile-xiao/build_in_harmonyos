@@ -1,0 +1,2490 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5bc6363..c0aac6a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -30,13 +30,23 @@ include(ECMDeprecationSettings)
+ 
+ find_package(Qt6 ${QT_MIN_VERSION} REQUIRED COMPONENTS Core Widgets)
+ 
++# OHOS adaptation: the upstream KIO worker (audiocd.cpp) and the KCM settings
++# module (kcmaudiocd/) both depend on KF6::KIO / KF6::KCMUtils / KF6::Solid,
++# none of which are published to the ohpcd conan registry. Additionally the
++# worker's ripping core requires a raw optical drive device (/dev/sr0 style
++# cdda access via cdparanoia), which does not exist on HarmonyOS PC. The
++# reusable deliverable on this platform is therefore the audiocdplugins
++# encoder library plus the encoder plugins themselves (wav/flac/vorbis/lame/
++# opus), which other applications (e.g. KAudioCreator-style rippers) embed
++# directly without a KIO daemon. KIO/KCMUtils/Solid/KCddb worker usage is
++# trimmed from the CMake graph accordingly; the encoder plugin ABI keeps the
++# upstream create_audiocd_encoders symbol with a self-contained data sink
++# interface (audiocdencoder.h) instead of KIO::WorkerBase.
+ find_package(KF6 ${KF_MIN_VERSION} REQUIRED COMPONENTS
+     Config
+     I18n
+-    KIO
+-    KCMUtils
++    CoreAddons
+     WidgetsAddons
+-    Solid
+ )
+ find_package(KCddb6 5.1)
+ set_package_properties(KCddb6 PROPERTIES
+@@ -51,29 +61,6 @@ set_package_properties(KF6DocTools PROPERTIES
+     TYPE OPTIONAL
+ )
+ 
+-find_package(Cdparanoia REQUIRED)
+-
+-cmake_push_check_state()
+-set(CMAKE_REQUIRED_INCLUDES ${CMAKE_REQUIRED_INCLUDES} ${CDPARANOIA_INCLUDE_DIR})
+-check_struct_has_member("struct cdrom_drive" "ioctl_device_name" "cdda_interface.h" CDDA_IOCTL_DEVICE_EXISTS)
+-cmake_pop_check_state()
+-if(CDDA_IOCTL_DEVICE_EXISTS)
+-    set(HAVE_CDDA_IOCTL_DEVICE 1)
+-else()
+-    set(HAVE_CDDA_IOCTL_DEVICE 0)
+-endif()
+-execute_process(
+-    COMMAND sed -e "s|cdda_private_data_t \\*private;|cdda_private_data_t \\*private_data;|g"
+-    # The next line should be removed if strerror_tr will be used somewhere
+-    COMMAND sed -e "/static\ char/,/}\;/d"
+-    INPUT_FILE ${CDPARANOIA_INCLUDE_DIR}/cdda_interface.h
+-    OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/cdda_interface.hpp
+-    RESULT_VARIABLE CDDA_INTERFACE_EDIT_ERROR
+-)
+-if (CDDA_INTERFACE_EDIT_ERROR)
+-    message(STATUS "Fixing cdda_interface.h for C++ failed with exit code ${CDDA_INTERFACE_EDIT_ERROR}")
+-endif()
+-
+ configure_file(config-audiocd.h.in ${CMAKE_CURRENT_BINARY_DIR}/config-audiocd.h)
+ 
+ #############################
+@@ -81,41 +68,6 @@ ecm_set_disabled_deprecation_versions(QT 6.7
+     KF 6.4.0
+     )
+ add_subdirectory(plugins)
+-add_subdirectory(kcmaudiocd)
+-add_subdirectory(data)
+-
+-add_library(kio_audiocd MODULE)
+-target_sources(kio_audiocd PRIVATE
+-    audiocd.cpp audiocd.h
+-)
+-
+-ecm_qt_declare_logging_category(kio_audiocd
+-    HEADER audiocd_kio_debug.h
+-    IDENTIFIER AUDIOCD_KIO_LOG
+-    CATEGORY_NAME kf.kio.workers.audiocd
+-    OLD_CATEGORY_NAMES kf5.kio.audiocd kf.kio.slaves.audiocd
+-    DEFAULT_SEVERITY Warning
+-    DESCRIPTION "audiocd KIO worker"
+-    EXPORT AUDIOCD
+-)
+-
+-set_target_properties(kio_audiocd PROPERTIES OUTPUT_NAME "audiocd")
+-
+-target_link_libraries(kio_audiocd
+-    audiocdplugins
+-    KF6::I18n
+-    KF6::Solid
+-    Qt::Widgets
+-    Cdparanoia::Cdparanoia
+-)
+-
+-install(TARGETS kio_audiocd  DESTINATION ${KDE_INSTALL_PLUGINDIR}/kf6/kio)
+-
+-ecm_qt_install_logging_categories(
+-    EXPORT AUDIOCD
+-    FILE kio_audiocd.categories
+-    DESTINATION ${KDE_INSTALL_LOGGINGCATEGORIESDIR}
+-)
+ 
+ if (KF6DocTools_FOUND)
+     add_subdirectory(doc)
+diff --git a/audiocd.cpp b/audiocd.cpp
+deleted file mode 100644
+index 88bce05..0000000
+--- a/audiocd.cpp
++++ /dev/null
+@@ -1,1322 +0,0 @@
+-/*
+- * Copyright (C) 2000 Rik Hemsley (rikkus) <rik@kde.org>
+- * Copyright (C) 2000-2002 Michael Matz <matz@kde.org>
+- * Copyright (C) 2001 Carsten Duvenhorst <duvenhorst@m2.uni-hannover.de>
+- * Copyright (C) 2001 Adrian Schroeter <adrian@suse.de>
+- * Copyright (C) 2003 Richard Lärkäng <richard@goteborg.utfors.se>
+- * Copyright (C) 2003 Scott Wheeler <wheeler@kde.org>
+- * Copyright (C) 2004-2005 Benjamin Meyer <ben at meyerhome dot net>
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+- * GNU General Public License for more details.
+- *
+- * You should have received a copy of the GNU General Public License
+- * along with this program; if not, write to the Free Software
+- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301,
+- * USA.
+- */
+-
+-#include "audiocd.h"
+-#include <config-audiocd.h>
+-
+-extern "C" {
+-// cdda_interface.h in cdparanoia 10.2 has a member called 'private' which the
+-// C++ compiler doesn't like
+-// we will thus use a generated local copy which renames that member.
+-#include "cdda_interface.hpp"
+-#include <cdda_paranoia.h>
+-void paranoiaCallback(long, int);
+-
+-int Q_DECL_EXPORT kdemain(int argc, char **argv);
+-}
+-
+-#include "plugins/audiocdencoder.h"
+-
+-#include <sys/resource.h>
+-#include <sys/stat.h>
+-#include <unistd.h>
+-
+-#include <cstdlib>
+-#include <ctime>
+-
+-#include <QApplication>
+-#include <QFile>
+-#include <QFileInfo>
+-#include <QHash>
+-#include <QRegularExpression>
+-#include <QUrlQuery>
+-
+-#include "audiocd_kio_debug.h"
+-
+-#include <KLocalizedString>
+-#include <KMacroExpander>
+-#include <QRegularExpression>
+-
+-#include <Solid/Block>
+-#include <Solid/Device>
+-#include <Solid/OpticalDrive>
+-
+-// CDDB
+-#include <KCDDB/Client>
+-
+-// Pseudo plugin class to embed metadata
+-class KIOPluginForMetaData : public QObject
+-{
+-    Q_OBJECT
+-    Q_PLUGIN_METADATA(IID "org.kde.kio.worker.audiocd" FILE "audiocd.json")
+-};
+-
+-using namespace KIO;
+-
+-using namespace AudioCD;
+-
+-extern "C" Q_DECL_EXPORT int kdemain(int argc, char **argv)
+-{
+-    // QApplication uses libkcddb which needs a valid kapp pointer
+-    // GUIenabled must be true as libkcddb sometimes wants to communicate
+-    // with the user
+-    QCoreApplication::setAttribute(Qt::AA_DisableSessionManager);
+-    QApplication app(argc, argv);
+-    app.setApplicationName(QStringLiteral("kio_audiocd"));
+-    KLocalizedString::setApplicationDomain(QByteArrayLiteral("kio_audiocd"));
+-
+-    if (argc != 4) {
+-        fprintf(stderr, "Usage: kio_audiocd protocol pool app\n");
+-        exit(-1);
+-    }
+-
+-    qCDebug(AUDIOCD_KIO_LOG) << "Starting " << getpid();
+-
+-    AudioCDProtocol worker(argv[1], argv[2], argv[3]);
+-    worker.dispatchLoop();
+-
+-    qCDebug(AUDIOCD_KIO_LOG) << "Done";
+-
+-    return 0;
+-}
+-
+-enum Which_dir {
+-    Unknown = 0, // Error
+-    Info, // CDDB info
+-    Base, // The KIO worker base directory showing all drives
+-    Root, // The root directory, shows all these :)
+-    FullCD, // Show a single file containing all of the data
+-    EncoderDir, // The root directory created by an encoder
+-    SubDir // A directory created from the Album name configuration
+-};
+-
+-class AudioCDProtocol::Private
+-{
+-public:
+-    Private()
+-        : s_info(i18n("Information"))
+-        , s_fullCD(i18n("Full CD"))
+-    {
+-        clearURLargs();
+-    }
+-
+-    void clearURLargs()
+-    {
+-        req_allTracks = false;
+-        which_dir = Unknown;
+-        req_track = -1;
+-        cddbUserChoice = -1;
+-    }
+-
+-    bool tocsAreDifferent(struct cdrom_drive *drive)
+-    {
+-        if (tracks != (uint)drive->tracks)
+-            return true;
+-        for (int i = 0; i < drive->tracks; ++i) {
+-            if (disc_toc[i].dwStartSector != drive->disc_toc[i].dwStartSector || disc_toc[i].bFlags != drive->disc_toc[i].bFlags
+-                || disc_toc[i].bTrack != drive->disc_toc[i].bTrack)
+-                return true;
+-        }
+-        return false;
+-    }
+-
+-    void setToc(struct cdrom_drive *drive)
+-    {
+-        for (int i = 0; i < drive->tracks; ++i) {
+-            disc_toc[i].dwStartSector = drive->disc_toc[i].dwStartSector;
+-            disc_toc[i].bFlags = drive->disc_toc[i].bFlags;
+-            disc_toc[i].bTrack = drive->disc_toc[i].bTrack;
+-        }
+-    }
+-
+-    // The type/which of request
+-    bool req_allTracks;
+-    Which_dir which_dir;
+-    int req_track;
+-    QString fname;
+-    QString child_dir;
+-    AudioCDEncoder *encoder_dir_type;
+-
+-    // Misc settings
+-    QString device; // URL settable
+-    int paranoiaLevel; // URL settable
+-    bool reportErrors;
+-
+-    // Directory strings, never change after init
+-    const QString s_info;
+-    const QString s_fullCD;
+-
+-    // Current CD
+-    TOC disc_toc[MAXTRK];
+-    unsigned tracks;
+-    bool trackIsAudio[100];
+-
+-    // CDDB items
+-    KCDDB::Result cddbResult;
+-    CDInfoList cddbList;
+-    int cddbUserChoice; // URL settable
+-    KCDDB::CDInfo cddbBestChoice;
+-
+-    // Template for ..
+-    QString fileNameTemplate; // URL settable
+-    QString albumNameTemplate; // URL settable
+-    QString fileLocationTemplate; // URL settable
+-    QString rsearch;
+-    QString rreplace;
+-
+-    // Current strings for this CD and or cddb selection
+-    QStringList templateTitles;
+-    QString templateAlbumName;
+-    QString templateFileLocation;
+-};
+-
+-int paranoia_read_limited_error;
+-
+-AudioCDProtocol::AudioCDProtocol(const QByteArray &protocol, const QByteArray &pool, const QByteArray &app)
+-    : WorkerBase(protocol, pool, app)
+-{
+-    d = new Private;
+-    // Add encoders
+-    AudioCDEncoder::findAllPlugins(this, encoders);
+-    if (encoders.isEmpty()) {
+-        qCCritical(AUDIOCD_KIO_LOG) << "No encoders available";
+-        return;
+-    }
+-
+-    encoderTypeCDA = encoderFromExtension(QStringLiteral(".cda"));
+-    encoderTypeWAV = encoderFromExtension(QStringLiteral(".wav"));
+-}
+-
+-AudioCDProtocol::~AudioCDProtocol()
+-{
+-    qDeleteAll(encoders);
+-    delete d;
+-}
+-
+-AudioCDEncoder *AudioCDProtocol::encoderFromExtension(const QString &extension)
+-{
+-    AudioCDEncoder *encoder;
+-    for (int i = encoders.size() - 1; i >= 0; --i) {
+-        encoder = encoders.at(i);
+-        if (QLatin1String(".") + QLatin1String(encoder->fileType()) == extension)
+-            return encoder;
+-    }
+-
+-    qCWarning(AUDIOCD_KIO_LOG) << "No encoder available for format" << extension;
+-    return nullptr;
+-}
+-
+-AudioCDEncoder *AudioCDProtocol::determineEncoder(const QString &filename)
+-{
+-    int pos = filename.lastIndexOf(QLatin1Char('.'));
+-    return encoderFromExtension(filename.mid(pos));
+-}
+-
+-// Initiate a request to access the CD drive.  If there is no valid drive
+-// specified or there is a problem, then error() must be (or have been)
+-// called before returning a null pointer.
+-KIO::WorkerResult AudioCDProtocol::initRequest(const QUrl &url, struct cdrom_drive **drive)
+-{
+-    // Load our Settings.
+-    loadSettings();
+-    // Then URL parameters can overrule our settings.
+-    parseURLArgs(url);
+-
+-    const KIO::WorkerResult result = getDrive(drive);
+-    if (!result.success()) {
+-        return result;
+-    }
+-
+-    if (d->tocsAreDifferent(*drive)) {
+-        // Update our knowledge of the disc
+-        d->setToc(*drive);
+-        d->tracks = (*drive)->tracks;
+-
+-        KCDDB::TrackOffsetList signature;
+-        for (uint i = 0; i < d->tracks; i++) {
+-            d->trackIsAudio[i] = IS_AUDIO((*drive), i);
+-            signature << d->disc_toc[i].dwStartSector + 150;
+-        }
+-
+-        signature << cdda_disc_lastsector(*drive) - cdda_disc_firstsector(*drive) + 1 + 150;
+-
+-        KCDDB::Client c;
+-        d->cddbResult = c.lookup(signature);
+-        if (d->cddbResult == Success) {
+-            d->cddbList = c.lookupResponse();
+-            // FIXME: not always the best choice, see bug 279485
+-            // for a similar problem with Amarok
+-            d->cddbBestChoice = d->cddbList.first();
+-        }
+-        generateTemplateTitles();
+-    }
+-
+-    // Determine what file or folder that is wanted.
+-    QString path = url.path();
+-    if (!path.isEmpty() && path[0] == QLatin1Char('/'))
+-        path = path.mid(1);
+-
+-    d->req_allTracks = false;
+-
+-    // See which file and directory they want
+-    QString remainingDirPath;
+-    d->which_dir = Unknown;
+-    if (path.isEmpty()) {
+-        d->which_dir = Root;
+-        d->encoder_dir_type = encoderTypeWAV;
+-        remainingDirPath = d->templateFileLocation;
+-        d->fname = QString();
+-    } else {
+-        for (int i = encoders.size() - 1; i >= 0; --i) {
+-            AudioCDEncoder *encoder = encoders.at(i);
+-            QString encoderFileLocation = encoder->type();
+-            if (!d->templateFileLocation.isEmpty())
+-                encoderFileLocation = encoderFileLocation + QLatin1String("/") + d->templateFileLocation;
+-            if (path == encoder->type()) {
+-                d->which_dir = EncoderDir;
+-                d->encoder_dir_type = encoder;
+-                remainingDirPath = encoderFileLocation.mid(path.length());
+-                d->fname = QString();
+-                break;
+-            } else if (encoderFileLocation.startsWith(path)) {
+-                d->which_dir = SubDir;
+-                d->encoder_dir_type = encoder;
+-                remainingDirPath = encoderFileLocation.mid(path.length());
+-                d->fname = QString();
+-                break;
+-            } else if (path.startsWith(encoderFileLocation)) {
+-                d->which_dir = SubDir;
+-                d->encoder_dir_type = encoder;
+-                remainingDirPath = QString();
+-                d->fname = path.mid(encoderFileLocation.length() + 1);
+-                break;
+-            } else if (path.startsWith(encoder->type())) {
+-                d->which_dir = EncoderDir;
+-                d->encoder_dir_type = encoder;
+-                remainingDirPath = QString();
+-                d->fname = path.mid(encoder->type().length() + 1);
+-            }
+-        }
+-        if (Unknown == d->which_dir) {
+-            if (path.startsWith(d->s_info)) {
+-                d->which_dir = Info;
+-                d->fname = path.mid(d->s_info.length() + 1);
+-            } else if (path.startsWith(d->s_fullCD)) {
+-                d->which_dir = FullCD;
+-                d->fname = path.mid(d->s_fullCD.length() + 1);
+-                d->req_allTracks = true;
+-            } else if (!d->templateFileLocation.isEmpty() && d->templateFileLocation.startsWith(path)) {
+-                d->which_dir = SubDir;
+-                d->encoder_dir_type = encoderTypeWAV;
+-                remainingDirPath = d->templateFileLocation.mid(path.length());
+-                d->fname = QString();
+-            } else if (!d->templateFileLocation.isEmpty() && path.startsWith(d->templateFileLocation)) {
+-                d->encoder_dir_type = encoderTypeWAV;
+-                remainingDirPath = QString();
+-                d->fname = path.mid(d->templateFileLocation.length() + 1);
+-            } else {
+-                d->encoder_dir_type = encoderTypeWAV;
+-                remainingDirPath = QString();
+-                d->fname = path;
+-            }
+-        }
+-    }
+-    if (!remainingDirPath.isEmpty() && remainingDirPath[0] == QLatin1Char('/'))
+-        remainingDirPath = remainingDirPath.mid(1);
+-    d->child_dir = remainingDirPath.split(QStringLiteral("/")).first();
+-
+-    // See if the url is a track
+-    d->req_track = -1;
+-    if (!d->fname.isEmpty()) {
+-        QString name(d->fname);
+-
+-        // Remove extension
+-        int dot = name.lastIndexOf(QLatin1Char('.'));
+-        if (dot >= 0)
+-            name.truncate(dot);
+-
+-        // See if it matches a cddb title
+-        uint trackNumber;
+-        for (trackNumber = 0; trackNumber < d->tracks; trackNumber++) {
+-            if (d->templateTitles[trackNumber] == name)
+-                break;
+-        }
+-        if (trackNumber < d->tracks)
+-            d->req_track = trackNumber;
+-        else {
+-            /* Not found in title list. Try hard to find a number in the
+-                     string. */
+-            int start = 0;
+-            int end = 0;
+-            // Find where the numbers start
+-            while (start < name.length()) {
+-                if (name[start++].isDigit())
+-                    break;
+-            }
+-            // Find where the numbers end
+-            for (end = start; end < name.length(); ++end)
+-                if (!name[end].isDigit())
+-                    break;
+-            if (start < name.length()) {
+-                bool ok;
+-                // The external representation counts from 1 so subtract 1.
+-                d->req_track = name.mid(start - 1, end - start + 2).toInt(&ok) - 1;
+-                if (!ok)
+-                    d->req_track = -1;
+-            }
+-        }
+-    }
+-    if (d->req_track >= (int)d->tracks)
+-        d->req_track = -1;
+-
+-    qCDebug(AUDIOCD_KIO_LOG) << "path=" << path << " file=" << d->fname << " req_track=" << d->req_track << " which_dir=" << d->which_dir
+-                             << " full CD?=" << d->req_allTracks;
+-    return KIO::WorkerResult::pass();
+-}
+-
+-bool AudioCDProtocol::getSectorsForRequest(struct cdrom_drive *drive, long &firstSector, long &lastSector) const
+-{
+-    if (d->req_allTracks) { // we rip all the tracks of the CD
+-        firstSector = cdda_track_firstsector(drive, 1);
+-        lastSector = cdda_track_lastsector(drive, cdda_tracks(drive));
+-    } else { // we only rip the selected track
+-        int trackNumber = d->req_track + 1;
+-
+-        if (trackNumber <= 0 || trackNumber > cdda_tracks(drive))
+-            return false;
+-        firstSector = cdda_track_firstsector(drive, trackNumber);
+-        lastSector = cdda_track_lastsector(drive, trackNumber);
+-    }
+-    return true;
+-}
+-
+-static uint findInformationFileNumber(const QString &filename, uint max)
+-{
+-    if (filename == QStringLiteral("%1.txt").arg(i18n("CDDB Information")))
+-        return 1;
+-
+-    for (uint i = 2; i <= max; ++i) {
+-        if (filename == QStringLiteral("%1_%2.txt").arg(i18n("CDDB Information")).arg(i)) {
+-            return i;
+-        }
+-    }
+-
+-    return max + 1;
+-}
+-
+-// See whether this is the root of the io worker (listing of all
+-// available CD drives) or the root of a drive (listing of encoder
+-// subdirectories and track WAV files).
+-//
+-// This needs to be deduced from the URL without calling initRequest()
+-// or getDrive(), either of which may return KIO::WorkerResult::fail().  It is not an
+-// error if there is no drive to be accessed and none needs to be.
+-//
+-// So parse the URL only.  Either Base, Root or Unknown (meaning "anywhere
+-// else") will be returned.
+-static Which_dir whichFromUrl(const QUrl &url)
+-{
+-    QUrlQuery query(url);
+-    if (!query.hasQueryItem(QStringLiteral("device"))) { // see if "device" query present
+-        return Base; // if not, must be KIO worker base
+-    }
+-
+-    if (url.path() == QLatin1String("/")) { // see if the device root
+-        return Root;
+-    }
+-
+-    return Unknown; // elsewhere within device
+-}
+-
+-// Check that the URL does not have a host specified, and return an error
+-// if it does.  Moved here because not all operations need to or should
+-// call initRequest().
+-KIO::WorkerResult AudioCDProtocol::checkNoHost(const QUrl &url)
+-{
+-    if (!url.host().isEmpty()) {
+-        return KIO::WorkerResult::fail(KIO::ERR_UNSUPPORTED_ACTION,
+-                                       i18n("You cannot specify a host with this protocol. "
+-                                            "Please use the audiocd:/ format instead."));
+-    }
+-
+-    return KIO::WorkerResult::pass();
+-}
+-
+-// Escape any '/'es in what should be a file name.
+-static QString escapePath(const QString &in)
+-{
+-    QString result = in;
+-    // FIXME: maybe could use QUrl::toPercentEncoding()
+-    result.replace(QLatin1Char('/'), QLatin1String("%2F"));
+-    return result;
+-}
+-
+-KIO::WorkerResult AudioCDProtocol::get(const QUrl &url)
+-{
+-    const KIO::WorkerResult noHostResult = checkNoHost(url);
+-    if (!noHostResult.success()) {
+-        return noHostResult;
+-    }
+-
+-    struct cdrom_drive *drive;
+-    const KIO::WorkerResult initResult = initRequest(url, &drive);
+-    if (!initResult.success()) {
+-        return initResult;
+-    }
+-
+-    if (d->fname.contains(i18n("CDDB Information"))) {
+-        const uint choice = findInformationFileNumber(d->fname, d->cddbList.count());
+-        uint count = 1;
+-        CDInfoList::iterator it;
+-        bool found = false;
+-        for (it = d->cddbList.begin(); it != d->cddbList.end(); ++it) {
+-            if (count == choice) {
+-                // FIXME: should be "text/plain"?
+-                mimeType(QStringLiteral("text/html"));
+-                data((*it).toString().toUtf8());
+-                // send an empty QByteArray to signal end of data.
+-                data(QByteArray());
+-                found = true;
+-                break;
+-            }
+-            count++;
+-        }
+-        if (!found && d->fname.contains(i18n("CDDB Information") + QLatin1Char(':'))) {
+-            // FIXME: should be "text/plain"?
+-            mimeType(QStringLiteral("text/html"));
+-            // data(QCString( d->fname.latin1() ));
+-            // send an empty QByteArray to signal end of data.
+-            data(QByteArray());
+-            found = true;
+-        }
+-        cdda_close(drive);
+-        if (!found)
+-            return KIO::WorkerResult::fail(KIO::ERR_DOES_NOT_EXIST, url.path());
+-        return KIO::WorkerResult::pass();
+-    }
+-
+-    long firstSector, lastSector;
+-    if (!getSectorsForRequest(drive, firstSector, lastSector)) {
+-        cdda_close(drive);
+-        return KIO::WorkerResult::fail(KIO::ERR_DOES_NOT_EXIST, url.path());
+-    }
+-
+-    AudioCDEncoder *encoder = determineEncoder(d->fname);
+-    if (!encoder) {
+-        cdda_close(drive);
+-        return KIO::WorkerResult::fail(KIO::ERR_DOES_NOT_EXIST, url.path());
+-    }
+-
+-    KCDDB::CDInfo info;
+-    if (d->cddbResult == KCDDB::Success) {
+-        info = d->cddbBestChoice;
+-
+-        int track = d->req_track + 1;
+-
+-        // hack
+-        // do we rip the whole CD?
+-        if (d->req_allTracks) {
+-            track = 1;
+-            // YES => the title of the file is the title of the CD
+-            info.track(track - 1).set(Title, info.get(Title));
+-        }
+-        encoder->fillSongInfo(info, track, QString());
+-    }
+-    long totalByteCount = CD_FRAMESIZE_RAW * (lastSector - firstSector + 1);
+-    long time_secs = (8 * totalByteCount) / (44100 * 2 * 16);
+-
+-    unsigned long size = encoder->size(time_secs);
+-    totalSize(size);
+-    mimeType(QLatin1String(encoder->mimeType()));
+-
+-    // Read data (track/disk) from the cd
+-    const KIO::WorkerResult readResult = paranoiaRead(drive, firstSector, lastSector, encoder, url.fileName(), size);
+-
+-    // send an empty QByteArray to signal end of data.
+-    data(QByteArray());
+-
+-    cdda_close(drive);
+-
+-    return readResult;
+-}
+-
+-static void app_dir(UDSEntry &e, const QString &n, size_t s)
+-{
+-    const mode_t _umask = ::umask(0);
+-    ::umask(_umask);
+-
+-    e.clear();
+-    e.reserve(5);
+-    e.fastInsert(KIO::UDSEntry::UDS_NAME, QFile::decodeName(n.toLocal8Bit()));
+-    e.fastInsert(KIO::UDSEntry::UDS_FILE_TYPE, S_IFDIR);
+-    e.fastInsert(KIO::UDSEntry::UDS_ACCESS, (0555 & ~_umask));
+-    e.fastInsert(KIO::UDSEntry::UDS_SIZE, s);
+-    e.fastInsert(KIO::UDSEntry::UDS_MIME_TYPE, QLatin1String("inode/directory"));
+-}
+-
+-static void app_file(UDSEntry &e, const QString &n, size_t s, const QString &mimetype = QString())
+-{
+-    const mode_t _umask = ::umask(0);
+-    ::umask(_umask);
+-
+-    e.clear();
+-    e.reserve(6);
+-    e.fastInsert(KIO::UDSEntry::UDS_NAME, QFile::decodeName(n.toLocal8Bit()));
+-    e.fastInsert(KIO::UDSEntry::UDS_FILE_TYPE, S_IFREG);
+-    // Use current date and time to avoid confusions. See
+-    // https://bugs.kde.org/show_bug.cgi?id=400114
+-    e.fastInsert(KIO::UDSEntry::UDS_MODIFICATION_TIME, QDateTime::currentDateTime().toSecsSinceEpoch());
+-    e.fastInsert(KIO::UDSEntry::UDS_ACCESS, (0444 & ~_umask));
+-    e.fastInsert(KIO::UDSEntry::UDS_SIZE, s);
+-    if (!mimetype.isEmpty())
+-        e.fastInsert(KIO::UDSEntry::UDS_MIME_TYPE, mimetype);
+-}
+-
+-struct DeviceListing {
+-    QString device;
+-    QString displayName;
+-};
+-
+-QList<DeviceListing> cdromDevices()
+-{
+-    QList<DeviceListing> ret;
+-
+-    const auto devices = Solid::Device::listFromType(Solid::DeviceInterface::OpticalDrive);
+-    for (const Solid::Device &device : devices) {
+-        qDebug() << device.udi().toLatin1().constData();
+-        const Solid::Block *b = device.as<Solid::Block>();
+-
+-        if (!b) {
+-            continue;
+-        }
+-
+-        QString name;
+-        QString type;
+-
+-        const Solid::OpticalDrive *o = device.as<Solid::OpticalDrive>();
+-        Solid::OpticalDrive::MediumTypes mediumType = o->supportedMedia();
+-
+-        // TODO translate them ?
+-        if (mediumType < Solid::OpticalDrive::Cdrw) {
+-            type = QLatin1String("CD-ROM");
+-        } else if (mediumType < Solid::OpticalDrive::Dvd) {
+-            type = QLatin1String("CDRW");
+-        } else if (mediumType < Solid::OpticalDrive::Dvdr) {
+-            type = QLatin1String("DVD-ROM");
+-        } else if (mediumType < Solid::OpticalDrive::Bd) {
+-            type = QLatin1String("DVDRW");
+-        } else if (mediumType < Solid::OpticalDrive::HdDvd) {
+-            type = QLatin1String("Blu-ray");
+-        } else {
+-            type = QLatin1String("High Density DVD");
+-        }
+-
+-        if (!device.vendor().isEmpty())
+-            name = (QLatin1Char('[') + type + QLatin1String(" - ") + device.vendor() + QLatin1String(" - ") + device.product() + QLatin1Char(']'));
+-        else
+-            name = (QLatin1Char('[') + type + QLatin1String(" - unknown vendor - ") + device.product() + QLatin1Char(']'));
+-
+-        ret << DeviceListing{
+-            b->device(),
+-            name,
+-        };
+-    }
+-
+-    return ret;
+-}
+-
+-KIO::WorkerResult AudioCDProtocol::stat(const QUrl &url)
+-{
+-    const KIO::WorkerResult result = checkNoHost(url);
+-    if (!result.success()) {
+-        return result;
+-    }
+-
+-    if (whichFromUrl(url) == Base) {
+-        // This is the top level directory with CDROM devices only.
+-        // No drive access is required.  url.fileName() is empty here.
+-
+-        UDSEntry entry;
+-        // One subdirectory for each drive
+-        const auto devices = cdromDevices();
+-        app_dir(entry, escapePath(QStringLiteral("/")), devices.count());
+-        statEntry(entry);
+-        return KIO::WorkerResult::pass();
+-    }
+-
+-    struct cdrom_drive *drive;
+-    const KIO::WorkerResult initResult = initRequest(url, &drive);
+-    if (!initResult.success()) {
+-        return initResult;
+-    }
+-
+-    if (d->which_dir == Info) {
+-        // This is the info dir or one of the info files
+-        if (d->fname.isEmpty()) {
+-            // The info dir
+-            UDSEntry entry;
+-            app_dir(entry, escapePath(url.fileName()), d->cddbList.count());
+-            statEntry(entry);
+-            return KIO::WorkerResult::pass();
+-        }
+-        if (d->fname.contains(i18n("CDDB Information"))) {
+-            // choice is 1-indexed so we need <= and -1 when accessing d->cddbList
+-            const uint choice = findInformationFileNumber(d->fname, d->cddbList.count());
+-            if (choice <= (uint)d->cddbList.count()) {
+-                // It's a valid info file
+-                UDSEntry entry;
+-                app_file(entry, escapePath(url.fileName()), d->cddbList.at(choice - 1).toString().toLatin1().size(), QStringLiteral("text/plain"));
+-                statEntry(entry);
+-                return KIO::WorkerResult::pass();
+-            }
+-        }
+-    }
+-
+-    const bool isFile = !d->fname.isEmpty();
+-
+-    // the track number. 0 if ripping
+-    // the whole CD.
+-    const uint trackNumber = d->req_track + 1;
+-
+-    if (!d->req_allTracks) { // we only want to rip one track.
+-        // does this track exist?
+-        if (isFile && (trackNumber < 1 || trackNumber > d->tracks)) {
+-            cdda_close(drive);
+-            return KIO::WorkerResult::fail(KIO::ERR_DOES_NOT_EXIST, url.path());
+-        }
+-    }
+-
+-    UDSEntry entry;
+-    if (!isFile) {
+-        app_dir(entry, escapePath(url.fileName()), cdda_tracks(drive));
+-    } else {
+-        AudioCDEncoder *encoder = determineEncoder(d->fname);
+-        long firstSector = 0, lastSector = 0;
+-        getSectorsForRequest(drive, firstSector, lastSector);
+-        app_file(entry, escapePath(url.fileName()), fileSize(firstSector, lastSector, encoder));
+-    }
+-
+-    statEntry(entry);
+-    cdda_close(drive);
+-    return KIO::WorkerResult::pass();
+-}
+-
+-KIO::WorkerResult AudioCDProtocol::listDir(const QUrl &url)
+-{
+-    const KIO::WorkerResult result = checkNoHost(url);
+-    if (!result.success()) {
+-        return result;
+-    }
+-
+-    UDSEntry entry;
+-    app_dir(entry, QStringLiteral("."), 0);
+-    listEntry(entry);
+-
+-    if (whichFromUrl(url) == Base) {
+-        // The top level directory with CDROM devices only.
+-
+-        const auto devices = cdromDevices();
+-        for (const auto &device : devices) {
+-            QUrl targetUrl = url;
+-            QUrlQuery targetQuery;
+-            targetQuery.addQueryItem(QStringLiteral("device"), device.device);
+-            targetUrl.setQuery(targetQuery);
+-
+-            app_dir(entry, escapePath(device.device), 2 + encoders.count());
+-            entry.fastInsert(KIO::UDSEntry::UDS_TARGET_URL, targetUrl.url());
+-            entry.fastInsert(KIO::UDSEntry::UDS_DISPLAY_NAME, device.displayName);
+-            listEntry(entry);
+-        }
+-        totalSize(entry.count());
+-        return KIO::WorkerResult::pass();
+-    }
+-
+-    struct cdrom_drive *drive;
+-    const KIO::WorkerResult initResult = initRequest(url, &drive);
+-    if (!initResult.success()) {
+-        return initResult;
+-    }
+-
+-    if (d->which_dir == Unknown) {
+-        cdda_close(drive);
+-        return KIO::WorkerResult::fail(KIO::ERR_DOES_NOT_EXIST, url.path());
+-    }
+-
+-    if (!d->fname.isEmpty()) {
+-        cdda_close(drive);
+-        return KIO::WorkerResult::fail(KIO::ERR_IS_FILE, url.path());
+-    }
+-
+-    // Generate templated names every time
+-    // because the template might have changed.
+-    generateTemplateTitles();
+-
+-    if (d->which_dir == Info) {
+-        CDInfoList::iterator it;
+-        uint count = 1;
+-        for (it = d->cddbList.begin(); it != d->cddbList.end(); ++it) {
+-            (*it).toString();
+-            if (count == 1)
+-                app_file(entry, QString::fromLatin1("%1.txt").arg(i18n("CDDB Information")), ((*it).toString().length()) + 1);
+-            else
+-                app_file(entry, QString::fromLatin1("%1_%2.txt").arg(i18n("CDDB Information")).arg(count), ((*it).toString().length()) + 1);
+-            count++;
+-            listEntry(entry);
+-        }
+-        // Error
+-        if (count == 1) {
+-            app_file(entry, QString::fromLatin1("%1: %2.txt").arg(i18n("CDDB Information")).arg(KCDDB::resultToString(d->cddbResult)), 0);
+-            count++;
+-            listEntry(entry);
+-        }
+-    }
+-
+-    if (d->which_dir == Root) {
+-        // List virtual directories.
+-        app_dir(entry, d->s_fullCD, encoders.count());
+-        listEntry(entry);
+-
+-        // Either >0 cddb results or cddb error file
+-        app_dir(entry, d->s_info, d->cddbList.count());
+-        listEntry(entry);
+-
+-        // List the encoders
+-        AudioCDEncoder *encoder;
+-        for (int i = encoders.size() - 1; i >= 0; --i) {
+-            encoder = encoders.at(i);
+-            // Skip the directory that is in the root (you can still go in it, just
+-            // don't show it)
+-            if (encoder == encoderTypeWAV)
+-                continue;
+-            app_dir(entry, encoder->type(), d->tracks);
+-            listEntry(entry);
+-        }
+-    }
+-
+-    // Now fill in the tracks for the current directory
+-    if (d->which_dir == FullCD) {
+-        AudioCDEncoder *encoder;
+-        for (int i = encoders.size() - 1; i >= 0; --i) {
+-            encoder = encoders.at(i);
+-            if (d->cddbResult != KCDDB::Success)
+-                addEntry(d->s_fullCD, encoder, drive, -1);
+-            else
+-                addEntry(d->templateAlbumName, encoder, drive, -1);
+-        }
+-    }
+-
+-    if (d->which_dir == SubDir || d->which_dir == Root || d->which_dir == EncoderDir) {
+-        if (d->child_dir.isEmpty()) {
+-            // we are at the end of the hierarchy, list the tracks
+-            for (uint trackNumber = 1; trackNumber <= d->tracks; trackNumber++) {
+-                // Skip data tracks
+-                if (!d->trackIsAudio[trackNumber - 1])
+-                    continue;
+-
+-                switch (d->which_dir) {
+-                case EncoderDir:
+-                case SubDir:
+-                case Root:
+-                    addEntry(d->templateTitles[trackNumber - 1], d->encoder_dir_type, drive, trackNumber);
+-                    break;
+-                case Info:
+-                case Unknown:
+-                default:
+-                    cdda_close(drive);
+-                    return KIO::WorkerResult::fail(KIO::ERR_INTERNAL, url.path());
+-                }
+-            }
+-        } else {
+-            app_dir(entry, d->child_dir, 1);
+-            listEntry(entry);
+-        }
+-    }
+-
+-    totalSize(entry.count());
+-    cdda_close(drive);
+-    return KIO::WorkerResult::pass();
+-}
+-
+-void AudioCDProtocol::addEntry(const QString &trackTitle, AudioCDEncoder *encoder, struct cdrom_drive *drive, int trackNo)
+-{
+-    if (!encoder || !drive)
+-        return;
+-
+-    long theFileSize = 0;
+-    if (trackNo == -1) { // adding entry for the full CD
+-        theFileSize = fileSize(cdda_track_firstsector(drive, 1), cdda_track_lastsector(drive, cdda_tracks(drive)), encoder);
+-    } else { // adding one regular track
+-        long firstSector = cdda_track_firstsector(drive, trackNo);
+-        long lastSector = cdda_track_lastsector(drive, trackNo);
+-        theFileSize = fileSize(firstSector, lastSector, encoder);
+-    }
+-    UDSEntry entry;
+-    app_file(entry, trackTitle + QLatin1String(".") + QLatin1String(encoder->fileType()), theFileSize, QLatin1String(encoder->mimeType()));
+-    listEntry(entry);
+-}
+-
+-long AudioCDProtocol::fileSize(long firstSector, long lastSector, AudioCDEncoder *encoder)
+-{
+-    if (!encoder)
+-        return 0;
+-
+-    long filesize = CD_FRAMESIZE_RAW * (lastSector - firstSector + 1);
+-    long length_seconds = (filesize) / 176400;
+-
+-    return encoder->size(length_seconds);
+-}
+-
+-KIO::WorkerResult AudioCDProtocol::getDrive(struct cdrom_drive **drive)
+-{
+-    const QByteArray device(QFile::encodeName(d->device));
+-    if (device.isEmpty()) {
+-        *drive = nullptr;
+-        return KIO::WorkerResult::fail(KIO::ERR_MALFORMED_URL, i18nc("The URL does not include a device name", "Missing device specification"));
+-    }
+-
+-    *drive = cdda_identify(device.data(), CDDA_MESSAGE_FORGETIT, nullptr);
+-    if (*drive == nullptr) {
+-        qCDebug(AUDIOCD_KIO_LOG) << "Can't find an audio CD on: \"" << d->device << "\"";
+-
+-        const QFileInfo fi(d->device);
+-        if (!fi.isReadable())
+-            return KIO::WorkerResult::fail(KIO::ERR_WORKER_DEFINED,
+-                                           i18n("Device does not have read permissions for this account.  "
+-                                                "Check the read permissions on the device."));
+-        if (!fi.isWritable())
+-            return KIO::WorkerResult::fail(KIO::ERR_WORKER_DEFINED,
+-                                           i18n("Device does not have write permissions for this account.  "
+-                                                "Check the write permissions on the device."));
+-        if (!fi.exists())
+-            return KIO::WorkerResult::fail(KIO::ERR_DOES_NOT_EXIST, d->device);
+-
+-        return KIO::WorkerResult::fail(KIO::ERR_WORKER_DEFINED,
+-                                       i18n("Unknown error.  If you have a cd in the drive try running "
+-                                            "cdparanoia -vsQ as yourself (not root). Do you see a track "
+-                                            "list? If not, make sure you have permission to access the CD "
+-                                            "device. If you are using SCSI emulation (possible if you "
+-                                            "have an IDE CD writer) then make sure you check that you "
+-                                            "have read and write permissions on the generic SCSI device, "
+-                                            "which is probably /dev/sg0, /dev/sg1, etc.. If it still does "
+-                                            "not work, try typing audiocd:/?device=/dev/sg0 (or similar) "
+-                                            "to tell kio_audiocd which device your CD-ROM is."));
+-    }
+-
+-    if (cdda_open(*drive) != 0) {
+-        qCDebug(AUDIOCD_KIO_LOG) << "cdda_open failed";
+-        cdda_close(*drive);
+-        *drive = nullptr;
+-        return KIO::WorkerResult::fail(KIO::ERR_CANNOT_OPEN_FOR_READING, d->device);
+-    }
+-
+-    return KIO::WorkerResult::pass();
+-}
+-
+-KIO::WorkerResult AudioCDProtocol::paranoiaRead(struct cdrom_drive *drive,
+-                                                long firstSector,
+-                                                long lastSector,
+-                                                AudioCDEncoder *encoder,
+-                                                const QString &fileName,
+-                                                unsigned long size)
+-{
+-    if (!encoder || !drive)
+-        return KIO::WorkerResult::fail();
+-
+-    cdrom_paranoia *paranoia = paranoia_init(drive);
+-    if (nullptr == paranoia) {
+-        qCDebug(AUDIOCD_KIO_LOG) << "paranoia_init failed";
+-        return KIO::WorkerResult::fail();
+-    }
+-
+-    int paranoiaLevel = PARANOIA_MODE_FULL ^ PARANOIA_MODE_NEVERSKIP;
+-    switch (d->paranoiaLevel) {
+-    case 0:
+-        paranoiaLevel = PARANOIA_MODE_DISABLE;
+-        break;
+-
+-    case 1:
+-        paranoiaLevel |= PARANOIA_MODE_OVERLAP;
+-        paranoiaLevel &= ~PARANOIA_MODE_VERIFY;
+-        break;
+-
+-    case 2:
+-        paranoiaLevel |= PARANOIA_MODE_NEVERSKIP;
+-    default:
+-        break;
+-    }
+-
+-    paranoia_modeset(paranoia, paranoiaLevel);
+-
+-    cdda_verbose_set(drive, CDDA_MESSAGE_PRINTIT, CDDA_MESSAGE_FORGETIT);
+-
+-    paranoia_seek(paranoia, firstSector, SEEK_SET);
+-
+-    long currentSector(firstSector);
+-
+-    unsigned long processed = encoder->readInit(CD_FRAMESIZE_RAW * (lastSector - firstSector + 1));
+-    // TODO test for errors (processed<0)?
+-    processedSize(processed);
+-    bool ok = true;
+-    QString errorString;
+-
+-    unsigned long lastSize = size;
+-    unsigned long diff = 0;
+-
+-    paranoia_read_limited_error = 0;
+-    int warned = 0;
+-    while (currentSector <= lastSector) {
+-        // TODO make the 5 configurable? The default in the lib is 20 fyi
+-        qint16 *buf = paranoia_read_limited(paranoia, paranoiaCallback, 5);
+-        if (warned == 0 && paranoia_read_limited_error >= 5 && d->reportErrors) {
+-            warning(
+-                i18n("AudioCD: Disk damage detected on this track, risk of data "
+-                     "corruption."));
+-            warned = 1;
+-        }
+-        if (nullptr == buf) {
+-            qCDebug(AUDIOCD_KIO_LOG) << "Unrecoverable error in paranoia_read";
+-            ok = false;
+-            errorString = i18n("Error reading audio data for %1 from the CD", fileName);
+-            break;
+-        }
+-
+-        ++currentSector;
+-
+-        int encoderProcessed = encoder->read(buf, CD_FRAMESAMPLES);
+-        if (encoderProcessed == -1) {
+-            qCDebug(AUDIOCD_KIO_LOG) << "Encoder processing error, stopping.";
+-            ok = false;
+-            errorString = i18n("Could not read %1: encoding failed", fileName);
+-            const QString details = encoder->lastErrorMessage();
+-            if (!details.isEmpty())
+-                errorString += QLatin1Char('\n') + details;
+-            break;
+-        }
+-        processed += encoderProcessed;
+-
+-        /**
+-         * Because compression size is so 'unknown' use some guesswork
+-         *
+-         * 1) First assume that the reported size is correct and
+-         * only change the totalSize if the guess it outside a range of %5.
+-         * 2) Only increase in size unless the decrease is %5 of last estimate.
+-         * This prevents continues small changes which is just annoying.
+-         */
+-        unsigned long end = lastSector - firstSector;
+-        unsigned long cur = currentSector - firstSector;
+-        unsigned long estSize = (processed / cur) * end;
+-
+-        // If our guess is within 5% of reported
+-        // size then use the reported size.
+-        unsigned long guess = (long)((100 / (float)size) * estSize);
+-        if ((guess > 97 && guess < 103) || estSize == 0) {
+-            if (processed > lastSize) {
+-                totalSize(processed + 1);
+-                lastSize = processed;
+-            }
+-        } else {
+-            float percentDone = ((float)cur / (float)end);
+-            // Calculate estimated amount that will be wrong
+-            diff = estSize - lastSize;
+-            diff = (diff * (unsigned long)((100 / (float)end) * (end - cur))) / 2;
+-            // Need 1% of data calculated as initial buffer, use %2 to be safe
+-            if (percentDone < .02) {
+-                // qCDebug(AUDIOCD_KIO_LOG) << "val: " << (float)cur/(float)end << "
+-                // diff: " << diff;
+-                diff = 0;
+-            }
+-
+-            // We are growing larger, increase total.
+-            if (lastSize < estSize) {
+-                // qCDebug(AUDIOCD_KIO_LOG) << "lastGuess: " << lastSize << ", guess: "
+-                // << estSize << ", diff: " << diff;
+-                totalSize(estSize + diff);
+-                lastSize = estSize + diff;
+-            } else {
+-                int margin = (int)((percentDone) * 75);
+-                // Don't bother really trying until almost half way done.
+-                if (percentDone <= .40)
+-                    margin = 7;
+-                unsigned long low = lastSize - lastSize / margin;
+-                if (estSize < low) {
+-                    // qCDebug(AUDIOCD_KIO_LOG) << "low: " << low << ", estSize: " <<
+-                    // estSize << ", num: " << margin;
+-                    totalSize(estSize);
+-                    lastSize = estSize;
+-                }
+-            }
+-        }
+-        /**
+-         * End estimation.
+-         */
+-        // qCDebug(AUDIOCD_KIO_LOG) << "processed: " << processed << ", totalSize: "
+-        // << estSize;
+-        processedSize(processed);
+-    }
+-
+-    if (processed > size)
+-        totalSize(processed);
+-
+-    long encoderProcessed = encoder->readCleanup();
+-    if (encoderProcessed >= 0) {
+-        processed += encoderProcessed;
+-        if (processed > size)
+-            totalSize(processed);
+-        processedSize(processed);
+-    } else if (ok) // i.e. no error message already emitted
+-        errorString = i18n("Could not read %1: encoding failed", fileName);
+-
+-    paranoia_free(paranoia);
+-    paranoia = nullptr;
+-
+-    if (!errorString.isEmpty()) {
+-        return KIO::WorkerResult::fail(ERR_WORKER_DEFINED, errorString);
+-    }
+-
+-    return KIO::WorkerResult::pass();
+-}
+-
+-/**
+- * Read the settings from the URL
+- * @see loadSettings()
+- */
+-void AudioCDProtocol::parseURLArgs(const QUrl &url)
+-{
+-    d->clearURLargs();
+-
+-    // FIXME: Use QUrlQuery for parsing
+-    QString query(QUrl::fromPercentEncoding(url.query().toLatin1()));
+-
+-    if (query.isEmpty())
+-        return;
+-
+-    const QStringList tokens(query.split(QLatin1Char('&'), Qt::SkipEmptyParts));
+-
+-    for (QStringList::ConstIterator it(tokens.constBegin()); it != tokens.constEnd(); ++it) {
+-        const QString token(*it);
+-
+-        int equalsPos = token.indexOf(QLatin1Char('='));
+-        if (-1 == equalsPos)
+-            continue;
+-
+-        const QString attribute(token.left(equalsPos));
+-        const QString value(token.mid(equalsPos + 1));
+-
+-        if (attribute == QLatin1String("device"))
+-            d->device = value;
+-        else if (attribute == QLatin1String("paranoia_level"))
+-            d->paranoiaLevel = value.toInt();
+-        else if (attribute == QLatin1String("fileNameTemplate"))
+-            d->fileNameTemplate = value;
+-        else if (attribute == QLatin1String("albumNameTemplate"))
+-            d->albumNameTemplate = value;
+-        else if (attribute == QLatin1String("fileLocationTemplate"))
+-            d->fileLocationTemplate = value;
+-        else if (attribute == QLatin1String("cddbChoice"))
+-            d->cddbUserChoice = value.toInt();
+-        else if (attribute == QLatin1String("niceLevel")) {
+-            int niceLevel = value.toInt();
+-            if (setpriority(PRIO_PROCESS, getpid(), niceLevel) != 0)
+-                qCDebug(AUDIOCD_KIO_LOG) << "Setting nice level to (" << niceLevel << ") failed.";
+-        }
+-    }
+-}
+-
+-/**
+- * Read the settings set by the kcm modules
+- * @see parseURLArgs()
+- */
+-void AudioCDProtocol::loadSettings()
+-{
+-    const KConfig *config = new KConfig(QStringLiteral("kcmaudiocdrc"), KConfig::NoGlobals);
+-    const KConfigGroup groupCDDA(config, QStringLiteral("CDDA"));
+-
+-    d->device = QString(); // clear device
+-    d->paranoiaLevel = 1; // enable paranoia error correction, but allow skipping
+-
+-    if (groupCDDA.readEntry("disable_paranoia", false)) {
+-        d->paranoiaLevel = 0; // disable all paranoia error correction
+-    }
+-
+-    if (groupCDDA.readEntry("never_skip", true)) {
+-        d->paranoiaLevel = 2;
+-        // never skip on errors of the medium, should be default for high quality
+-    }
+-
+-    d->reportErrors = groupCDDA.readEntry("report_errors", false);
+-
+-    if (groupCDDA.hasKey("niceLevel")) {
+-        int niceLevel = groupCDDA.readEntry("niceLevel", 0);
+-        if (setpriority(PRIO_PROCESS, getpid(), niceLevel) != 0)
+-            qCDebug(AUDIOCD_KIO_LOG) << "Setting nice level to (" << niceLevel << ") failed.";
+-    }
+-
+-    // The default track filename template
+-    const KConfigGroup groupFileName(config, QStringLiteral("FileName"));
+-    d->fileNameTemplate = groupFileName.readEntry("file_name_template", "%{trackartist} - %{number} - %{title}");
+-    d->albumNameTemplate = groupFileName.readEntry("album_name_template", "%{albumartist} - %{albumtitle}");
+-    if (groupFileName.readEntry("show_file_location", false))
+-        d->fileLocationTemplate = groupFileName.readEntry("file_location_template", QString());
+-    else
+-        d->fileLocationTemplate = QString();
+-    d->rsearch = groupFileName.readEntry("regexp_search");
+-    d->rreplace = groupFileName.readEntry("regexp_replace");
+-    // if the regular expressions are enclosed in quotes. Remove them
+-    // otherwise it is not possible to search for a space " ", since an empty
+-    // (only spaces) value is not supported by KConfig, so the space has to be
+-    // quoted, but then here the regexp searches really for " " instead of just
+-    // the space. Alex
+-    const QRegularExpression qoutedString(QLatin1String("^\".*\"$"));
+-    if (const auto match = qoutedString.match(d->rsearch); match.hasMatch()) {
+-        d->rsearch = d->rsearch.mid(1, d->rsearch.length() - 2);
+-    }
+-    if (const auto match = qoutedString.match(d->rreplace); match.hasMatch()) {
+-        d->rreplace = d->rreplace.mid(1, d->rreplace.length() - 2);
+-    }
+-
+-    // Tell the encoders to load their settings
+-    AudioCDEncoder *encoder;
+-    for (int i = encoders.size() - 1; i >= 0; --i) {
+-        encoder = encoders.at(i);
+-        if (encoder->init())
+-            encoder->loadSettings();
+-        else
+-            encoders.removeAt(i);
+-    }
+-
+-    delete config;
+-}
+-
+-/**
+- * Generates the track titles from the template using the cddb information.
+- */
+-void AudioCDProtocol::generateTemplateTitles()
+-{
+-    d->templateTitles.clear();
+-    if (d->cddbResult != KCDDB::Success) {
+-        for (unsigned int i = 0; i < d->tracks; i++) {
+-            d->templateTitles.append(i18n("Track %1", QString::asprintf("%02d", i + 1)));
+-        }
+-        return;
+-    }
+-
+-    KCDDB::CDInfo info = d->cddbBestChoice;
+-    if (d->cddbUserChoice >= 0 && ((d->cddbUserChoice) < d->cddbList.count()))
+-        info = d->cddbList[d->cddbUserChoice];
+-
+-    // Then generate the templates
+-    d->templateTitles.clear();
+-    for (uint i = 0; i < d->tracks; i++) {
+-        QHash<QString, QString> macros;
+-        macros[QStringLiteral("albumartist")] = info.get(Artist).toString();
+-        macros[QStringLiteral("albumtitle")] = info.get(Title).toString();
+-        macros[QStringLiteral("title")] = info.track(i).get(Title).toString();
+-        macros[QStringLiteral("trackartist")] = info.track(i).get(Artist).toString();
+-        macros[QStringLiteral("number")] = QString::asprintf("%02d", i + 1);
+-        // macros["number"] = QString("%1").arg(i+1, 2, 10);
+-        macros[QStringLiteral("genre")] = info.get(Genre).toString();
+-        macros[QStringLiteral("year")] = info.get(Year).toString();
+-
+-        QString title = escapePath(KMacroExpander::expandMacros(d->fileNameTemplate, macros, QLatin1Char('%')));
+-        title.replace(QRegularExpression(d->rsearch), d->rreplace);
+-        d->templateTitles.append(title);
+-    }
+-
+-    QHash<QString, QString> macros;
+-    macros[QStringLiteral("albumartist")] = info.get(Artist).toString();
+-    macros[QStringLiteral("albumtitle")] = info.get(Title).toString();
+-    macros[QStringLiteral("genre")] = info.get(Genre).toString();
+-    macros[QStringLiteral("year")] = info.get(Year).toString();
+-    d->templateAlbumName = escapePath(KMacroExpander::expandMacros(d->albumNameTemplate, macros, QLatin1Char('%')));
+-    d->templateAlbumName.replace(QRegularExpression(d->rsearch), d->rreplace);
+-
+-    d->templateFileLocation = KMacroExpander::expandMacros(d->fileLocationTemplate, macros, QLatin1Char('%'));
+-}
+-
+-/**
+- * Based upon the cdparanoia ripping application
+- * Only output BAD stuff
+- * The higher the paranoia_read_limited_error the worse the problem is
+- * FYI: PARANOIA_CB_READ & PARANOIA_CB_VERIFY happen continuously when ripping
+- */
+-void paranoiaCallback(long, int function)
+-{
+-    switch (function) {
+-    case PARANOIA_CB_VERIFY:
+-        // qCDebug(AUDIOCD_KIO_LOG) << "PARANOIA_CB_VERIFY";
+-        break;
+-
+-    case PARANOIA_CB_READ:
+-        // qCDebug(AUDIOCD_KIO_LOG) << "PARANOIA_CB_READ";
+-        break;
+-
+-    case PARANOIA_CB_FIXUP_EDGE:
+-        // qCDebug(AUDIOCD_KIO_LOG) << "PARANOIA_CB_FIXUP_EDGE";
+-        paranoia_read_limited_error = 2;
+-        break;
+-
+-    case PARANOIA_CB_FIXUP_ATOM:
+-        // qCDebug(AUDIOCD_KIO_LOG) << "PARANOIA_CB_FIXUP_ATOM";
+-        paranoia_read_limited_error = 6;
+-        break;
+-
+-    case PARANOIA_CB_READERR:
+-        qCDebug(AUDIOCD_KIO_LOG) << "PARANOIA_CB_READERR";
+-        paranoia_read_limited_error = 6;
+-        break;
+-
+-    case PARANOIA_CB_SKIP:
+-        qCDebug(AUDIOCD_KIO_LOG) << "PARANOIA_CB_SKIP";
+-        paranoia_read_limited_error = 8;
+-        break;
+-
+-    case PARANOIA_CB_OVERLAP:
+-        // qCDebug(AUDIOCD_KIO_LOG) << "PARANOIA_CB_OVERLAP";
+-        break;
+-
+-    case PARANOIA_CB_SCRATCH:
+-        qCDebug(AUDIOCD_KIO_LOG) << "PARANOIA_CB_SCRATCH";
+-        paranoia_read_limited_error = 7;
+-        break;
+-
+-    case PARANOIA_CB_DRIFT:
+-        // qCDebug(AUDIOCD_KIO_LOG) << "PARANOIA_CB_DRIFT";
+-        paranoia_read_limited_error = 4;
+-        break;
+-
+-    case PARANOIA_CB_FIXUP_DROPPED:
+-        qCDebug(AUDIOCD_KIO_LOG) << "PARANOIA_CB_FIXUP_DROPPED";
+-        paranoia_read_limited_error = 5;
+-        break;
+-
+-    case PARANOIA_CB_FIXUP_DUPED:
+-        qCDebug(AUDIOCD_KIO_LOG) << "PARANOIA_CB_FIXUP_DUPED";
+-        paranoia_read_limited_error = 5;
+-        break;
+-    }
+-}
+-
+-// needed for JSON file embedding
+-#include "audiocd.moc"
+diff --git a/audiocd.h b/audiocd.h
+deleted file mode 100644
+index 7669308..0000000
+--- a/audiocd.h
++++ /dev/null
+@@ -1,118 +0,0 @@
+-/*
+- * Copyright (C) 2000 Rik Hemsley (rikkus) <rik@kde.org>
+- * Copyright (C) 2000-2002 Michael Matz <matz@kde.org>
+- * Copyright (C) 2001 Carsten Duvenhorst <duvenhorst@m2.uni-hannover.de>
+- * Copyright (C) 2001 Adrian Schroeter <adrian@suse.de>
+- * Copyright (C) 2003 Richard Lärkäng <richard@goteborg.utfors.se>
+- * Copyright (C) 2003 Scott Wheeler <wheeler@kde.org>
+- * Copyright (C) 2004-2005 Benjamin Meyer <ben at meyerhome dot net>
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+- * GNU General Public License for more details.
+- *
+- * You should have received a copy of the GNU General Public License
+- * along with this program; if not, write to the Free Software
+- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301,
+- * USA.
+- */
+-
+-#ifndef AUDIO_CD_H
+-#define AUDIO_CD_H
+-
+-#include <KIO/WorkerBase>
+-
+-class AudioCDEncoder;
+-
+-struct cdrom_drive;
+-
+-namespace AudioCD
+-{
+-
+-/**
+- * The core class of the audiocd:// KIO worker.
+- * It has the KIO worker login and the ripping logic. The actual encoding
+- * is done by encoders that are separate objects.
+- */
+-class AudioCDProtocol : public KIO::WorkerBase
+-{
+-public:
+-    AudioCDProtocol(const QByteArray &protocol, const QByteArray &pool, const QByteArray &app);
+-    ~AudioCDProtocol() override;
+-
+-    KIO::WorkerResult get(const QUrl &) override;
+-    KIO::WorkerResult stat(const QUrl &) override;
+-    KIO::WorkerResult listDir(const QUrl &) override;
+-
+-protected:
+-    AudioCDEncoder *encoderFromExtension(const QString &extension);
+-    AudioCDEncoder *determineEncoder(const QString &filename);
+-
+-    struct cdrom_drive *findDrive(bool &noPermission);
+-    void parseURLArgs(const QUrl &);
+-
+-    void loadSettings();
+-
+-    /**
+-     * From the request information (Private member "d"),
+-     * get the first and last sector for the request.
+-     * return false if the parameters are invalid (for instance,
+-     * track number which does not exist on this CD)
+-     */
+-    bool getSectorsForRequest(struct cdrom_drive *drive, long &firstSector, long &lastSector) const;
+-
+-    /**
+-     * Give the size in bytes of the space between those two
+-     * sectors, depending on the file type.
+-     */
+-    long fileSize(long firstSector, long lastSector, AudioCDEncoder *encoder);
+-
+-    /**
+-     * The heart of this KIO worker.
+-     * Reads data off the cd and then passes it to an encoder to encode
+-     */
+-    KIO::WorkerResult
+-    paranoiaRead(struct cdrom_drive *drive, long firstSector, long lastSector, AudioCDEncoder *encoder, const QString &fileName, unsigned long size);
+-
+-    KIO::WorkerResult initRequest(const QUrl &url, struct cdrom_drive **drive);
+-
+-    /**
+-     * Add an entry in the KIO directory, using the title you give,
+-     * it will set the extension itself depending on the fileType.
+-     * You must also give the trackNumber for the size of the file
+-     * to be calculated.
+-     * @note If you want to add a file which is the whole CD, give
+-     * trackNo = -1
+-     *
+-     * @note You can always safely add MP3 or OGG files. The function
+-     * will check if kio_audiocd was compiled with support for those,
+-     * so NO NEED to wrap your calls with #ifdef for lame or vorbis.
+-     * this function will do the right thing.
+-     */
+-    void addEntry(const QString &trackTitle, AudioCDEncoder *encoder, struct cdrom_drive *drive, int trackNo);
+-
+-    class Private;
+-    Private *d;
+-
+-private:
+-    void generateTemplateTitles();
+-    KIO::WorkerResult checkNoHost(const QUrl &url);
+-
+-    QList<AudioCDEncoder *> encoders;
+-    KIO::WorkerResult getDrive(struct cdrom_drive **drive);
+-
+-    // These are the only guaranteed encoders to be built, the rest
+-    // are dynamic depending on other libraries on the system
+-    AudioCDEncoder *encoderTypeCDA;
+-    AudioCDEncoder *encoderTypeWAV;
+-};
+-
+-} // end namespace AudioCD
+-
+-#endif // AUDIO_CD_H
+diff --git a/audiocd.json b/audiocd.json
+deleted file mode 100644
+index 488bdc1..0000000
+--- a/audiocd.json
++++ /dev/null
+@@ -1,30 +0,0 @@
+-{
+-    "KDE-KIO-Protocols": {
+-        "audiocd": {
+-            "Class": ":local",
+-            "Icon": "media-optical-audio",
+-            "ShowPreviews": false,
+-            "X-DocPath": "kioworker6/audiocd/index.html",
+-            "copyFromFile": true,
+-            "copyToFile": false,
+-            "deleting": false,
+-            "input": "none",
+-            "listing": [
+-                "Name",
+-                "Type",
+-                "Size",
+-                "Date",
+-                "Link",
+-                ""
+-            ],
+-            "makedir": false,
+-            "maxInstances": 20,
+-            "maxInstancesPerHost": 5,
+-            "moving": false,
+-            "output": "filesystem",
+-            "protocol": "audiocd",
+-            "reading": true,
+-            "writing": false
+-        }
+-    }
+-}
+diff --git a/plugins/CMakeLists.txt b/plugins/CMakeLists.txt
+index c82a3a5..cd37273 100644
+--- a/plugins/CMakeLists.txt
++++ b/plugins/CMakeLists.txt
+@@ -1,3 +1,27 @@
++# OHOS adaptation: link through -L/-l so the plugins record a bare soname
++# for libaudiocdplugins (see the comment next to AUDIOCD_ENCODER_INSTALL_DIR
++# below). Must come before the add_subdirectory calls for scope propagation.
++link_directories(${CMAKE_BINARY_DIR}/bin)
++
++# OHOS adaptation: define the Ogg::ogg imported target from the conan libogg
++# package before FindOggVorbis builds OGGVORBIS::* targets; if the interface
++# target is missing at generate time CMake writes a literal "Ogg::ogg" into
++# the makefile dependencies ("target pattern contains no '%'" error).
++# OggConfig.cmake also overwrites the plain OGG_LIBRARY variable with the
++# "Ogg::ogg" target name, which FindOggVorbis would then bake into
++# IMPORTED_LOCATION - restore the real library path right after.
++set(_oggaudio_ogg_library_before "${OGG_LIBRARY}")
++set(_oggaudio_ogg_include_before "${OGG_INCLUDE_DIR}")
++find_package(Ogg CONFIG REQUIRED)
++# OggConfig.cmake overwrites the plain OGG_LIBRARY/OGG_INCLUDE_DIR variables
++# with the "Ogg::ogg" target name; FindOggVorbis would bake that into
++# IMPORTED_LOCATION. Restore the real paths captured above (they come from
++# the conan toolchain cache variables).
++if(_oggaudio_ogg_library_before MATCHES "^/")
++    set(OGG_LIBRARY "${_oggaudio_ogg_library_before}")
++    set(OGG_INCLUDE_DIR "${_oggaudio_ogg_include_before}")
++endif()
++
+ find_package(FLAC)
+ if(FLAC_FOUND)
+     add_subdirectory(flac)
+@@ -27,14 +51,27 @@ add_library(audiocdplugins SHARED)
+ target_sources(audiocdplugins PRIVATE
+     audiocdencoder.cpp audiocdencoder.h
+ )
++
++# OHOS adaptation: the logging-category header used to be generated for the
++# kio_audiocd worker target only; with the worker trimmed the library target
++# owns the category (same identifier "kf.kio.workers.audiocd").
++ecm_qt_declare_logging_category(audiocdplugins
++    HEADER audiocd_kio_debug.h
++    IDENTIFIER AUDIOCD_KIO_LOG
++    CATEGORY_NAME kf.kio.workers.audiocd
++    OLD_CATEGORY_NAMES kf5.kio.audiocd kf.kio.slaves.audiocd
++    DEFAULT_SEVERITY Warning
++    DESCRIPTION "audiocd KIO worker"
++)
+ target_include_directories(audiocdplugins
+     PRIVATE
+         ${CMAKE_BINARY_DIR}
+ )
+ target_link_libraries(audiocdplugins
+     PUBLIC
+-        KF6::KIOCore
+-	KCddb6
++        KF6::ConfigGui
++        KCddb6
++        Qt6::Widgets
+ )
+ 
+ generate_export_header(audiocdplugins 
+@@ -50,11 +87,21 @@ set_target_properties(audiocdplugins PROPERTIES
+ 
+ install(TARGETS audiocdplugins ${KDE_INSTALL_TARGETS_DEFAULT_ARGS})
+ 
++# OHOS adaptation: the encoder plugins link against audiocdplugins and the
++# stock CMake target-based link records the build-tree relative path
++# (../../bin/libaudiocdplugins.so) in DT_NEEDED, which breaks after
++# installation. Linking through -L/-l keeps DT_NEEDED a bare soname that
++# resolves next to the installed library. The encoders install into
++# lib/audiocd-encoders/ (upstream used the KIO worker plugin dir, which is
++# trimmed on this platform); consumers add that directory to
++# QCoreApplication::libraryPaths() for AudioCDEncoder::findAllPlugins().
++set(AUDIOCD_ENCODER_INSTALL_DIR "${KDE_INSTALL_LIBDIR}/audiocd-encoders")
++
+ install(FILES
+     ${CMAKE_CURRENT_BINARY_DIR}/audiocdplugins_export.h
+     ${CMAKE_CURRENT_BINARY_DIR}/audiocdplugins_version.h
+     audiocdencoder.h
++    audiocdcdio.h
+     DESTINATION ${AUDIOCDPLUGINS_INSTALL_INCLUDEDIR}
+     COMPONENT Devel
+ )
+-
+diff --git a/plugins/audiocdcdio.h b/plugins/audiocdcdio.h
+new file mode 100644
+index 0000000..c8c79e0
+--- /dev/null
++++ b/plugins/audiocdcdio.h
+@@ -0,0 +1,24 @@
++/*
++    SPDX-FileCopyrightText: 2004-2005 Benjamin Meyer <ben at meyerhome dot net>
++    SPDX-License-Identifier: GPL-2.0-or-later
++*/
++
++#ifndef AUDIOCDCDIO_H
++#define AUDIOCDCDIO_H
++
++/*
++ * OHOS adaptation: upstream pulls the raw CD frame size constants from
++ * cdparanoia's cdda_interface.h (via the sed-mangled cdda_interface.hpp copy
++ * that the top-level CMakeLists.txt generates). The KIO worker that actually
++ * talks to the drive is trimmed on this platform (no /dev/sr0 style device
++ * and no KIO worker daemon), and the conan package intentionally avoids the
++ * unpublished cdparanoia dependency just for two compile-time constants.
++ * The values below are the fixed on-disc constants from the CD-DA standard
++ * (identical to the cdparanoia definitions, Red Book / IEC 60908):
++ *   - CD_FRAMESIZE_RAW: bytes of raw audio data per CD frame (2352)
++ *   - CD_FRAMESAMPLES:  16-bit stereo samples per frame (2352/4 = 588)
++ */
++#define CD_FRAMESIZE_RAW 2352
++#define CD_FRAMESAMPLES (CD_FRAMESIZE_RAW / 4)
++
++#endif // AUDIOCDCDIO_H
+diff --git a/plugins/audiocdencoder.cpp b/plugins/audiocdencoder.cpp
+index d0751c9..ae0da25 100644
+--- a/plugins/audiocdencoder.cpp
++++ b/plugins/audiocdencoder.cpp
+@@ -25,12 +25,12 @@
+ #include <QLibrary>
+ #include <QRegularExpression>
+ 
+-Q_LOGGING_CATEGORY(AUDIOCD_KIO_LOG, "kf.kio.workers.audiocd")
++AudioCDDataSink::~AudioCDDataSink() = default;
+ 
+ /**
+  * Attempt to load a plugin and see if it has the symbol
+  * create_audiocd_encoders.
+- * @param libFileName file to try to load.
++ * @param libFileName file to try.
+  * @returns pointer to the symbol or NULL
+  */
+ static QFunctionPointer loadPlugin(const QString &libFileName)
+@@ -48,7 +48,7 @@ static QFunctionPointer loadPlugin(const QString &libFileName)
+  * and I do know that this does work. :)  Feel free to improve the loading
+  * system, there isn't much code anyway.
+  */
+-void AudioCDEncoder::findAllPlugins(KIO::WorkerBase *worker, QList<AudioCDEncoder *> &encoders)
++void AudioCDEncoder::findAllPlugins(AudioCDDataSink *sink, QList<AudioCDEncoder *> &encoders)
+ {
+     QString foundEncoders;
+ 
+@@ -75,9 +75,9 @@ void AudioCDEncoder::findAllPlugins(KIO::WorkerBase *worker, QList<AudioCDEncode
+ 
+                 QFunctionPointer function = loadPlugin(fi.absoluteFilePath());
+                 if (function) {
+-                    void (*functionPointer)(KIO::WorkerBase *, QList<AudioCDEncoder *> &) =
+-                        (void (*)(KIO::WorkerBase *worker, QList<AudioCDEncoder *> &encoders))function;
+-                    functionPointer(worker, encoders);
++                    void (*functionPointer)(AudioCDDataSink *, QList<AudioCDEncoder *> &) =
++                        (void (*)(AudioCDDataSink *sink, QList<AudioCDEncoder *> &encoders))function;
++                    functionPointer(sink, encoders);
+                 }
+             }
+         }
+diff --git a/plugins/audiocdencoder.h b/plugins/audiocdencoder.h
+index fdb2206..4ce6cf8 100644
+--- a/plugins/audiocdencoder.h
++++ b/plugins/audiocdencoder.h
+@@ -17,39 +17,66 @@
+   USA.
+ */
+ 
+-#ifndef AUDIOCD_ENCODER_H
+-#define AUDIOCD_ENCODER_H
++#ifndef AUDIO_CD_ENCODER_H
++#define AUDIO_CD_ENCODER_H
+ 
+ #include "audiocdplugins_export.h"
+ 
+-#include <KIO/WorkerBase>
++#include "audiocdcdio.h"
++
+ #include <QList>
+ #include <QLoggingCategory>
++#include <QWidget>
+ #include <sys/types.h>
+ 
+-#include <KCDDB/CDInfo>
++// OHOS adaptation: the published libkcddb conan package installs the
++// CamelCase forwarding headers under kcddb/ (KDEInstallDirs single-dir
++// layout), so use the lowercase include form (libkcddb test_package
++// precedent).
++#include <kcddb/CDInfo>
++
++using namespace KCDDB;
+ 
+ Q_DECLARE_LOGGING_CATEGORY(AUDIOCD_KIO_LOG)
+ 
+ class KConfigSkeleton;
+-using namespace KCDDB;
+ 
++/*
++ * OHOS adaptation: upstream declares the sink type as KIO::WorkerBase
++ * (KIO/WorkerBase from the unpublished KF6::KIOCore dependency). The whole
++ * KIO worker daemon layer is unavailable on this platform, but every
++ * encoder only ever uses one method on it: data(const QByteArray &), which
++ * forwards encoded chunks to the transport stream. A small self-contained
++ * abstract sink keeps the exact upstream data() call semantics inside the
++ * encoders while dropping the KIO dependency: any consumer (a KIO worker on
++ * a KIO-enabled platform, or a plain file/QIODevice writer here) implements
++ * data() and hands itself to AudioCDEncoder::findAllPlugins.
++ */
++class AUDIOCDPLUGINS_EXPORT AudioCDDataSink
++{
++public:
++    virtual ~AudioCDDataSink();
++    virtual void data(const QByteArray &d) = 0;
++};
++
++/**
++ * The encoder base class. The encoder is responsible for taking the raw
++ * 2352-byte CDDA frames from the drive and encoding them into its output
++ * format, forwarding the encoded chunks to the sink via data().
++ */
+ class AUDIOCDPLUGINS_EXPORT AudioCDEncoder
+ {
+ public:
+     /**
+      * Constructor.
+-     * @param worker parent that this classes can use to call data() with
++     * @param sink parent that this classes can use to call data() with
+      * when finished encoding bits.
+      */
+-    explicit AudioCDEncoder(KIO::WorkerBase *worker)
+-        : ioWorker(worker)
++    explicit AudioCDEncoder(AudioCDDataSink *sink)
++        : ioSink(sink)
+     {
+     }
+ 
+-    /**
+-     * Destructor.
+-     */
+     virtual ~AudioCDEncoder()
+     {
+     }
+@@ -146,18 +173,18 @@ public:
+      * Uses QLibraryInfo to find where libraries could be, opens all of the ones
+      * that we might own audiocd_encoder_* and then uses the symbol
+      * create_audiocd_encoders to obtain the encoders from that library.
+-     * @param worker Worker needed if the plugin is going to be used to encode
++     * @param sink Sink needed if the plugin is going to be used to encode
+      * something.
+-     * @param encoders container for new encoders.
++     *
++     * @param encoders reference to the list of encoders that have been
++     * successfully loaded.
+      */
+-    static void findAllPlugins(KIO::WorkerBase *worker, QList<AudioCDEncoder *> &encoders);
++    static void findAllPlugins(AudioCDDataSink *sink, QList<AudioCDEncoder *> &encoders);
+ 
+-protected:
+     /**
+-     * Pointer to the ioWorker that is running this encoder.
+-     * Used (only?) for the data() function to pass back encoded data.
++     * Pointer to the ioSink that is running this encoder.
+      */
+-    KIO::WorkerBase *ioWorker;
++    AudioCDDataSink *ioSink;
+ };
+ 
+-#endif // AUDIOCD_ENCODER_H
++#endif // AUDIO_CD_ENCODER_H
+diff --git a/plugins/flac/CMakeLists.txt b/plugins/flac/CMakeLists.txt
+index 67869ef..6b0efaa 100644
+--- a/plugins/flac/CMakeLists.txt
++++ b/plugins/flac/CMakeLists.txt
+@@ -12,17 +12,26 @@ kconfig_add_kcfg_files(audiocd_encoder_flac audiocd_flac_encoder.kcfgc)
+ 
+ target_include_directories(audiocd_encoder_flac
+     PRIVATE
++        ${CMAKE_CURRENT_SOURCE_DIR}/..
++        ${CMAKE_CURRENT_BINARY_DIR}/..
+         ${CMAKE_BINARY_DIR}
+ )
+ 
++# Preserve the build-order dependency on the audiocdplugins target that the
++# -l link item cannot express (parallel make would link the encoder plugins
++# before libaudiocdplugins.so exists).
++add_dependencies(audiocd_encoder_flac audiocdplugins)
++
+ target_link_libraries(audiocd_encoder_flac 
+-    audiocdplugins
++    -laudiocdplugins
++    KF6::ConfigGui
++    KCddb6
+     KF6::I18n
+     Qt::Widgets
+     FLAC::FLAC
+ )
+ 
+-install(TARGETS audiocd_encoder_flac  DESTINATION ${KDE_INSTALL_PLUGINDIR})
++install(TARGETS audiocd_encoder_flac DESTINATION ${AUDIOCD_ENCODER_INSTALL_DIR})
+ 
+ install(FILES audiocd_flac_encoder.kcfg DESTINATION ${KDE_INSTALL_KCFGDIR})
+ 
+diff --git a/plugins/flac/encoderflac.cpp b/plugins/flac/encoderflac.cpp
+index d8957f3..7e538b9 100644
+--- a/plugins/flac/encoderflac.cpp
++++ b/plugins/flac/encoderflac.cpp
+@@ -37,9 +37,9 @@
+ Q_LOGGING_CATEGORY(AUDIOCD_KIO_LOG, "kf.kio.workers.audiocd")
+ 
+ extern "C" {
+-AUDIOCDPLUGINS_EXPORT void create_audiocd_encoders(KIO::WorkerBase *worker, QList<AudioCDEncoder *> &encoders)
++AUDIOCDPLUGINS_EXPORT void create_audiocd_encoders(AudioCDDataSink *sink, QList<AudioCDEncoder *> &encoders)
+ {
+-    encoders.append(new EncoderFLAC(worker));
++    encoders.append(new EncoderFLAC(sink));
+ }
+ }
+ 
+@@ -48,7 +48,7 @@ class EncoderFLAC::Private
+ public:
+     FLAC__StreamEncoder *encoder;
+     FLAC__StreamMetadata **metadata;
+-    KIO::WorkerBase *ioWorker;
++    AudioCDDataSink *ioSink;
+     unsigned long data;
+ #if defined(FLAC_API_VERSION_CURRENT) && FLAC_API_VERSION_CURRENT > 7
+     unsigned compression_level;
+@@ -78,7 +78,7 @@ static FLAC__StreamEncoderWriteStatus WriteCallback(const FLAC__StreamEncoder *e
+ 
+     if (bytes) {
+         output = QByteArray::fromRawData((const char *)buffer, bytes);
+-        d->ioWorker->data(output);
++        d->ioSink->data(output);
+         output.clear();
+     }
+ 
+@@ -99,11 +99,11 @@ FLAC__SeekableStreamEncoder *encoder,  FLAC__uint64 absolute_byte_offset, void
+ *client_data)
+ {} ; */
+ 
+-EncoderFLAC::EncoderFLAC(KIO::WorkerBase *worker)
+-    : AudioCDEncoder(worker)
++EncoderFLAC::EncoderFLAC(AudioCDDataSink *sink)
++    : AudioCDEncoder(sink)
+ {
+     d = new Private();
+-    d->ioWorker = worker;
++    d->ioSink = sink;
+     d->encoder = nullptr;
+ #if defined(FLAC_API_VERSION_CURRENT) && FLAC_API_VERSION_CURRENT > 7
+     d->compression_level = 5;
+diff --git a/plugins/flac/encoderflac.h b/plugins/flac/encoderflac.h
+index 5373f94..d98b11b 100644
+--- a/plugins/flac/encoderflac.h
++++ b/plugins/flac/encoderflac.h
+@@ -44,7 +44,7 @@ public:
+ class EncoderFLAC : public AudioCDEncoder
+ {
+ public:
+-    explicit EncoderFLAC(KIO::WorkerBase *worker);
++    explicit EncoderFLAC(AudioCDDataSink *sink);
+     ~EncoderFLAC() override;
+ 
+     QString type() const override
+diff --git a/plugins/lame/CMakeLists.txt b/plugins/lame/CMakeLists.txt
+index 3fd8986..a84710c 100644
+--- a/plugins/lame/CMakeLists.txt
++++ b/plugins/lame/CMakeLists.txt
+@@ -19,18 +19,26 @@ kconfig_add_kcfg_files(audiocd_encoder_lame audiocd_lame_encoder.kcfgc)
+ 
+ target_include_directories(audiocd_encoder_lame
+     PRIVATE
++        ${CMAKE_CURRENT_SOURCE_DIR}/..
++        ${CMAKE_CURRENT_BINARY_DIR}/..
+         ${CMAKE_BINARY_DIR}
+ )
+ 
++# Preserve the build-order dependency on the audiocdplugins target that the
++# -l link item cannot express (parallel make would link the encoder plugins
++# before libaudiocdplugins.so exists).
++add_dependencies(audiocd_encoder_lame audiocdplugins)
++
+ target_link_libraries(audiocd_encoder_lame 
+-    audiocdplugins
++    -laudiocdplugins
++    KF6::ConfigGui
+     KF6::I18n
+     KF6::WidgetsAddons
+     Qt::Widgets
+     KCddb6
+ )
+ 
+-install(TARGETS audiocd_encoder_lame  DESTINATION ${KDE_INSTALL_PLUGINDIR})
++install(TARGETS audiocd_encoder_lame DESTINATION ${AUDIOCD_ENCODER_INSTALL_DIR})
+ 
+ install(FILES audiocd_lame_encoder.kcfg  DESTINATION  ${KDE_INSTALL_KCFGDIR})
+ 
+diff --git a/plugins/lame/encoderlame.cpp b/plugins/lame/encoderlame.cpp
+index 4368c78..7dd491e 100644
+--- a/plugins/lame/encoderlame.cpp
++++ b/plugins/lame/encoderlame.cpp
+@@ -32,9 +32,9 @@
+ Q_LOGGING_CATEGORY(AUDIOCD_KIO_LOG, "kf.kio.workers.audiocd")
+ 
+ extern "C" {
+-AUDIOCDPLUGINS_EXPORT void create_audiocd_encoders(KIO::WorkerBase *worker, QList<AudioCDEncoder *> &encoders)
++AUDIOCDPLUGINS_EXPORT void create_audiocd_encoders(AudioCDDataSink *sink, QList<AudioCDEncoder *> &encoders)
+ {
+-    encoders.append(new EncoderLame(worker));
++    encoders.append(new EncoderLame(sink));
+ }
+ }
+ 
+@@ -49,13 +49,13 @@ public:
+     QString lastErrorMessage;
+     QStringList genreList;
+     uint lastSize;
+-    KProcess *currentEncodeProcess;
++    QProcess *currentEncodeProcess;
+     QTemporaryFile *tempFile;
+ };
+ 
+-EncoderLame::EncoderLame(KIO::WorkerBase *worker)
++EncoderLame::EncoderLame(AudioCDDataSink *sink)
+     : QObject()
+-    , AudioCDEncoder(worker)
++    , AudioCDEncoder(sink)
+ {
+     d = new Private();
+     d->waitingForWrite = false;
+@@ -85,10 +85,16 @@ bool EncoderLame::init()
+ 
+     // Ask lame for the list of genres it knows; otherwise it barfs when doing
+     // e.g. lame --tg 'Vocal Jazz'
+-    KProcess proc;
+-    proc.setOutputChannelMode(KProcess::MergedChannels);
+-    proc << QStringLiteral("lame") << QStringLiteral("--genre-list");
+-    proc.execute();
++    QProcess proc;
++    proc.setProcessChannelMode(QProcess::MergedChannels);
++    // OHOS adaptation: KProcess::operator<< / execute() are KCoreAddons
++    // conveniences; plain QProcess with an explicit program + start() +
++    // waitForFinished() is the Qt-native equivalent (kcoreaddons not linked).
++    proc.setProgram(QStringLiteral("lame"));
++    proc.setArguments({QStringLiteral("--genre-list")});
++    proc.start();
++    if (!proc.waitForFinished(30000))
++        return false;
+ 
+     if (proc.exitStatus() != QProcess::NormalExit)
+         return false;
+@@ -236,8 +242,8 @@ unsigned long EncoderLame::size(long time_secs) const
+ 
+ long EncoderLame::readInit(long /*size*/)
+ {
+-    // Create KProcess
+-    d->currentEncodeProcess = new KProcess();
++    // Create the encoder process (QProcess; see OHOS adaptation note)
++    d->currentEncodeProcess = new QProcess();
+     d->tempFile = new QTemporaryFile(QDir::tempPath() + QLatin1String("/kaudiocd_XXXXXX") + QLatin1String(".mp3"));
+     d->tempFile->open();
+     d->lastErrorMessage.clear();
+@@ -245,26 +251,31 @@ long EncoderLame::readInit(long /*size*/)
+ 
+     // -r raw/pcm
+     // -s 44.1 (because it is raw you have to specify this)
+-    *(d->currentEncodeProcess) << QStringLiteral("lame") << QStringLiteral("--verbose") << QStringLiteral("-r") << QStringLiteral("-s")
+-                               << QStringLiteral("44.1");
+-    *(d->currentEncodeProcess) << args;
++    // OHOS adaptation: KProcess::operator<< replaced by an explicit
++    // program/argument list on plain QProcess.
++    QStringList encoderArgs;
++    encoderArgs << QStringLiteral("--verbose") << QStringLiteral("-r") << QStringLiteral("-s")
++                << QStringLiteral("44.1");
++    encoderArgs << args;
+     if (Settings::self()->id3_tag())
+-        *d->currentEncodeProcess << trackInfo;
++        encoderArgs << trackInfo;
+ 
+     // Read in stdin, output to the temp file
+-    *d->currentEncodeProcess << QStringLiteral("-") << d->tempFile->fileName();
++    encoderArgs << QStringLiteral("-") << d->tempFile->fileName();
++    d->currentEncodeProcess->setProgram(QStringLiteral("lame"));
++    d->currentEncodeProcess->setArguments(encoderArgs);
+ 
+     // qCDebug(AUDIOCD_KIO_LOG) << d->currentEncodeProcess->args();
+ 
+-    connect(d->currentEncodeProcess, &KProcess::readyReadStandardOutput, this, &EncoderLame::receivedStdout);
+-    connect(d->currentEncodeProcess, &KProcess::readyReadStandardError, this, &EncoderLame::receivedStderr);
++    connect(d->currentEncodeProcess, &QProcess::readyReadStandardOutput, this, &EncoderLame::receivedStdout);
++    connect(d->currentEncodeProcess, &QProcess::readyReadStandardError, this, &EncoderLame::receivedStderr);
+     // 	connect(d->currentEncodeProcess, &KProcess::bytesWritten,
+     //                          this, &EncoderLame::wroteStdin);
+ 
+-    connect(d->currentEncodeProcess, QOverload<int, QProcess::ExitStatus>::of(&KProcess::finished), this, &EncoderLame::processExited);
++    connect(d->currentEncodeProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, &EncoderLame::processExited);
+ 
+     // Launch!
+-    d->currentEncodeProcess->setOutputChannelMode(KProcess::SeparateChannels);
++    d->currentEncodeProcess->setProcessChannelMode(QProcess::SeparateChannels);
+     d->currentEncodeProcess->start();
+     return 0;
+ }
+@@ -330,7 +341,7 @@ long EncoderLame::readCleanup()
+         while (!file.atEnd()) {
+             uint read = file.read(data, 1024);
+             QByteArray output(data, read);
+-            ioWorker->data(output);
++            ioSink->data(output);
+         }
+         file.close();
+     }
+diff --git a/plugins/lame/encoderlame.h b/plugins/lame/encoderlame.h
+index b6275b7..78a3d39 100644
+--- a/plugins/lame/encoderlame.h
++++ b/plugins/lame/encoderlame.h
+@@ -23,7 +23,7 @@
+ #include "audiocdencoder.h"
+ #include "ui_encoderlameconfig.h"
+ 
+-#include <KProcess>
++#include <QProcess>
+ 
+ class EncoderLameConfig : public QWidget, public Ui::EncoderLameConfig
+ {
+@@ -44,7 +44,7 @@ class EncoderLame : public QObject, public AudioCDEncoder
+     Q_OBJECT
+ 
+ public:
+-    explicit EncoderLame(KIO::WorkerBase *worker);
++    explicit EncoderLame(AudioCDDataSink *sink);
+     ~EncoderLame() override;
+ 
+     QString type() const override
+diff --git a/plugins/opus/CMakeLists.txt b/plugins/opus/CMakeLists.txt
+index d68e3d0..b18ca8d 100644
+--- a/plugins/opus/CMakeLists.txt
++++ b/plugins/opus/CMakeLists.txt
+@@ -12,16 +12,24 @@ kconfig_add_kcfg_files(audiocd_encoder_opus audiocd_opus_encoder.kcfgc)
+ 
+ target_include_directories(audiocd_encoder_opus
+     PRIVATE
++        ${CMAKE_CURRENT_SOURCE_DIR}/..
++        ${CMAKE_CURRENT_BINARY_DIR}/..
+         ${CMAKE_BINARY_DIR}
+ )
+ 
++# Preserve the build-order dependency on the audiocdplugins target that the
++# -l link item cannot express (parallel make would link the encoder plugins
++# before libaudiocdplugins.so exists).
++add_dependencies(audiocd_encoder_opus audiocdplugins)
++
+ target_link_libraries(audiocd_encoder_opus
+-    audiocdplugins
++    -laudiocdplugins
++    KF6::ConfigGui
+     KF6::I18n
+     Qt::Widgets
+     KCddb6
+ )
+ 
+-install(TARGETS audiocd_encoder_opus  DESTINATION ${KDE_INSTALL_PLUGINDIR})
++install(TARGETS audiocd_encoder_opus DESTINATION ${AUDIOCD_ENCODER_INSTALL_DIR})
+ 
+ install(FILES audiocd_opus_encoder.kcfg  DESTINATION  ${KDE_INSTALL_KCFGDIR})
+diff --git a/plugins/opus/encoderopus.cpp b/plugins/opus/encoderopus.cpp
+index 75acdba..6ac496b 100644
+--- a/plugins/opus/encoderopus.cpp
++++ b/plugins/opus/encoderopus.cpp
+@@ -32,9 +32,9 @@
+ Q_LOGGING_CATEGORY(AUDIOCD_KIO_LOG, "kf.kio.workers.audiocd")
+ 
+ extern "C" {
+-AUDIOCDPLUGINS_EXPORT void create_audiocd_encoders(KIO::WorkerBase *worker, QList<AudioCDEncoder *> &encoders)
++AUDIOCDPLUGINS_EXPORT void create_audiocd_encoders(AudioCDDataSink *sink, QList<AudioCDEncoder *> &encoders)
+ {
+-    encoders.append(new EncoderOpus(worker));
++    encoders.append(new EncoderOpus(sink));
+ }
+ }
+ 
+@@ -49,13 +49,13 @@ public:
+     bool processHasExited;
+     QString lastErrorMessage;
+     uint lastSize;
+-    KProcess *currentEncodeProcess = nullptr;
++    QProcess *currentEncodeProcess = nullptr;
+     QTemporaryFile *tempFile = nullptr;
+ };
+ 
+-EncoderOpus::EncoderOpus(KIO::WorkerBase *worker)
++EncoderOpus::EncoderOpus(AudioCDDataSink *sink)
+     : QObject()
+-    , AudioCDEncoder(worker)
++    , AudioCDEncoder(sink)
+ {
+     d = new Private();
+     d->waitingForWrite = false;
+@@ -132,8 +132,8 @@ unsigned long EncoderOpus::size(long time_secs) const
+ 
+ long EncoderOpus::readInit(long /*size*/)
+ {
+-    // Create KProcess
+-    d->currentEncodeProcess = new KProcess();
++    // Create the encoder process (QProcess; see OHOS adaptation note)
++    d->currentEncodeProcess = new QProcess();
+     d->tempFile = new QTemporaryFile(QDir::tempPath() + QLatin1String("/kaudiocd_XXXXXX") + QLatin1String(".opus"));
+     d->tempFile->open();
+     d->lastErrorMessage.clear();
+@@ -141,21 +141,26 @@ long EncoderOpus::readInit(long /*size*/)
+ 
+     // --raw raw/pcm
+     // --raw-rate 44100 (because it is raw you have to specify this)
+-    *(d->currentEncodeProcess) << QStringLiteral("opusenc") << QStringLiteral("--raw") << QStringLiteral("--raw-rate") << QStringLiteral("44100");
+-    *(d->currentEncodeProcess) << args;
+-    *d->currentEncodeProcess << trackInfo;
++    // OHOS adaptation: KProcess::operator<< replaced by an explicit
++    // program/argument list on plain QProcess.
++    QStringList encoderArgs;
++    encoderArgs << QStringLiteral("--raw") << QStringLiteral("--raw-rate") << QStringLiteral("44100");
++    encoderArgs << args;
++    encoderArgs << trackInfo;
+ 
+     // Read in stdin, output to the temp file
+-    *d->currentEncodeProcess << QStringLiteral("-") << d->tempFile->fileName();
++    encoderArgs << QStringLiteral("-") << d->tempFile->fileName();
++    d->currentEncodeProcess->setProgram(QStringLiteral("opusenc"));
++    d->currentEncodeProcess->setArguments(encoderArgs);
+ 
+     // qCDebug(AUDIOCD_KIO_LOG) << args;
+ 
+-    connect(d->currentEncodeProcess, &KProcess::readyReadStandardOutput, this, &EncoderOpus::receivedStdout);
+-    connect(d->currentEncodeProcess, &KProcess::readyReadStandardError, this, &EncoderOpus::receivedStderr);
+-    connect(d->currentEncodeProcess, QOverload<int, QProcess::ExitStatus>::of(&KProcess::finished), this, &EncoderOpus::processExited);
++    connect(d->currentEncodeProcess, &QProcess::readyReadStandardOutput, this, &EncoderOpus::receivedStdout);
++    connect(d->currentEncodeProcess, &QProcess::readyReadStandardError, this, &EncoderOpus::receivedStderr);
++    connect(d->currentEncodeProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, &EncoderOpus::processExited);
+ 
+     // Launch!
+-    d->currentEncodeProcess->setOutputChannelMode(KProcess::SeparateChannels);
++    d->currentEncodeProcess->setProcessChannelMode(QProcess::SeparateChannels);
+     d->currentEncodeProcess->start();
+     return 0;
+ }
+@@ -217,7 +222,7 @@ long EncoderOpus::readCleanup()
+         while (!file.atEnd()) {
+             uint read = file.read(data, 1024);
+             QByteArray output(data, read);
+-            ioWorker->data(output);
++            ioSink->data(output);
+         }
+         file.close();
+     }
+diff --git a/plugins/opus/encoderopus.h b/plugins/opus/encoderopus.h
+index 3f05846..2a470f6 100644
+--- a/plugins/opus/encoderopus.h
++++ b/plugins/opus/encoderopus.h
+@@ -24,7 +24,7 @@
+ #include "audiocdencoder.h"
+ #include "ui_encoderopusconfig.h"
+ 
+-#include <KProcess>
++#include <QProcess>
+ 
+ class EncoderOpusConfig : public QWidget, public Ui::EncoderOpusConfig
+ {
+@@ -45,7 +45,7 @@ class EncoderOpus : public QObject, public AudioCDEncoder
+     Q_OBJECT
+ 
+ public:
+-    explicit EncoderOpus(KIO::WorkerBase *worker);
++    explicit EncoderOpus(AudioCDDataSink *sink);
+     ~EncoderOpus() override;
+ 
+     QString type() const override
+diff --git a/plugins/vorbis/CMakeLists.txt b/plugins/vorbis/CMakeLists.txt
+index ce5c14f..edbc5f4 100644
+--- a/plugins/vorbis/CMakeLists.txt
++++ b/plugins/vorbis/CMakeLists.txt
+@@ -2,6 +2,16 @@ add_definitions(-DTRANSLATION_DOMAIN=\"audiocd_encoder_vorbis\")
+ 
+ add_library(audiocd_encoder_vorbis SHARED)
+ 
++target_include_directories(audiocd_encoder_vorbis
++    PRIVATE
++        ${CMAKE_CURRENT_SOURCE_DIR}/..
++        ${CMAKE_CURRENT_BINARY_DIR}/..
++        ${CMAKE_BINARY_DIR}
++        # vorbisenc.h includes <ogg/ogg.h>: propagate the libogg include dir
++        ${OGG_INCLUDE_DIR}
++)
++
++
+ target_sources(audiocd_encoder_vorbis PRIVATE
+     encodervorbis.cpp encodervorbis.h
+ )
+@@ -10,14 +20,20 @@ ki18n_wrap_ui(audiocd_encoder_vorbis encodervorbisconfig.ui)
+ 
+ kconfig_add_kcfg_files(audiocd_encoder_vorbis audiocd_vorbis_encoder.kcfgc)
+ 
++# Preserve the build-order dependency on the audiocdplugins target that the
++# -l link item cannot express (parallel make would link the encoder plugins
++# before libaudiocdplugins.so exists).
++add_dependencies(audiocd_encoder_vorbis audiocdplugins)
++
+ target_link_libraries(audiocd_encoder_vorbis 
+     OGGVORBIS::vorbis
+-    audiocdplugins
++    -laudiocdplugins
++    KF6::ConfigGui
+     KF6::I18n
+     Qt::Widgets
+     KCddb6
+ )
+-install(TARGETS audiocd_encoder_vorbis  DESTINATION ${KDE_INSTALL_PLUGINDIR})
++install(TARGETS audiocd_encoder_vorbis DESTINATION ${AUDIOCD_ENCODER_INSTALL_DIR})
+ 
+ install(FILES audiocd_vorbis_encoder.kcfg  DESTINATION  ${KDE_INSTALL_KCFGDIR})
+ 
+diff --git a/plugins/vorbis/encodervorbis.cpp b/plugins/vorbis/encodervorbis.cpp
+index c15dd27..62202bf 100644
+--- a/plugins/vorbis/encodervorbis.cpp
++++ b/plugins/vorbis/encodervorbis.cpp
+@@ -35,9 +35,9 @@
+ #include <vorbis/vorbisenc.h>
+ 
+ extern "C" {
+-AUDIOCDPLUGINS_EXPORT void create_audiocd_encoders(KIO::WorkerBase *worker, QList<AudioCDEncoder *> &encoders)
++AUDIOCDPLUGINS_EXPORT void create_audiocd_encoders(AudioCDDataSink *sink, QList<AudioCDEncoder *> &encoders)
+ {
+-    encoders.append(new EncoderVorbis(worker));
++    encoders.append(new EncoderVorbis(sink));
+ }
+ }
+ 
+@@ -66,8 +66,8 @@ public:
+     int vorbis_bitrate;
+ };
+ 
+-EncoderVorbis::EncoderVorbis(KIO::WorkerBase *worker)
+-    : AudioCDEncoder(worker)
++EncoderVorbis::EncoderVorbis(AudioCDDataSink *sink)
++    : AudioCDEncoder(sink)
+ {
+     d = new Private();
+ }
+@@ -163,11 +163,11 @@ long EncoderVorbis::flush_vorbis()
+                 char *oggbody = reinterpret_cast<char *>(d->og.body);
+ 
+                 if (d->og.header_len) {
+-                    ioWorker->data(QByteArray::fromRawData(oggheader, d->og.header_len));
++                    ioSink->data(QByteArray::fromRawData(oggheader, d->og.header_len));
+                 }
+ 
+                 if (d->og.body_len) {
+-                    ioWorker->data(QByteArray::fromRawData(oggbody, d->og.body_len));
++                    ioSink->data(QByteArray::fromRawData(oggbody, d->og.body_len));
+                 }
+                 processed += d->og.header_len + d->og.body_len;
+             }
+@@ -231,11 +231,11 @@ long EncoderVorbis::readInit(long /*size*/)
+         char *oggbody = reinterpret_cast<char *>(d->og.body);
+ 
+         if (d->og.header_len) {
+-            ioWorker->data(QByteArray::fromRawData(oggheader, d->og.header_len));
++            ioSink->data(QByteArray::fromRawData(oggheader, d->og.header_len));
+         }
+ 
+         if (d->og.body_len) {
+-            ioWorker->data(QByteArray::fromRawData(oggbody, d->og.body_len));
++            ioSink->data(QByteArray::fromRawData(oggbody, d->og.body_len));
+         }
+     }
+     return 0;
+diff --git a/plugins/vorbis/encodervorbis.h b/plugins/vorbis/encodervorbis.h
+index b372e62..bade309 100644
+--- a/plugins/vorbis/encodervorbis.h
++++ b/plugins/vorbis/encodervorbis.h
+@@ -47,7 +47,7 @@ public:
+ class EncoderVorbis : public AudioCDEncoder
+ {
+ public:
+-    explicit EncoderVorbis(KIO::WorkerBase *worker);
++    explicit EncoderVorbis(AudioCDDataSink *sink);
+     ~EncoderVorbis() override;
+ 
+     QString type() const override
+diff --git a/plugins/wav/CMakeLists.txt b/plugins/wav/CMakeLists.txt
+index 2a20dbc..5ff5075 100644
+--- a/plugins/wav/CMakeLists.txt
++++ b/plugins/wav/CMakeLists.txt
+@@ -9,11 +9,21 @@ target_sources(audiocd_encoder_wav PRIVATE
+ 
+ target_include_directories(audiocd_encoder_wav
+     PRIVATE
++        ${CMAKE_CURRENT_SOURCE_DIR}/..
++        ${CMAKE_CURRENT_BINARY_DIR}/..
+         ${CMAKE_BINARY_DIR}
+ )
+ 
++# Preserve the build-order dependency on the audiocdplugins target that the
++# -l link item cannot express (parallel make would link the encoder plugins
++# before libaudiocdplugins.so exists).
++add_dependencies(audiocd_encoder_wav audiocdplugins)
++
+ target_link_libraries(audiocd_encoder_wav 
+-    audiocdplugins 
++    -laudiocdplugins
++    KF6::ConfigGui
++    KCddb6
++    Qt::Widgets
+ )
+ 
+-install(TARGETS audiocd_encoder_wav  DESTINATION ${KDE_INSTALL_PLUGINDIR})
++install(TARGETS audiocd_encoder_wav DESTINATION ${AUDIOCD_ENCODER_INSTALL_DIR})
+diff --git a/plugins/wav/encodercda.cpp b/plugins/wav/encodercda.cpp
+index c7f59e4..beabb5b 100644
+--- a/plugins/wav/encodercda.cpp
++++ b/plugins/wav/encodercda.cpp
+@@ -36,13 +36,10 @@ const char *EncoderCda::mimeType() const
+     return "audio/x-cda";
+ }
+ 
+-// Remove this by calculating CD_FRAMESIZE_RAW from the frames
+-extern "C" {
+-// cdda_interface.h in cdparanoia 10.2 has a member called 'private' which the
+-// C++ compiler doesn't like we will thus use a generated local copy which
+-// renames that member.
+-#include "cdda_interface.hpp"
+-}
++// OHOS adaptation: the frame-size constants used to come from cdparanoia's
++// sed-mangled cdda_interface.hpp copy; they now come from the self-contained
++// audiocdcdio.h (same fixed on-disc values, no cdparanoia dependency).
++#include "audiocdcdio.h"
+ 
+ inline qint16 swap16(qint16 i)
+ {
+@@ -60,7 +57,7 @@ long EncoderCda::read(qint16 *buf, int frames)
+             buf[i] = swap16(buf[i]);
+     char *cbuf = reinterpret_cast<char *>(buf);
+     output = QByteArray::fromRawData(cbuf, CD_FRAMESIZE_RAW);
+-    ioWorker->data(output);
++    ioSink->data(output);
+     output.clear();
+     return CD_FRAMESIZE_RAW;
+ }
+diff --git a/plugins/wav/encodercda.h b/plugins/wav/encodercda.h
+index c083046..c711c85 100644
+--- a/plugins/wav/encodercda.h
++++ b/plugins/wav/encodercda.h
+@@ -39,8 +39,8 @@
+ class EncoderCda : public AudioCDEncoder
+ {
+ public:
+-    explicit EncoderCda(KIO::WorkerBase *worker)
+-        : AudioCDEncoder(worker)
++    explicit EncoderCda(AudioCDDataSink *sink)
++        : AudioCDEncoder(sink)
+     {
+     }
+     ~EncoderCda() override
+diff --git a/plugins/wav/encoderwav.cpp b/plugins/wav/encoderwav.cpp
+index 6ec8950..c66cc91 100644
+--- a/plugins/wav/encoderwav.cpp
++++ b/plugins/wav/encoderwav.cpp
+@@ -27,10 +27,10 @@
+ #include <QList>
+ 
+ extern "C" {
+-AUDIOCDPLUGINS_EXPORT void create_audiocd_encoders(KIO::WorkerBase *worker, QList<AudioCDEncoder *> &encoders)
++AUDIOCDPLUGINS_EXPORT void create_audiocd_encoders(AudioCDDataSink *sink, QList<AudioCDEncoder *> &encoders)
+ {
+-    encoders.append(new EncoderWav(worker));
+-    encoders.append(new EncoderCda(worker));
++    encoders.append(new EncoderWav(sink));
++    encoders.append(new EncoderCda(sink));
+ }
+ }
+ 
+@@ -74,7 +74,7 @@ long EncoderWav::readInit(long byteCount)
+ 
+     QByteArray output;
+     output = QByteArray::fromRawData((char *)riffHeader, 44);
+-    ioWorker->data(output);
++    ioSink->data(output);
+     output.clear();
+     return 44;
+ }
+diff --git a/plugins/wav/encoderwav.h b/plugins/wav/encoderwav.h
+index 4db4b39..abfa9b5 100644
+--- a/plugins/wav/encoderwav.h
++++ b/plugins/wav/encoderwav.h
+@@ -38,8 +38,8 @@
+ class EncoderWav : public EncoderCda
+ {
+ public:
+-    explicit EncoderWav(KIO::WorkerBase *worker)
+-        : EncoderCda(worker)
++    explicit EncoderWav(AudioCDDataSink *sink)
++        : EncoderCda(sink)
+     {
+     }
+     ~EncoderWav() override

@@ -1,0 +1,43 @@
+# ═══ Draft knowledge entry — OHOS 代码页完整性 (XPM) 封死一切自改代码路径 ═══
+# Timestamp: 2026-09-05
+# Software: boxfort 0.1.2
+# Gate: 原生测试 / conan-verify G2 / W3
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+# Related: E045 (RWX 分配被 W^X 拒绝) — 本条覆盖 E045 未涉及的三类文本页写入路径
+
+id: DRAFT-boxfort-ohos-code-page-integrity
+severity: 3
+category: platform|kernel|security|memory
+trigger_tool: clang|any JIT/trampoline/sandbox library
+phase: runtime
+approach: 平台限制无修可解, 但可以**运行时探测后回退**, 无需平台宏 (符合 R8)。可靠探测方法:
+  fork 一次性子进程, 在子进程内对自身一个函数所在页依次试 mprotect(R|W|X) (强制系统 EINVAL)、
+  mprotect(R|W) (强制系统内核直接击杀子进程), 父进程 waitpid 后按 WIFEXITED 判定; 判定不可写时
+  走功能等价的回退分支 (boxfort: fork 子进程直接调用沙箱函数并 _exit 其返回值), 可写时保持上游
+  路径。注意 mprotect(R|W) 的失败形态是进程被杀而非 errno, 因此探测必须在一次性子进程内进行;
+  实测该探测子进程的死亡不产生 faultlogger 记录。JIT/闭包类库 (libffi) 仍走 mmap(RW)->写->
+  mprotect(RX) 分步映射且目标必须是匿名内存。
+
+keywords: 代码页, 自修改代码, XPM, W^X, mprotect, SIGSEGV, EPERM, MAP_FIXED, trampoline,
+  self-exec, boxfort, sandbox, patch_main, text page
+error_signature: bxf_run.*-71|EPROTO.*wait_stop|WIFSTOPPED|Protocol error.*sandbox|
+  mprotect.*EINVAL.*text|execve.*worker.*exit
+
+match_keywords: mprotect, PROT_EXEC, SIGSEGV, /proc/self/mem, EPERM, MAP_FIXED,
+  code page, trampoline, sandbox, patch_main, WIFSTOPPED, EPROTO
+
+root_cause: OHOS 内核对用户态可执行映射实施代码页完整性保护 (XPM), 实测 (HUAWEI MateBook Pro,
+  OHOS 6.1.1, clang 15.0.4) 四条自改代码路径全部被封死:
+  1) mprotect(text_page, PROT_READ|PROT_WRITE|PROT_EXEC) -> EINVAL(22) 直接拒绝;
+  2) mprotect(text_page, PROT_READ|PROT_WRITE) -> 系统调用层放行但进程随即被内核 SIGSEGV 击杀;
+  3) 通过 /proc/self/mem pwrite 代码页 -> EPERM(13);
+  4) mmap(MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED) 覆盖已执行代码页 -> 进程被内核 SIGSEGV 击杀。
+  因此任何"先获得可写代码页再写跳板"的策略均不可行, 且无 /proc/self/mem 逃逸通道。
+affected_scope: 自修改代码类机制: boxfort patch_main 重执行跳板、运行时代码 patch、文本页内联
+  hook、依赖改写 main 的沙箱握手; 纯 JIT/闭包 (libffi) 见 E045, 本条补足"文件映射代码页"边界
+
+rec_priority: 1
+rec_approach: ohos-conditional-direct-run
+verification_cmd: "对自身函数所在页: mprotect(RWX) 期望 EINVAL; mprotect(RW) 期望进程被杀;
+  /proc/self/mem pwrite 期望 EPERM; boxfort 适配后 meson test 4/4 PASS (native) +
+  conan create + test_package 12 断言 PASS (boxfort/0.1.2, feat/boxfort-0.1.2)"

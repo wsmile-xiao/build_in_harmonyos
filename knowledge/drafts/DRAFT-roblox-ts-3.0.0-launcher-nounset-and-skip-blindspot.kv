@@ -1,0 +1,61 @@
+# ═══ Draft knowledge entry — 自生成 sh 启动器的 `set -u` 陷阱 + 「运行期用例整体 skip」漏检盲区 ═══
+# Timestamp: 2026-09-30
+# Software: roblox-ts 3.0.0（npm / Node.js CLI；配方自生成 bin/rbxtsc 启动器）
+# Phase: test_package / packaging
+# Status: DRAFT — 同 stem 配对 knowledge/drafts/DRAFT-roblox-ts-3.0.0-launcher-nounset-and-skip-blindspot.md
+#
+# 关联既有知识：
+#   E400（Node.js CLI on HarmonyOS: JITless 能力边界）—— 本条是 E400 场景下的**配方自生成
+#   脚本**缺陷，与 E400 的运行时能力问题正交；也与
+#   DRAFT-roblox-ts-3.0.0-ohos-node-jitless-npm-cli（同一包的 npm/--jitless 适配）互补。
+
+id: DRAFT-roblox-ts-3.0.0-launcher-nounset-and-skip-blindspot
+trigger_tool: conan|sh|test_package
+phase: testing|packaging
+error_signature: >-
+  [A-Za-z_][A-Za-z0-9_]*: parameter not set|parameter not set|set -u|nounset
+
+severity: 3
+category: conan, testing, shell, packaging, launcher, recipe-pattern
+match_keywords: set -u, set -eu, nounset, parameter not set, launcher, wrapper,
+                 启动器, RBXTSC_NODE, env var default, ${VAR:-}, skip 盲区,
+                 test_package, 运行期用例, node 不可用, CI 漏检, 断言位计数
+
+title: 配方自生成的 sh 启动器若带 `set -u` 却裸引「可能未设置」的环境变量（如 `"$RBXTSC_NODE"`），
+       会在执行时以 `VAR: parameter not set` 中止；而工具链不可用环境下运行期用例被整体
+       `[skip]`，会让这类启动器缺陷**逃过本地门禁**，只在 CI（工具链可用）暴露
+
+root_cause: >
+  两个因素叠加（CI build #65252 实测）：
+  ① 启动器生成模板写了 `set -eu` + `for cand in "$RBXTSC_NODE" …`。POSIX shell 在 `-u`
+  下展开**未设置**变量即中止整个脚本（实测 `/bin/sh`：`RBXTSC_NODE: parameter not set`，
+  RC=1），`[ -n "$cand" ] || continue` 之类的守卫根本来不及执行。
+  ② 该缺陷在本机被**漏检**：本机 conan 派生 node 进程不稳定（E400 + 沙箱），test.sh 的
+  node 门槛探测失败 → `if [ -n "$NODE_BIN" ]` 整块走 `else`，只用**一条**
+  `[skip] rbxtsc CLI execution` 概括 4 条断言，且 `[OHOS]` 运行期启动器用例同样 skip
+  → 启动器的运行路径从未被本地执行，缺陷只在 CI（node 可用）暴露为 3 条 FAIL。
+
+affected_scope: >
+  所有自生成启动器/wrapper 的配方（npm CLI、脚本工具、header-only 工具类），以及所有
+  「运行期依赖外部工具链（node/python/jvm…）且该工具链在部分环境不可用」的 test_package。
+
+approach: >
+  ① 生成脚本中，被引环境变量一律用 `"${VAR:-}"`（或 `"${VAR:-默认}"`）展开；如需强约束
+  则该变量走显式校验分支并给出可读错误信息，而不是交给 shell 的 nounset。保留
+  `set -e`/`set -u` 的价值（fail-fast），只修展开写法。
+  ② 把「整块 else → 一条 skip」改为**逐条 skip**：每条断言各占一个断言位，使
+  「断言位总数」与环境无关（本包恒定 32），杜绝「本地 28 / CI 32」这类计数漂移
+  （同族问题：PR 内多处计数声明不一致，见同批修复）。
+  ③ 关键行为补**不依赖运行时**的静态守卫断言，例如：
+  `grep -q '${RBXTSC_NODE:-' launcher && ! grep -q '"$RBXTSC_NODE"' launcher`
+  —— 该断言在 node 不可用的机器上同样执行，正是本缺陷的直击形态。
+  ④ 生成脚本后先用 `sh -n` 做语法检查，并在本机以「变量未设置」的最小复现脚本验证一次。
+
+verification_cmd: >-
+  sh -c 'set -u; for c in "$UNSET_VAR" x; do echo "$c"; done' ; # 复现
+  unset RBXTSC_NODE; <pkg>/bin/rbxtsc --version ;                 # 修复后应为 3.0.0/RC=0
+  PATH=<fake-broken-node>:${PATH} <pkg>/bin/rbxtsc --version
+
+rec_priority: 1
+rec_approach: default-expand-env-in-generated-launchers-and-per-assert-skip
+rec_auto_fix: false

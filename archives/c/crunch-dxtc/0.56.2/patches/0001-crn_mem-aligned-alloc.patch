@@ -1,0 +1,79 @@
+diff -ruN a/crnlib/crn_mem.cpp b/crnlib/crn_mem.cpp
+--- a/crnlib/crn_mem.cpp
++++ b/crnlib/crn_mem.cpp
+@@ -69,9 +69,24 @@
+   void* p_new;
+ 
+   if (!p) {
+-#if defined(__FreeBSD__)
+-    // See https://github.com/DaemonEngine/crunch/pull/36
+-    p_new = ::aligned_alloc(CRNLIB_MIN_ALLOC_ALIGNMENT, size);
++    // OHOS/musl hardening: plain malloc() only guarantees alignof(max_align_t),
++    // which can be 8, while crnlib requires CRNLIB_MIN_ALLOC_ALIGNMENT (16, see
++    // inc/crnlib.h). A Release build silences the CRNLIB_ASSERT below (NDEBUG)
++    // but crnlib_free()/crnlib_realloc() still reject 8-aligned blocks at
++    // runtime ("bad ptr"), aborting the crunch CLI during PNG->CRN compression
++    // on HarmonyOS aarch64. Guarantee 16 via posix_memalign, rounding size up
++    // to a multiple of the alignment as required by aligned_alloc. Extends
++    // DaemonEngine/crunch PR #36 (FreeBSD aligned_alloc precedent) to all
++    // POSIX targets.
++    size_t aligned_size = (size + (CRNLIB_MIN_ALLOC_ALIGNMENT - 1)) & ~(size_t)(CRNLIB_MIN_ALLOC_ALIGNMENT - 1);
++    if (!aligned_size)
++      aligned_size = CRNLIB_MIN_ALLOC_ALIGNMENT;
++#if defined(__FreeBSD__) || defined(__linux__) || defined(__OHOS__) || defined(__APPLE__)
++    p_new = NULL;
++    if (::posix_memalign(&p_new, CRNLIB_MIN_ALLOC_ALIGNMENT, aligned_size) != 0)
++      p_new = NULL;
++    if (!p_new)
++      p_new = ::malloc(aligned_size);
+ #else
+     p_new = ::malloc(size);
+ #endif
+@@ -101,10 +116,46 @@
+       CRNLIB_ASSERT((reinterpret_cast<ptr_bits_t>(p_new) & (CRNLIB_MIN_ALLOC_ALIGNMENT - 1)) == 0);
+       p_final_block = p_new;
+     } else if (movable) {
+-      p_new = ::realloc(p, size);
++      // Preserve the 16-byte invariant across growth: plain ::realloc()
++      // preserves only malloc's natural alignment, so reallocate manually via
++      // the aligned path above (malloc + memcpy + free).
++      size_t aligned_size = (size + (CRNLIB_MIN_ALLOC_ALIGNMENT - 1)) & ~(size_t)(CRNLIB_MIN_ALLOC_ALIGNMENT - 1);
++      void* p_aligned = NULL;
++      // SIZE_MAX wraparound guard (defensive; callers cap size at
++      // CRNLIB_MAX_POSSIBLE_BLOCK_SIZE so this is unreachable in practice).
++      // On overflow keep p_aligned NULL so we take the WARNING failure path
++      // below instead of allocating short and overflowing on memcpy.
++      if ((aligned_size < size) || (!aligned_size)) {
++        p_aligned = NULL;
++      } else {
++#if defined(__FreeBSD__) || defined(__linux__) || defined(__OHOS__) || defined(__APPLE__)
++        if (::posix_memalign(&p_aligned, CRNLIB_MIN_ALLOC_ALIGNMENT, aligned_size) != 0)
++          p_aligned = NULL;
++        if (!p_aligned)
++          p_aligned = ::malloc(aligned_size);
++#else
++        p_aligned = ::malloc(aligned_size);
++#endif
++      }
++      p_new = p_aligned;
+ 
+       if (p_new) {
+         CRNLIB_ASSERT((reinterpret_cast<ptr_bits_t>(p_new) & (CRNLIB_MIN_ALLOC_ALIGNMENT - 1)) == 0);
++        // Portable usable-size query for the memcpy length. Upstream defines
++        // _msize as a macro (malloc_usable_size/malloc_size) on non-Windows,
++        // but spell the platform call out explicitly so non-MSVC targets
++        // never depend on the MSVC intrinsic ::_msize.
++#if defined(__APPLE__)
++        size_t old_size = ::malloc_size(p);
++#elif defined(_WIN32) || defined(_WIN64)
++        size_t old_size = ::_msize(p);
++#else
++        size_t old_size = ::malloc_usable_size(p);
++#endif
++        size_t copy_size = old_size < size ? old_size : size;
++        if (copy_size)
++          ::memcpy(p_new, p, copy_size);
++        ::free(p);
+         p_final_block = p_new;
+       } else {
+         printf("WARNING: ::realloc() of size %u failed!\n", (uint)size);

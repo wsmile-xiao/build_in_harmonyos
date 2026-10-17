@@ -1,0 +1,120 @@
+#====================================================================
+# DRAFT - CMake 平台模块缺失使 UNIX 未定义，上游 if(UNIX) 守卫的实现被静默剔除
+# contributor: Awstme
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-E577-cmake-ohos-unix-guard-silent-drop
+trigger_tool:           cmake|conan|clang|nm|llvm-readelf
+phase:                  configuration|compile|linking
+error_signature:        System is unknown to cmake.*Platform/HarmonyOS|undefined reference to .*(MFXInit|MFXInitEx|MFXClose|MFXQueryVersion)|导出符号.*(7|过少).*个
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               cmake, toolchain, ohos, platform-semantics, silent-functional-loss, packaging
+match_keywords:         UNIX, CMAKE_SYSTEM_NAME, HarmonyOS, Platform/OHOS.cmake, if(UNIX), 静默丢功能, 平台模块缺失, DT_SONAME, nm 导出符号, 链接期符号缺失, MFXInit
+title:                  CMake 平台模块缺失使 UNIX 未定义，上游 if(UNIX) 守卫的整份实现被静默剔除（无构建错误，仅链接期暴露）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             >
+  完整因果链（各环均有设备实测证据）：① Conan 的 OHOS profile 把
+  os=OHOS 映射为 CMAKE_SYSTEM_NAME=HarmonyOS，而原生探测时 CMake 取
+  CMAKE_HOST_SYSTEM_NAME，本机 uname -s 同样返回 HarmonyOS；
+  ② CMake 按 Modules/Platform/<SYSTEM_NAME>.cmake 查找平台文件，设备上
+  hnp cmake 4.1.2 与 SDK cmake 3.28 都没有 Platform/HarmonyOS.cmake，
+  只有 Platform/OHOS.cmake（全文为 include(Platform/Linux)），系统名不是
+  OHOS 时该文件不生效；③ 平台文件不加载 → UNIX、
+  CMAKE_SHARED_LIBRARY_SONAME_*_FLAG、find_package(Threads) 等由
+  Platform/Linux.cmake 建立的语义全部未定义（CMake 只打印
+  "System is unknown to cmake"，**不是错误、退出码仍为 0**）。
+  **CMAKE_DL_LIBS 不在此列**：它由 Platform/GNU.cmake 兜底，实测破损配置下
+  build.ninja 仍有 LINK_LIBRARIES = -ldl（正确配置多出的是 -pthread）——
+  把 -ldl 也算作"被 UNIX 守卫跳过"是错误归因；
+  ④ 上游用 if(UNIX) 守卫 POSIX/Linux 实现时，整份源文件被排除在构建图
+  之外 —— 没有编译错误、没有链接错误，产物只是"少了一部分 API"，
+  同时因 SONAME flag 未定义而丢掉 DT_SONAME；⑤ 缺失面只在**消费者链接
+  该符号**或运行期调用时暴露（undefined reference / 运行期功能缺失），
+  上游自带的单元测试也可能因为只覆盖存活分支而全绿。
+  必须强调一个易错点：**并非所有"看起来像平台开关"的东西都在 if(UNIX) 内**。
+  libvpl 的 -Wl,--version-script 位于 if(WIN32) 的 else() 分支，破损配置下
+  **仍然生效**（实测破损产物仍带 LIBVPL_2.0/2.1 版本节点），只是仅覆盖存活
+  的那 7 个符号；把它也算作"被 UNIX 守卫跳过"是错误归因。诊断时必须逐个
+  读守卫块（grep -n -B2 -A2 <feature>），不能凭"关键字在同一文件里"推断。
+affected_scope:         任何以 CMake 构建、且用 if(UNIX)/if(APPLE)/if(WIN32) 之类的平台布尔变量（而非 CMAKE_SYSTEM_NAME 字符串）选择实现分支的工程，在 HarmonyOS/OHOS 上默认系统名下都会命中；对"部分平台实现被整段守卫"的库后果最重（API 静默缺失 + DT_SONAME 丢失），对只依赖平台**字符串**判断的工程则不命中
+
+verification_cmd:       |
+  # 1) 平台模块现状：有 OHOS、无 HarmonyOS
+  CMAKE_ROOT=$(cmake --system-information | sed -n 's/^CMAKE_ROOT "\(.*\)"/\1/p')
+  ls "$CMAKE_ROOT/Modules/Platform/OHOS.cmake"        # 存在，内容为 include(Platform/Linux)
+  ls "$CMAKE_ROOT/Modules/Platform/HarmonyOS.cmake"   # → No such file or directory
+  # 2) 守卫形态：上游用 if(UNIX) 决定是否编译 POSIX 实现（以 libvpl 为例）
+  grep -n '^if(UNIX)' libvpl/CMakeLists.txt
+  # 3) 逐个读守卫块，别把别的分支算进来（version script 在 if(WIN32) 的 else() 里）
+  grep -n -B3 -A3 'version-script' libvpl/CMakeLists.txt
+  #    → 落在 `else()` 分支：破损配置下仍生效，只是只覆盖存活符号
+  # 4) 对照构建：系统名取 HarmonyOS（或留空走原生探测）→ UNIX 为假，源文件不进构建图
+  cmake -S . -B build-bad -G Ninja -DCMAKE_SYSTEM_NAME=HarmonyOS >/dev/null 2>&1
+  grep -c 'mfxloader' build-bad/build.ninja           # → 0
+  # 5) 修复后：系统名取平台真名 OHOS → UNIX 为真，源文件进图
+  cmake -S . -B build-ok -G Ninja -DCMAKE_SYSTEM_NAME=OHOS >/dev/null 2>&1
+  grep -c 'mfxloader' build-ok/build.ninja            # → 3（>0）
+  # 6) 产物对照：导出符号数 / DT_SONAME（version node 两种配置都有，不能当判据）
+  nm -D --defined-only build-bad/libvpl.so | grep -c ' T '      # → 7
+  nm -D --defined-only build-ok/libvpl.so  | grep -c ' T '      # → 59
+  nm -D --defined-only build-ok/libvpl.so  | grep MFXInit       # → T MFXInit@@LIBVPL_2.0
+  llvm-readelf -d build-bad/libvpl.so | grep -c SONAME          # → 0
+  llvm-readelf -d build-ok/libvpl.so.2.16 | grep SONAME         # → (SONAME) Library soname: [libvpl.so.2]
+
+# ═══ Layer 3: 方案层 (Solution Space) ═══
+rec_priority:           1
+rec_approach:           canonical-platform-name-ohos
+rec_description:        在配方 generate() 中把 CMAKE_SYSTEM_NAME 显式设为平台真名 "OHOS"（而不是让它停在 Conan 默认的 HarmonyOS、也不是伪装成 Linux）。SDK/cmake 随带 Modules/Platform/OHOS.cmake，其内容为 include(Platform/Linux)，因此 UNIX、SONAME flag、Threads 查找等 POSIX 语义全部就位：守卫分支被编译、共享库带真实 DT_SONAME、version script 覆盖完整 API，且 CMake 不再打印 "System is unknown to cmake"（CMAKE_DL_LIBS 本就有 Platform/GNU.cmake 兜底，不属于本修复补齐的项）。平台身份真实，不引入 Linux 专有逻辑（systemd/dbus/X11 等由具体工程自行判断，不由系统名强行引入）。诊断期必须逐个读守卫块，避免把不在 UNIX 块内的东西（如 libvpl 的 version script 与 ${CMAKE_DL_LIBS} 链接）算作被跳过。
+rec_command:            conanfile.py generate(): tc.variables["CMAKE_SYSTEM_NAME"] = "OHOS"; 重新 conan create 后核对 nm -D --defined-only <pkg>/lib/*.so | grep -c ' T ' 与 llvm-readelf -d <pkg>/lib/*.so.* | grep -E 'SONAME'
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      cmake-system-name-linux
+fallback_description:   目标 cmake 没有 Platform/OHOS.cmake（纯上游 CMake）时，退回仓库内最常见的 CMAKE_SYSTEM_NAME="Linux"。它能拿到同样的 POSIX 语义，且任何 cmake 安装都有平台文件、不依赖 SDK 补丁。诚实权衡：这是把平台**改名**成 Linux，会一并加载 Linux 专有语义；对平台集成类工程可能引入 systemd/dbus/X11 等错误依赖，且平台上真实身份与构建期身份不一致。
+fallback_command:       conanfile.py generate(): tc.variables["CMAKE_SYSTEM_NAME"] = "Linux"; （仓库内同口径先例 archives/a/adios2、archives/a/ableton-link、archives/c/cpu_features）
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+fallback2_priority:     3
+fallback2_approach:     extend-upstream-platform-guard-patch
+fallback2_description:  既不能改系统名（工程另有用途）也不能改配方时，向上游提补丁把守卫条件扩成同时接受 OHOS/HarmonyOS（如 if(UNIX OR CMAKE_SYSTEM_NAME STREQUAL "OHOS")）。诚实权衡：需要维护补丁、随上游改版漂移，且必须按 R8/P-PATCH-003 做成可向上游提交的形态（不引入无实质逻辑的空壳分支）。
+fallback2_command:      patches/000N-extend-platform-guard.patch，配合 conandata.yml 声明与 apply_conandata_patches()
+fallback2_auto_fix:     false
+fallback2_impl:         manual
+
+forbid_1_pattern:       以「configure 成功 + build 成功」作为适配完成判据|不核对守卫分支是否进入构建图|不看产物导出符号清单
+forbid_1_reason:        本形态的失败面**没有任何错误输出**（CMake 只给一行 warning，退出码 0；编译链接全绿）。只看构建日志必然误判为适配完成，缺陷要到消费者链接期或运行期才暴露，返工面扩大到全部下游。
+forbid_1_consequence:   发布一个"少了一整块 API"的库到制品仓，下游按正常语义使用即链接失败；且上游自身单测可能全绿，CI 也不会拦。
+
+forbid_2_pattern:       凭"关键字出现在同一文件/同一段落"就把某个构建动作归因为被平台开关跳过|不逐个读守卫块（if/else 边界）就下结论
+forbid_2_reason:        实测反例：libvpl 的 -Wl,--version-script 位于 if(WIN32) 的 else() 分支，破损配置下仍生效 —— 把它写成"被 if(UNIX) 跳过"是错误归因；这类错误会随草稿固化进知识库，并误导后来者用错误的判据去核对（例如以为 version node 缺失，实际它是存在的）。
+forbid_2_consequence:   知识库沉淀错误机理；后续同类诊断按错误判据做，可能漏判真实缺失面（本例真正丢的是 mfxloader.cpp 与 DT_SONAME）。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             [P-BUILD-001, P-ENV-001]
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E092, E096, DRAFT-cmake-harmonyos-platform-soname-flag]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-E577-cmake-ohos-unix-guard-silent-drop.md
+last_updated:           2026-09-15
+source_event:           libvpl/2.16.0 HarmonyOS PC 首次适配（新增包；PC 专项积分赛，路径 B 知识库扩展申请 Issue #3030）；2026-09-15 设备实测：CMAKE_SYSTEM_NAME 留空/HarmonyOS 时导出 7 个符号、无 DT_SONAME，OHOS 时 59 个符号 + var(SONAME) libvpl.so.2；两种配置的 version node（LIBVPL_2.0/2.1）都存在 —— 这是本条目的关键反例；ctest 1023 注册 / 1014 执行 / 707 PASS / 307 SKIP / 9 DISABLED / 0 FAIL
+authors:                Awstme <awstme@qq.com>
+source_pr:
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-15
+draft:                  true
+contributor_id:         Awstme

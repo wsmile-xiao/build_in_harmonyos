@@ -1,0 +1,94 @@
+# ═══ Draft knowledge entry — 临时目录绑到 ${HOME}/tmp 却未创建该父目录：本地探索机恰好存在 → 本地全绿、CI worker 上 configure/config.status 直接失败 ═══
+# Timestamp: 2026-09-21
+# Software: libexif-gtk 0.5.0 (任何把 configure 的 ac_tmp / TMPDIR 改写到 ${HOME}/... 的 autotools 配方)
+# Gate: CI（buildbot worker）conan create → configure
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-home-tmp-dependency-missing-on-ci-worker
+trigger_tool:           configure|config.status|conan|mkdir|mktemp
+phase:                  configuration
+error_signature:        mkdir: '.*/tmp/conf[0-9]+-[0-9]+': No such file or directory|
+                         cannot create a temporary directory in \.|
+                         could not setup config files machinery
+severity:               2
+category:               ohos, portability, conan, autotools, packaging
+match_keywords:         ${HOME}/tmp, HOME/tmp, ac_tmp, mktemp, mkdir -p, config.status,
+                         cannot create a temporary directory, CI worker, 本地绿 CI 红,
+                         E136, E114, E002, umask 022, TMPDIR, 父目录不存在, ENOENT
+
+title:                  把 configure 的临时目录改写到 ${HOME}/tmp（为绕 HMDFS umask 077 不可写）却未创建该父目录：
+                        本地探索机 $HOME/tmp 恰好存在 → 本地全绿；CI worker 的 $HOME 可写但无 tmp/ 子目录 → mktemp ENOENT，configure/config.status 失败
+
+root_cause: >
+  HMDFS 上 `umask 077 && mktemp -d` 生成的临时目录表现为不可写的 drwx--S---，
+  于是 autotools 包的既定修法是把 configure 的 ac_tmp 改到 `${HOME}/tmp` 并降 umask 到 022
+  （E136/E114；同族 libexif/0.6.26.1 即此方案）。但该方案隐含一个未声明的环境假设：
+  **`${HOME}/tmp` 这个父目录必须已经存在**。
+    - 本地探索机：$HOME/tmp 由历史脚本/任务创建过（本项目 TMPDIR 默认就是 ~/tmp），
+      于是 `mktemp -d "${HOME}/tmp/confXXXXXX"` 成功 → 本地 configure / conan create / W3 全绿；
+    - CI worker（buildbot worker，HOME=/storage/Users/currentUser，TMPDIR=/data/storage/el2/base/cache）：
+      $HOME 可写但**没有 tmp/ 子目录** → `mktemp -d` 报 ENOENT，
+      报错落在下游的 config.status 阶段：
+        mkdir: '/storage/Users/currentUser/tmp/conf8316-11777': No such file or directory
+        config.status: error: cannot create a temporary directory in .
+      而 fallback 分支用的是 `mkdir "$tmp"`（无 -p，父目录不存在同样失败）。
+  这就是典型的“本地绿、CI 红”的目录存在性假设差异，且**在本地任意重跑都复现不到**。
+
+affected_scope: >
+  任何把临时目录/缓存目录绑到 `${HOME}/…`、`~/…` 的补丁或配方（configure 的 ac_tmp、
+  TMPDIR 改写、HOME 下的 cache 目录），且未同时创建该目录；CI worker 的 $HOME 布局与
+  本地探索机不同（无 tmp/）时必现。libexif-gtk 0.5.0 首轮 CI（PR #11607 / build #54325）
+  实证：本地 conan create + W3 全绿，CI 在 conan-build-test 的 configure 阶段失败。
+
+verification_cmd: >
+  # 秒级隔离复现（不需要 CI）：把 HOME 指向一个"存在但没有 tmp/ 子目录"的目录
+  mkdir -p /tmp/fakehome && HOME=/tmp/fakehome ./configure --prefix=/usr/local … ; echo $?
+  # 修复前：mkdir: '…/fakehome/tmp/confXXXX-XXXX': No such file or directory
+  #         config.status: error: cannot create a temporary directory in .
+  # 修复后：exit 0，且 …/fakehome/tmp 被自动创建
+
+rec_priority:           1
+rec_approach:           mkdir-p-parent-in-patch-and-recipe
+rec_description: >
+  两层一起做，保证补丁自洽且与同族配方一致：
+  (1) 补丁内两条分支都先建父目录——
+      tmp=`(umask 022 && mkdir -p "${HOME}/tmp" && mktemp -d "${HOME}/tmp/confXXXXXX") 2>/dev/null` &&
+      … || { tmp=${HOME}/tmp/conf$$-$RANDOM; (umask 022 && mkdir -p "$tmp"); }
+  (2) 配方 build() 兜底（同族 libexif/0.6.26.1 的 E002 同款，Python 侧，非裸 shell 变量）：
+      Path(os.environ.get("HOME", "/tmp")).joinpath("tmp").mkdir(parents=True, exist_ok=True)
+rec_command: >
+  # 补丁：将 ac_tmp 段的两处 mkdir 补成 mkdir -p 并在 mktemp 前建父目录；
+  # 配方：apply_conandata_patches(self) 之后、autotools.configure() 之前插入上面的 Path(...).mkdir
+rec_auto_fix:           false
+rec_impl:               patch（patch_type=portability）+ 配方 build() 一行兜底
+fallback_priority:      2
+fallback_approach:      use-tmpdir-env-with-mkdir-p
+fallback_description: >
+  改用环境提供的 TMPDIR（CI 已注入可写目录，如 /data/storage/el2/base/cache）：
+  `${TMPDIR:-/tmp}/confXXXXXX` + `mkdir -p`。比硬编码 ${HOME}/tmp 更贴合“谁提供谁负责”的约定，
+  但与同族 libexif 已发布配方的写法不一致（可读性权衡）。
+fallback_command:       # 补丁内：tmp=`(umask 022 && mkdir -p "${TMPDIR:-/tmp}" && mktemp -d "${TMPDIR:-/tmp}/confXXXXXX") 2>/dev/null` &&
+fallback_auto_fix:      false
+fallback_impl:          仅改补丁
+
+forbid_1_pattern:       /tmp/confXXXXXX\b(?!.*TMPDIR)
+forbid_1_reason:        OHOS 上 /tmp 只读（E002），把临时目录写死在 /tmp 会让真机构建直接失败
+forbid_1_consequence:   本地容器可过、真机必失败
+
+principles:             环境变量指向的目录必须由使用者自己创建，不得假设其存在；
+                        凡是新增“目录依赖”的改动，必须用“空 HOME / 空 TMPDIR”再复现一遍，本地绿不等于 CI 绿
+caused_by:              E136/E114 的既定修法只解决了 umask/权限（EACCES），未解决父目录缺失（ENOENT）；
+                        本地探索机的 TMPDIR 默认就是 ~/tmp，掩盖了该假设
+causes:                 CI worker 上 conan create 的 configure 阶段失败（config.status: cannot create a temporary directory）
+similar_to:             E136 / E114（同族：HMDFS 上 mktemp 目录不可写，改用 ${HOME}/tmp + umask 022 —— 本条补的正是它们留下的父目录假设）；
+                        E002（/tmp 只读）；DRAFT-E2167-handwritten-configure-conan-injected-args（手写 configure 的参数注入）
+doc_file:               knowledge/drafts/DRAFT-home-tmp-dependency-missing-on-ci-worker.md
+last_updated:           2026-09-21
+source_event:           libexif-gtk 0.5.0 PR #11607 首轮 CI（build #54325，conan-build-test ❌）configure 阶段失败
+authors:                AtomCode (OpenDesk)
+source_pr:              (本 PR)
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     1
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-21

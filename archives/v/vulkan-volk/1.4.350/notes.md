@@ -39,3 +39,8 @@
 ## 注意事项
 - volk 是纯静态库，无可执行二进制，G1/G2 门禁为空属正常
 - volk.c 使用 dlopen/dlsym 加载 Vulkan loader，与 Linux/POSIX 路径一致
+---
+
+**编译结束**: 2026-08-30 00:59
+**最终状态**: built
+

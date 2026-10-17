@@ -1,0 +1,62 @@
+# ═══ Draft knowledge entry — 上游测试源声明 void main() 无显式 return → 进程退出码未定义 ═══
+# Timestamp: 2026-09-06
+# Software: binn 3.0(任何上游 C 测试源用非标准 void main() 且依赖隐式退出码的包)
+# Gate: 上游测试运行 / 双口径统计 / conan create
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-binn-3.0-upstream-test-void-main-exit-code
+severity: 2
+category: portability|testing|upstream
+trigger_tool: test|clang|make
+phase: testing|runtime
+approach: 定位上游测试源的 main 声明：`grep -n "void main" test/*.c`。确认无 return 后用最小
+  portability 补丁将 `void main() {` 改为 `int main() {` 并在函数末尾（所有断言与输出之后）加
+  `return 0;`，断言与输出语义零改动。补丁入 patches/ 并按 refresh-patch 命名规范登记
+  conandata.yml（patch_type: portability）。重新编译运行实测退出码 0。
+
+keywords: void main, int main, return 0, exit code, undefined behavior, upstream test source, portability patch,
+  C standard, main return type, OHOS, aarch64, conan patch, patch_type portability
+
+error_signature: exit code 7|void main\(\)|Segmentation|undefined exit|rc=7|退出码 7
+match_keywords: void main, main(), return 0, exit code, undefined, portability, upstream test, test_binn_json
+
+root_cause: C 标准（C99+）要求 main 返回 int；上游以 `void main()` 声明且不写 return 时，进程
+  退出码由运行时栈/寄存器残留值决定，属未定义行为——OHOS aarch64 实测同一二进制退出码 7。
+  与平台无关，任何架构上都不稳定；双口径统计中该入口的非零退出码会污染通过率判定。
+affected_scope: 所有上游测试源用 `void main()`（无 return）的 C 库；修复不改变测试断言语义，
+  仅使进程以定义良好的 0 退出。
+
+verification_cmd: clang -I src -o test/test_binn_json test/test_binn_json.c conversions/json/binn_json.c src/binn.c -L <jansson_lib> -ljansson && ./test/test_binn_json; echo $?  # 修复前 7，修复后 0
+
+rec_priority: 1
+rec_approach: portability-main-return-patch
+rec_description: int main() + return 0 最小补丁，登记 conandata.yml patch_type=portability
+rec_command: patch 文件（void main→int main + 末尾 return 0）；conandata.yml patches 登记
+rec_auto_fix: false
+rec_impl: patches/0001-*.patch + conandata.yml patch_type=portability
+
+fallback_priority: 2
+fallback_approach: 运行时 wrapper 吞退出码
+fallback_description: 不推荐——掩盖而非修复未定义行为；仅在不允许改上游测试源时作为兜底
+fallback_command: sh -c './test_binn_json; exit 0'
+fallback_auto_fix: false
+fallback_impl: 仅记录
+
+principles: 上游测试源的非标准 C 声明会引入未定义运行行为，双口径统计必须基于定义良好的退出码；
+  portability 补丁应最小化且不改变测试语义
+
+caused_by: 上游测试源以非标准 void main() 声明且无显式 return
+causes: 测试入口退出码非零/不确定，双口径通过率误判或 quality_warning
+similar_to: E363(bash harness 假绿——同属退出码家族但为 shell 脚本根因,非 C main 声明)
+conflicts_with:
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-binn-3.0-upstream-test-void-main-exit-code.md
+last_updated: 2026-09-06
+source_event: binn 3.0 上游第 17 例 test_binn_json.c void main 退出码 7，补丁修复后 0
+authors: pc1-17
+source_pr: (本 PR)
+source_commit: (本 PR 提交)
+metrics_success_count: 0
+metrics_fail_count: 0
+metrics_confidence: 0.85
+metrics_last_used: 2026-09-06

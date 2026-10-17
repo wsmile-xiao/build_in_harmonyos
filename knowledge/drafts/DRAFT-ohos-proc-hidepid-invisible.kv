@@ -1,0 +1,77 @@
+#====================================================================
+# DRAFT-ohos-proc-hidepid-invisible — OHOS /proc 以 hidepid=invisible 挂载，
+#   读其它进程 /proc/<pid>/* 一律被拒；进程树类 API 需优雅降级
+# 触发事件: psutil 7.2.2 适配（PR #11263，2026-09-19 真机实测）
+# 主从明确: E031（/proc SELinux 访问限制）为根条目；本条补充实际挂载机制
+#   （hidepid=invisible）、可读边界（仅 self 可读）与进程树枚举后果
+#====================================================================
+
+id:                     DRAFT-ohos-proc-hidepid-invisible
+trigger_tool:           runtime|psutil|libgtop|htop|procps|monitoring
+phase:                  runtime|testing
+error_signature:        psutil\.AccessDenied: \(pid=|AccessDenied.*ppid_map|
+                         /proc/1/stat.*Permission denied|
+                         procfs.*hidepid=invisible|
+                         children.*AccessDenied|parents.*AccessDenied
+
+severity:               2
+category:               ohos|filesystem|procfs|runtime|permission
+match_keywords:         hidepid, invisible, /proc/mounts, readproc, gid=3009,
+                         PermissionError, AccessDenied, ppid_map, /proc/1/stat,
+                         children, parents, pstree, 进程树, libgtop, psutil,
+                         cross-process, graceful degrade, 优雅降级
+
+title:                  OHOS /proc 以 hidepid=invisible 挂载：读其它进程 /proc/<pid>/* 被拒，进程树类 API 需优雅降级
+
+root_cause:             `/proc` 挂载参数为
+                         `procfs /proc procfs rw,relatime,hmmac=genfs,gid=3009,hidepid=invisible 0 0`
+                         （/proc/mounts 实读），即 hidepid=invisible 策略：仅允许读
+                         **自身**进程的 /proc/self/*，读任何其它 pid 的 /proc/<pid>/*
+                         一律 PermissionError。实测 /proc/1/stat、/proc/1/status、
+                         /proc/1/cmdline 全部被拒，而 /proc/self/* 正常。
+                         反直觉点：进程 uid 20020085 的补充组已含 3009(readproc)
+                         （= /proc 挂载的 gid=3009），**仍被拒**——加组不生效。
+                         与 E031 的区别：E031 覆盖 /proc/stat、/proc/meminfo（普通
+                         用户可读）的 SELinux 受限面；本条的受限面是**逐进程文件**
+                         /proc/<pid>/*。
+
+affected_scope:         所有依赖跨进程 /proc 信息的库与工具：psutil 的
+                         children/parents/ppid/pstree/reap、libgtop 的进程表枚举、
+                         htop/procps、任何"枚举 pid 后逐个读属性"的监控程序
+
+rec_priority:           1
+rec_approach:           graceful-degrade-capability-probe
+rec_description:        以 PermissionError/AccessDenied 作能力探测信号：跨进程读取
+                         失败时把进程树维度标记为本平台不可用，返回空集/None 并保持
+                         其余 API 可用；消费者文档写明限制。测试侧改为只验证自身进程
+                         （getpid()），跨进程用例如实归因进允许失败清单。
+rec_command: >
+  用 getpid()/自身进程做功能验证：
+  python3 -c "import os,psutil; p=psutil.Process();
+              assert p.pid==os.getpid(); print(p.name(), p.status())"
+  跨进程用例: except (PermissionError, psutil.AccessDenied) 时按平台限制 skip/归因
+rec_auto_fix:           false
+rec_impl:               source-guard-or-test-attribution
+
+forbid_1_pattern:       用 sudo 运行程序以规避 /proc/<pid> 读取限制（E031 的 rec_approach: sudo-run）
+forbid_1_reason:        CI / conan 包构建环境**没有 sudo**，该方案在 CI 必然失败
+                        （E429 的 causes 已记录同一结论）
+forbid_1_consequence:   本地看似"修好"，CI 依旧红；或直接构建失败，浪费轮次
+
+forbid_2_pattern:       给用户补齐 3009(readproc) 组以"打开" /proc/<pid> 读取
+forbid_2_reason:        实测 uid 已在该组内仍被拒（hidepid=invisible 判定不因该组放开）
+forbid_2_consequence:   误判根因、浪费排查时间，问题依旧
+
+principles:             先复现再修（逐 pid 抽样确认拒绝面）; 平台限制用能力探测降级而非崩溃;
+                        受限平台上的功能验证改用自身进程（libgtop 同款）
+
+verification_cmd:       grep ' /proc ' /proc/mounts   # → ...,gid=3009,hidepid=invisible
+                         head -c 40 /proc/self/stat   # 正常
+                         head -c 40 /proc/1/stat      # Permission denied
+                         id                            # groups 含 3009(readproc)
+
+related_docs:           doc/E031.md, doc/E429.md
+
+source_event:           archives/p/psutil/7.2.2 PR#11263（158 failed 中 46 处命中 _pslinux.py:1575）
+first_seen_project:     psutil/7.2.2
+last_updated:           2026-09-20

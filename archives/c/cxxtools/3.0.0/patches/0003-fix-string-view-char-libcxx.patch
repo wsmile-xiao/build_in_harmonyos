@@ -1,0 +1,293 @@
+--- a/include/cxxtools/char.h
++++ b/include/cxxtools/char.h
+@@ -595,7 +595,290 @@
+ } // namespace cxxtools
+ 
+ #ifdef CXXTOOLS_WITH_STD_LOCALE
+ #include <cxxtools/facets.h>
+ #endif
++
++// libc++ portability: std::basic_string_view<cxxtools::Char> specialization.
++//
++// libc++ (used by the OHOS SDK toolchain) requires basic_string_view's
++// character type to be trivial (static_assert on is_trivial<Char>), while
++// libstdc++ has no such requirement. cxxtools::Char is a small value
++// wrapper with user-provided constructors, so it is not trivial and any
++// mention of basic_string_view<Char> hard-errors on libc++:
++//   * std::operator<<(basic_ostream, const basic_string) delegates to the
++//     string_view inserter, so streaming a cxxtools::String into a
++//     basic_ostream<Char> (e.g. src/settingswriter.cpp) fails;
++//   * overload resolution for `wideStream << std::endl` instantiates the
++//     string_view inserter parameter and fails the same way.
++// An explicit specialization replaces the primary template (and its
++// asserts) for (Char, char_traits<Char>). It is a plain read-only view
++// with no ownership: construction from (pointer, size) or NUL-terminated
++// data, data()/size() observers used by the standard inserters, plus the
++// usual substr/compare/find helpers. No behaviour change on toolchains
++// whose headers already accepted the code.
++#include <string_view>
++#include <stdexcept>
++#include <iterator>
++#include <cstddef>
++
++namespace std
++{
++
++template <>
++class basic_string_view<cxxtools::Char, std::char_traits<cxxtools::Char> >
++{
++    public:
++        typedef std::char_traits<cxxtools::Char> traits_type;
++        typedef cxxtools::Char value_type;
++        typedef const cxxtools::Char* pointer;
++        typedef const cxxtools::Char* const_pointer;
++        typedef const cxxtools::Char& reference;
++        typedef const cxxtools::Char& const_reference;
++        typedef const cxxtools::Char* const_iterator;
++        typedef const cxxtools::Char* iterator;
++        typedef std::reverse_iterator<const_iterator> const_reverse_iterator;
++        typedef const_reverse_iterator reverse_iterator;
++        typedef std::size_t size_type;
++        typedef std::ptrdiff_t difference_type;
++        static const size_type npos = static_cast<size_type>(-1);
++
++        basic_string_view() noexcept
++        : _data(nullptr), _size(0)
++        { }
++
++        basic_string_view(const cxxtools::Char* str) noexcept
++        : _data(str), _size(str ? traits_type::length(str) : 0)
++        { }
++
++        basic_string_view(const cxxtools::Char* str, size_type len) noexcept
++        : _data(str), _size(len)
++        { }
++
++        basic_string_view(const basic_string_view& other) noexcept = default;
++
++        basic_string_view& operator=(const basic_string_view& other) noexcept = default;
++
++        ~basic_string_view() = default;
++
++        const_iterator begin() const noexcept
++        { return _data; }
++
++        const_iterator end() const noexcept
++        { return _data + _size; }
++
++        const_iterator cbegin() const noexcept
++        { return _data; }
++
++        const_iterator cend() const noexcept
++        { return _data + _size; }
++
++        const_reverse_iterator rbegin() const noexcept
++        { return const_reverse_iterator(end()); }
++
++        const_reverse_iterator rend() const noexcept
++        { return const_reverse_iterator(begin()); }
++
++        const_reverse_iterator crbegin() const noexcept
++        { return const_reverse_iterator(end()); }
++
++        const_reverse_iterator crend() const noexcept
++        { return const_reverse_iterator(begin()); }
++
++        const_reference operator[](size_type pos) const
++        { return _data[pos]; }
++
++        const_reference at(size_type pos) const
++        {
++            if (pos >= _size)
++                throw std::out_of_range("basic_string_view::at");
++            return _data[pos];
++        }
++
++        const_reference front() const
++        { return _data[0]; }
++
++        const_reference back() const
++        { return _data[_size - 1]; }
++
++        const_pointer data() const noexcept
++        { return _data; }
++
++        size_type size() const noexcept
++        { return _size; }
++
++        size_type length() const noexcept
++        { return _size; }
++
++        size_type max_size() const noexcept
++        { return npos; }
++
++        bool empty() const noexcept
++        { return _size == 0; }
++
++        void remove_prefix(size_type n)
++        {
++            _data += n;
++            _size -= n;
++        }
++
++        void remove_suffix(size_type n)
++        {
++            _size -= n;
++        }
++
++        void swap(basic_string_view& other) noexcept
++        {
++            const_pointer data = _data;
++            size_type size = _size;
++            _data = other._data;
++            _size = other._size;
++            other._data = data;
++            other._size = size;
++        }
++
++        size_type copy(cxxtools::Char* dest, size_type n, size_type pos = 0) const
++        {
++            if (pos > _size)
++                throw std::out_of_range("basic_string_view::copy");
++            size_type rlen = _size - pos;
++            if (n < rlen)
++                rlen = n;
++            traits_type::copy(dest, _data + pos, rlen);
++            return rlen;
++        }
++
++        basic_string_view substr(size_type pos = 0, size_type n = npos) const
++        {
++            if (pos > _size)
++                throw std::out_of_range("basic_string_view::substr");
++            size_type rlen = _size - pos;
++            if (n < rlen)
++                rlen = n;
++            return basic_string_view(_data + pos, rlen);
++        }
++
++        int compare(basic_string_view other) const noexcept
++        {
++            size_type rlen = _size < other._size ? _size : other._size;
++            int result = traits_type::compare(_data, other._data, rlen);
++            if (result != 0)
++                return result;
++            if (_size < other._size)
++                return -1;
++            if (_size > other._size)
++                return 1;
++            return 0;
++        }
++
++        int compare(size_type pos, size_type n, basic_string_view other) const
++        {
++            return substr(pos, n).compare(other);
++        }
++
++        int compare(size_type pos1, size_type n1, basic_string_view other, size_type pos2, size_type n2) const
++        {
++            return substr(pos1, n1).compare(other.substr(pos2, n2));
++        }
++
++        int compare(const cxxtools::Char* str) const
++        {
++            return compare(basic_string_view(str));
++        }
++
++        int compare(size_type pos, size_type n, const cxxtools::Char* str) const
++        {
++            return substr(pos, n).compare(basic_string_view(str));
++        }
++
++        int compare(size_type pos, size_type n, const cxxtools::Char* str, size_type m) const
++        {
++            return substr(pos, n).compare(basic_string_view(str, m));
++        }
++
++        size_type find(basic_string_view other, size_type pos = 0) const noexcept
++        {
++            if (other._size == 0)
++                return pos <= _size ? pos : npos;
++            if (pos + other._size > _size)
++                return npos;
++            const_pointer result = traits_type::find(_data + pos, _size - pos, other._data[0]);
++            while (result != 0)
++            {
++                size_type found = static_cast<size_type>(result - _data);
++                if (found + other._size > _size)
++                    return npos;
++                if (traits_type::compare(result, other._data, other._size) == 0)
++                    return found;
++                if (found + 1 >= _size)
++                    return npos;
++                result = traits_type::find(result + 1, _size - found - 1, other._data[0]);
++            }
++            return npos;
++        }
++
++        size_type find(cxxtools::Char ch, size_type pos = 0) const noexcept
++        {
++            if (pos >= _size)
++                return npos;
++            const_pointer result = traits_type::find(_data + pos, _size - pos, ch);
++            return result ? static_cast<size_type>(result - _data) : npos;
++        }
++
++        size_type find(const cxxtools::Char* str, size_type pos, size_type n) const
++        {
++            return find(basic_string_view(str, n), pos);
++        }
++
++        size_type find(const cxxtools::Char* str, size_type pos = 0) const
++        {
++            return find(basic_string_view(str), pos);
++        }
++
++        size_type rfind(basic_string_view other, size_type pos = npos) const noexcept
++        {
++            if (other._size > _size)
++                return npos;
++            size_type last = _size - other._size;
++            if (pos < last)
++                last = pos;
++            for (size_type i = last + 1; i > 0; --i)
++            {
++                if (traits_type::compare(_data + i - 1, other._data, other._size) == 0)
++                    return i - 1;
++            }
++            return npos;
++        }
++
++        size_type rfind(cxxtools::Char ch, size_type pos = npos) const noexcept
++        {
++            if (_size == 0)
++                return npos;
++            size_type last = _size - 1;
++            if (pos < last)
++                last = pos;
++            for (size_type i = last + 1; i > 0; --i)
++            {
++                if (traits_type::eq(_data[i - 1], ch))
++                    return i - 1;
++            }
++            return npos;
++        }
++
++        size_type rfind(const cxxtools::Char* str, size_type pos, size_type n) const
++        {
++            return rfind(basic_string_view(str, n), pos);
++        }
++
++        size_type rfind(const cxxtools::Char* str, size_type pos = npos) const
++        {
++            return rfind(basic_string_view(str), pos);
++        }
++
++    private:
++        const_pointer _data;
++        size_type _size;
++};
++
++} // namespace std
+ 
+ #endif

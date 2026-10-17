@@ -1,0 +1,104 @@
+# test_package/MANIFEST.yml
+# 上游官方测试声明文件（CI L0e 强制要求存在）
+package: rsyslog-cisco/8.2604.0
+homepage: "https://www.rsyslog.com/"
+
+# 上游测试清点口径（R51 三步法：清点 → 实跑 → 回填；完整台账见 notes.md 第四节）
+#   官方源码包 rsyslog-8.2604.0.tar.gz 内 `tests/` 目录：条目 1486 个，其中 *.sh 1411 个。
+#   本包目标产物是两个 Parser 模块（plugins/pmciscoios → lib/rsyslog/pmciscoios.so、
+#   contrib/pmcisconames → lib/rsyslog/pmcisconames.so），按「官方全量源码包 + 仅编译打包
+#   目标模块」口径构建（与同族 archives/k/kamailio-outbound/6.0.6 一致），不构建 rsyslogd。
+#
+#   清点证据（在解包源码树中实测，命令逐条可复现）：
+#     $ ls tests | grep -i cisco                 → 0 个（不存在以 cisco 命名的用例文件）
+#     $ grep -rli cisco tests/                    → 2 个文件：
+#         imtcp_spframingfix.sh   （tests/Makefile.am:644  注册进 TESTS）
+#         imptcp_spframingfix.sh  （tests/Makefile.am:1161 注册进 TESTS）
+#       该二者验证的是**输入模块** imtcp/imptcp 的 Cisco ASA 帧间隔修正
+#       （conf 内写 framingfix.cisco.asa="on"，脚本自述 "test imtcp in regard to
+#        Cisco ASA framing"），与 Parser 模块 pmciscoios/pmcisconames 无关；
+#     $ grep -rli pmcisco tests/                  → 0 个（无任何用例引用这两个模块）
+#
+#   结论：上游**没有**驱动 pmciscoios/pmcisconames 解析路径的自动化用例
+#   （上游对这两个模块的验证依赖用户自建 rsyslog.conf 手工 run），因此上游侧
+#   无可执行项，与 Cisco 相关的 2 个用例全部登记为未执行并逐项给出原因。
+upstream_check_command: "make check（完整源码树 + rsyslogd 运行时；本包仅构建 plugins/pmciscoios 与 contrib/pmcisconames）"
+upstream_test_in_build: false
+upstream_test_command: "make check"
+
+# 上游测试清单（与 Cisco 相关的全部 2 个用例，逐项登记）
+# 通用不可执行原因：需同源码树构建的 tools/rsyslogd 及 imtcp/imptcp 输入模块的运行时会话
+# （tests/diag.sh 的 startup/injectmsg/shutdown_when_empty 驱动），二者均不在本包制品内——
+# 本包只产出 lib/rsyslog/pmciscoios.so 与 lib/rsyslog/pmcisconames.so 两个可加载模块。
+upstream_tests:
+  - file: imtcp_spframingfix.sh
+    source: rsyslog-8.2604.0/tests/imtcp_spframingfix.sh
+    description: "imtcp 输入对 Cisco ASA 帧间隔的修正（framingfix.cisco.asa=\"on\"）"
+    executed: false
+    not_executed_reason: "需运行中 rsyslogd + imtcp 输入模块（本包不构建 rsyslogd/imtcp）"
+  - file: imptcp_spframingfix.sh
+    source: rsyslog-8.2604.0/tests/imptcp_spframingfix.sh
+    description: "同上，imptcp（多线程输入）分支"
+    executed: false
+    not_executed_reason: "需运行中 rsyslogd + imptcp 输入模块（本包不构建 rsyslogd/imptcp）"
+
+# test_package 中自带的测试（消费者视角验证）
+test_package_tests:
+  # ── 鸿蒙特有测试：完整消费者用例（人工评审 rule12 要求）───────────────────
+  - file: test_pmcisco_e2e.c
+    description: >-
+      鸿蒙特有测试（完整消费者用例，非纯断言）：以真实消费者（rsyslogd 进程侧）身份
+      dlopen(RTLD_NOW) 加载两个 Parser 模块并走真实入口链路。
+      pmciscoios.so：dlsym("modInit") → modInit()（模块经宿主回调索取 core 服务并注册
+      配置指令）→ queryEtryPt() 全入口表（实测 10 项：modExit / parse2 / GetParserName /
+      newParserInst / checkParserInst / freeParserInst / isCompatibleWithFeature /
+      modGetID / getType / getKeepType）→ GetParserName(uchar **ppSz) 取 PARSER_NAME
+      （实测出参 "rsyslog.ciscoios"，该入口签名为带出参的 ABI 形状）→ newParserInst(NULL)
+      创建实例 → checkParserInst() → isCompatibleWithFeature() →
+      parse2(pInst, pMsg) 真实解析：正例消息
+      "6: *Jan  1 00:00:00: %LINK-3-UPDOWN: Interface GigabitEthernet0/1, changed state to up"
+      须返 RS_RET_OK 并经 core 服务实调 MsgSetTAG（TAG='%LINK-3-UPDOWN:'，len=15）/
+      MsgSetMSGoffs（offset=36，指向正文）/ setProtocolVersion(MSG_LEGACY_PROTOCOL=0)；
+      负例覆盖：序号段异常、TAG 段不以 '%' 起始均须返 RS_RET_COULD_NOT_PARSE，且不得
+      产生任何 core 调用；模块自身进度日志经 core 日志回调捕获核对。
+      pmcisconames.so：modInit → queryEtryPt()（实测 8 项：modExit / parse / GetParserName /
+      isCompatibleWithFeature / modGetID / getType / getKeepType）→ 对不存在的入口点
+      newParserInst/checkParserInst/freeParserInst 查询须返 RS_RET_MODULE_ENTRY_POINT_NOT_FOUND
+      → parse2 真链路（BEGINparse 单参形状）→ 负例（非 Cisco 名称消息）须返
+      RS_RET_COULD_NOT_PARSE 并打印 "not a cisco name mangled log!"。
+      结尾打印 E2E_ASSERTIONS_OK / E2E_ASSERTIONS_FAILED 供脚本核对。
+    command: "cc -std=gnu11 -Wl,--export-dynamic -o pmcisco_e2e test_pmcisco_e2e.c rsyslog_core_stub.c && PMCISCO_IOS_MODULE=<pkg>/lib/rsyslog/pmciscoios.so PMCISCO_NAMES_MODULE=<pkg>/lib/rsyslog/pmcisconames.so ./pmcisco_e2e"
+    e2e: true
+    cases: 74  # W3 实测 E2E_ASSERTIONS_OK（失败数须为 0），权威计数见 e2e_assertion_count
+  - file: rsyslog_core_stub.c
+    description: >-
+      消费者进程内的 rsyslog core 符号层。llvm-nm -u 实测两模块在加载期引用的 core 符号：
+      pmciscoios.so = Debug / MsgSetHOSTNAME / MsgSetMSGoffs / MsgSetTAG / applyDfltTZ /
+      cnfparamsPrint / cnfparamvalsDestruct / nvlstGetParams / r_dbgprintf /
+      setProtocolVersion；pmcisconames.so = Debug / loadConf / r_dbgprintf / strncasecmp。
+      stub 逐一提供实现（含 msg_t/datetime/parser 对象接口与宿主查询回调），并以计数器与
+      文本捕获记录模块调用行为（宿主查询名、配置指令名、core 日志文本、TAG 与 offset 入参）。
+      作用：让两个模块能在进程内按 RTLD_NOW 真实加载——OHOS/musl 无惰性绑定
+      （RTLD_LAZY 等同 RTLD_NOW），模块的全部未定义符号必须可解析。
+  - file: rsyslog_core_stub.h
+    description: >-
+      core 服务声明与观测接口（宿主查询回调、objGetObjInterface/regCfSysLineHdlr 查询面、
+      msg_t 实测偏移、日志捕获缓冲、各 core 调用计数），供 test_pmcisco_e2e.c 断言使用。
+  # ── 产物面校验 ───────────────────────────────────────────────────────────
+  - file: check_pmcisco.py
+    description: "产物结构校验：两个模块各自 ELF aarch64/ET_DYN、.dynstr 内 modInit/_init/_fini 导出、PARSER_NAME 字面量（rsyslog.ciscoios / rsyslog.cisconames）、无 glibc 版本化符号、无 libz.so/libestr.so/libfastjson.so 动态依赖串、DT_NEEDED 仅 libc.so 且无 DT_RPATH/DT_RUNPATH（纯 ELF 字节自检）、lib/rsyslog 仅含两个目标模块、licenses/COPYING"
+    command: "python3 check_pmcisco.py"
+  - file: conanfile.py
+    description: "L1 测试入口：定位制品内 lib/rsyslog/{pmciscoios,pmcisconames}.so，注入 PMCISCO_PACKAGE_FOLDER 后先跑 check_pmcisco.py，再编译并实跑消费者端到端用例（R34 实质验证，非空壳 print）"
+    command: "conan create . --build=missing（CI 自动执行 test()）"
+
+# 断言总数（check_pmcisco.py 中的无条件 check() 调用数：
+# 单模块 = ELF 4 + .dynstr 4（存在 + modInit/_init/_fini）+ PARSER_NAME 1 + glibc 1 +
+#          动态依赖串 3 + 加载期依赖面 3（.dynamic 存在 / NEEDED 仅 libc / 无 RPATH）= 16，
+# 两模块 ×2 = 32，再加 lib/rsyslog 目录内容 1 + licenses/COPYING 1 = 34；
+# 另含 4 项 readelf 动态段复核断言，构建机无 readelf/llvm-readelf 时走 SKIP 分支）
+assertion_count: 34
+
+# 鸿蒙特有测试（消费者端到端）断言数：W3 本地实跑（OHOS aarch64 + clang，CI 同款 profile）
+# 结果 = E2E_ASSERTIONS_OK=74 / E2E_ASSERTIONS_FAILED=0（退出码 0），原始日志存 reports/
+e2e_assertion_count: 74

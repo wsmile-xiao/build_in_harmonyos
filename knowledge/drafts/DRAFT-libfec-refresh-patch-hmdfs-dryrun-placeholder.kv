@@ -1,0 +1,66 @@
+#====================================================================
+# Draft: refresh-patch 在 HMDFS 上 patch --dry-run 实际创建 0 字节
+#        占位文件 → 新增源文件被误判为修改文件，补丁头变 --- a/ 被
+#        conan patch 拒绝（须 --- /dev/null）
+#====================================================================
+
+id:                     DRAFT-LIBFEC-REFRESH-PATCH-HMDFS-DRYRUN-PLACEHOLDER
+trigger_tool:           refresh-patch|conan|patch
+phase:                  patch-generation|configuration|build
+error_signature:        source/target file does not exist:|
+                         Apply patch .*source/target file does not exist|
+                         Failed to apply patch: .*\.patch.*source/target
+
+severity:               2
+category:               hmdfs, tooling, conan, autotools
+match_keywords:         refresh-patch, dry-run, patch, placeholder, 0 bytes,
+                         /dev/null, --- a/, --- /dev/null, source/target file
+                         does not exist, HMDFS, new file, added file,
+                         cpu_mode_arm64.c
+
+title:                  refresh-patch 的 patch --dry-run 在 HMDFS 上会真实创建 0 字节目标文件到 .orig，下一轮把"新增源文件"误判为"修改文件"生成 --- a/ 头，conan apply_conandata_patches 拒绝应用（新增文件补丁必须 --- /dev/null）
+
+root_cause:             refresh_patch.auto_mode 对新增文件（orig 不存在）生成
+                        `--- /dev/null` 头的补丁后，会调用 _dry_run() 在 orig 目录执行
+                        `patch --dry-run -p1` 验证；在 HMDFS（chmod 被忽略、写语义
+                        异常）上该 dry-run 实际创建了 0 字节目标文件（如
+                        .orig/cpu_mode_arm64.c，0 bytes）。下一轮 refresh-patch
+                        检测到 orig 已存在该文件 → 走"修改文件"分支 → 生成
+                        `--- a/cpu_mode_arm64.c` 头 → conan 的 apply_conandata_patches
+                        以 source/target file does not exist 拒绝（新增文件必须
+                        `--- /dev/null` 头）。
+affected_scope:         任何在 HMDFS 上使用 refresh-patch --auto 为"新增源文件"
+                        （orig 中不存在）生成补丁的 OHOS 适配任务；且该补丁经
+                        conan apply_conandata_patches 应用到干净 tarball 时。
+
+verification_cmd:       head -2 patches/0005-*.patch;  # 必须 --- /dev/null
+                        ls -la $BUILD_SRC_ORIG_DIR/<新增文件>;  # 不得存在 0 字节占位
+
+rec_priority:           1
+rec_approach:           remove-orig-placeholder-before-refresh-patch
+rec_description:        每轮 refresh-patch --auto 前删除 .orig 目录中因上一轮
+                        dry-run 产生的 0 字节占位文件（如 rm -f
+                        $BUILD_SRC_ORIG_DIR/cpu_mode_arm64.c），使新增文件始终
+                        以 `--- /dev/null` 头生成补丁；生成后核对补丁头
+                        （grep -m1 '^---' patches/NNNN-*.patch）。若占位已入库
+                        （如其他库 commit 的 .build-closed/.staging-verified），
+                        属基线噪声按 baseline_isolation_audit 记录隔离复验。
+rec_command:            rm -f $BUILD_SRC_ORIG_DIR/<新文件> && \
+                        python3 scripts/ohc-run.py refresh-patch --auto <lib> <ver> && \
+                        head -2 archives/<l>/<lib>/<ver>/patches/0005-*.patch
+rec_auto_fix:           true
+rec_impl:               手动删除占位后重新 refresh-patch；补丁以 /dev/null 头提交
+
+fallback_priority:      2
+fallback_approach:      manual-patch-header-fix
+fallback_description:   若占位已进入 git 跟踪（其他库基线），不得修改其他库文件；
+                        仅删除 .orig 本地占位并重新生成，或手工将补丁头改回
+                        `--- /dev/null`（conan 新增文件补丁唯一合法头）。
+fallback_command:       sed -i '1s|^--- a/|--- /dev/null|' patches/0005-*.patch
+
+forbid_1_pattern:       git add .orig 占位文件|将 0 字节占位文件提交入库
+forbid_1_reason:        占位文件是工具副作用而非源码，入库会触发 JC1 运行时状态
+                        文件检测（full 模式 git ls-files 命中即 W3 阻塞）。
+forbid_1_consequence:   W3 本地 CI 模拟 JC_RESULT=fail 阻塞 finish，浪费整轮构建。
+
+principles:             real-evidence-over-assumption, minimal-patch

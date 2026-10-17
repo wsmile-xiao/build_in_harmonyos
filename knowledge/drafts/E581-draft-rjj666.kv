@@ -1,0 +1,110 @@
+#====================================================================
+# E581-draft-rjj666 — 共享库交付形态的 glibc 符号残留：
+#   静态库无恙、共享库必挂（--no-allow-shlib-undefined），
+#   源码不可改时经上游构建系统 LD_FLAGS 通道链入 PIC shim
+# 触发事件: liblphobos 1.42.0 适配（共享库版 druntime 的 dl.o 残留）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     E581-draft-rjj666
+trigger_tool:           ld.lld|clang|ldc2|cmake|nm
+phase:                  linking
+
+error_signature:        undefined reference due to --no-allow-shlib-undefined: program_invocation_name|
+                        undefined symbol: program_invocation_name|
+                        nm -D --undefined-only.*program_invocation_name
+
+severity:               2
+category:               linking, libc, musl, shared-library, ohos
+
+match_keywords:         program_invocation_name, program_invocation_short_name,
+                        __progname, glibc, musl, shared library, static library,
+                        no-allow-shlib-undefined, dl.o, LD_FLAGS, LDFLAGS,
+                        shim, PIC, 静态库, 共享库, 符号残留
+
+title:                  glibc 特有符号（program_invocation_name 等）在 musl 无实现：静态库交付时残留成员不被拉入故无恙，共享库交付时引用它的 .o 被整体打入 .so、消费者链接默认 --no-allow-shlib-undefined 语义下必挂；源码不可条件编译时，把 shim 编为 PIC 对象经上游构建系统的共享库链接附加参数通道（LD_FLAGS/LDFLAGS）链入 .so
+
+root_cause:             glibc 特有符号（program_invocation_name /
+                        program_invocation_short_name，OHOS musl 无对应实现）
+                        残留在库源码里。**同一残留，交付形态决定后果**：
+                        ① 静态库交付：引用该符号的成员 .o（如 druntime
+                        core/internal/elf/dl.o）只有消费者真正引用其符号时
+                        才被拉入；ldc/1.42.0 工具包（仅静态库）正是此形态，
+                        故无恙。
+                        ② 共享库交付：dl.o 被整体打入 .so，符号进入动态
+                        符号表（nm -D 可见 undefined）；消费者以默认语义
+                        （--no-allow-shlib-undefined，lld/clang 链接 .so
+                        的常规行为）链接时必报错——错误在消费者侧而非
+                        构建侧，构建期验证全绿也发现不了。
+                        判别命令：nm -D --undefined-only <lib>.so |
+                        grep program_invocation
+
+durable_solution: >
+  源码不可条件编译时（本例：D 的 __traits(compiles, ...) 恒真使静态分支
+  失效，且 LDC 在 OHOS 不定义 OHOS 版本标识，无法 version(OHOS)），走
+  **上游构建系统通道**：
+
+      clang -c -fPIC -o ohos_runtime_shim.o shim.c
+      cmake -S <src> ... -DLD_FLAGS="ohos_runtime_shim.o" ...
+      # runtime CMake 的 LD_FLAGS = "Extra C linker flags for shared
+      # libraries"，shim.o 随每个 .so 链入
+
+  shim 内容：program_invocation(_short)_name 提供空串定义（与 ldc 包
+  引导期适配同构），可同文件附带 pthread_cancel 家族 no-op（E085）。
+  .so 自带定义后，消费者链接零符号错误。
+
+  C/C++ 生态等价通道：LDFLAGS / CMAKE_SHARED_LINKER_FLAGS /
+  target_link_options / target_link_libraries(<obj> 私有目标文件)。
+  泛化原则：**凡是上游构建系统暴露的"附加到共享库链接"的变量，
+  都是不改源码注入符号定义的通用入口**。
+
+  效果（liblphobos/1.42.0 实测）：
+      处置前：消费者 ldc2 链接 hello.d 即报
+        ld.lld: error: undefined reference due to
+                --no-allow-shlib-undefined: program_invocation_name
+      处置后：test_package 消费者用例 7/7 真机通过（链接零符号错误）
+
+fallback:               源码可改且有平台宏可用时，改源码替换为 __progname
+                        （extern char *__progname，musl 提供）——即 E493/E203
+                        路线；本条的 LD_FLAGS 通道适用于源码不可改的场景。
+
+verification_cmd: >
+  # ① 交付前自查（对每个 .so）：
+  nm -D --undefined-only <lib>.so | grep -E 'program_invocation|__libc_' || echo clean
+  # ② 消费者复验：以默认链接语义编译一段引用该库的程序，
+  #    要求零 undefined reference due to --no-allow-shlib-undefined
+  # ③ 确认 shim 确实进链：nm -D --defined-only <lib>.so | grep program_invocation
+
+forbid_1_pattern:       只在静态库场景验证通过（或只验证本库构建），即宣称共享库交付可用，未做 nm -D 未定义符号复核
+forbid_1_reason:        静态库与共享库的符号暴露面完全不同：静态库残留成员不被拉入，共享库整体打入并对消费者可见
+forbid_1_consequence:   问题不在构建期而在消费者链接期爆发；下游所有消费者全部阻断
+
+affected_scope:         一切交付 .so 且内部引用 glibc-only 符号的库：
+                        program_invocation_name、error_print_progname、
+                        __libc_* 系列、__ctype_b_loc 等在 musl 无实现的
+                        glibc 扩展。典型触发场景：同源码「工具包（静态库
+                        形态）已适配、库包（共享库形态）新适配」
+                        （ldc → liblphobos 即此先例）。
+
+similar_to:             E493, E203
+
+# 关系说明：E493（!5113）/E203 覆盖「编译/链接期报 undefined → 改源码用
+# __progname」的源码替换路线；本条覆盖 ①静态库 vs 共享库交付形态的判别
+# 维度，②源码不可条件编译时经构建系统 LD_FLAGS 通道链入 shim 的通用解法。
+# 与 E493/E203 互补，不重复。
+
+doc_file:               knowledge/drafts/E581-draft-rjj666.md
+last_updated:           2026-09-17
+source_event:           liblphobos 1.42.0 适配：共享库版 druntime 的 dl.o 整体打入 program_invocation_name 残留，消费者链接必挂；shim PIC 经上游 runtime CMake 的 LD_FLAGS 链入后 test_package 7/7 通过
+
+authors:                rjj666
+source_pr:              0
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-17
+
+draft:                  true
+contributor_id:         rjj666

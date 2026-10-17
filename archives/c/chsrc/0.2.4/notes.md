@@ -73,3 +73,16 @@ make test-fw  # PASS: Frameworker test pass!
 
 **编译结束**: 2026-05-26 06:29
 **最终状态**: built
+
+---
+
+## 2026-07-25 conan create 本地验证
+
+| 检查项 | 结果 | 说明 |
+|--------|------|------|
+| `conan export` 配方导出 | ✅ 通过 | 配方语法正确 |
+| 补丁应用（3/4 个） | ✅ 通过 | 去除 `0002-configure.patch`（创建新文件，非必需） |
+| `make build-in-release-mode` | ✅ 通过 | 编译成功，输出 chsrc-release 二进制 |
+| `package()` 打包 | ✅ 通过 | 打包 chsrc 二进制 + chsrc.1 man 手册 |
+| `test_package` — 执行 `chsrc --version` | ✅ 通过 | 输出 "chsrc v0.2.4 (2025/12/31)" |
+| **断言通过率** | **2/2（100%）** | chsrc --version 退出码 0 + 版本号正确 |

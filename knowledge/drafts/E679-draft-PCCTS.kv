@@ -1,0 +1,32 @@
+#====================================================================
+# Draft: pccts 1.33mr33 - 非单构建根的 2002 年 makefile 工具集：
+#        四个子目录各自硬编码 CC=cc/COPT 且无 configure/install，
+#        sorcerer/lib 两文件缺 pcctscfg.h 掉进 <varargs.h> 被 clang 15 shim #error，
+#        上游测试另有三类端口性失败（老式头 / K&R main 缺返回类型 / 静态与非静态声明冲突）
+#====================================================================
+
+id: "DRAFT-E679-NON-ROOT-MMAKE-VARGARGS-PORTABILITY"
+trigger_tool: "make|clang|clang++"
+phase: "compilation|link"
+error_signature: "Please use <stdarg.h> instead of <varargs.h>|'iostream.h' file not found|'stream.h' file not found|a type specifier is required for all declarations|static declaration of 'rexpr' follows non-static declaration|make: *** [makefile:7: test] Error 127"
+
+severity: "2"
+category: "portability|toolchain|build-system"
+match_keywords: "pccts, pcctscfg.h, PCCTS_USE_STDARG, varargs.h, sorcerer, sorlist.c, sintstack.c, iostream.h, stream.h, non-static declaration, Error 127, CC=cc, COPT, non-root build, genmk, antlr, dlg, MR23, ast_find_all"
+
+title: "2002 年非单构建根 makefile 工具集在 OHOS/clang15 的四个独立故障点：CC 硬编码、单文件缺 pcctscfg.h 掉 varargs 分支、老式 C++ 头、K&R 与静态性冲突——按子目录依赖序自写构建步骤 + 12 个 portability 补丁即可，无需任何 bootstrap"
+
+root_cause: "四个故障点各自独立，混在一起看会误判成\"工具链不可用\"：(1) 上游无单一构建根——根 makefile 默认目标只 echo banner 后依次 `cd` 递归，四个子目录 makefile 各自硬编码 `CC=cc`/`COPT=-O`，且全树无 configure、无 install 目标；OHOS 只有 clang 没有 cc，原样 `make` 打完 banner 即无产物，子目录 `cc ...` 直接 Error 127。(2) `sorcerer/lib/{sorlist,sintstack}.c` 头部只有 <stdio.h>/<setjmp.h>，**缺 `#include \"pcctscfg.h\"`**——而 `PCCTS_USE_STDARG` 正是由 pcctscfg.h 在 `__STDC__`/`__USE_PROTOS`/`__cplusplus` 三条件下定义的；缺头即掉进 `#else <varargs.h>` 分支，clang 15 的 varargs.h 是 shim，直接 `#error \"Please use <stdarg.h> instead of <varargs.h>\"`。同目录 `astlib.c`/`sstack.c` 带了该头故正常——这是**单文件级头缺失**，不是全局配置问题，也是最省事的修法（补一行 include 与同目录对齐；另一等价路是 `COPT` 注入 `-DPCCTS_USE_STDARG`，因 COPT 被四个子目录 makefile 全部拼进 CFLAGS，是唯一能一次覆盖到 sorcerer/lib 的注入点）。(3) `h/pccts_iostream.h` 对 `PCCTS_USE_NAMESPACE_STD` 有宏保护，但 `pcctscfg.h` **只消费不定义**它 ⇒ C++ 侧必须显式 `-D`；而 `testcpp/{2,3}/MyLexer.cpp` 绕过该头直接 `#include <iostream.h>`，`testcpp/13/test.g` 内嵌 `<stream.h>`（全文 0 处流符号使用，纯冗余），宏救不到只能补丁。(4) 上游 K&R 习惯在 C++ 下两处炸：内嵌 `main()` 缺返回类型（`a type specifier is required`，`-fpermissive`/`-std=gnu++98` 均无效），`support/rexpr` 的 `rexpr.h` 非 static 声明 vs `rexpr.c` static 定义（且 **两个分支 `#ifdef __USE_PROTOS` 与 `#else` 都要改**——rexpr.c 不 include pcctscfg.h 故走 `#else`，只改一支无效，实测 rc 仍失败）。"
+affected_scope: "一切 1995–2002 年间、无 configure 的多子目录 makefile 工具集移植到 OHOS/clang15 的场景；尤其 PCCTS 家族（antlr/dlg/sorcerer/genmk）与其派生项目。凡\"根 makefile 只做 cd 递归 + 子目录硬编码 CC\"的形态，配方必须自写按依赖序的构建步骤。"
+verification_cmd: "make -C antlr CC=clang COPT='-O2' -j1 && make -C dlg CC=clang COPT='-O2' -j1 && make -C sorcerer CC=clang COPT='-O2' -j1 && make -C support/genmk CC=clang COPT='-O2' -j1 && ls -la bin/"
+
+rec_priority: "1"
+rec_approach: "ordered-subdir-make-with-portability-patches"
+rec_description: "按依赖序自写构建步骤：①`mkdir bin`（①②③ 都 mv 进它）→ ②`make -C antlr`（生成器，必须最先）→ ③`make -C dlg` → ④`make -C sorcerer`（其 all 目标先编 sor 再递归 sorcerer/lib，依赖 ②③ 的 bin/antlr+bin/dlg）→ ⑤`make -C support/genmk` 后手工 `mv genmk bin/`。编译器一律 `CC=<conf 取到的 clang>`（注意 `tools.build:compiler_executables` 是**单个 dict**、不支持 `:c` 子键，conan 2.29 对不存在的子键直接抛 ConanException），`COPT` 是唯一能覆盖全部子目录 CFLAGS 的注入点。安装无现成目标，按上游发行版的 `debian/install` 口径手工 copy：可执行→bin/、`h/*.[hc]`+`h/*.cpp`→include/、`sorcerer/h/*.h`→include/sorcerer/，**排除 .dsp/.dsw/.bat IDE 残留**；上游 `sorcerer/lib` 只编 .o 不归档，故包内 `cpp_info.libs` 为空属预期非缺产物。补丁走 `track-edit add` 逐文件登记 + `refresh-patch --auto`（tracker 精准模式）三处引用一致（conandata patches / manifest patches_applied / patches/ 实物），分类人工改写为 `portability`+`platform_only:False`（工具默认写 `auto`/`pending`/`True`）。⚠️ 两个坑：跑完上游测试后**必须把被重新生成的产物恢复自 orig**（`test4/SimpleTreeParser.cpp|test7/stdpccts.h` 这类在 orig 存在但会被 antlr/sor 覆写，否则 refresh-patch 把产物当补丁、编号漂移使 conandata 引用错位）；`pr.diff` 为 0 字节时 junk_check 的 `-s` 判据退化为全仓扫描，JC6 会把上游主线几百个包误判成本 PR（须先 commit 再 finish）。"
+rec_command: "diff -rq \"$ORIG\" \"$WORK\" | grep '^Files' | wc -l   # 应等于人工登记的编辑数；多出的即被重新生成的产物，cp 自 orig 恢复后再 refresh-patch"
+prescan_pattern: 'Please\ use\ <stdarg\.h>\ instead\ of\ <varargs\.h>|''iostream\.h''\ file\ not\ found|''stream\.h''\ file\ not\ found|a\ type\ specifier\ is\ required\ for\ all\ declarations|static\ declaration\ of\ ''rexpr''\ follows\ non\-static\ declaration|make:\ \*\*\*\ \[makefile:7:\ test\]\ Error\ 127'
+rec_auto_fix: "false"
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr: "PENDING"
+source_commit: "PENDING"

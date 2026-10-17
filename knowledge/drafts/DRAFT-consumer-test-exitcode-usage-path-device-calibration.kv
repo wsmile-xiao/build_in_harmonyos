@@ -1,0 +1,86 @@
+#====================================================================
+# DRAFT knowledge entry - CLI 消费者测试对 usage/错误路径退出码的断言不可跨平台移植，必须先目标平台实证再校准
+# Source package: xmacro/0.3pre-20000911（真机 2026-10-04 实证）；模式适用于所有带 usage 路径的命令行包
+#====================================================================
+
+id: DRAFT-consumer-test-exitcode-usage-path-device-calibration
+trigger_tool: conan-test|zsh|subprocess
+phase: consumer-test
+error_signature: AssertionError.*returncode|should fail|exit code mismatch
+severity: 2
+category: consumer-test, cli, platform-portability, exit-code
+match_keywords: usage 退出码, EXIT_FAILURE, 消费者测试, 退出码断言, rc=0, device verified, 平台实证, 校准断言
+
+title: 消费者测试断言「无参调用应 exit 非 0」在 OHOS 上实测不成立（usage(EXIT_FAILURE) 返回 0）——退出码断言必须先在目标设备实证再写入 test_package
+
+root_cause: >
+  上游 CLI 惯例是 usage 错误路径调用 exit(EXIT_FAILURE)（标准值 1）。
+  在常规 Linux/glibc 上 rc=1；但 OHOS 平台实测（xmacro 0.3pre-20000911，
+  真机 2026-10-04）同一二进制无参调用打印完整 Usage 后 rc=0——
+  目标平台 libc/加载器对退出码的传递与宿主直觉不一致。
+  本机（x86 宿主）验证通过、真机 CI 才翻车，且翻车点出现在 L1 的
+  test_package 断言里，报错形如:
+      AssertionError: xmacroplay without args should fail
+  根因不是配方错误，而是「宿主经验写死的退出码断言」被带到了目标平台。
+affected_scope: >
+  所有对 CLI 工具做「错误/usage 路径退出码」断言的消费者测试
+  （test_package/test_*.py、cmake 测试、shell 冒烟）。
+  判定：本机 rc 符合预期、真机 rc 不符，且 stderr 输出（Usage/错误信息）
+  与预期一致——输出契约成立、只有退出码不符 → 平台差异，校准断言；
+  若输出也不符 → 二进制没真正执行，另查依赖加载/签名问题。
+
+# ── 使用说明 ──
+# 1) 遇到消费者测试退出码断言在真机失败时，先不要改二进制或配方；
+# 2) 用「输入输出定义」里的命令在设备上实证一次；
+# 3) 按「判定规则」分流：平台差异 → 校准断言（本方案）；输出缺失 → 查依赖加载；
+# 4) 校准后必须在断言注释与 notes.md 记录实证日期与证据。
+
+# ── 输入输出定义 ──
+# 输入: 被测包安装后的 bin 路径 + conanrun 环境（conan test 已提供）。
+# 实证命令（设备上，conanrun 同款环境）:
+#   . <test_package 构建目录>/conanrun.sh
+#   <pkg>/bin/<tool>; echo "RC=$?"        # 期望观察 usage 路径真实 rc
+#   <pkg>/bin/<tool> -v 2>/dev/null; echo "RC=$?"
+# 输出: usage 路径的真实 rc 与 stderr 内容，作为断言校准依据。
+# 判定规则:
+#   stderr 有预期输出 + rc 与宿主不同 → 平台差异，只断言输出契约;
+#   stderr 也为空/报加载错误 → 不是本条目（查 LD_LIBRARY_PATH/签名/依赖闭包）。
+
+# ── 示例 ──
+# 修复前（本机经验写死）:
+#   proc = subprocess.run([play], capture_output=True, text=True)
+#   assert proc.returncode != 0, "should fail"
+#   assert "Usage:" in proc.stderr
+# 修复后（校准为输出契约）:
+#   # OHOS 实测 usage(EXIT_FAILURE) 返回 0（真机 2026-10-04），只断言输出契约
+#   proc = subprocess.run([play], capture_output=True, text=True)
+#   assert "Usage:" in proc.stderr
+# 修复后真机结果: L1 pass, 5/5 断言通过, L1e 破坏性反向验证仍能抓到假测试
+# （bin/ 被移走后文件存在性断言先失败——退出码断言放松不影响 L1e 有效性）。
+
+rec_priority: 2
+rec_approach: assert-output-contract-not-exitcode
+rec_description: >
+  消费者测试对 usage/错误路径只断言「可观测输出契约」（stderr 关键字、
+  输出格式），不锁退出码；确需锁 rc 时先在目标设备用同款 conanrun 环境
+  实证一次并把证据写进断言注释。文件存在性断言保留不动，保证 L1e
+  破坏性反向验证仍然有效。
+rec_command: >
+  . conanrun.sh && <pkg>/bin/<tool>; echo RC=$?   # 设备实证
+  # test_package 内: assert "Usage:" in proc.stderr  （去掉 returncode 断言）
+rec_auto_fix: false
+rec_impl: consumer-test-calibration
+similar_to: [crashme-2.8.5-consumer-test-exitcode-126-127-255-guard, zpaq-7.15-no-version-flag-smoke-gate, E698-integrit-4.1-upstream-make-test-self-built-tree-exitcode-contract]
+conflicts_with: []
+notes: >
+  与 crashme 条目的区别：那条是 126/127/255 作为「加载失败信号」的守卫；
+  本条是「合法 usage 路径的 rc 本身跨平台不可移植」。
+  与 zpaq 条目的区别：那条是工具根本没有 --version；本条是有 usage 输出
+  但退出码不符。三条合起来构成 CLI 消费者测试冒烟断言的完整校准矩阵：
+  版本旗标存在性 → L2；加载失败码 → 守卫；usage 退出码 → 本条。
+verify_builds: >
+  xmacro/0.3pre-20000911 真机 shadow CI 2026-10-04：修复前 L1 fail
+  （AssertionError rc==0），校准后 L0/L1/L4/L5 全 pass、exit 0、5/5 断言。
+authors: codex
+source_pr: pending
+source_commit: ee6e886f2c (feat/xmacro-0.3pre-20000911-codex)

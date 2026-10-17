@@ -1,0 +1,80 @@
+#====================================================================
+# DRAFT-osi-0.108.11-soplex-copy-ctor — COIN-OR OsiSpx 0.108.11 operator= 使用已知损坏的 SoPlex 拷贝构造触发 SIGTRAP
+# 触发事件: osi 0.108.11 R04 OsiSolverInterfaceUnitTest（soplex/3.1.1）SIGTRAP
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-osi-0.108.11-soplex-copy-ctor
+trigger_tool:           make|unitTest|conan
+phase:                  compilation|test_runtime
+error_signature:        Signal 5|SIGTRAP|Signal 5 (core dumped)|exit 133|soplex|SoPlex copy ctor|
+                         OsiSpxSolverInterface::operator=|nRows\(\)|use of invalid pointer|
+                         copy-constructor of SoPlex did not work|#113
+
+severity:               1
+category:               upstream|compat|runtime|coin-or|soplex|osi|copy-semantics|bugfix
+match_keywords:         SoPlex, soplex, SolverLegacy, SoPlexLegacy, copy constructor, copy ctor,
+                         assignment operator, operator=, OsiSpx, OsiSpxSolverInterface, COIN-OR,
+                         SIGTRAP, Signal 5, crash, nRows, use-after-free, 拷贝构造, 赋值运算符, 运行期崩溃
+title:                  COIN-OR OsiSpx 0.108.11 operator= must not use SoPlex copy ctor (broken, #113); mirror the copy ctor assignment path
+
+topic: >
+  soplex 3.1.1 的 SoPlex（SOPLEX_LEGACY 下为 SoPlexLegacy）**拷贝构造不可用**：
+  `new soplex::SoPlex(*source.soplex_)` 生成的副本内部状态损坏，后续
+  `soplex_->nRows()` 等访问触发 SIGTRAP（Signal 5，exit 133，PC 落 musl trap 路径）。
+  COIN-OR Osi 0.108.11 的 OsiSpxSolverInterface.cpp **copy ctor 已规避**该问题
+  （注释 "Using the copy-constructor of SoPlex did not work, see #113"，
+  改用 `*soplex_ = *source.soplex_` 赋值），但其 **operator= 却仍使用
+  `soplex_ = new soplex::SoPlex(*source.soplex_)` 拷贝构造**——
+  unitTest 的 copy/assignment 测试块 `lhs = imC2` 之后 `lhs.getNumRows()`
+  （soplex_->nRows()）崩溃。
+
+root_cause: >
+  1) soplex 3.1.1 的 SoPlexLegacy 拷贝构造生成损坏对象（上游已知 #113，
+     copy ctor 与 operator= 语义不一致/内部指针复制缺陷）；
+  2) OsiSpx 0.108.11 operator= 漏用赋值路径，与自身 copy ctor 策略不一致；
+  3) configure/编译均通过，问题只在运行期出现（对象被拷贝/赋值后访问内部状态），
+     常规单元测试路径（RowCut/ColCut/Debugger）不触发，OsiSolverInterfaceUnitTest
+     的 copy-ctor 段才触发。
+
+durable_solution: >
+  1) 修复 OsiSpxSolverInterface::operator=：弃用 SoPlex 拷贝构造，改为与
+     copy ctor 完全一致的路径——`#if SOPLEX_VERSION >= 220` 分支新建
+     `spxout_` + `soplex_ = new soplex::SoPlex(*spxout_, ENTER, COLUMN)` 后
+     执行 `*soplex_ = *source.soplex_`（赋值）；（已落补丁
+     patches/0007-OsiSpx-operator-assignment-fix.patch，实测 SIGTRAP 消失，
+     OsiSolverInterfaceUnitTest 全量 1446 PASSED / 0 ERROR / exit 0）；
+  2) 凡使用 SoPlex/SoPlexLegacy 拷贝构造的 COIN-OR 系接口（OsiSpx 及同类
+     solver interface）都应核对 copy ctor 与 operator= 语义一致；
+  3) 集成 SoPlex 前预检拷贝/赋值语义（写最小探针验证 copy-ctor 后再赋值访问）。
+
+verification: >
+  osi 0.108.11 R04 实测：
+  - 复现：`./unitTest -mpsDir=../../Data/Sample -netlibDir=../../Data/Netlib
+    -testOsiSolverInterface` exit 133（Signal 5），崩溃点
+    OsiSpxSolverInterfaceTest.cpp copy-ctor 块 `lhs=imC2` 后 `lhs.getNumRows()`
+    （reports/osi-r04-repro-run.log；
+    代码级二分标记 osi-r04-diagmark4-run.log）；
+  - 接口核对：soplex.h `#ifndef SOPLEX_LEGACY ... #else #include soplexlegacy.h
+    typedef SoPlexLegacy SoPlex`；OsiSpx copy ctor 注释自述 #113；
+  - 修复后：补丁 0007 应用，-O2 重建，`Osi/test/unitTest` exit 0，
+    1446 PASSED / 0 ERROR / 3 WARNING（预期内），"All tests completed successfully"
+    （reports/osi-r04-verify-run.log）；
+  - 归因：非平台（HMDFS/工具链）、非 soplex 二进制缺陷本身可修——
+    当前库 OsiSpx 适配可修（上游 OsiSpx 0.108.11 自身策略即规避拷贝构造）。
+
+boundary: >
+  适用 COIN-OR OsiSpx（及直接 new SoPlex 拷贝构造的同类 solver interface）在
+  soplex 3.1.x（SoPlexLegacy）下的运行期崩溃。上游 SoPlex 修复拷贝构造后
+  本问题消失；或上游 OsiSpx 新版统一 operator= 与 copy ctor 后消失。
+  反例：copy ctor 路径（赋值）本身无崩溃；RowCut/ColCut/Debugger 段不触发。
+
+relations:
+  similar_to: [DRAFT-osi-0.108.11-glpk5-lpx-api-removal]
+  caused_by: [soplex-3.1.1-so-plex-legacy-copy-ctor-broken]
+  prerequisite_of: []
+  conflicts_with: []
+
+doc_file:               reports/DRAFT-osi-0.108.11-soplex-copy-ctor.md
+last_updated:           2026-09-18
+source_event:           archives/o/osi/0.108.11/manifest.yaml (osi 0.108.11 R04 适配)

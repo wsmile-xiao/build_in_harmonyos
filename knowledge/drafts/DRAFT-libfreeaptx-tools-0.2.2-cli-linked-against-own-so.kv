@@ -1,0 +1,110 @@
+#====================================================================
+# DRAFT — 纯 POSIX Makefile 的上游仓库把 CLI 工具链到自己的 .so 上，
+#         拆成 tools 包（删掉 lib/）之后工具在加载期就起不来（退出码 127），
+#         而 make install 里已经把它们"装好了"
+# Timestamp: 2026-09-17
+# Software: libfreeaptx 0.2.2（Makefile，无 configure / CMake / Meson）
+# Status: DRAFT — 待复审提升为正式 E 条目
+#
+# To promote:
+#   1. Review the evidence below
+#   2. Rename to Ennn.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/Ennn.md
+#====================================================================
+
+id:                     DRAFT-libfreeaptx-tools-0.2.2-cli-linked-against-own-so
+trigger_tool:           make|ld|clang|readelf
+phase:                  linking|runtime
+error_signature:        error while loading shared libraries|CANNOT LINK EXECUTABLE|
+                        library "lib\w+\.so\.\d+" not found|exit(?:ed with)? status 127|
+                        No rule to make target '.*\.static'|cannot open shared object file
+
+severity:               3
+category:               linkage|packaging|make|runtime|cli
+match_keywords:         DT_NEEDED, RUNPATH, RPATH, readelf -d, split package,
+                        tools-only package, static target, STATIC_UTILITIES,
+                        .SUFFIXES, .c.static, No rule to make target,
+                        plain makefile, no configure, -fPIC, relocation,
+                        CFLAGS override, make command line variable,
+                        libpackage split, exit 127
+title:                  纯 Makefile 上游把 CLI 工具链到自身共享库上：拆 tools 包删掉 lib/ 后工具加载期失败（127），必须先把工具的链接规则改成自包含
+root_cause:             上游 Makefile 用"工具依赖库文件"的隐式规则把 CLI 和库绑在一起：
+                            UTILITIES  = $(NAME)enc $(NAME)dec
+                            $(UTILITIES): $(LIBNAME)
+                            .o: .c
+                                $(CC) $(CFLAGS) -c -o $@ $<
+                            $(LIBNAME): $(SOURCES) $(HEADERS)
+                                $(CC) $(CFLAGS) -fPIC -shared -o $@ $^
+                        于是 $(NAME)enc 的链接命令是
+                            $(CC) ... -o freeaptxenc freeaptxenc.o $(LIBNAME)
+                        生成的 ELF 带 DT_NEEDED libfreeaptx.so.0，且没有 RUNPATH。
+                        库包与 tools 包拆开后 tools 包按"同一文件只有一个属主"删掉 lib/，
+                        二进制在加载期找不到 DT_NEEDED 里的 .so，直接以 127 退出
+                        （OHOS 上表现为 CANNOT LINK EXECUTABLE / library not found），
+                        连 --help 都答不出来——而 make 阶段一切正常，日志里没有任何错误。
+                        这是"构建成功但产物不可用"的典型形态：只有 readelf -d 与真机
+                        执行才能发现。
+affected_scope:         纯手写 Makefile 的上游（无 configure/CMake/Meson 的 curl 层小库），
+                        只要库与 CLI 在同一次 make 里产出、且链接规则让 CLI 依赖库文件，
+                        拆分发包就会撞上。autotools/CMake 工程通常有 --disable-shared
+                        之类的开关，情况不同。
+verification_cmd:       readelf -d <pkg>/bin/<tool> | grep NEEDED        # 期望只有 libc.so
+                        <pkg>/bin/<tool> --version                       # 退出码必须为 0，不是 127
+rec_priority:           1
+rec_approach:           link-tools-from-sources
+rec_description:        不要把"工具链到自己的 .so"当成给用户的功能，tools 包直接让工具
+                        吃源文件、与主源码一起编译，产物自包含：
+                            $(NAME)enc: freeaptxenc.o $(SOURCES)
+                                $(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -I. -o $@ $@.o $(SOURCES)
+                        同时把 default 目标收窄成 $(UTILITIES) $(HEADERS)、install 只装 bin/，
+                        这样 tools 包既不会产出 .so，也不会跟库包争头文件与 .pc。
+rec_command:            patch -p1 < 0001-Makefile-static-tools.patch && make -j1 CC=<cc> CFLAGS="-W -Wall -O3 -fPIC"
+rec_auto_fix:           false
+rec_impl:               patch-makefile-tools-selfcontained
+
+fallback_priority:      2
+fallback_approach:      keep-shared-lib-in-tools-package
+fallback_description:   如果工具确实必须共享同一个库（体积/版本联动），就让 tools 包保留
+                        lib/ 并给二进制打 RUNPATH=$ORIGIN/../lib；但这样两份归档会有同名
+                        .so，必须确认平台允许（多数情况属"同一文件两个属主"，会被拒），
+                        因此只作为退路。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:        ^\s*CFLAGS\s*=\s*-[^\n]*\n(?![^\n]*\+=)
+forbid_1_reason:        Makefile 里 CFLAGS 用普通赋值而非 +=/?=，会盖掉环境里注入的
+                        交叉编译标志；把它当"环境变量能生效"来传 -fPIC 会静默丢失。
+forbid_1_consequence:   交叉编译编出非 PIC 的目标文件，链接期报
+                        R_AARCH64_ADR_PREL_PG_HI21 relocation 之类的重定位错误，
+                        或者在 PIE 默认打开的目标上直接链接失败。
+forbid_2_pattern:       make\s+.*\.static\b|install-lib|make\s+install\s*$
+forbid_2_reason:        依赖上游声明的静态目标（.c.static / *.static）或聚合 install：
+                        前者只有 .SUFFIXES 和一个从未使用的变量，没有配套规则；
+                        后者会把 .so、头文件、.pc 一并装进 tools 包。
+forbid_2_consequence:   "No rule to make target 'freeaptxenc.static'" 直接中断构建；
+                        聚合 install 则让 tools 包与库包的文件互相覆盖。
+
+principles:
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               drafts/DRAFT-libfreeaptx-tools-0.2.2-cli-linked-against-own-so.md
+last_updated:           2026-09-17
+source_event:           libfreeaptx-tools 0.2.2 适配：上游 Makefile 用 $(UTILITIES): $(LIBNAME) 把工具链到 libfreeaptx.so.0，拆包删 lib/ 后工具以 127 退出
+
+authors:                username- <ajOovSKTQ0vaLwZB.username-@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-17
+
+draft: true
+contributor_id:         username-

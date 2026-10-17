@@ -1,0 +1,187 @@
+# ═══ Draft knowledge entry — 制品仓依赖包**自带的 .pc** 记录构建机前缀：
+#     把它挂进 PKG_CONFIG_PATH 会让 pkg-config **静默成功**却给出错误路径，
+#     失败点从 configure 后移到 compile/link ═══
+# Timestamp: 2026-09-20
+# Software: pdf2svg 0.2.4（CLI application，上游用 PKG_CHECK_MODULES 声明 cairo / poppler-glib）
+# Gate: L0i（依赖已发布）/ conan create + test_package 6 项断言
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-pdf2svg-0.2.4-dep-bundled-pc-build-prefix-pollution
+trigger_tool:           pkg-config|autotools|config|conan
+phase:                  configure|build|link
+error_signature: |
+  checking for (CAIRO|POPPLERGLIB)\.\.\. yes|
+  cannot find -l(cairo|poppler-glib|glib-2\.0)|
+  fatal error: 'cairo\.h' file not found|
+  fatal error: 'glib\.h' file not found|
+  \.(conan2|conan)/p/b/[a-z0-9]{15}/p|
+  ^prefix=/(storage/|$)|
+  -I/include/(cairo|glib-2\.0)|
+  -L/lib\b.*-lcairo
+error_signature_2: |
+  Package '.*' has been installed in a non-standard prefix|
+  user specifying|
+  /include/cairo|^include/include|
+  another build machine|别人家的缓存
+
+severity:               3
+category:               autotools, configure, pkg-config, conan, dependency, portability, musl
+match_keywords:         PKG_CHECK_MODULES, AC_ARG_VAR, pkg-config, PKG_CONFIG_PATH,
+                         cairo.pc, cairo-svg.pc, poppler.pc, poppler-glib.pc, glib-2.0.pc,
+                         prefix=, .conan2, package_folder, 构建机前缀, 静默成功,
+                         -lintl, aggregated_components, 依赖包自带 pkgconfig
+
+title:                  制品仓依赖包自带的 .pc 记录了**构建机前缀**：挂进 PKG_CONFIG_PATH 会让
+                        pkg-config 静默成功并返回错误路径，失败点从 configure 后移到 compile/link
+
+root_cause: >
+  ohpcd 制品仓里的依赖包大多由**上游自己的构建系统**安装，其 lib/pkgconfig/*.pc
+  是从构建机当场生成的，prefix= 记录的是**构建机当时的绝对路径**，随包一起被
+  发布出来。实测三例（pdf2svg 适配时逐个抓取）：
+
+    cairo/lib/pkgconfig/cairo.pc          prefix=/                     # 构建时 DESTDIR/ 前置
+    cairo/lib/pkgconfig/cairo-svg.pc      prefix=/                     # 同上
+    poppler/lib/pkgconfig/poppler.pc      prefix=/storage/Users/currentUser/.conan2/p/b/poppl74bba25eec764/p
+    poppler/lib/pkgconfig/poppler-glib.pc prefix=/storage/Users/currentUser/.conan2/p/b/poppl74bba25eec764/p
+    glib/lib/pkgconfig/glib-2.0.pc        prefix=/                     # 且 Libs 含 -lintl
+
+  注意 poppler 那条：`poppl74bba25eec764` 是**另一台构建机**的 conan hash 目录，
+  当前制品仓里实际的 package_folder 是 `poppl2e264df4b3b30` —— 也就是说这个
+  prefix **在本机根本不存在**，它不是"路径没展开"而是"指向了别人家的缓存"。
+
+  危害不是"找不到模块"（那还能一眼定位），而是**静默成功**：
+  把 <dep>/lib/pkgconfig 挂进 PKG_CONFIG_PATH 后，pkg-config 退出码 0、
+  PKG_CHECK_MODULES 打印 `checking for CAIRO... yes`，configure 顺利往下走；
+  直到编译期才以 `fatal error: 'cairo.h' file not found`（因为
+  `prefix=/` → `-I/include/cairo`）或链接期 `cannot find -lcairo`
+  （`prefix=/` → `-L/lib`）暴露。**症状从 configure 后移到 compile/link，
+  且错误信息里出现的是 `/include`、`/lib` 这种"看起来像系统目录"的路径，
+  极易被误判为"缺系统包"而不是"制品的 .pc 坏了"。**
+
+  还有第二层陷阱：`glib-2.0.pc` 的 `Libs` 里带 `-lintl`。制品仓的 glib 确实
+  随包带了 `libintl.so.8`，但 `-lintl` 是否可解析取决于 libdir 是否在 -L 列表里
+  —— `.pc` 自己给的 -L 是错的，所以这一项同样是"看起来合理、用起来找不到"。
+
+affected_scope: >
+  一切「上游 configure 用 pkg-config/PKG_CHECK_MODULES 找依赖，而制品仓的依赖包
+  自带 lib/pkgconfig/*.pc」的适配 —— 只要配方把依赖包的 pkgconfig 目录挂进
+  PKG_CONFIG_PATH 就会命中。pdf2svg 0.2.4 是实证（cairo / poppler-glib / glib 三选三污染）。
+  同批先例 libxp/1.0.4、xauth/1.1.4 走同一条逃生口路线。反向判据：如果某依赖的 .pc
+  是 conan 自己用 cpp_info 生成的（prefix 指向 package_folder），它可以安全使用；
+  本条目针对的是**上游自带并被原样发布**的那一类。
+
+verification_cmd: >
+  # 1) 逐个抓依赖包自带 .pc 的 prefix（一条命令就能看到污染与自洽两种形态）
+  for d in cairo poppler glib fontconfig; do
+    p=$(conan cache path "$d/*" 2>/dev/null); done
+  grep -H '^prefix=' <dep_pkg>/lib/pkgconfig/*.pc
+  #   实测：cairo.pc prefix=/ ; poppler-glib.pc prefix=/storage/Users/currentUser/.conan2/p/b/poppl74bba25eec764/p
+  # 2) 复现"静默成功"
+  PKG_CONFIG_PATH=<cairo_pkg>/lib/pkgconfig pkg-config --cflags --libs cairo; echo "rc=$?"
+  #   → -I/include/cairo -L/lib -lcairo  , rc=0   ← 危险点：退出码是 0
+  # 3) 确认这些路径在本机不存在（证明不是"没展开"而是"指向别人家的缓存"）
+  ls -d /storage/Users/currentUser/.conan2/p/b/poppl74bba25eec764/p 2>&1   # → No such file
+  # 4) 确认逃生口存在（tarball 自带 configure，不要 autoreconf）
+  grep -n 'if test -n "\$CAIRO_CFLAGS"'       configure    # pdf2svg 实测 3674 / 3691
+  grep -n 'if test -n "\$POPPLERGLIB_CFLAGS"' configure    # pdf2svg 实测 3766 / 3783
+  # 5) 用 cpp_info 现算的 -I/-L 复核（应与 .pc 给出的完全不同）
+  #    glib 的 include/glib-2.0、lib/glib-2.0/include、include/gio-unix-2.0 只在组件里
+  #    —— 根 cpp_info.includedirs 只有一层 include，用它会得到 fatal error: 'glib.h' file not found
+
+rec_priority:           1
+rec_approach:           bypass-pkg-config-via-pkgcheck-modules-arg-var-escape-hatch
+rec_description: >
+  做法：(1) 先确诊——把每个直接依赖的 lib/pkgconfig/*.pc 的 prefix 打出来，
+  区分"上游自带（prefix 指向构建机）"与"conan 生成（prefix 指向 package_folder）"；
+  (2) 确诊为污染后**不要**把依赖包的 pkgconfig 目录挂进 PKG_CONFIG_PATH，
+  改用上游 PKG_CHECK_MODULES 自带的 AC_ARG_VAR 逃生口：把
+  <PREFIX>_CFLAGS / <PREFIX>_LIBS 四个变量都算好喂进环境，非空即直接采用、
+  完全不执行 pkg-config（生成的 configure 里就是
+  `if test -n "$<PREFIX>_CFLAGS"; then pkg_cv_<PREFIX>_CFLAGS="$<PREFIX>_CFLAGS"`）；
+  (3) -I / -L 由 `dependency.cpp_info.aggregated_components().includedirs / .libdirs`
+  现算，**必须用 aggregated_components() 而不是根 cpp_info**——glib 的
+  include/glib-2.0、lib/glib-2.0/include（glibconfig.h）与 include/gio-unix-2.0
+  只存在于组件里；(4) `-l` 列表按消费者**实际 include 的头文件**写，不要照抄
+  依赖的根级 cpp_info.libs（poppler 的是 ['poppler','poppler-glib','poppler-cpp']
+  的并集，照抄会白白拖进 poppler-cpp）；(5) 若某依赖的 .pc 是 conan 生成的、
+  可以安全使用，则保留 conan 生成的 .pc 路径即可，两条路可混用；
+  (6) 在 notes.md / manifest.yaml 的 build.configure_options 里写明
+  "不走 pkg-config、走 AC_ARG_VAR"，让下一位适配者不必重踩。
+rec_command: >
+  # conanfile.py generate() 内
+  environment = tc.environment()
+  environment.define("CAIRO_CFLAGS",       self._cflags(("cairo","pixman","fontconfig","freetype","libpng")))
+  environment.define("CAIRO_LIBS",         self._libs(("cairo",), ("cairo",)))
+  environment.define("POPPLERGLIB_CFLAGS", self._cflags(("poppler","glib") + _CAIRO_CLOSURE))
+  environment.define("POPPLERGLIB_LIBS",   self._libs(("poppler","glib","cairo"),
+                                                       ("poppler-glib","poppler","glib-2.0","gobject-2.0","gio-2.0"),
+                                                       ("m","pthread","dl")))
+  tc.generate(env=environment)
+  # _cflags / _libs 内部：dependency.cpp_info.aggregated_components().includedirs / .libdirs
+  #   注意：self.dependencies 可以按名字下标，名字不在图里时 KeyError → 静默跳过
+rec_auto_fix:           false
+rec_impl:               recipe
+
+fallback_priority:      2
+fallback_approach:      conan-generated-pc-files-only
+fallback_description: >
+  如果消费者必须经 pkg-config（例如上游用了 module 检查之外的 pkg-config 宏、
+  或构建系统无法通过环境变量注入），则把 PKG_CONFIG_PATH 指向
+  **conan 生成的** .pc 所在目录，而不是依赖包自带的 lib/pkgconfig。
+  Conan 2 的 PkgConfigDeps 生成器会写出 prefix 指向 package_folder 的 .pc，
+  路径是真实的。代价是引入一个生成器（多一份依赖图→.pc 的映射要维护，
+  且模块名必须与上游 PKG_CHECK_MODULES 里的名字对得上）。
+fallback_command:       generators = "PkgConfigDeps"  # 然后只把 generators_folder 放进 PKG_CONFIG_PATH
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       PKG_CONFIG_PATH=.*(lib/pkgconfig|lib64/pkgconfig)|PKG_CONFIG_PATH.*\$\{?dependency
+forbid_1_reason:        依赖包自带的 lib/pkgconfig 里是**构建机前缀**；挂上去会让
+                        pkg-config 静默成功并给出 /include、/lib 或别人家 .conan2 缓存
+                        路径，故障点后移到 compile/link。
+forbid_1_consequence:   错误信息里出现的是看起来像系统目录的 /include、/lib，
+                        极易被误判为"缺系统包"；一轮 CI 白跑且方向错误。
+forbid_2_pattern:       直接采用.*pkg-config.*输出|pkg-config --cflags.*\|\||pkg-config --libs.*\|\|
+forbid_2_reason:        本类污染下 pkg-config 退出码是 0，只有**核对 prefix**
+                        才能区分自洽与污染；"跑通了"不构成证据。
+forbid_2_consequence:   把"静默成功"当成"模块可用"，问题被推迟到链接期才暴露。
+forbid_3_pattern:       (sed|awk|echo|cp).*> *.*\.conan2/.*\.pc|修改.*制品仓.*\.pc|patch.*conan cache.*\.pc
+forbid_3_reason:        直接改缓存里的 .pc 不可复现、不可追踪，换 worker / 重装依赖
+                        即失效（同 [stale_runtime_library] 类问题的处置纪律）。
+forbid_3_consequence:   修法只存在于当前机器上；CI 换 worker 后随机复现或随机通过。
+forbid_4_pattern:       伪造.*\.pc|手写.*\.pc.*prefix|cat.*> .*(cairo|glib|poppler).*\.pc
+forbid_4_reason:        伪造一个制品仓里不存在的产物，把"模块不可用"变成"链接期
+                        undefined reference"，症状后移且更难定位（同 libXp / xauth 条目的禁止策略）。
+forbid_4_consequence:   知识库被污染；下一位适配者按伪造的 .pc 继续走错路。
+
+principles:             P-ENV-001
+causes:                 []
+caused_by:              []
+similar_to:             E074（HMDFS/PKG_CONFIG_PATH 相关）、
+                        DRAFT-libxp-1.0.4-configure-pkgconfig-printproto-module-removed
+                        （同批 X11 家族：模块**被撤销**时的纯 AC_ARG_VAR 逃生口）、
+                        DRAFT-xauth-1.1.4-missing-pkgconfig-module-vendor-upstream-sublib
+                        （同批 X11 家族：模块**有真实提供者但制品仓没包**时的
+                        AC_ARG_VAR + vendored 编译叠加拿法）。
+                        三条共用同一个诊断入口（configure 报哪个模块），差别在
+                        **确诊查询**：本条目查的是"依赖包自带的 .pc 是否记着构建机前缀"，
+                        xauth 那条查的是"提供者还在不在制品仓"。
+                        verdict 不同：本条目**禁止**用依赖包自带的 pkgconfig 目录，
+                        xauth/libxp 那两条讲的是模块找不到时怎么办。
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-pdf2svg-0.2.4-dep-bundled-pc-build-prefix-pollution.md
+last_updated:           2026-09-20
+source_event:           archives/p/pdf2svg/0.2.4 适配（cairo/poppler-glib/glib 三包自带 .pc 的
+                        prefix 全部指向构建机 → 改走 PKG_CHECK_MODULES 的 AC_ARG_VAR 逃生口，
+                        test_package 6 项断言通过）
+
+authors:                2301_76770579
+source_pr:              11397
+source_commit:          01e6fd2bb6408e89b3a96725084508b0c67c6529
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-20

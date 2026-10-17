@@ -1,0 +1,123 @@
+#====================================================================
+# E663-dist-tarball-maintainer-rules-touch-t
+#   autotools make-dist 发行物在无 automake 的 worker 上被 make 规则
+#   触发 maintainer 重生成（aclocal/automake 缺位 → 失败）
+# 来源: PR feat(lnav): 0.13.2 适配 HarmonyOS PC
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E663-dist-tarball-maintainer-rules-touch-t
+trigger_tool:           make|automake|conan
+phase:                  compilation
+error_signature:        (aclocal|automake|autoconf)-[0-9.]+\s.*is missing on your system|
+                        WARNING:\s*'(aclocal|automake|autoconf)'|
+                        trying to rule.*configure|
+                        cd .* && /bin/sh .*configure|
+                        aclocal:\s*(No such file or directory|not found)|CDPATH.*aclocal
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               build-system, autotools, automake, make-dist, timestamps
+match_keywords:         aclocal, automake, missing on your system, maintainer,
+                        重新生成, regeneration, timestamp, 时间戳, Makefile.in,
+                        configure.ac, am--refresh, rebuild rules, stamp,
+                        make-dist, 发行物, conan build, VPATH
+prescan_pattern:        \b(aclocal|automake|autoconf)-?\d*[\.\d]*\b.*missing|
+                        am--refresh|\$\((ACLOCAL|AUTOMAKE|AUTOCONF)\)
+prescan_globs:          Makefile.in, **/Makefile.in, Makefile.am, configure.ac
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             automake 生成的 Makefile.in 自带 maintainer 规则
+                        （am--refresh 族）：当 make 判定 configure.ac 比
+                        aclocal.m4/configure 新、或 configure 比 Makefile.in 新、
+                        或 configure.ac 比当前 Makefile 新时，自动重跑
+                        aclocal/automake/autoconf 重新生成构建系统。CI worker/
+                        OHOS 设备 PATH 上没有 automake（HNP 只有 autoconf 家族）
+                        时该规则必然失败。触发面不止"源码修改"：conan 的
+                        source()/unzip 解包时间戳、HMDFS 落盘 mtime 粒度、
+                        以及包内文件的抽取顺序都可能把时间戳弄成倒挂——
+                        发行物 tarball（make dist 形态）也会中招，与"是否
+                        自带 configure"无关。git 快照形态包（需 autoreconf
+                        自举）不属本条——那是真缺生成物，走 tool_requires。
+
+affected_scope:         所有以 make-dist 发行物形态适配的 autotools 包
+                        （tarball 自带 configure/Makefile.in 但 Makefile.in
+                        内嵌 am--refresh 规则），在无 automake 的构建环境
+                        （OHOS CI worker、HarmonyOS 设备）上做 VPATH 构建。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           touch-t-dependency-order-normalization
+rec_description:        构建前（configure 之前）用 touch -t 显式分钟级时间戳按
+                        automake 的依赖序归一：configure.ac（最旧）→ *.m4 →
+                        aclocal.m4 → configure → config.h.in → Makefile.in
+                        （最新）。全部文件落后于 Makefile 后，make 判定一切
+                        已是最新的，maintainer 规则永不触发。用 -t 而非顺序
+                        touch 是为规避文件系统同秒 mtime 粒度竞态；分钟级
+                        间隔保证确定性。不改上游源码（只改 mtime，无补丁、
+                        无平台宏），配方内五行 for 循环即可，免 automake
+                        tool_requires。
+rec_command:            touch -t 202601010000.00 configure.ac *.m4 **/*.m4 &&
+                        touch -t 202601010002.00 aclocal.m4 &&
+                        touch -t 202601010003.00 configure &&
+                        touch -t 202601010004.00 **/config.h.in &&
+                        touch -t 202601010005.00 **/Makefile.in
+rec_auto_fix:           false
+rec_impl:               conan-build-step
+
+fallback_priority:      2
+fallback_approach:      tool-requires-automake
+fallback_description:   tool_requires("automake/1.18") 让 maintainer 规则真跑
+                        成功。缺点：引入 conan automake/perl 依赖链（注意
+                        conan autoconf/2.72 的 PERL5LIB 毒丸，device-facts
+                        §一.23），构建变慢且真重生成可能因缺 aclocal.m4 输入
+                        失败——发行物通常不带 m4 源。仅当确需改 configure.ac
+                        （补丁重打 configure）时使用。
+fallback_command:       self.tool_requires("automake/1.18")
+fallback_auto_fix:      false
+fallback_impl:          conan-tool-requires
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       find.*-exec\s+touch\s+\{\}\s*\\;.*$
+forbid_1_reason:         不带时间戳的裸 touch（find 顺序）在同秒 mtime 粒度下
+                         顺序不保证，倒挂依旧随机复现（设备 HMDFS mtime 粒度粗）
+forbid_1_consequence:    时好时坏的构建失败，无法稳定复现排查
+forbid_2_pattern:        改.*Makefile.in|删除.*am--refresh|补丁.*Makefile.in
+forbid_2_reason:         Makefile.in 是生成物，R6 禁止补丁生成物；且每个
+                         子目录一份，补丁面爆炸
+forbid_2_consequence:    巨型补丁难审计，上游版本更新即失配
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             E-dev-facts-一.4（worker PATH 无 automake 的根因背景；
+                        本条是该背景在 make-dist 发行物上的具体命中形态）、
+                        DRAFT-10251-libnfc-tools-1.8.0-automake-per-target-cppflags-empty-override
+                        （同为 automake 语义陷阱，但那是变量替换、本条是
+                        maintainer 重生成规则）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       grep -n "am--refresh\|$(ACLOCAL)" <包>/Makefile.in | head -3
+                        # 期望：看到 maintainer 规则存在（说明发行物确带该规则）；
+                        # 构建日志不再出现 'is missing on your system'
+doc_file:               knowledge/drafts/E663-dist-tarball-maintainer-rules-touch-t.md
+last_updated:           2026-09-22
+source_event:           lnav 0.13.2 适配（feat/lnav-0.13.2）：官方 make-dist
+                        tarball 自带 configure，但在 OHOS worker 形态下 make
+                        判定 Makefile.in 过期即触发 aclocal 重生成；
+                        touch -t 依赖序归一后 configure/make 干净通过
+authors:                lnav-0.13.2 任务
+source_pr:              feat/lnav-0.13.2
+source_commit:          待 PR 建立后回填
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-22

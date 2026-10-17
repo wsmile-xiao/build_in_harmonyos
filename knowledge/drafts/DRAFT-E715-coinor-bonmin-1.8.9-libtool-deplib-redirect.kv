@@ -1,0 +1,93 @@
+# =====================================================================
+# Draft: coinor 族 autotools 包在 OHOS 上的四连坑与正解（libtool .la / 归档合并 /
+#        coin m4 误判 MSVC / HMDFS mktemp 假绿）
+# 软件: coinor-bonmin 1.8.9（同族 cbc/2.10.13、clp、coinor-ipopt 实测互证）
+# 取号: E715（knowledge_id.py --claim，2026-09-24）
+# =====================================================================
+
+draft:                 E715-coinor-bonmin-1.8.9-libtool-deplib-redirect
+status:                pending-editor-review
+id:                    E715
+trigger_tool:          conan|autotools|libtool
+phase:                 configure|build|link|testing
+
+severity:              1
+category:              build-system, portability, packaging, ohos
+error_signature:       "is not a valid libtool archive|Required package Cbc or Ipopt not available|can't create ./confstat.*Permission denied|Error relocating .* symbol not found|Overruling autoconf; cl does not recognise -g"
+prescan_pattern:       "libtool: link: .*is not a valid libtool archive|coin_cc_is_cl|confstatXXXXXX|Error relocating"
+match_keywords:        coinor, bonmin, cbc, clp, osi, libtool .la, //lib/libCbc.la, 依赖归档合并, coin m4 MSVC 误判, config.status confstat, HMDFS mktemp, dep-libs, osi-clp.pc
+
+title:                 coinor 族 autotools 在 OHOS：依赖 .la 无效要用「本地无 .la 目录 + -L 重定向」而非绝对 .a 路径（否则本包静态库被合并膨胀 1.7GB）；CC 必须裸名避开 coin m4 的 */cl* 误判；config.status 临时目录改 mkdir
+
+root_cause: |
+  四个独立机制叠加，任一未处理都会以 rc=0 假绿或硬错收场：
+  (1) ohpcd 上游 coinor 族包用 --prefix=/ + DESTDIR 安装，其 libtool .la 内 libdir='//lib'，
+      本包链接时 libtool 经 -L 解析到这些 .la 直接报错；
+  (2) 但把 -l* 换成绝对 .a 路径（cbc「方案 B」先例）会让 libtool 把 file-arg 归档
+      **合并进正在创建的静态库**：libbonmin.a 由 2.8MB 膨胀到 1,718,842,488B，成员内嵌
+      18 个依赖 .a 且重复（cbc 包 250MB 即同机制产物）；
+  (3) coin BuildTools m4 的 `case "$CC" in clang*) ;; cl* | */cl* …` 对**绝对路径**
+      /data/service/hnp/bin/clang 命中 `*/cl*` ⇒ coin_cc_is_cl=true ⇒
+      `--enable-pkg-config` 默认被关、pkg-config 探测整体跳过 ⇒ configure 以
+      `Required package Cbc or Ipopt not available` 硬错收场（C++ 侧的 case 有
+      `*/clang*` 豁免、C 侧没有，属上游不对称）；
+  (4) config.status 用 `umask 077 && mktemp -d` 建 ./confstatXXXXXX（0700），HMDFS 落盘
+      `drwx--S---` 且目录内写文件 Permission denied ⇒ `config.status: creating Makefile`
+      之后紧跟 `mv … Permission denied`，configure **rc=0 却一个文件都没生成**。
+affected_scope:        一切消费 ohpcd coinor 族静态依赖的 autotools/libtool 下游包；
+  一切用绝对 CC 路径跑 coin BuildTools 生成的 configure 的配方；
+  一切在 HMDFS 上用 autoconf 2.5x config.status 的包（E678 同族）
+
+error_excerpt: |
+  libtool: link: `//lib/libCbc.la' is not a valid libtool archive
+  make[2]: *** [Makefile:503: libbonmin.la] Error 1
+  ---（换绝对 .a 路径后）---
+  -rw-r--r-- 1 … 1718842488 … src/CbcBonmin/.libs/libbonmin.a   # 成员内嵌 libCbc.a/libClp.a…
+  ---（绝对 CC 后）---
+  configure: Overruling autoconf; cl does not recognise -g.
+  checking for COIN-OR package CoinDepend... skipped check via pkg-config, redirect to fallback
+  configure: error: Required package Cbc or Ipopt not available.
+  ---（HMDFS mktemp）---
+  ./config.status[1162]: can't create ./confstatOGAdHO/out: Permission denied
+  config.status: creating Makefile
+  configure: Configuration of Bonmin successful   # rc=0，但 Makefile 实际不存在
+
+rec_approach:          三步定位 + 一条正解：
+  ① 先按「.la 无效」判：链接行里出现 `-L<conan pkg>/lib` 且报 `is not a valid libtool archive`
+    ⇒ 该依赖包 lib/ 下有 .la（conan list 那个包的 lib/ 即可确认）；
+  ② **禁止**改成绝对 .a 路径（先例 cbc 方案 B 会把依赖归档合并进本包静态库，包体爆炸）；
+  ③ 正解：把所有「带 .la 的依赖包」的 .a 用符号链接汇到 build 内 dep-libs/（只放 .a、无 .la），
+    再把 Makefile 里这些包的 -L 重定向到 dep-libs/：.la 找不到、-l 语义保留、不触发合并；
+  ④ CC/CXX 一律裸名 clang/clang++（或给 configure 显式 --enable-pkg-config 兜底）；
+  ⑤ config.status 临时目录按 E678 改 mkdir -p conftmp + umask 022，并在 configure 之后
+    **断言关键产物真存在**（Makefile/config.h/…）才允许进 make。
+
+solution:              |
+  # ── (1)+(2) 正解：本地无 .la 目录 + -L 重定向（实测 2.8MB/62 成员/嵌套 .a=0）──
+  DL="$BUILD/Bonmin/dep-libs"; rm -rf "$DL"; mkdir -p "$DL"
+  for pkg in <每个 lib/ 下含 .la 的 conan 依赖>; do
+    for f in "$pkg/lib/"*.a; do [ -e "$f" ] && ln -sf "$f" "$DL/"; done
+  done
+  find "$SRC/Bonmin" -name Makefile -exec sed -i "s|-L$pkg/lib|-L$DL|g" {} \;   # 逐包重定向
+  # 复现：先看 libbonmin.a 是否含嵌套 .a（1.7GB 形态）
+  llvm-ar t <build>/src/CbcBonmin/.libs/libbonmin.a | grep -c '\.a$'   # 坏=18，好=0
+  # ── (3) CC 裸名（绝对路径命中 coin m4 */cl* 分支）────────────────────
+  CC=clang CXX=clang++ ./configure ... --enable-pkg-config    # 断言日志出现 "checking pkg-config is at least version"
+  grep -c "skipped check via pkg-config, redirect to fallback" config.log   # 好=0
+  # ── (4) HMDFS config.status 临时目录（E678）──────────────────────────
+  # patch configure 内 config.status 模板：mktemp -d(0700) → mkdir -p conftmp + umask 022
+  grep -n "tmp=./conftmp" configure
+  # 反假绿断言（configure rc=0 之后必须全真）
+  for f in Makefile src/Interfaces/config.h bonmin.pc libtool; do test -f "$f" || echo "MISSING $f"; done
+  # ── 运行期：unitTest/CppExample 需要 libipopt.so ────────────────────
+  LD_LIBRARY_PATH=<ipopt>/lib:<openblas>/lib make test   # 否则 Error relocating … symbol not found (127)
+
+fallback:              |
+  若依赖包无法用符号链接（个别 FS）：改为复制 .a（体积换正确性）；
+  若必须产 shared 库：本族静态依赖（zlib 等）非 PIC，-shared 会报
+  `R_AARCH64_ADR_PREL_PG_HI21 … recompile with -fPIC`——先实测再承诺 shared 选项。
+  若 coin m4 误判无法用裸名规避（如必须显式绝对路径）：给 configure 补
+  `--enable-pkg-config` 并把 C 侧 case 加 `*/clang*` 豁免（与 C++ 侧对齐）作为补丁。
+
+verify_cmd:            cd $HOME/ws/worktrees/coinor-bonmin-1.8.9 && conan create archives/c/coinor-bonmin/1.8.9 -pr:h=$HOME/ws/worktrees/coinor-bonmin-1.8.9/ci/conan/profiles/ohos-aarch64 -pr:b=$HOME/ws/worktrees/coinor-bonmin-1.8.9/ci/conan/profiles/ohos-aarch64 -r=ohpcd
+reproduce_note:        本条四坑的完整设备实测记录见 $HOME/tmp/coinor-bonmin-1.8.9/{explore-configure.log,explore-make.log,explore-make4.log,explore-test2.log} 与包内 notes.md

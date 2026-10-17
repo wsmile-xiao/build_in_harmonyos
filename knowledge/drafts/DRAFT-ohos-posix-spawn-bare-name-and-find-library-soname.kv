@@ -1,0 +1,183 @@
+#====================================================================
+# DRAFT-ohos-posix-spawn-bare-name-and-find-library-soname —— OHOS 上
+#   posix_spawn 不搜 PATH（cc/git 等裸名必失败）+ 无 ldconfig 使 find_library 恒 None
+# 对应文档: knowledge/drafts/DRAFT-ohos-posix-spawn-bare-name-and-find-library-soname.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-ohos-posix-spawn-bare-name-and-find-library-soname
+trigger_tool:           python|ctypes|conan|subprocess
+phase:                  build|testing|runtime
+error_signature:        FileNotFoundError: \[Errno 2\] No such file or directory: '[a-z]+'|
+                         distutils.compilers.C.errors.CompileError: \[Errno 2\].*'cc'|
+                         Error relocating .*: symbol not found.*PyImport_ImportModule|
+                         OSError: ctypes.util.find_library\(\) did not manage to locate
+
+severity:               2
+category:               python, compat, testing, subprocess, posix
+match_keywords:         posix_spawn, posix_spawnp, PATH, shutil.which, 裸名, cc, gcc, git,
+                         ctypes.util.find_library, ldconfig, soname, libm, libdl,
+                         sitecustomize, subprocess.Popen, E405, E068, musl,
+                         distutils, setuptools, _ctypes, ffi_prep_closure_loc,
+                         RTLD_GLOBAL, dlopen
+title:                  OHOS 上两个必须成对处理的 Python 兼容坑：posix_spawn 不搜 PATH
+                        （裸名命令 + distutils 编译器解析全失败），以及无 ldconfig 使
+                        ctypes.util.find_library 恒返回 None
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             【坑 A：posix_spawn 不搜 PATH（E405 已收录；本条补其覆盖不到的面）】
+                        E405 已有**调用方改写类**修法（rec_auto_fix: true —— 改绝对路径 /
+                        shell=True / 先 shutil.which()）。本条的增量是**改不了调用方**的
+                        场合：发起调用的代码不归你掌控时（distutils 内部硬编码
+                        `["cc"]`、第三方库内部的 `Popen`），只能用 sitecustomize 在
+                        **进程内补丁 subprocess.Popen.__init__**。
+                        机制本身与 E405 同源 —— OHOS 的 hnp CPython 里 `subprocess` 走
+                        `os.posix_spawn()`（**不是** posix_spawnp），对**裸名**命令不做
+                        PATH 搜索：
+                            subprocess.run(["git","--version"])      → FileNotFoundError
+                            subprocess.run(["/data/.../git","--version"]) → OK
+                        两个高频后果：
+                          ① 上游脚本/测试里写死的裸名（`cc`、`git`）直接失败；
+                          ② distutils/setuptools 的编译器解析默认是 `["cc"]`
+                             （`compilers/C/unix.py` 的 `'compiler_so': ["cc"]`），
+                             于是**任何** embedding/扩展类测试都在编译期炸：
+                                distutils.compilers.C.errors.CompileError:
+                                    [Errno 2] No such file or directory: 'cc'
+                        案例量化：cffi 2.1.1 该坑造成 **209 项 ERROR**，补丁后 0。
+                        ⚠️ 最易走错的一步：**造一个 cc→clang 的 PATH shim 无效**。
+                        因为失败发生在 exec 阶段（posix_spawn 不查 PATH），
+                        与"PATH 上有没有 cc"无关。实测：shim 挂在 PATH 首位、
+                        `shutil.which("cc")` 能解析到，`Popen(["cc",...])` 仍
+                        FileNotFoundError。
+
+                        【坑 B：无 ldconfig → find_library 恒 None（知识 E068）】
+                        OHOS 无 `/sbin/ldconfig`，也无 gcc，`ctypes.util.find_library`
+                        的三个来源（_findSoname_ldconfig / _findLib_gcc / _findLib_ld）
+                        全部落空 → 恒返回 None。但 `libm.so`/`libdl.so` **实际可以**
+                        `ctypes.CDLL` 载入。而 cffi 的 `ffi.dlopen("m")` 正是经
+                        `_load_backend_lib` → `ctypes.util.find_library`，于是
+                        上游一大批用例报：
+                            OSError: ctypes.util.find_library() did not manage
+                                     to locate a library called 'm'
+                        实测影响面：仅此一项就让 cffi 的测试出现 24+2 项失败。
+
+                        【坑 C（与 A/B 同族，常一起出现）】
+                        musl 不从主可执行文件导出 Python 符号 → 测试**运行期现场编译**
+                        的扩展必须显式 `-lpython3.12`，否则
+                            ImportError: Error relocating ...: PyImport_ImportModule:
+                                         symbol not found
+                        宿主解释器的 sysconfig `LDSHARED` 不带该标志，需自己补。
+affected_scope:         所有在 OHOS 上跑**上游测试套件**的 Python 包适配（尤其含
+                        embedding/编译型用例者：cffi、psutil、pillow、lxml 等），
+                        以及任何在测试里调裸名外部命令的套件。
+                        实测案例：cffi 2.1.1 —— 坑 A 造成 209 项 ERROR、
+                        坑 B 造成 26 项失败、坑 C 造成 134 项 ImportError。
+verification_cmd:       ① 坑 A 复现（同一条命令，绝对路径 vs 裸名）：
+                          python3 -c "import subprocess; subprocess.run(['git','--version'])"
+                          # FileNotFoundError —— 即使 which git 有结果
+                          python3 -c "import subprocess; subprocess.run(['/data/service/hnp/bin/git','--version'])"
+                          # OK
+                        # ② 坑 B 复现：
+                        python3 -c "import ctypes.util as u; print(u.find_library('m'))"
+                        # None（而 python3 -c "import ctypes; ctypes.CDLL('libm.so')" 可成功）
+                        # ③ 坑 C 复现：
+                        grep -n "import ctypes" <src>/testing/conftest.py  # 顶层即 import
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           inject-sitecustomize-and-env-bridge
+rec_description:        在**测试进程**注入 `sitecustomize.py`（PUT 在 PYTHONPATH 最前），
+                        成对修掉 A/B 两坑；坑 C 用环境变量补链接标志。四处改动：
+
+                        (1) 修 posix_spawn 裸名（坑 A）——按 pillow 10.4.0 先例包
+                            `subprocess.Popen.__init__`，裸名先经 `shutil.which`
+                            解析成绝对路径再 exec：
+                                def _resolve(c):
+                                    c = os.fspath(c)
+                                    if os.path.dirname(c): return c if os.path.isfile(c) else None
+                                    return shutil.which(c)
+                                if not getattr(subprocess.Popen.__init__, "_ohos_path_fix", False):
+                                    _orig = subprocess.Popen.__init__
+                                    def _patched(self, args, *a, **kw):
+                                        if (r := _resolve(args[0])) is not None:
+                                            args = [r, *args[1:]]
+                                        _orig(self, args, *a, **kw)
+                                    _patched._ohos_path_fix = True
+                                    subprocess.Popen.__init__ = _patched
+                            该补丁会被子进程继承（env 传递），故 distutils 起的
+                            编译器进程同样受益。实测 cffi：209 项 ERROR → 0。
+
+                        (2) 修 find_library（坑 B）——同样在 sitecustomize 里包装，
+                            原生返回 None 时按 soname 顺序探测：
+                                for cand in (f"lib{n}.so", f"lib{n}.so.6",
+                                             f"lib{n}.so.2", f"lib{n}.so.1", f"lib{n}.so.0"):
+                                    try: ctypes.CDLL(cand); return cand
+                                    except OSError: continue
+                            实测 cffi：26 项失败 → 通过。
+
+                        (3) 补 -lpython3.12（坑 C）——测试环境加
+                            `LDFLAGS="-L<host LIBDIR> -lpython3.12 ..."`。
+                            实测 cffi：134 项 ImportError → 0。
+
+                        (4) 编译器路径——把 CC/CXX 显式设为绝对路径（同时给
+                            `_cc_shim()` 造 cc/c++/gcc/g++ → clang 的 shim 目录
+                            并前置到 PATH，覆盖少数直接用 PATH 查找的路径）。
+rec_command:            # 见上 (1)(2)(3)；(3) 的 LDFLAGS 形态：
+                        #   LDFLAGS="-L$(python3 -c 'import sysconfig;print(sysconfig.get_config_var("LIBDIR"))') -lpython3.12"
+                        # 让 shim 生效的 env（必须在 PYTHONPATH 最前）：
+                        #   PYTHONPATH=<shimmod>:<src>:<src>/src:<test-deps>
+                        #   PATH=<cc-shim>:$PATH
+rec_auto_fix:           false
+rec_impl:               sitecustomize-injection
+
+fallback_priority:      2
+fallback_approach:      patch-upstream-tests
+fallback_description:   若不允许注入 sitecustomize（例如被测就是 subprocess 语义本身），
+                        只能改上游测试源码把裸名换成绝对路径 / 把 find_library 换成
+                        已知 soname——但这属**改上游源码**，须打补丁并逐条说明，成本高
+                        且随版本漂移。默认不用。
+fallback_command:       # 在 patches/ 内把 "cc " 替换为 "<clang> "
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+forbid_1_pattern:       造.*(cc|gcc).*(shim|软链|symlink).*(PATH).*(即|就).*(解决|修复)|
+                         PATH.*shim.*(即可|就能).*裸名
+forbid_1_reason:        坑 A 的失败点在 exec（posix_spawn 不查 PATH），不在 PATH 内容；
+                        只挂 shim 不改 exec 语义，问题依旧（实测 shim 已生效仍失败）。
+forbid_1_consequence:   反复在 PATH 上打转，误判为"环境缺 cc"，浪费时间且不改结果。
+
+forbid_2_pattern:       find_library.*(判定|认为).*(平台不支持 dlopen|库不存在)|
+                        find_library 返回 None.*(结论).*libm 不可用
+forbid_2_reason:        find_library 只在"查找方式"上失败（无 ldconfig/gcc），
+                        `ctypes.CDLL("libm.so")` 实际可用；据此判定库不存在是误诊。
+forbid_2_consequence:   把可修的环境问题当成平台限制，导致用例被无谓 deselect 或
+                        上报错误的 env_unsupported。
+
+principles:             measure-not-assume, reproducible-build-test,
+                        use-platform-detection-not-guess
+
+causes:                 []
+caused_by:              []
+similar_to:             [E024, E068, E405, DRAFT-apertium-ohos-python-bare-name-test-subprocess,
+                         DRAFT-ohos-test-subprocess-overrides-pythonpath-needs-venv]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-posix-spawn-bare-name-and-find-library-soname.md
+last_updated:           2026-09-20
+source_event:           cffi 2.1.1 适配（Python CFFI，C 扩展 + libffi）——上游 38 个
+                        测试模块初测 209 ERROR + 26 + 134 项失败，逐项定位为上述三坑，
+                        修后 1729 passed / 0 failed
+
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  3
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-20
+
+draft:                  true
+contributor_id:         3211

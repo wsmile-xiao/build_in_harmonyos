@@ -1,0 +1,101 @@
+# ═══ Draft knowledge entry — 上游 x86 内联汇编在 aarch64 的架构宏守卫 + 零值回退 ═══
+# Timestamp: 2026-09-06
+# Software: infoware 0.6.0（模式适用于任何含 x86 CPUID/XGETBV 汇编的库）
+# Gate: PR #8568（任务 #5452）；设备 conan-verify G2 首跑失败日志
+# Status: DRAFT — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-infoware-cpuid-arch-guard
+trigger_tool:           clang|cmake|make|conan
+phase:                  compilation
+error_signature: >
+    invalid output constraint '=a' in asm|
+    error: invalid output constraint|
+    __cpuid_count\(x, 0, out\[0\], out\[1\], out\[2\], out\[3\]\)|
+    cpuid\.h:\d+:\d+: error: invalid output constraint|
+    __asm__ __volatile__\("xgetbv" : "=a"\(eax\), "=d"\(edx\)
+
+severity:               2
+category:               compat|architecture|inline-asm|portability|source-patch
+match_keywords:         cpuid, __cpuid, __cpuid_count, cpuid.h, xgetbv, invalid output constraint,
+                        =a, aarch64, __x86_64__, __i386__, arch guard, architecture macro,
+                        cpuid_non_windows, GLOB_RECURSE, zero fill, 内联汇编, 架构守卫
+title:                  上游仅含 x86 内联汇编（__cpuid/xgetbv）的"非 Windows"源文件在 aarch64 编译失败：架构宏守卫 + 零值回退保 API
+
+root_cause: >
+  上游把 CPU 探测实现放在 cpuid_non_windows.cpp（#ifndef _WIN32 即编译），文件内
+  #include <cpuid.h> 并使用 __cpuid_count 与 xgetbv 内联汇编，输出约束 "=a"/"=d"
+  是 x86/x86_64 专有；CMake 用 GLOB_RECURSE 收集 src/*.cpp，aarch64 上该文件必然
+  被编入，clang 在 asm 约束校验期报 6 处 "invalid output constraint '=a' in asm"，
+  无任何编译选项可绕过（不是平台宏缺失，是 ISA 差异）。上游没有 disable-asm 类
+  configure 开关（区别于 E016 的 reconfigure-no-asm 场景），排除整个文件又会导致
+  cpuid() 符号缺失链接失败。
+
+affected_scope:         任何在"非 Windows"/通用源文件中内嵌 x86 CPUID/XGETBV/RDTSC 等特权
+                        指令内联汇编的 C/C++ 库（系统信息类、性能计数类、加密优化类）在
+                        aarch64/arm/riscv 等 OHOS 平台的适配；对 amd64 专有 .S 文件的同理
+                        （须改用对应架构实现而非删除）。
+
+verification_cmd:       conan create . -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+                        （G2 干净构建通过）+ 设备 ctest：100% tests passed (4/4 examples)
+
+rec_priority:           1
+rec_approach:           arch-macro-guard-with-zero-fallback
+rec_description: >
+  1) 用架构宏 #if defined(__x86_64__) || defined(__i386__) 守卫原 x86 实现
+     （含 #include <cpuid.h>），语义对 amd64 完全不变。
+  2) #else 分支提供非 x86 回退：cpuid() 将 out[0..3] 全部置 0，xgetbv() 返回 0。
+  3) 改前必须核验所有调用方对零值的容忍性：逐个 grep cpuid( 调用点，确认只做
+     位测试/字符串拼接（infoware 的 instruction_set.cpp、vendor_id.cpp 均只测试
+     位标志，零叶=特性缺失），不存在除以 cpuid 结果的路径——有除法消费方的库
+     需改为返回"未知"枚举而非 0。
+  4) 只用架构宏（__x86_64__/__i386__/__aarch64__），禁止平台宏 __OHOS__ 进补丁
+     （R8/PF5 硬门禁）；架构宏表达的是 ISA 事实，非平台差异。
+  5) 补丁经 refresh-patch --auto 生成（orig/work 双 hash 留档），conandata.yml
+     patches 列表登记 patch_type: portability。
+  6) 实测效果：aarch64 clang -Wall -Wextra -pedantic 零警告通过，官方 4 用例
+     ctest 全过，API 继续可用（cpu quantities/memory/endianness 正常返回）。
+
+rec_command:            refresh-patch --auto <name> <version>
+rec_auto_fix:           false
+rec_impl:               source-patch-arch-guard
+
+fallback_priority:      2
+fallback_approach:      exclude-file-and-stub-symbols
+fallback_description:   CMake 排除 cpuid_non_windows.cpp 并另写空实现文件满足链接。
+                        缺点：新增源文件放大补丁面积，且丢失的 API 语义不如零值回退
+                        （下游能链接但行为未知）；仅当上游类型无法零值化时使用。
+fallback_command:       手工（无标准命令）
+fallback_auto_fix:      false
+fallback_impl:          manual-cmake-exclusion
+
+forbid_1_pattern:       __OHOS__
+forbid_1_reason:        补丁/配方新增行使用平台宏 __OHOS__ 违反 R8/PF5（架构事实必须用架构宏表达）
+forbid_1_consequence:   PF5 前置硬闸拦截，PR 无法创建
+
+forbid_2_pattern:       (rm|delete).*cpuid_non_windows\.cpp
+forbid_2_reason:        直接删除文件而不提供符号回退
+forbid_2_consequence:   链接期 undefined reference to iware::detail::cpuid，构建失败
+
+forbid_3_pattern:       zero.*(fallback|fill).*without.*check(ing)? consumers
+forbid_3_reason:        零值回退的前提是全部消费方对零值安全（只做位测试、无除法/数组索引）；
+                        提交前必须逐个 grep cpuid( 调用点核验并记录结论
+forbid_3_consequence:   运行期除零/越界，test_package 或下游崩溃
+
+principles:             P001, P016
+similar_to:             E016, E245
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-infoware-cpuid-arch-guard.md
+last_updated:           2026-09-06
+source_event:           "PR #8568 feat(infoware): 0.6.0 适配 HarmonyOS PC（任务 #5452）；
+                        设备 conan-verify G2 首跑 6 处 invalid output constraint '=a' 失败；
+                        修复后设备 ctest 4/4、CI build #40887 通过"
+authors:                wanderlust_0823
+source_pr:              8568
+source_commit:          836be9a4
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-06

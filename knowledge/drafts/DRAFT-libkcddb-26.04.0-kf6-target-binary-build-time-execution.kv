@@ -1,0 +1,160 @@
+#====================================================================
+# Draft: KF6/KDE 配方在「无法执行目标平台二进制」的宿主机上的构建期阻塞
+#        （configure 期 ECM qtpaths / build 期 AUTOMOC moc）
+# 交付实例: libkcddb 26.04.0（PR !11783，任务 #8241）
+# 相邻条目: E429 / E543（同为 qtpaths 故障，但退出码与根因不同，见 root_cause 分诊）
+#====================================================================
+
+id:                     E643
+trigger_tool:           conan|cmake|configure|autogen
+phase:                  configuration
+
+error_signature:        Qt6 qtpaths call failed: 255|Failed call: .*qtpaths|aarch64-binfmt-P: Could not open '/lib/ld-musl-aarch64\.so\.1'|uncaught target signal 11|AutoMoc subprocess error.*return value 255|Error relocating .*libQt6Core\.so.*symbol not found
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               conan, cmake, cross-compile, host-tools, kf6, qt6
+match_keywords:         qtpaths, ECMQueryQt, ecm_query_qt, KDEInstallDirs6, moc, AUTOMOC, AutoMoc, Qt6CoreTools, QT_HOST_PATH, ld-musl-aarch64.so.1, binfmt, qemu-aarch64, KF6, ECM, qtbase, 宿主工具, host tools, exit 255
+title:                  KF6/KDE 配方在无法执行目标平台二进制的宿主机上双重阻塞：configure 期 ECM 执行目标 qtpaths（exit 255）、build 期 AUTOMOC 执行目标 moc；制品仓无宿主 Qt，只能交 CI 构建
+prescan_pattern:        KDEInstallDirs|ecm_query_qt|find_package\(ECM|set\(CMAKE_AUTOMOC|AUTOMOC
+prescan_globs:          CMakeLists.txt, *.cmake, conanfile.py
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause: |
+  在**非 OHOS 的 x86-64 宿主机**（普通 Linux / WSL2）上交叉构建 KF6/KDE 配方时，会连续撞上两个
+  「构建期必须执行目标平台二进制」的硬点，且都无法用环境变量绕过：
+
+  1. **configure 期**：ECM >= 6.26 的 `KDEInstallDirs6.cmake:210` 调用
+     `ecm_query_qt(qt_install_prefix_dir QT_INSTALL_PREFIX)`；`ECMQueryQt.cmake` 用
+     `get_target_property(_qtpaths_executable Qt6::qtpaths LOCATION)` 取可执行文件后
+     `execute_process` 运行它。该 target 指向 **目标包** qtbase 的 `bin/qtpaths`
+     （aarch64 OHOS 动态 ELF）。宿主无 aarch64 musl 动态加载器 → 直接
+     `CMake Error ... Qt6 qtpaths call failed: 255`。
+     **ECMQueryQt 没有 cache 变量逃生口**：查询结果不接受外部预置
+     （`QUERY_EXECUTABLE` 只来自 target 属性），所以 `-DQT_INSTALL_PREFIX=...` 之类一律无效。
+  2. **build 期**：KF6 库普遍含 QObject 头 → `CMAKE_AUTOMOC` 在编译期执行
+     `$qtbase/libexec/moc`，同样是 aarch64 OHOS 动态 ELF → `AutoMoc subprocess error`
+     （`Process failed with return value 255`），且失败点晚于 configure，容易被误判为源码问题。
+
+  **与 E429/E543 的分诊（关键，二者的修法在本场景完全无效）**：
+
+  | 现象 | 根因 | 正确处置 |
+  |---|---|---|
+  | `Qt6 qtpaths call failed: 127` + `Error loading shared library libc++_shared.so` | qtpaths **能**启动，但 OHOS 沙箱 LD_LIBRARY_PATH 里有不兼容 libc++ 遮蔽了 `/system/lib64` 的兼容版 | E429 / E543：向 LD_LIBRARY_PATH 前置 `/system/lib64` 与 SDK llvm/lib |
+  | `Qt6 qtpaths call failed: 255` + `aarch64-binfmt-P: Could not open '/lib/ld-musl-aarch64.so.1'` | 宿主机**根本不能执行** aarch64 动态产物（没有加载器），与 libc++ 无关 | **本条目**：注入 LD_LIBRARY_PATH 无效；不要改配方，改验证边界 |
+  | `AutoMoc subprocess error ... return value 255`（编译期） | 同上，只是换成了 moc | 本条目；注意 E456 的宿主 moc 方案在本生态不可用（见 affected_scope） |
+
+  **本生态不存在宿主 Qt**：`conan list "qtbase/6.11.1:*" -r ohpcd` 实测只有一个 package，
+  settings 为 `os=OHOS, arch=armv8, compiler=clang 15, libcxx=libc++`。因此
+  - **E456**（Qt5/Windows：提供 native moc/rcc/uic 并注入 `CMAKE_AUTOMOC_EXECUTABLE`）——本生态拿不到宿主 Qt，方案不适用；
+  - **E495**（设 `QT_HOST_PATH` 指向宿主 Qt 前缀）——同样因为没有宿主 Qt 前缀而不适用。
+
+  可见：这些配方的编译只能在**能执行 aarch64 目标产物的环境**（官方 CI worker / OHOS 沙箱）里完成。
+affected_scope: |
+  所有在非 OHOS 宿主上交叉构建的 KF6 / KDE Gear 配方（configure 期必然 include KDEInstallDirs；
+  凡有 QObject 头则编译期必然 AUTOMOC）。制品仓已发布的 KF6 库均可命中：kconfig、ki18n、
+  kcoreaddons、kpackage、bluez-qt、solid、kio、kcmutils、libktorrent、libkcddb 等。
+  实测实例：libkcddb 26.04.0（x86-64 WSL2 + Conan 2.29.1 + OHOS SDK v7.0）。
+verification_cmd: |
+  # 分诊：看 qtpaths 是不是 aarch64 OHOS 动态 ELF，以及宿主能不能执行
+  readelf -h "$(conan cache path qtbase/6.11.1 | tail -1)/bin/qtpaths" | grep -E 'Machine|Type'
+  readelf -l "$(conan cache path qtbase/6.11.1 | tail -1)/bin/qtpaths" | grep INTERP
+  # → Machine: AArch64, INTERP: /lib/ld-musl-aarch64.so.1；宿主无该加载器
+
+# ═══ Layer 3: 方案层 ★ ═══
+rec_priority:           1
+rec_approach:           detect-and-delegate-to-ci-with-local-boundary
+rec_description: |
+  1) **归因（10 分钟定位）**：`qtpaths call failed: <N>` 先看 N —— 127/`Error loading shared library`
+   → 走 E429/E543（OHOS 沙箱 libc++ 遮蔽）；255/126 或伴随
+   `Could not open '/lib/ld-musl-aarch64.so.1'` → 本条：宿主不可执行目标产物。
+   再用 `readelf -h/-l $qtbase/bin/qtpaths` 确认它是 AArch64 且 INTERP 指向 OHOS musl 加载器。
+  2) **不要在配方里"修"**：配方本身没有问题——同一份配方与补丁在官方 CI（可执行 aarch64 产物）上
+   能正常编译并跑上游 CTest（同族归档 libkcddb/26.04.3 已由 CI 构建并合入）。
+   不要为了本地跑通而引入宿主工具替换（见禁止策略）。
+  3) **把本地验证目标降级为「配置面 + 源码等价性」**：
+   a. 配置面：可用宿主侧 `qtpaths` 桩把 `cmake.configure()` 走通——`KDEInstallDirs6` 只有
+      `QT_INSTALL_PREFIX` 是**无条件**查询的（`QT_INSTALL_PLUGINS/QML` 仅在
+      `_qt_prefix_is_cmake_install_prefix` 为真时查，`QT_INSTALL_DOCS` 仅在建文档时查），
+      而 Qt6 是可重定位安装，真实 qtpaths 对 `QT_INSTALL_PREFIX` 返回的就是 qtbase 包目录本身，
+      因此桩只要逐项回包内路径即与真实行为等价（实测：桩到位后 configure/generate 全过，
+      `package_id` 计算与 26.04.3 一致）。**桩只用于本地定位配置错误，绝不进交付面。**
+   b. 源码等价性：用同族已归档版本做「编译面逐字节等价」证明（见 E644）。
+   4) **真实编译与测试交 CI**：PR 里如实写明本地验证边界与 CI 结论来源，不要伪造本地执行结果。
+rec_command:            conan create . -pr:h=ohos-aarch64 -pr:b=default   # 在能执行 aarch64 产物的 worker 上执行
+rec_auto_fix:           false
+rec_impl:
+
+solution: |
+  # 只在本地定位用：qtpaths 桩（不得写入交付配方）
+  # 真实 qtpaths 是 OHOS aarch64 二进制，本机不可执行；桩逐项返回 qtbase 包内路径。
+  cat > "$QTB/bin/qtpaths" <<EOF
+  #!/bin/sh
+  PKG="$QTB"
+  case "\$2" in
+    QT_INSTALL_PREFIX|QT_INSTALL_ARCHDATA|QT_INSTALL_DATA) echo "\$PKG" ;;
+    QT_INSTALL_BINS) echo "\$PKG/bin" ;;
+    QT_INSTALL_LIBS) echo "\$PKG/lib" ;;
+    QT_INSTALL_LIBEXECS) echo "\$PKG/libexec" ;;
+    QT_INSTALL_PLUGINS) echo "\$PKG/plugins" ;;
+    QT_INSTALL_QML) echo "\$PKG/qml" ;;
+    QT_INSTALL_HEADERS) echo "\$PKG/include" ;;
+    QT_INSTALL_TRANSLATIONS) echo "\$PKG/translations" ;;
+    *) echo "" ;;
+  esac
+  EOF
+  chmod 755 "$QTB/bin/qtpaths"      # 用完立即还原原二进制
+
+  # 编译阶段无宿主替代品（moc 必须与被构建的 Qt 同版本）→ 到此为止，交 CI。
+
+fallback_priority:      2
+fallback_approach:      sibling-version-compile-surface-equivalence + report-boundary-honestly
+fallback_description:   本地无法编译时，用「同族已归档版本 + 同一补丁 → 打补丁后全树 diff」给出编译面等价性证据（E644），并在 PR 中如实申报本地验证上限
+fallback_command:       diff -rq lib-$VER lib-$SIBLING_VER   # 差异须只落在 po/ 与 recipe 关闭的子目录
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       CMAKE_AUTOMOC_EXECUTABLE.*(/usr/(lib/)?qt6|qt6-base-dev-tools)|用宿主 Qt[0-9.]+ .*moc
+forbid_1_reason:        宿主 moc 必须与被构建的 Qt 同大版本同 minor；用系统 Qt（如 6.4）的 moc 生成 6.11 的元对象代码，产出的是"能编过但语义可能不匹配"的伪验证，且会掩盖真正的目标工具链问题
+forbid_1_consequence:   本地得到假绿，CI/设备端才暴露元对象或信号槽语义偏差
+
+forbid_2_pattern:       把 qtpaths 桩|stub .*qtpaths|qtpaths 桩.*写入 (archives|conanfile)
+forbid_2_reason:        桩只解决宿主机无法执行目标二进制的本地定位问题；写进交付配方会让 CI/设备端（真 qtpaths 可用）读到假路径，破坏安装布局
+forbid_2_consequence:   归档配方被污染，CI 上的 KDEInstallDirs 计算出的插件/QML 目录错误
+
+forbid_3_pattern:       (测试|test).*(跳过|未执行).*(但|却).*(声明|写).*(通过|PASS)|伪造.*本地.*执行
+forbid_3_reason:        本故障下测试二进制同样无法在宿主执行；必须如实申报"本地未执行、结论由 CI 给出"，不得用桩/静态检查冒充测试通过
+forbid_3_consequence:   违反如实申报要求，且掩盖真实回归
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P003, P011
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E429, E543, E456, E495]
+conflicts_with:         []
+prerequisite_of:        [E644]
+
+# ═══ 元数据 ═══
+doc_file:               doc/E643.md
+last_updated:           2026-09-21
+source_event:           libkcddb 26.04.0 适配（PR !11783）本机 conan create 首次失败：ECMQueryQt.cmake:98 Qt6 qtpaths call failed: 255；桩通过后编译期又失败于 AutoMoc moc return value 255
+
+# ═══ 知识协作 ═══
+authors:                Zmaomao
+source_pr:              11783
+source_commit:          86cba138e
+verify_builds:
+reference_impl:         archives/l/libkcddb/26.04.0/conanfile.py（_cmake_build_env 里 LLVM/SDK 注入）、archives/l/libkcddb/26.04.3/conanfile.py（CI 已验证的同款配方）
+
+# ═══ 质量度量 ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-21
+
+draft:                  DRAFT-libkcddb-26.04.0-kf6-target-binary-build-time-execution
+status:                 pending-editor-review
+contributor_id:         ZM01

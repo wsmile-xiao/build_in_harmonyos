@@ -1,81 +1,55 @@
-# libogg 1.3.6 — 编译进度
+# libogg 1.3.6 adaptation notes
 
-> 档案创建时间: 2026-04-27 00:00:00
-> 最后更新: 2026-04-27 (当前状态)
-> 当前会话 ID: (可选，用于多轮对话追踪)
+## Scope
 
-## 一、基本信息
-| 项目 | 值 |
-|------|-----|
-| 软件 | libogg |
-| 版本 | 1.3.6 |
-| 状态 | 🔵 进行中 / ✅ success / ⚠️ partial / ❌ failed |
-| 构建系统 | autotools/cmake/meson/... |
-| 源码路径 | URL |
+This Path A candidate replaces the incomplete historical 1.3.6 placeholder.
+It uses the official Xiph release archive and has no third-party Conan
+dependency. The version is the libogg reference required by the local
+OpusFile/DOSBox dependency audit.
 
-## 二、编译阶段（checkbox 实时更新）
+## Source
 
-### Phase 1: 环境准备
-- [ ] ohc-run.py init-build 完成 / 源码下载解压
+- URL: `https://downloads.xiph.org/releases/ogg/libogg-1.3.6.tar.xz`
+- SHA-256: `5c8253428e181840cd20d41f3ca16557a9cc04bad4a3d04cce84808677fa1061`
+- Size: 439,952 bytes
 
-### Phase 2: 编译（configure + make + make install）
-- [ ] configure 完成（记录参数和耗时）
-- [ ] make 编译完成（记录错误和修复）
-- [ ] make install 完成
+The historical `config.guess` and `config.sub` patches apply only to the old
+Autotools route. The selected official CMake route does not use them, so this
+candidate carries no source patch.
 
-### Phase 2.5: 独立目录安装验证（⭐ 必须做）
-- [ ] 干净源码 + 补丁应用
-- [ ] 独立 TEST_PREFIX configure + make install
-- [ ] 功能回归测试结果
+## Test accounting
 
-### Phase 3: 测试验证
-- [ ] make check / make test 结果
-- [ ] 安全弹窗触发确认
+Official `CMakeLists.txt` registers exactly two independent CTest entries:
+`test_bitwise` from `src/bitwise.c` and `test_framing` from `src/framing.c`.
+It calls `add_test()` without enabling CTest, so a plain CTest invocation finds
+zero entries. Reusing E249, the recipe executes the two built official programs
+directly and requires both process results instead of accepting an empty CTest
+run.
+The Conan test package adds one installed-package integration flow that creates
+an Ogg page, submits it to a second stream, and verifies the recovered packet.
+The logical total is therefore two upstream entries plus one integration flow.
+Shared and static repetitions do not increase these totals, and internal API
+checks are not split into cases.
 
-### Phase 4: 预编译包制作（⭐ verify PASS 后必须）
-- [ ] Step 1-10 打包流程（见 packaging.md）
+## Current boundary
 
-### Phase 5: 归档收尾
-- [ ] 补丁生成（ohc-run.py refresh-patch --auto）
-- [ ] manifest.yaml / README.md / PROGRESS.md 更新
-- [ ] ohc-run.py verify-build 质量门禁
+The Windows host static build ran both official programs and the installed
+consumer successfully. A separate shared build ran both official programs,
+but the upstream Windows import library names `ogg.dll` while CMake installs
+`libogg.dll`, so the installed shared consumer cannot start. This Windows-only
+metadata observation does not establish an OpenHarmony failure or success.
 
-## 三、对话记录（⭐ 断点续传核心）
+Fresh OpenHarmony PC W3 r4 executed shared and static Conan creates from an
+eight-file locked execution-input manifest. Both modes completed the two official
+programs and the installed-package consumer. Repeated modes are corroboration,
+so the logical result is `2/2` upstream plus `1/1` integration, not six tests.
+The host evidence is not used for this target pass count.
 
-> **每轮对话结束时必须更新此节。新 AI 会从这里恢复上下文。**
-
-### 对话 #N — 2026-04-27 HH:MM
-**操作**: （做了什么，如"执行 configure"、"修复 xxx bug"、"制作预编译包"）
-**结果**: （成功/失败/部分成功，附关键输出摘要）
-**发现的问题**: （遇到的坑、错误信息、根因分析）
-**当前状态**: （精确到哪个步骤，下一步该做什么）
-**遗留问题**: （未解决的、需要下轮继续的）
-
----
-
-### 对话 #1 — 2026-04-27 00:00
-**操作**: 执行 ./configure --prefix=$DEFAULT_PREFIX
-**结果**: （待填写）
-**发现的问题**: （待填写）
-**当前状态**: Phase 2 configure 进行中
-**遗留问题**: 无
-
-（后续每轮对话追加...）
-
-## 四、源码修改清单
-| 文件 | 原因 | 方式 | 补丁状态 |
-|------|------|------|---------|
-| ... | ... | ... | ... |
-
-## 五、预编译包交付物
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| ... | ... | ... |
-
-## 六、结束记录
-- **最终状态**: ...
-- **结束时间**: ...
----
-
-**编译结束**: 2026-04-27 09:32
-**最终状态**: partial
+The r4 execution bundle contains only inputs that can affect build or tests.
+Result metadata such as this file, manifests, and reports is excluded and is
+frozen separately for W4, so recording the result cannot change tested bytes.
+The evidence contract records exact shared/static/runner exit values and an
+exact file inventory with size and SHA-256 for each payload. Its validator also
+rejects an extra file, a changed runner exit, and changed log bytes. Evidence
+SHA-256 values are recorded in `manifest.yaml`. A new independent W4 is
+required for the r4 consumer cleanup fix. CI and publication are not claimed.

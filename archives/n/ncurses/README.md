@@ -1,4 +1,12 @@
-# ncurses 6.4 鸿蒙系统编译指南
+# ncurses 鸿蒙系统编译指南
+
+本文档保留 ncurses 6.4 的历史适配记录，并在末尾记录当前 ncurses 6.6
+静态宽字符配方的契约和验证边界。
+
+## 版本索引
+
+- ncurses 6.4：历史手工编译、风险和下游集成记录
+- ncurses 6.6：当前 Conan 配方、完整上游入口和目标机验证合同
 
 ## 概述
 
@@ -663,3 +671,33 @@ clang -shared -L. -lpython3.9 \
 ### 详细文档
 
 Python 编译完整指南：`build_in_harmonyos/p/python/3.9.0/README.md`
+
+---
+
+## ncurses 6.6
+
+ncurses 6.6 is packaged as static wide-character libraries to avoid shadowing the
+platform `libncursesw.so.6`. The package includes all five library components, public
+headers, command-line tools, and the complete terminfo database.
+
+### Adaptation notes
+
+- Preserve all 86 upstream `test/programs` entrypoints and run the complete
+  `make -j1 check` target.
+- Patch upstream `config.guess` so native platform detection yields
+  `aarch64-unknown-linux-ohos`; do not force build, host, or target triplets.
+- Reject the platform `expr` implementation when it cannot evaluate Autoconf compound
+  expressions, allowing the GNU implementation from the build environment to be used.
+- Run generated header installation helpers through the configured shell on HMDFS.
+- Cache `setfsuid` as unavailable after the target probe is confirmed to trigger
+  syscall 151/SIGSYS. No source or patch uses an OHOS conditional macro.
+
+### Conan contract
+
+The `ncurses/6.6` recipe exports the `ncurses::ncurses` CMake target and `ncursesw`
+pkg-config identity. It supplies consumer-first static link order, packaged terminfo
+environment variables, and tool paths. Consumer tests cover CMake `FindCurses`, wide
+character output, `tputs`, terminfo lookup, windows, panels, menus, and forms.
+
+The package has no third-party Conan prerequisite. Its HarmonyOS build environment
+requires Bash, GNU Make, Clang, Gawk, GNU sed, and a compatible GNU `expr`.

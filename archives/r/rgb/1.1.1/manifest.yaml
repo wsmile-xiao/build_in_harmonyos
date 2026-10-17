@@ -1,0 +1,87 @@
+# 版本级 manifest — rgb 1.1.1
+# 遵循 ARCHIVE-SPEC v2.0
+
+version: "1.1.1"
+software: "rgb"
+
+# 编译状态: published | built | failed | archived
+# PR 阶段尚未由 release 流水线 upload 到制品仓，真实状态为 built
+status: built
+
+build_date: "2026-09-23"
+build_system: autotools
+
+# 源码信息
+source:
+  # 与 conandata.yml 严格同源：官方优先的多 URL 列表（列表形式不会被 CI 的
+  # 镜像前置改写命中；实测该改写把 uwaterloo 等三个镜像排在官方之前，
+  # 而三者对本包全部返回 404，且预下载不校验 HTTP 状态码）。
+  url:
+    - "https://xorg.freedesktop.org/archive/individual/app/rgb-1.1.1.tar.gz"
+    - "https://www.x.org/archive/individual/app/rgb-1.1.1.tar.gz"
+  sha256: "9bceca0821a46ff54989ab08ab00d6dd87eb2779fc15165d848eaa0ddd742fbe"
+  tar_format: tar.gz
+
+# 构建配置
+build:
+  system: autotools
+  # 注意：不传 --build/--host/--target（worktree SKILL §4.1 对 native 编译明令
+  # 禁用）；host 三元组由 patches/0001-config.guess.patch 给 config.guess 插入
+  # HarmonyOS 分支后由 configure 自行探测（该补丁在 conandata.yml 的 patches: 中声明、
+  # 由 build() 首行 apply_conandata_patches 应用；真机 config.log 实测 build/host 均为
+  # aarch64-unknown-linux-ohos，autoconf 的 host_alias 因未传 --host 而恒为空）。
+  configure_options:
+    - "--with-rgb-db-type=text"
+    - "--with-rgb-db-dir=<package_folder>/share/X11/rgb"
+    - "PKG_CONFIG_PATH=<xorgproto/2025.1 包>/share/pkgconfig"
+  dependencies:
+    - "xorgproto/2025.1 (ohpcd 已发布 OHOS armv8 binary；提供 xproto.pc 与 <X11/Xos.h>/<X11/Xfuncs.h> 头文件，text 模式不链接 X 库)"
+  cc: clang
+  # text 分支需 asprintf/隐式声明修正（E017）；harness 默认 --enable-werror
+  extra_cflags:
+    - "-D_GNU_SOURCE"
+  cxx: ""
+
+# 补丁信息
+# 两处 OHOS 适配点以持久补丁交付，且在 conandata.yml 的 `patches:` 中声明、
+# 由 build() 首行 apply_conandata_patches(self) 真实应用（与 libfontenc/1.1.7 同族同法）：
+#   0001 config.guess 认得 uname -s=HarmonyOS ⇒ 配方无需写死 --build/--host（SKILL §4.1）
+#   0002 configure 的 umask 077→022（E011/E118）与 ac_pwd getcwd 回退
+# 配方 build() 里的 _rewrite_configure() 与 0002 同义，补丁到位后为幂等兜底。
+patches_applied:
+  - "patches/0001-config.guess.patch"
+  - "patches/0002-configure.patch"
+
+# 已知限制（面向使用者，与 archives/r/rgb/README.md、notes.md §8 同源）
+known_limitations:
+  - "包不可重定位：text 模式 showrgb 的默认颜色库路径 RGB_DB 由 configure 期烤入绝对路径 --with-rgb-db-dir=<package_folder>/share/X11/rgb；换 CONAN_HOME 或把包目录搬走之后，无参 `showrgb` 会报 unable to open rgb database 并退出非零。此时须显式给库路径：`showrgb <package_folder>/share/X11/rgb`（按 man 页口径不带 .txt 后缀）。"
+  - "只交付 text 形态：bin/showrgb + share/X11/rgb.txt + share/man/man1/showrgb.1。同名二进制 rgb（rgb.txt → .dir/.pag 转换器）在本平台不可构建——它被 automake 的 RGB_DB 条件包住，dbm/ndbm 分支要求 xorg-server 与 dbm.h/ndbm.h：xorg-server 在本仓有归档目录（archives/x/xorg-server/21.1.14、21.1.15）但**未发布到 ohpcd 制品仓**（`ci/scripts/preflight_check.sh rgb/1.1.1 --deps xorg-server/21.1.15` 实测返回 `[WARN] 未发布`），dbm.h/ndbm.h 在 OHOS NDK sysroot 中不存在，且 rgb.c 要 #include \"rgb.h\"（上游自陈在 server/include/，不在 release tarball）。"
+  - "两处上游生成文件的适配改动同时以两种形式存在且内容一致：持久补丁 `patches/0001-config.guess.patch`、`patches/0002-configure.patch`（在 conandata.yml 的 patches: 中声明，由 build() 首行 apply_conandata_patches 应用）与配方内 `_rewrite_configure()` 的运行时改写（补丁到位后为幂等兜底）。`ohc-run.py finish` 的 refresh-patch --auto 会按 ~/builds/*.orig 与 *.work 差量重新生成同样内容的 .patch，入库版与重生成版逐字相同（独立审计已核）。"
+
+# 知识沉淀
+knowledge_gained:
+  - "xorg/app/rgb 的 Makefile.am 是 bin_PROGRAMS = showrgb，同名二进制 rgb 只在 if RGB_DB（--with-rgb-db-type=dbm|ndbm）时才构建；而这两个分支无条件 PKG_CHECK_MODULES(XORG, [xorg-server]) 且需 dbm.h/ndbm.h + dbminit/dbm_open 实现 ⇒ 未发布 xorg-server/ndbm 时 rgb 二进制不可得，只能落 text 模式（W0）"
+  - "text 模式 showrgb 是纯文本解析器（fopen + sscanf(\"%d %d %d %[^\\n]\") + printf(\"%3u %3u %3u\\t\\t%s\\n\")），不链接任何 X 客户端库 ⇒ 该族应用里少数「无 X server、无 X 库」即可真机运行并做行为断言的样本"
+  - "showrgb 读默认库时会先试 <RGB_DB>.txt 再回落 <RGB_DB> 本体（dumprgb 的两次 fopen），所以 rgb.txt 必须安装到 datarootdir/X11/ 下且名字为 rgb.txt，无参调用才可用"
+  - "configure 报 'could not make ./config.status' 的第一现场是 autoconf 的 ac_delim 收敛循环（ac_delim_n=132 vs ac_delim_num=133）：本包 ac_subst_vars 恰为 133 个变量，在 GNU sed 4.9 / toybox sed 0.8.12 下用同一份变量表复现均为 133/133 收敛 ⇒ 该报错是手工探索时 PATH 组合所致，不是包内在缺陷；走 conan 的 AutotoolsToolchain 环境不再复现"
+  - "上游 rgb 1.1.1 无自动化测试：Makefile.am grep -E 'check|TESTS' 结果为空，N_static=0（不是漏跑 make check）"
+  - "本仓 CI 的 -pr:h 与 -pr:b 是同一个 ci/conan/profiles/ohos-aarch64 ⇒ conan 的 AutotoolsToolchain 判定 cross_building()=False，只往 conanbuild.conf 写 --prefix 等安装目录、**不注入 --host/--build**（实测该文件里仅有的两个三元组就是配方写死的那对，已删）。因此删掉写死三元组后必须由 config.guess 探测：真机未打补丁的 config.guess(2024-07-27) 在 `uname -s`=HarmonyOS 下 rc=1 报 unable to guess system type，插入 *:HarmonyOS:*:* 分支后 rc=0 输出 aarch64-unknown-linux-ohos，config.sub(2024-05-27) 已接受该三元组"
+
+patch_generation:
+  method: per-file-difflib
+  source_orig_dir: /storage/Users/currentUser/builds/rgb-1.1.1.orig
+  source_work_dir: /storage/Users/currentUser/builds/rgb-1.1.1.work
+  source_orig_hash: 9977037aaab76707
+  source_work_hash: f3ae6efdf53b91e5
+  generated_at: '2026-09-24T01:39:06'
+  patches_count: 2
+
+patch_classification:
+  - file: 0001-config.guess.patch
+    type: auto
+    platform_only: True
+    guard: 'pending'
+  - file: 0002-configure.patch
+    type: auto
+    platform_only: True
+    guard: 'pending'

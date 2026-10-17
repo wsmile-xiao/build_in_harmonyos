@@ -1,0 +1,81 @@
+#====================================================================
+# DRAFT-kdbusaddons-baseline-noise-isolation - 跨库 tracked 基线噪声
+# 精确隔离-完整复验-原样恢复（JC/W3 门禁阻塞处理流水线）
+# 关联库: kdbusaddons 6.29.0（r05 finish/W3 场景）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# 触发: finish 的 W3 本地 CI 模拟（build_and_test.sh 的 junk_check JC1/JC5）
+#       时，JC 报告"Junk Files: N / JC_RESULT=fail / L0_RESULT=fail"，
+#       且被拦文件列表全部位于其他库的已跟踪目录（非当前库 diff）。
+id:                     DRAFT-kdbusaddons-baseline-noise-isolation
+trigger_tool:           finish|build_and_test.sh|junk_check.sh|jc1|jc5|git
+phase:                  ci|review|packaging
+error_signature:        JC_RESULT=fail|Junk Files: [0-9]+|\[FAIL\] JC1:.*运行时状态文件|\[FAIL\] JC5:.*未登记的隐藏文件|conandata\.yml\.orig|conandata\.yml\.ghfast-bak|\.staging-verified
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               ci, git, ohos, infrastructure
+match_keywords:         junk_check, JC1, JC5, tracked baseline, baseline noise, git rm --cached, git add -f, isolation, restore, W3, finish, atomicity, provenance, blob hash, conandata.yml.orig, ghfast-bak, staging-verified
+title:                  跨库 tracked 基线噪声导致 W3/JC 门禁阻塞时的精确隔离-完整复验-原样恢复方法
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             W3 本地 CI（build_and_test.sh 的 junk_check.sh）以 full 模式
+                        对整仓 `git ls-files` 扫描；当 main 分支上其他库提交过
+                        会被 JC1（.orig/.ghfast-bak/.bak 等备份残留）或 JC5
+                        （archives 下未登记隐藏文件）匹配的跟踪文件时，当前库的
+                        finish/W3 会因"Junk Files: N"被阻塞。这些文件与当前库
+                        的 PR/diff 完全无关，属于仓库既有基线噪声；根因不在当前库
+                        配方，而在跨库历史提交带入的跟踪垃圾文件。
+affected_scope:         所有在共享 build_in_harmonyos 仓库内、且恰逢其他库已合入
+                        跟踪垃圾文件时跑 finish/W3 的配方（跨库基础设施陷阱，
+                        非单库缺陷；kdbusaddons 6.29.0 r05 实测）
+verification_cmd:       # 确认 JC 拦的是他库基线而非当前库 diff:
+                        git -C <worktree> status --porcelain -- <被拦路径>
+                        # 应为空（当前 diff 未触碰）; 再确认被拦文件是跟踪基线:
+                        git -C <worktree> ls-files --error-unmatch <被拦路径>
+                        git -C <worktree> log --oneline -1 -- <被拦路径>
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           tracked-baseline-noise-isolate-verify-restore
+rec_description:        对精确被拦路径临时只做 git 跟踪状态隔离（git rm --cached，
+                        磁盘文件内容不改），跑完完整自然 finish/W3 后立即
+                        git add 恢复，并逐项证明 blob(SHA-1)/SHA-256/模式/跟踪
+                        状态与隔离前快照完全一致；不删除、不加入白名单、不修改
+                        他库文件、不重跑掩盖。
+rec_command:            # 1) 隔离前快照：记录 provenance（路径/跟踪状态/index blob/worktree sha1/sha256/模式/来源 commit）
+                        git status --porcelain -- <f>; git ls-files -s <f>
+                        git hash-object <f>; sha256sum <f>; git log --oneline -1 -- <f>
+                        # 2) 精确隔离（仅移出跟踪状态，磁盘文件保留原内容）
+                        git rm --cached --quiet <f1> <f2> <f3>
+                        # 3) 完整自然 finish/W3（非仅 --resume），确认 JC 无拦截
+                        python3 scripts/ohc-run.py finish <lib> <ver> built
+                        # 4) 原样恢复（被 .gitignore 拦的用 -f；磁盘未变故 blob 不变）
+                        git add -f -- <f1> <f2> <f3>
+                        # 5) 逐项证明一致：index blob == 隔离前 seal blob == worktree sha1
+                        git ls-files -s <f>; git hash-object <f>; sha256sum <f>
+                        # 6) 原子性收尾：git status 仅当前库新增 + 既有 libXext 差异
+                        git status --porcelain | head
+rec_auto_fix:           false
+rec_impl:               git-tracked-baseline-isolation
+
+fallback_priority:      2
+fallback_approach:      external-report-do-not-mask
+fallback_description:   若隔离后 W3 仍有当前库自身的真实失败（非基线噪声），或
+                        隔离/恢复产生任何不一致，必须停止返工：按外部首错规则
+                        回报，不得删除候选文件、不得改他库、不得改 JC 白名单、
+                        不得伪造 .ci-result.json 掩盖。
+fallback_command:       # 恢复现场后如实回报，交由分析端决策：
+                        git add -f -- <f> 2>/dev/null; git status --porcelain
+fallback_auto_fix:      false
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       git rm(?! --cached)|rm -f .*conandata.*\.orig|echo .*>> .*junk_check\.sh|删除.*白名单.*登记
+forbid_1_reason:        只允许"git rm --cached 移出跟踪状态"；禁止真删除磁盘文件、
+                        修改 junk_check.sh 白名单、或改他库内容来掩盖 JC。
+forbid_1_consequence:   破坏他库/框架内容，permanently 篡改仓库基线，W2 原子性与
+                        事后审计无法复原。
+forbid_2_pattern:       只跑 finish --resume|跳过 W3|手写 .ci-result\.json
+forbid_2_reason:        任务要求完整自然 finish/W3；--resume 或手写 .ci-result.json
+                        无法提供"隔离生效 → JC 通过"的完整证据链。

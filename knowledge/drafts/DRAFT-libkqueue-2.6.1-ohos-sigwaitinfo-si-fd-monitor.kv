@@ -1,0 +1,117 @@
+#====================================================================
+# DRAFT-libkqueue-2.6.1-ohos-sigwaitinfo-si-fd-monitor — OHOS sigwaitinfo
+#   不填充 si_fd + F_SETSIG close 通知不可靠：监控线程卡死、退出 join 阻塞
+# 触发事件: libkqueue 2.6.1 第一轮适配（OHOS PC arm64, conan create 阶段）
+# 知识新增类：既无正式条目也无草稿覆盖 sigwaitinfo/si_fd/F_SETSIG 语义
+#====================================================================
+
+id:                     DRAFT-libkqueue-2.6.1-ohos-sigwaitinfo-si-fd-monitor
+trigger_tool:           clang|ld|runtime
+phase:                  linking|runtime
+error_signature:        sigwaitinfo.*si_fd.*0|
+                         kqueue.*hang|kevent.*hang|pthread_join.*block|
+                         F_SETSIG.*not delivered|
+                         monitoring thread.*never exit|
+                         OK: kqueue\(\) = 5.*SIGTERM|
+                         undefined reference.*pthread_setcancelstate
+
+severity:               2
+category:               libc-compat|threading|signal|event-loop|runtime
+match_keywords:         sigwaitinfo, si_fd, F_SETSIG, F_SETOWN_EX, sigtimedwait,
+                         MONITORING_THREAD_SIGNAL, kqueue, kevent, epoll,
+                         timerfd, eventfd, pthread_cancel, pthread_join,
+                         OHOS, musl, runtime hang, fd close notification
+title:                  OHOS sigwaitinfo 不填充 si_fd 且 F_SETSIG close 通知不可靠：
+                         事件监控线程需 sigtimedwait 轮询 + fd 状态扫描 + 显式唤醒，
+                         且无 pthread_cancel 时退出路径必须跳过 pthread_join
+
+root_cause: >
+  在 OHOS（musl libc + Linux 内核）上，对 fd 设置 O_ASYNC + F_SETSIG 生成 RT 信号、
+  再由专用监控线程 sigwaitinfo 等待 close 通知的模式存在两个平台差异：
+  (1) sigwaitinfo 返回的 siginfo 中 si_fd 恒为 0（不填充被关闭的 fd），
+      依赖 info.si_fd 索引 fd_map 的清理逻辑永远找不到目标对象；
+  (2) close 触发的 RT 信号投递偶发不可靠（部分运行完全不投递），
+      监控线程若只在 sigwaitinfo 等待则可能永远不醒。
+  叠加 OHOS libc 不提供 pthread_cancel（见 DRAFT-ohos-pthread-cancel-decl，
+  libkqueue 实测 sysroot libc.so nm -D 对 pthread_cancel/setcancelstate/
+  testcancel 均 0 命中，与 nymphcast 的声明缺失场景不同，本库是符号缺失），
+  进程退出清理路径（atexit -> linux_libkqueue_free -> pthread_cancel +
+  pthread_join）在无法取消线程时 pthread_join 永久阻塞，进程挂起。
+  实测：diag 程序 kqueue() 后 close(fd) 再退出，偶发卡死在
+  "before exit" 后；wchan 显示主线程 FUTEX（join）、监控线程
+  signalmgr_timedwait（sigwaitinfo 等待）。
+
+affected_scope: >
+  OHOS PC / OpenHarmony 上任何使用 F_SETSIG + sigwaitinfo/sigwait 监听
+  fd close 的用户态事件机制，或依赖 pthread_cancel 清理工作线程的库：
+  libkqueue 类 kqueue/kevent 用户态实现、自定义事件循环、fd 监控线程。
+
+verification_cmd: >
+  # 1) si_fd 恒 0 实证：F_SETSIG 后 sigwaitinfo，打印 info.si_fd
+  # 2) 挂起复现：kqueue() + close(kq) + exit，偶发卡死
+  # 3) 修复验证：sigtimedwait 轮询 + fcntl(F_GETFD) EBADF 扫描，稳定退出
+
+rec_priority:           1
+rec_approach:           sigtimedwait-poll-plus-fd-scan-plus-explicit-wake
+rec_description: >
+  监控线程不再裸等 sigwaitinfo：改用 sigtimedwait（100ms 超时）轮询；
+  每次 EAGAIN 超时主动扫描活跃 fd 集合，对 fcntl(fd, F_GETFD) 返回
+  EBADF 的对象执行清理（不依赖 si_fd）；超时扫描发现无存活对象即
+  break 退出循环。清理回调中 si_fd 无效时同样退化为全量扫描。
+  进程退出路径：pthread_cancel 不可用时（ESRCH）用
+  tgkill(SYS_tgkill, tid, MONITORING_THREAD_SIGNAL) 显式唤醒监控线程；
+  因监控线程已自行 detach 退出、musl 上 join 会永久阻塞，OHOS 分支跳过
+  pthread_join。libc 探针统一用 __OHOS__（该工具链未定义 __MUSL__）。
+rec_command: >
+  # 监控线程循环（伪代码，libkqueue platform.c 0005 补丁同构）
+  #   sigtimedwait(&set, &info, ts=100ms) -> EAGAIN 时：
+  #     lock; LIST_FOREACH_SAFE(kq) { if (fcntl(kq->kq_id,F_GETFD)<0 &&
+  #         errno==EBADF) kqueue_free(kq); } ; if (kq_cnt==0) break; unlock
+  #   si_fd 无效时 cleanup(signal_fd) 退化：全量扫描 fd 关闭状态
+  # free 路径（OHOS）：
+  #   pthread_cancel 返回 ESRCH -> tgkill(getpid(), tid, MONITORING_THREAD_SIGNAL)
+  #   跳过 pthread_join（线程已 detach 退出；musl join 永久阻塞）
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      detach-monitor-thread-no-join
+fallback_description: >
+  若改造等待循环不可行，可让监控线程创建即 detach、退出路径完全不
+  join（进程退出自然回收）；代价是 LSAN 可能报告线程/资源泄漏，
+  且无法等待线程完成清理。
+fallback_command:       pthread_detach(pthread_self()) 于线程入口；退出路径跳过 join
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+forbid_1_pattern:       si_fd.*guaranteed|sigwaitinfo.*si_fd.*populated
+forbid_1_reason:        OHOS 实测 si_fd 恒为 0，假定填充会导致清理永不命中
+forbid_1_consequence:   监控线程永不退出、进程退出挂起
+
+forbid_2_pattern:       pthread_cancel.*stub.*return.*0
+forbid_2_reason:        libkqueue 实测 sysroot libc 无此符号；stub 返回 0 会让
+                        调用方误以为线程已取消而继续 join，仍会挂起
+forbid_2_consequence:   free 路径 join 永久阻塞
+
+forbid_3_pattern:       join.*detached.*thread.*ohos
+forbid_3_reason:        OHOS musl 对已自 detach 线程的 join 实测永久阻塞
+forbid_3_consequence:   atexit 清理挂起
+
+principles:             P004, P015
+similar_to:             DRAFT-ohos-pthread-cancel-decl, E085, E127
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-libkqueue-2.6.1-ohos-sigwaitinfo-si-fd-monitor.md
+last_updated:           2026-09-07
+source_event:           archives/l/libkqueue/2.6.1 patches 0003-0005；
+                        conan create13 EXIT=0；diag 复现 15/15 稳定退出；
+                        ohos_specific_test 15/15 PASS
+authors:                pc6-3 <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-07

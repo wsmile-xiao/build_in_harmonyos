@@ -1,0 +1,25 @@
+id: E653
+error_signature: "OSError: cannot load library 'lib*.so': Error loading shared library ...: Permission denied（OHOS dlopen 拒载 NDK 本机构建共享库）"
+match_keywords: dlopen,Permission,denied,cffi,dlopen,shared,library,load,NDK,clang++,max-page-size,16384,16k,align,isolated,test
+category: ohos-loader,binding-python,shared-library
+severity: high
+root_cause: HarmonyOS/OHOS 设备对 dlopen() 有比 execve 更严的共享库接受策略。同一颗设备上：pip 安装的社区预编译扩展（16K LOAD 对齐、NEEDED 经 $ORIGIN 解析）可正常加载；而设备 NDK clang++（如 scikit-build-core/cffi 现场构建的 Python 扩展）产出的 .so 被 ctypes/cffi dlopen 以 Permission denied 拒绝。实测逐层排除：①文件名模式无关（改名 .cpython-*.so 仍拒）；②所在目录无关（应用沙箱 /data/storage/.../files、$TMPDIR、/dev/shm 全拒，HMDFS 同目录的预编译扩展可载）；③依赖解析是必要非充分条件——NDK 默认链 libc++_shared.so 而 OHOS 系统只有 libc++.so（报错文案把主库路径误指为被拒对象），LD_LIBRARY_PATH 在 OHOS loader 不生效、把 libc++_shared.so 旁置 $ORIGIN 仍拒；④LOAD 对齐是必要非充分条件——NDK 产物 R-E 段 0x1000（4K）对齐，社区扩展 0x4000（16K），用 CXXFLAGS/LDFLAGS="-Wl,-z,max-page-size=16384" 重链到 0x4000 后仍被拒；⑤ELF 内容级拒载（NDK 构建产物带 .note.ohos.ident 等），当前设备策略下无用户侧修法。影响：任何需要现场 dlopen 的绑定层（cffi/pybind11/ctypes 消费路径）在设备不可用。
+rec_approach: 配方层统一给 OHOS 共享产物加 -Wl,-z,max-page-size=16384（CMakeToolchain 的 CMAKE_SHARED_LINKER_FLAGS/CMAKE_MODULE_LINKER_FLAGS/CMAKE_EXE_LINKER_FLAGS；Meson 用 cpp_link_args；autotools 用 LDFLAGS），这是确定有效且必要的修复。绑定层测试（pytest 消费 dlopen 路径）在设备上判定为环境限制：按 NOT_RUN 申报，理由写「OHOS dlopen 内容级拒载 NDK 本机构建 .so（同目录 pip 预编译扩展可载，已排除文件名/目录/依赖/16K 对齐四因子）」，并附 dlopen 探针日志；不要把它误报成编译失败或依赖缺失。
+solution_cmds: |
+  # CMake 配方（conanfile.py generate()，OHOS 分支）
+  tc = CMakeToolchain(self)
+  if self.settings.os == "OHOS":
+      tc.variables["CMAKE_SHARED_LINKER_FLAGS"] = "-Wl,-z,max-page-size=16384"
+      tc.variables["CMAKE_MODULE_LINKER_FLAGS"] = "-Wl,-z,max-page-size=16384"
+      tc.variables["CMAKE_EXE_LINKER_FLAGS"] = "-Wl,-z,max-page-size=16384"
+  # 判别探针（设备可直接执行；so 换成任意待检库）
+  python3 -c "import ctypes; ctypes.CDLL('/path/to/lib.so')"
+  # 对照组：同目录 pip 预编译扩展应 OK；NDK 本机构建产物 DENIED 即命中本条
+  /data/service/hnp/bin/llvm-readelf -lW lib.so | grep 'R E'   # 看对齐: 0x1000=4K / 0x4000=16K
+  /data/service/hnp/bin/llvm-readelf -d lib.so | grep NEEDED   # 看依赖: libc++_shared.so 在 OHOS 系统不存在
+verification: "用 ctypes.CDLL 直载目标 .so：预期加载失败的报错为 Permission denied 形态；用 llvm-readelf -lW 核对 R-E 段 p_align；换名/换目录/补 LD_LIBRARY_PATH/$ORIGIN 旁置 libc++_shared.so/16K 重链后复测均应保持 DENIED（证伪单因子修复）。"
+fallback: 绑定层在设备不可运行时，把上游绑定测试整组记 NOT_RUN + 上述技术原因与证据，C++/C 核心测试仍须在设备实跑覆盖核心功能；确需绑定层证据时改在 CI（Linux worker）验证。
+doc_refs: ""
+prescan_pattern: "dlopen\\(|ctypes\\.CDLL|cffi\\.FFI|dlopen\\(NULL\\)|find_library\\("
+applies_to: isospec,any-python-binding-package,any-dlopen-consumer,cffi,pybind11
+last_updated: 2026-09-21

@@ -1,0 +1,104 @@
+--- a/src/test_framework/basic_utils/resource_meas.h
++++ b/src/test_framework/basic_utils/resource_meas.h
+@@ -5,6 +5,7 @@
+ 
+ 
+ #include <pthread.h>
++#include <signal.h>
+ #include <stdbool.h>
+ #include <sys/resource.h>
+ #include <sys/time.h>
+@@ -38,6 +39,8 @@
+ 	pthread_attr_t thread_attr;
+ 	pthread_t thread_id;
+ 
++	volatile sig_atomic_t stopping; /* Set to true to request measurement thread exit. */
++
+ 	float current_cpu_usage; /* Last calculated value of CPU usage. */
+ 	float maximal_cpu_usage; /* Maximum detected during measurements run. */
+ 
+--- a/src/test_framework/basic_utils/resource_meas.c
++++ b/src/test_framework/basic_utils/resource_meas.c
+@@ -62,7 +62,9 @@
+ static void * resouce_meas_thread(void * arg)
+ {
+ 	resource_meas * meas = (resource_meas *) arg;
+-	while (1) {
++	/* pthread_cancel() is not used (OHOS libc does not provide it); exit on
++	   the flag set by resource_meas_stop(). */
++	while (!meas->stopping) {
+ 		resource_meas_do_measurement(meas);
+ 		cw_millisleep_internal(meas->meas_interval_msecs);
+ 	}
+@@ -105,7 +107,12 @@
+ {
+ 	pthread_mutex_lock(&meas->mutex);
+ 
+-	pthread_cancel(meas->thread_id);
++	/* pthread_cancel() is not used (OHOS libc does not provide it); ask the
++	   thread to exit and wait. */
++	meas->stopping = true;
++	pthread_mutex_unlock(&meas->mutex);
++	pthread_join(meas->thread_id, NULL);
++	pthread_mutex_lock(&meas->mutex);
+ 	pthread_attr_destroy(&meas->thread_attr);
+ 
+ 	pthread_mutex_unlock(&meas->mutex);
+--- a/src/cwutils/cw_rec_tester.h
++++ b/src/cwutils/cw_rec_tester.h
+@@ -5,6 +5,7 @@
+ 
+ 
+ #include <stdint.h>
++#include <signal.h>
+ #include "../libcw/libcw_key.h"
+ #include <test_framework/basic_utils/param_ranger.h>
+ #include <test_framework/basic_utils/test_result.h>
+@@ -55,6 +56,9 @@
+ 
+ 	pthread_t receiver_test_code_thread_id;
+ 
++	/* Set to true to request the test code thread to exit. */
++	volatile sig_atomic_t stopping;
++
+ 	char input_string[REC_TEST_INPUT_BUFFER_SIZE];
+ 
+ 	/* Iterator to the array above. */
+--- a/src/cwutils/cw_rec_tester.c
++++ b/src/cwutils/cw_rec_tester.c
+@@ -495,14 +495,19 @@
+ 		}
+ 	}
+ 
+-	/* Wait for all characters to be played out. During this wait the above
+-	   'initial_count' characters are played, and the generator's 'low
++	/* Wait for all characters to be played out, or for the test code to be
++	   stopped (see cw_rec_tester_stop_test_code()). During this wait the
++	   above 'initial_count' characters are played, and the generator's 'low
+ 	   watermark' callbacks adds more and more characters from tester's
+ 	   input string. At some point the input string runs out of characters,
+ 	   the last character is finally enqueued and played, and the 'wait'
+ 	   returns. */
+-	cw_tq_wait_for_level_internal(tester->helper_gen->tq, 0);
+-	cw_usleep_internal(1 * CW_USECS_PER_SEC);
++	while (!tester->stopping && 0 != cw_tq_length_internal(tester->helper_gen->tq)) {
++		cw_usleep_internal(1000); /* 1 ms */
++	}
++	if (!tester->stopping) {
++		cw_usleep_internal(1 * CW_USECS_PER_SEC);
++	}
+ 
+ 	cw_gen_delete(&tester->helper_gen); /* TODO (2022.01.03) if we are doing delete() in this function, then should we also do new() here? */
+ 	tester->generating_in_progress = false;
+@@ -527,7 +532,10 @@
+ 
+ void cw_rec_tester_stop_test_code(cw_rec_tester_t * tester)
+ {
+-	pthread_cancel(tester->receiver_test_code_thread_id);
++	/* pthread_cancel() is not used (OHOS libc does not provide it); ask the
++	   test code thread to exit (it polls the 'stopping' flag) and wait. */
++	tester->stopping = true;
++	pthread_join(tester->receiver_test_code_thread_id, NULL);
+ }
+ 
+ 

@@ -1,0 +1,70 @@
+#====================================================================
+# DRAFT-libopencsd-1.5.5-macos-ld64-soname — 本机 macOS 验证 OHOS 包时
+# 的链接参数差异（ld64 vs lld/GNU ld）
+#
+# 场景: libopencsd 1.5.5（纯 Makefile C++ 库，decoder/build/linux/makefile
+#       + unix_common/makefile.common）在 macOS 上以 default profile 做
+#       本地验证时，链接共享库报错：ld64 不认 -soname 与 -Wl,-z,defs。
+#       该参数由上游 makefile 无条件传入链接行，仅在 macOS 本机复现；
+#       OHOS/CI（lld）与 Linux（GNU ld）均支持这两个参数，保持上游默认。
+# 适用: 一切在 macOS 本机用 default profile 预验证 OHOS/Linux makefile 系
+#       包的场景（含本仓库 conan-verify / W3 本地门禁）。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-libopencsd-1.5.5-macos-ld64-soname
+source_lib:             libopencsd 1.5.5
+trigger_tool:           make|ld|clang++|conan create
+phase:                  linking
+error_signature:        ld: unknown option: -soname|unknown argument.*-soname|unrecognized option.*-z defs|ld: unknown option: -z|install_name
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               1
+category:               build-system, macos, linking, conan, makefile
+match_keywords:         -soname, -install_name, PLATFORM_LDFLAGS, SONAME_FLAG, ld64, macOS, lld, GNU ld, makefile.common, MASTER_LINKER, 本地验证, default profile
+title:                  macOS 本机验证 makefile 系 OHOS 包时，ld64 不认上游 -soname/-Wl,-z,defs，需以 -install_name 替代并置空 PLATFORM_LDFLAGS
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  上游 makefile.common 为 GNU lld/ld 编写的共享库链接行固定携带
+  `-Wl,-soname,libX.so.1`（经 SONAME_FLAG 变量）与 `-Wl,-z,defs`
+  （经 PLATFORM_LDFLAGS 变量）。macOS 的 ld64 不支持这两个 GNU 风格参数：
+  `-soname` 报 unknown option，`-z defs` 同样不被识别。但 macOS 本地验证
+  恰恰是 conan default profile / W3 本地门禁的运行环境，于是 makefile 系
+  OHOS 包在本机必然链接失败。该差异纯属平台链接器参数，与库源码无关；
+  OHOS CI 使用 lld、Linux 使用 GNU ld，均支持上游默认参数，不能在配方里
+  全局改写（否则破坏目标平台语义）。
+affected_scope:         在 macOS 本机以 default profile 构建/验证携带 GNU 链接参数的 makefile 系共享库包
+verification_cmd:       make MASTER_LINKER=clang++ -j1 2>&1 | grep -E 'unknown option|-soname|-z defs'
+
+# ═══ Layer 3: 方案层 (Solution Space) ═══
+rec_priority:           1
+rec_approach:           macos-link-flag-override
+rec_description:        仅在 macOS 本机验证路径上，以 make 命令行变量覆盖上游链接参数：
+                        `SONAME_FLAG=-install_name`（ld64 等价物，效果仍是记录
+                        dylib 标识名）并把 `PLATFORM_LDFLAGS` 置空（去掉 -z defs）。
+                        用配方侧的平台判定（如 sys.platform == darwin）把该覆盖
+                        限制在本机 default profile，OHOS/CI 保持上游默认（lld）。
+rec_command:            make SONAME_FLAG=-install_name PLATFORM_LDFLAGS= MASTER_CC=<cc> MASTER_CXX=<cxx> MASTER_LINKER=<cxx> MASTER_LIB=<ar> -j1
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+fallback_priority:      2
+fallback_approach:      skip-soname-on-macos
+fallback_description:   若配方不便区分平台，可让 makefile 侧的 SONAME_FLAG/PLATFORM_LDFLAGS
+                        以变量默认值保持上游参数，仅在 macOS 分支显式传覆盖值；禁止
+                        删除或改写 OHOS/CI 路径上的 -soname（lld 生成的 DT_SONAME 是
+                        L5 门禁与 A2 断言的检查对象）。
+fallback_command:       (同 rec_command，限定 darwin 分支)
+fallback_auto_fix:      false
+fallback_impl:          manual
+forbid_1_pattern:       remove.*soname|SONAME_FLAG=.*(delete|empty).*(ohos|CI)
+forbid_1_reason:        在 OHOS/CI 路径去掉 -soname 会丢失 DT_SONAME，违反 L5/A2 断言
+
+# ═══ Layer 4: 验证层 (Validation) ═══
+verified_on:            libopencsd 1.5.5（macOS apple-clang，conan 2.29.1 default profile）
+verification_result:    macOS 本机 conan create 全绿；61/61 上游测试通过；conan-verify G1-G4 全 PASS；
+                        W3 本地 CI exit 0；OHOS CI 由 lld 生成 DT_SONAME（待远程复核）
+# 反例/限制
+limitations: >
+  - 仅适用于 macOS 本机验证；Linux/OHOS 请保持上游默认参数。
+  - -install_name 只影响 dylib 标识，不参与 DT_SONAME 语义；A2 SONAME 断言仅在 OHOS 上执行。

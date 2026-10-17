@@ -1,0 +1,58 @@
+#====================================================================
+# DRAFT-pkgconfig-x11-proto-include-gap — pkg-config 消费链上的 X11 协议头断层：
+#   cpp_info.requires 传递不达 pc Cflags，必须 requires xorgproto（存在性）
+#   + 检测名声明 xproto（接线），缺一不可
+# 触发事件: juce/8.0.5 HarmonyOS PC 适配（archives/j/juce/8.0.5）
+#====================================================================
+
+id:                     DRAFT-pkgconfig-x11-proto-include-gap
+trigger_tool:           conan|cmake|pkg-config|clang
+phase:                  configuration|compilation
+error_signature:        fatal error: .X11/X\.h. file not found|X11/Xatom\.h.*file not found|X11/Xmd\.h.*file not found|X11/keysym\.h.*file not found|X11/Xproto\.h.*file not found
+
+severity:               2
+category:               pkg-config, conan, headers, x11, consumer-chain
+match_keywords:         x11.pc, xproto, xorgproto, X11/X.h, Xatom.h, Xmd.h, keysym.h, linuxPackages, NOLINK, pkg_check_modules, PkgConfigDeps, Requires, Cflags, transitive_headers, juce_add_module
+
+title:                  pkg-config 消费链上 cpp_info.requires 的 include 传递不可达：X11 协议头断层必须显式 requires xorgproto 并在 pc 检测名声明 xproto（NOLINK 只取 Cflags），两处缺一不可
+
+root_cause:             PkgConfigDeps 生成的 x11.pc 只含 libx11 自身 include，Requires 链仅 xcb——xorgproto 未声明 pkg_config_name，既不被代生成 .pc 也不进上游 pc 的 Requires；于是以 pc 检测名取头的消费方（juce_add_module linuxPackages、PKG_CHECK_MODULES）拿不到协议头 include，而配方 cpp_info.requires（含 transitive_headers）只保证图内存在性并对 CMakeDeps/targets 传播，对 pkg-config 消费链不可达。X11/X.h、Xatom.h、Xmd.h、keysym.h、Xproto.h 均由 xorgproto 制品提供，不在 libx11 包内。
+affected_scope:         一切以 .pc 检测名消费 X11 头的配方（juce linuxPackages 系、autotools PKG_CHECK_MODULES 系）；协议头同类结构（xcb-proto、wayland-protocols 等"库 pc + proto pc 分制品"）可类推。单库门禁下修复点在消费方声明，不得越界改 libx11/xorgproto 配方。
+verification_cmd:       sh -c "pkg-config --cflags xproto >/dev/null && printf \x27#include <X11/Xlib.h>\nint main(void){return 0;}\x27 | clang -x c - -fsyntax-only \$(pkg-config --cflags x11 xproto) && echo TRIPLE_PROBE_PASS"
+
+# ── 三态探针（失败态可复现，见 md）──
+probe_fail_a:           消费配方仅 requires libx11（无 xorgproto）：最小 TU include <X11/Xlib.h> → fatal error: X11/X.h file not found（协议头不在图内）
+probe_fail_b:           requires 齐全但检测名只写 x11：同一 fatal（xproto.pc 不进命中集）——cpp_info.requires 对 pkg-config 消费链失效的直接证据
+probe_pass:             requires xorgproto/2025.1 + linuxPackages "NOLINK x11 xproto"（或 PKG_CHECK_MODULES 加 xproto）：pkg-config --cflags xproto 非空且 TU 编译通过
+
+# ── fallback（首选修复不可用时的降级）──
+fallback_priority:      2
+fallback_approach:      consumer-side-explicit-pc-path-or-include-injection
+fallback_description:   若消费环境无 conanbuild 的 PKG_CONFIG_PATH 传播（旧版 conan/裸 cmake），改为消费方 generate() 把 xorgproto 的 share/pkgconfig 显式并入 PKG_CONFIG_PATH；纯 CMake 项目退化为 clipboard_lite 式 X11_INCLUDE_DIR 多目录注入（该式不依赖 pkg-config）。CMakeDeps/targets 消费方本就不受此断层影响，无需降级。
+fallback_command:       PKG_CONFIG_PATH=$PKG_CONFIG_PATH:$(conan cache path xorgproto/2025.1)/share/pkgconfig pkg-config --cflags xproto
+fallback_auto_fix:      false
+
+# ── forbid（反例边界）──
+forbid_1_pattern:       copy.*X11/X\.h|vendor.*xorgproto|include.*proto.*headers.*into.*package
+forbid_1_reason:        协议头属 xorgproto 制品；vendor 进消费方包造成双源漂移与许可清单污染
+forbid_1_consequence:   下游同时可见两份协议头，宏/版本漂移问题难以归因
+forbid_2_pattern:       (conanfile\.py)?修改.*archives/(x/xorgproto|l/libx11)/|跨库.*修.*libx11|xorgproto.*消费 run 内改动
+forbid_2_reason:        单库门禁：消费链断裂的修复点在消费方声明（requires + 检测名），不在上游包配方
+forbid_2_consequence:   携带第二库文件的多库合并提交被结构门禁硬性阻断
+
+# ── 原则与相似条目 ──
+principles:             P013（X11 扩展头在 OHOS 不可得时按包级默认降级关闭 JUCE_USE_XRANDR/XINERAMA/XSHM/XCURSOR 等，而非桩头绕过；协议头断层则按本条接线修复）
+similar_to:             E480（同 X11 头文件级依赖域：E480 的 PKG_CHECK_MODULES 直查 xfixes.pc、transitive_headers 即达；本条消费方查上游库生成 pc，断裂在 pc 生成侧 Requires 链，增量是检测名声明法）、
+                        E468（同 pkg-config 探测域：E468 是检测名与 .pc 名不一致，本条检测名正确而 .pc 的 Requires/Cflags 链断裂）、
+                        E309（同头缺失家族：E309 是单包打包漏装生成头（修 package()），本条各包内容完整、是跨包 include 闭包在消费声明层缺失）、
+                        DRAFT-clipboard_lite-3.4-x11-cmake-injection（同域互补：CMake find_package(X11) 变量注入 vs pc 检测名声明，逐项差异见 md 表）、
+                        DRAFT-x11-pkgconfig-triple（同域：x11 后端三件套检测名齐全性问题）
+rec_priority:           1
+rec_approach:           explicit-xorgproto-requires-plus-pkgconfig-detection-name
+rec_description:        (1) 消费配方 self.requires("xorgproto/2025.1", transitive_headers=True)，版本与 libx11 依赖一致（2024.1/2025.1 图内冲突先例）；(2) pc 检测名声明 xproto（juce: linuxPackages "NOLINK x11 xproto"；autotools: PKG_CHECK_MODULES 列表加 xproto）；(3) xorgproto 自带真实 .pc（share/pkgconfig，${pcfiledir} 相对前缀）且依赖 buildenv_info 的 PKG_CONFIG_PATH 会传播进消费方 conanbuild 环境；(4) 用三态探针验收（缺 requires 挂、缺检测名挂、双修过），不得以 vendor 头或越界改上游配方替代。
+rec_command:            self.requires("xorgproto/2025.1", transitive_headers=True)  +  linuxPackages: NOLINK x11 xproto
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:
+source_commit:

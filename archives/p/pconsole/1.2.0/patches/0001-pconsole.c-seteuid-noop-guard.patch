@@ -1,0 +1,65 @@
+pconsole 1.2.0 - guard every seteuid() call site with a POSIX no-op test
+
+pconsole drops/regains privileges by calling seteuid() unconditionally.
+There are exactly three such call sites in pconsole.c, and all three are
+on paths the program actually executes:
+
+  line 104  put_conn()  seteuid(0)         "regain root privs", before the
+                                         ioctl(TIOCSTI) of every keystroke
+  line 115  put_conn()  seteuid(getuid())  "drop root privs again", the
+                                         mandatory tail of every keystroke
+                                         injection
+  line 227  main()      seteuid(getuid())  "drop root privs", at startup
+
+When the effective uid already equals the real uid those calls cannot
+change anything - they are no-ops by definition, and the kernel's own
+set_user() fast path skips its capability check for them.  On a platform
+that refuses the privileged id syscall from a process that holds no such
+privilege (e.g. the seccomp whitelist of OpenHarmony/HarmonyOS, which
+kills the process with an uncatchable SIGSYS / exit 159 before the
+syscall ever returns) the program therefore dies even though there was
+nothing to drop.  Because line 115 is the tail of put_conn(), that is the
+path every single injected keystroke takes, so leaving it unguarded keeps
+the program fatal on precisely its core feature.
+
+Skip the syscall when it is provably a no-op.  The predicate is plain
+POSIX (geteuid/getuid), so no platform macro is involved and behaviour
+on every other platform is unchanged: a real setuid-root binary still
+takes the original path and still reports the original error.
+
+A regression guard lives in test_package/pconsole_pty_test.py (H5): it
+installs a seccomp-bpf filter that traps the whole set*-id syscall family
+in the child before exec, which reproduces the HarmonyOS boundary, and
+then drives a real keystroke injection through put_conn().  A build that
+emits any privileged id syscall on that path dies by SIGSYS and the test
+fails; the fully guarded build issues none and survives.
+
+--- a/pconsole.c
++++ b/pconsole.c
+@@ -101,7 +101,7 @@
+ 	}
+ 
+ 	/* regain root privs */
+-	if (seteuid(0)) {
++	if (geteuid() != getuid() && seteuid(0)) {
+ 		fprintf(stderr, "failed to regain root privs: %s\n", strerror(errno));
+ 		cmd_exit(NULL);
+ 		/* unreached */
+@@ -112,7 +112,7 @@
+ 	saved_errno = errno;
+ 
+ 	/* drop root privs again */
+-	if (seteuid(getuid())) {
++	if (geteuid() != getuid() && seteuid(getuid())) {
+ 		fprintf(stderr, "failed to drop root privs: %s\n", strerror(errno));
+ 		cmd_exit(NULL);
+ 		/* unreached */
+@@ -224,7 +224,7 @@
+ 		fprintf(stderr, "You must be root to run this program or this program should be setuid root.\n");
+ 		return -1;
+ 	}
+-	if (seteuid(getuid())) {				/* drop root privs */
++	if (geteuid() != getuid() && seteuid(getuid())) {		/* drop root privs */
+ 		fprintf(stderr, "failed to drop root privileges\n");
+ 		exit(-1);
+ 	}

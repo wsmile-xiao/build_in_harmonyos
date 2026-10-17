@@ -1,0 +1,97 @@
+id: DRAFT-3517-qemu-9.2.4-hmdfs-shm-fallocate-lock-mutual-exclusion
+title: "OHOS 上 HMDFS 与 /dev/shm 的 fallocate 与文件锁互斥——真机 punch-hole 与 QEMU byte-100 锁无法兼得的取舍（qemu 9.2.4 实证）"
+category: hmdfs
+severity: 2
+error_signature: "Failed to lock byte 100|fallocate.*(EPERM|EACCES)|Operation not permitted.*lock|virtio-blk WRITE_ZEROES 断言 status==0 失败|Unable to write zeroes"
+keywords:
+  - fallocate
+  - FALLOC_FL_PUNCH_HOLE
+  - F_SETLK
+  - fcntl lock
+  - HMDFS
+  - /dev/shm
+  - tmpfs
+  - mutually exclusive
+  - zero fill
+  - qemu
+  - virtio-blk
+  - WRITE_ZEROES
+  - raw image
+affected_build_systems:
+  - meson
+  - cmake
+  - autotools
+affected_compilers:
+  - clang
+affected_platforms:
+  - OHOS
+  - aarch64-linux-ohos
+first_seen:
+  package: qemu
+  version: "9.2.4"
+  date: "2026-09-27"
+last_updated: "2026-09-27"
+hit_count: 0
+verified: false
+verify_builds: []
+prescan_pattern: "PUNCH_HOLE|FALLOC_FL_PUNCH_HOLE|F_SETLK"
+root_cause: |-
+  OHOS 上没有**同时**满足「支持 punch-hole」与「支持文件锁」的可写挂载点，二者互斥：
+
+    | 挂载点  | fallocate(PUNCH_HOLE) | fcntl(F_SETLK) |
+    |---------|----------------------|----------------|
+    | HMDFS   | EACCES（不支持）      | OK             |
+    | /dev/shm| OK                    | EPERM（不支持）|
+
+  实测命令级事实（本机 aarch64-linux-ohos, HongMeng Kernel 1.12.0）：
+  HMDFS 文件 fallocate(punch) 返 EACCES；/dev/shm 文件 fcntl(F_SETLK) 返
+  EPERM（F_OFD_SETLK 同样 EPERM）。另有第三种误导路径：把文件放到
+  /dev/shm 后 QEMU 立即报 `Failed to lock byte 100`（QEMU 对每个 raw 映像
+  在 RAW_LOCK_PERM_BASE 起的字节上加锁，file-posix.c:876），使测试以
+  「QEMU 未连上 qtest socket」的 50s 超时收场——表面现象与锁毫无关联，
+  极易误判为 socket/环境问题。
+
+  因此「把临时文件挪到 /dev/shm 就解决了」是错误解法：它把「缺 punch」
+  换成了「缺锁」。
+rec_approach: |-
+  1. 先确认该文件**是否需要文件锁**（QEMU/数据库/日志轮转类写者通常会锁），
+     再选挂载点；不能只看 fallocate 一项能力；
+  2. 文件留在**锁可用**的挂载点（OHOS 上是 HMDFS），把缺失的原语
+     （punch-hole / zero-range）用**零填充**代偿——两者是同一契约的两种
+     实现（「该区间读回为零」），若上游断言是「读回为零」则语义等价；
+  3. 代偿只对**真正的「不支持」错误码**生效（EACCES/EPERM/ENOTSUP/
+     EOPNOTSUPP），真实错误（EBADF/EIO/ENOSPC）仍须透传，否则会掩盖故障；
+  4. 若代偿实现为 LD_PRELOAD 垫片，注意 OHOS 上报的是 **EACCES**
+     （"Permission denied"）而不总是 EPERM（"Operation not permitted"）
+     ——只容忍 EPERM 会让整个代偿静默失效（本包实测踩到）。
+solution: |-
+  qemu 9.2.4 的 virtio-blk WRITE_ZEROES 路径（tests/qtest/virtio-blk-test.c
+  断言 status == 0）实例：临时 raw 映像由 glib g_file_open_tmp 创建，QEMU 打开
+  时对 byte 100 加锁，随后 WRITE_ZEROES 需要 punch-hole。
+
+  验证 harness 的处置（不随配方发布）：保留映像在 HMDFS，LD_PRELOAD 垫片拦
+  fallocate，仅当真实调用返回 EACCES/EPERM/ENOTSUP/EOPNOTSUPP 且 mode 含
+  PUNCH_HOLE/ZERO_RANGE 时改为 pwrite 零填充，并遵循 FALLOC_FL_KEEP_SIZE
+  （非 KEEP_SIZE 时按真实语义把文件扩到 offset+len）。
+
+  ```c
+  ret = real_fallocate(fd, mode, offset, len);
+  if (ret == 0) return 0;
+  saved = errno;
+  if (!(mode & (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_ZERO_RANGE))) { errno = saved; return -1; }
+  if (saved != EACCES && saved != EPERM && saved != EOPNOTSUPP && saved != ENOTSUP) {
+      errno = saved; return -1;   /* 真实错误必须透传 */
+  }
+  return zero_fill(fd, mode, offset, len);
+  ```
+
+  实测：垫片前 WRITE_ZEROES 断言失败（status 1 != 0）；垫片后通过，且
+  byte-100 锁在 HMDFS 上仍为 OK。
+fallback: |-
+  若上游断言的是「稀疏性」而非「读回为零」（例如比对 st_blocks 或磁盘占用），
+  零填充不构成等价代偿，此时应改为裁剪该用例或标注 UNSUPPORTED；
+  若写者不要求文件锁，可直接把文件放到 /dev/shm 用真实 punch-hole。
+reference_builds: []
+related_docs:
+  - DRAFT-libaudit-2.7.4-hmdfs-fallocate
+  - DRAFT-postgresql-fallocate-eacces-filezero

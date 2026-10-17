@@ -1,0 +1,28 @@
+id:                     DRAFT-10861-SPLITVT-166-TIOCSCTTY-NEEDS-SESSION-LEADER
+trigger_tool:           conan|make|clang
+phase:                  runtime
+error_signature:        '输入被回显但命令不执行|子窗口无 shell 提示符|typed command echoed without execution|no prompt in child window'
+
+severity:               2
+category:               platform|portability|pty|process-control
+match_keywords:         'splitvt, screen, tmux, dvtm, svkbd, pty, openpty, TIOCSCTTY, setsid, setpgid, TIOCNOTTY, dropctty, controlling terminal, session leader, ldisc'
+
+title:                  'fork 后想夺取 pty 控制终端的子进程必须先成为会话首进程：`ioctl(TIOCSCTTY)` 在非会话首进程上静默失效'
+
+root_cause:             'POSIX 规定 `ioctl(fd, TIOCSCTTY, 0)` 只对**会话首进程**生效。老代码常把 `setsid()` 放在 `_POSIX_SOURCE` 之类的旧编译分支里，其它分支只走 `setpgid()` + `TIOCNOTTY`——`setpgid()` 只改进程组、不创建新会话，于是 fork 出的子进程在本平台上永远不是会话首进程，`TIOCSCTTY` 拿不到控制终端。后果是静默的：子窗口里的 shell 认定自己是后台作业，不取前台、不接管 tty，用户敲进去的行被 ldisc 回显，却永远不会被执行。编译与链接全程无错误，因此该缺陷不会被任何构建门禁发现，只在真 pty 上跑一条命令才暴露。'
+
+affected_scope:         '所有"fork 子进程 + 在子进程里用 TIOCSCTTY 绑定 pty"的程序（终端多路复用器、屏幕键盘、pty 包装器一类），在把 legacy System V/`sgtty` 分支改接到本平台时都会遇到；与具体包无关，与"setsid 是否被编译条件挡掉"有关。'
+
+verification_cmd:       '在同一份源码上只改 `dropctty()` 的条件一支，各构建一次，然后在真 pty 里跑：splitvt -norc -upper /bin/sh -lower "/bin/echo LOK"，向 master 写入 "echo XOLY\\r"；未扩支时子窗口无 `$` 提示符且只回显 `echo XOLY` 不输出 `XOLY`，扩支后出现 `$ ` 并输出 `XOLY`。'
+
+rec_priority:           1
+rec_approach:           gate-setsid-on-TIOCSCTTY-capability-not-legacy-macro
+
+rec_description:        '把"是否调用 `setsid()`"的判据从旧的编译期宏（`_POSIX_SOURCE` 等）改成**能力判据**：凡系统提供 `TIOCSCTTY` 者，一律在子进程里先 `setsid()` 再 `ioctl(0, TIOCSCTTY, 0)`，之后保留原有的 `TIOCNOTTY` 语义不变。⛔ 不要用平台宏（`__OHOS__` 一类）做分支，也不要去放宽/删除前台判定；`TIOCSCTTY` 由系统 `<sys/ioctl.h>` 直接给出，本平台实测已定义且可用 ⇒ 判据直接用 `defined(TIOCSCTTY)`，不需要额外的 configure 探测。'
+
+rec_command:            '在 `misc.c` 的 `dropctty()` 里，把条件链 `#if defined(_POSIX_SOURCE) || defined(SOLARIS) || defined(__386BSD__) || defined(__FreeBSD__)` 的链尾追加 `|| defined(TIOCSCTTY)`，其余分支一字不动。判据是「该系统有没有 TIOCSCTTY 这个宏」，不是平台名：未定义它的老平台仍走 `TIOCNOTTY` 那支、行为完全不变；凡定义它的系统（含 Linux/glibc 与本设备）一律改走 `setsid()` 支——这正是本条想要的效果，也是为什么不能用 `_POSIX_SOURCE` 一类旧宏替代。配套证据见 0005 补丁与 notes.md §4。'
+
+rec_auto_fix:           false
+
+source_pr:              PRE_CREATE
+source_commit:          待 PR 创建后由让渡窗回填

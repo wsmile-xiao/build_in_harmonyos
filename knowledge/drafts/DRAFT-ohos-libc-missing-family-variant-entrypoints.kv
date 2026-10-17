@@ -1,0 +1,79 @@
+#====================================================================
+# DRAFT-ohos-libc-missing-family-variant-entrypoints.kv
+# OHOS libc 只提供 utmp/pwd 两族 API 的基础迭代器，缺少 getutid/getpwent_r
+# 等"同族变体"入口：编译期隐式声明报错、链接期 undefined symbol
+# 触发事件: trousers 0.3.15 / tpm-tools 1.3.9.2 HarmonyOS PC 适配
+#           （archives/t/trousers/0.3.15、archives/t/tpm-tools/1.3.9.2）
+#====================================================================
+
+id:                     DRAFT-ohos-libc-missing-family-variant-entrypoints
+trigger_tool:           clang|make|link|ld
+phase:                  compiling|linking
+error_signature:        incompatible integer to pointer conversion assigning to 'struct utmp \*'|
+                        use of undeclared identifier 'getutid'|
+                        undefined symbol: getutid|
+                        undefined symbol: getpwent_r|
+                        did you mean: getutent
+
+severity:               2
+category:               compat|libc|portability|linking
+match_keywords:         getutid, getutent, setutent, endutent, utmp, utmpx, RUN_LVL,
+                        getpwent_r, getpwent, setpwent, endpwent, struct passwd,
+                        musl, OHOS libc 裁剪, implicit function declaration, undefined symbol
+title:                  OHOS libc 缺少 utmp/pwd 族的"变体入口"（getutid/getpwent_r）：用基础迭代器等价改写
+
+root_cause: >
+  OHOS 的 libc（musl 系）对 utmp/pwd 两族只实现了基础迭代器接口
+  （utmp：setutent/getutent/endutent；pwd：setpwent/getpwent/endpwent），
+  没有实现同族里的"变体入口"：
+    * getutid()/getutxid()：按记录类型定位 utmp 记录的查询入口，
+      SDK sysroot 的 libc.so 里既无符号也无原型。编译期表现为隐式声明
+      （int 返回值赋给 struct utmp * 时 clang 直接报
+      "incompatible integer to pointer conversion"），即使补上声明也会在
+      链接期报 "undefined symbol: getutid"。
+    * getpwent_r()：可重入版 passwd 遍历入口，非 POSIX，sysroot 里同样
+      没有符号；消费者链接静态库时才会暴露 "undefined symbol: getpwent_r"。
+  注意与 E121 的区别：E121 描述的是"有 utmp、没有 utmpx 整族"，
+  本条描述的是"族存在、族内高阶变体被裁掉"，两者处置方式不同。
+affected_scope: >
+  所有直接调用 utmp 族查询接口（getutid/getutxid）或可重入 passwd
+  接口（getpwent_r、getpwnam_r 的 *_r 变体同理需逐个核对）的库在 OHOS PC
+  上的适配：trousers 的 tcsd/platform.c、tspi/ps/tspps.c 均是实例；
+  从 glibc 环境移植的老代码（登录/终端/账户相关组件）命中概率高。
+  影响面：编译期失败或"库编过、消费者链接失败"。
+verification_cmd: >
+  # 1) 先查符号是否被 libc 导出（这一步决定补声明有没有意义）
+  SYSR=$(dirname $(clang -print-file-name=libc.so))
+  nm -D "$SYSR/libc.so" | grep -wE 'getutid|getutxid|getpwent_r|getutent|getpwent'
+  # 2) 再查头文件是否声明（有的平台"有符号没原型"）
+  grep -rn 'getutid\|getpwent_r' "$(dirname $SYSR)/include" 2>/dev/null
+  # 3) 改完后复验
+  grep -c 'getutent()' src/tcsd/platform.c     # 期望 >= 1，且不再出现 getutid
+  conan create archives/t/trousers/0.3.15 -pr:h=ci/conan/profiles/ohos-aarch64 \
+    -pr:b=ci/conan/profiles/ohos-aarch64       # 期望消费者 test_package 链接通过
+
+rec_priority:           1
+rec_approach:           source-patch|posix-equivalent
+rec_description: >
+  按"族"用基础迭代器等价改写，不引入任何平台条件编译宏（R8）：
+    * utmp 查询：把 getutid(&ut)（按 ut_type 定位）改为
+      setutent() + while ((next = getutent())) { if (next->ut_type != RUN_LVL) continue; ... } + endutent()，
+      语义等价（getutid 本来就是"按类型/ID 过滤 utmp 记录"）。
+    * pwd 遍历：把 getpwent_r(&pw, buf, size, &pwp) 改为
+      setpwent() + while ((pwp = getpwent())) + endpwent()；不可重入的
+      差异在单线程初始化路径上可接受（上游 BSD 分支本来就是这么写的）。
+    * 若只是缺原型（符号存在），优先补一个 extern 原型而不是改语义；
+      但本平台两者都缺，所以选择等价改写。
+  同一族里的 getpass()（无回显读口令，非 POSIX）也用 termios 等价实现
+  替代（已有独立条目覆盖），说明这类"族内变体缺失"应逐个按族盘点，
+  不要只补一个就以为解决了。
+rec_command: >
+  # utmp：定位 getutid/getutxid 调用点，改为基础迭代器 + ut_type 过滤
+  grep -rn 'getutid\|getutxid' src/
+  # pwd：定位 getpwent_r 调用点，改为 setpwent/getpwent/endpwent
+  grep -rn 'getpwent_r' src/
+  # 症状（本条目来源）已由上述源码改写消除，无需新增平台宏
+principles:             P004
+doc_file:               knowledge/drafts/DRAFT-ohos-libc-missing-family-variant-entrypoints.md
+last_updated:           2026-10-04
+source_event:           archives/t/trousers/0.3.15, archives/t/tpm-tools/1.3.9.2

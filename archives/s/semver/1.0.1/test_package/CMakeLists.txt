@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_semver CXX)
+find_package(semver REQUIRED)
+add_executable(test_semver test.cpp)
+target_link_libraries(test_semver PRIVATE semver::semver)
+target_compile_features(test_semver PRIVATE cxx_std_17)
+enable_testing()
+add_test(NAME test_semver COMMAND test_semver)

@@ -1,0 +1,98 @@
+# ═══ Draft knowledge entry — toybox xxd -i 只输出裸 hex 体，生成的资源头文件缺声明与 _len 变量 ═══
+# Timestamp: 2026-09-22
+# Software: metaeuk 7-bba0d80（通用：上游构建期用 xxd -i 把数据/脚本资源内嵌为 C 头文件的包——
+#           MMseqs2 系 compile_resource、以及任何 CMake/Make 里出现 `xxd -i` 生成 *.h 的项目）
+# Gate: 配方 build() 内真实 cmake.configure + cmake.build（conan create / CI 同源）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+# 判重：draft-review 未见同类条目。toybox 族既有条目覆盖 sed/expr（E010）、ash（E043）、
+#       install（E098/E182/E188）、cat（E106）；“xxd -i 输出契约差异”未入库。
+
+id: DRAFT-metaeuk-7-bba0d80-toybox-xxd-i-bare-hex-resource-header
+title: OHOS 设备 /usr/bin/xxd 是 toybox 实现——`xxd -i` 只输出裸 hex 数组体（无 `unsigned char 名[] = {...}` 声明行、无 `名_len` 长度变量），与 vim xxd 的输出契约不同 ⇒ 一切“构建期用 xxd -i 把资源内嵌为 C 头文件”的上游（MMseqs2 compile_resource 等）生成的头文件必缺声明，#include 它的编译单元连锁报错
+trigger_tool: cmake / xxd / make
+phase: compilation
+error_signature: |-
+  build/Release/lib/mmseqs/generated/CovSeqidQscPercMinDiag.lib.h:1:3: error: expected unqualified-id
+  error: unknown type name 'PrefilteringIndexData'; did you mean 'PrefilteringIndexReader'?
+  error: use of undeclared identifier 'CovSeqidQscPercMinDiag_lib'
+  error: use of undeclared identifier 'CovSeqidQscPercMinDiag_lib_len'
+severity: 2
+root_cause: OHOS /usr/bin/xxd 为 toybox 实现，-i 只输出裸 hex 体、缺 vim xxd 的声明行与 _len 变量，依赖该输出契约的构建期资源头生成（MMseqs2 compile_resource）产出无声明头文件致编译连锁失败
+category: platform|build-system|code-generation|toybox
+match_keywords: toybox xxd, xxd -i, 裸 hex, 资源内嵌, generated header, expected unqualified-id,
+  undeclared identifier, compile_resource, MMseqs2, xxdi.pl, vim xxd 输出契约, 名_len 缺失
+keywords: xxd 输出差异, 生成头缺声明, CMake add_custom_command, DEPENDS 不触发再生,
+  清缓存重建, perl 等价实现, 静态资源内嵌
+prescan_pattern: 'xxd\s+-i|xxdi\.pl|compile_resource|GENERATED_OUTPUT_HEADERS'
+prescan_globs: "**/CMakeLists.txt, **/*.cmake, archives/*/*/*/conanfile.py"
+safety_boundary: |-
+  **仅适用**于“构建期把资源文件转成 C 头文件”且工具链调用 `xxd -i`（或其 perl 等价 xxdi.pl）的包；
+  不涉及运行期、也不涉及 `xxd` 非 -i 模式（纯 hex 查看与声明生成无关）。
+  反例一：上游自己带 vim 风格 xxd 或对输出做后处理补声明的，不会触发。
+  反例二：资源头是源码内直接提交（非构建期生成）的包，toybox xxd 不参与，不适用。
+  解除条件：上游把资源内嵌改为 cmake -P 脚本/Python 等不依赖 xxd 输出契约的方案。
+approach: force-xxdi-pl-fallback-or-vim-xxd
+rec_priority: 1
+rec_approach: patch-resource-compiler-to-use-xxdi-pl
+rec_description: |-
+  在上游的资源编译 CMake 模块里跳过 `find_program(XXD_EXECUTABLE xxd)`（置空即可），
+  强制走其自带的 xxdi.pl 兜底分支——它是 vim xxd -i 的 perl 等价实现，输出含完整
+  `unsigned char 名[] = {...}` 声明与 `名_len` 变量，命名规则与 vim xxd 一致（非字母数字转下划线）。
+  前提：perl 在构建 env PATH 中（本机 /data/service/hnp/bin/perl，profile buildenv 已含）。
+  若上游无 xxdi.pl 类兜底，改为给生成命令补一个自写的 sh/perl 包装，输出 vim 契约三件套
+  （声明行、hex 体、_len 行）。
+  ⚠ **清缓存重建**：生成的坏头文件是 add_custom_command 的 OUTPUT，只改生成脚本而 DEPENDS
+  不变时 CMake 不会重新生成——必须删掉该包的 conan 缓存构建树再跑，否则旧坏头仍存活、
+  同签名复现。
+rec_command: |-
+  # MMseqsResourceCompiler.cmake 补丁核心（一行替换）
+  - find_program(XXD_EXECUTABLE xxd)
+  + set(XXD_EXECUTABLE "")   # 跳过 toybox xxd，走下方 xxdi.pl 分支（perl 语义与 vim xxd -i 一致）
+rec_auto_fix: false
+rec_impl: 配方侧（patches/ + conandata.yml，改的是上游版本化 cmake 模块）
+fallback_priority: 2
+fallback_approach: pre-generate-headers-in-recipe
+fallback_description: |-
+  若不能改上游 cmake 模块：在 build() 之前用配方自带的生成逻辑预生成全部资源头并让
+  add_custom_command 视 OUTPUT 为最新（或生成到相同路径）；代价是要枚举上游全部资源清单，
+  上游升级时易漏，仅作兜底。
+fallback_command: for f in data/resources/*; do perl xxdi.pl "$f" > "generated/$(basename $f).h"; done
+fallback_auto_fix: false
+fallback_impl: 配方侧（生成物预置，需留证）
+principles: |-
+  OHOS 的 /usr/bin 基础命令是 toybox 替身，**输出契约差异**（不只是“缺命令”）也能炸构建：
+  E098/E188 是“命令不存在/选项缺失”，本条是“命令存在但输出少了几行”。判症第一步
+  不是改配方参数，而是直接跑一遍生成命令看产物形态（`xxd -i t.txt` 一眼定真凶）。
+  连锁报错（unknown type / undeclared identifier）会指向业务头文件，与真正的病灶
+  （generated/*.h 首行）离得很远——永远先看**最早生成的文件**的内容。
+caused_by: toybox 0.8.12 的 xxd 实现只覆盖 hex dump 主功能，-i 模式省略了 vim 版的声明行与长度变量输出
+causes: 依赖 vim xxd -i 输出契约的构建期代码生成在 OHOS 上产出无声明头文件，编译连锁失败；
+  且因 add_custom_command 的 OUTPUT 已存在，仅修生成脚本不清缓存时坏产物持续存活
+similar_to: |-
+  E010（toybox sed/expr 不支持 POSIX 特性）：同属“toybox 替身与 GNU 行为差异”家族，
+  但那是选项/特性缺失，本条是输出契约缺失；E098/E182/E188（toybox install）与 E106
+  （toybox cat 与 GNU cat 的 stdout 差异）同理，均不涉及 xxd。
+  DRAFT-E549（toybox sed）为不同工具不同机制。
+conflicts_with:
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-metaeuk-7-bba0d80-toybox-xxd-i-bare-hex-resource-header.md
+last_updated: 2026-09-22
+source_event: |-
+  metaeuk 7-bba0d80 实测（设备，2026-09-22 10:0x）：conan create 在 40% 处失败，首错
+  generated/CovSeqidQscPercMinDiag.lib.h:1:3 expected unqualified-id；查看产物文件
+  只有 `  0x30, 0x2e, ...` 裸 hex（PAM30.out.h 等全部生成头同形态，缺声明与 _len）。
+  归因链：lib/mmseqs/cmake/MMseqsResourceCompiler.cmake 用 `xxd -i` + sed
+  （只替换 unsigned char 行）生成资源头 ⇒ /usr/bin/xxd 为 toybox 0.8.12，
+  `printf 'AB' | xxd -i t.txt` 实测只输出 `  0x41, 0x42`（vim 版应输出
+  `unsigned char _t_txt[] = {...}` + `_t_txt_len = 2`）。修复=补丁 0001 置空
+  XXD_EXECUTABLE 强制走 xxdi.pl 分支（`perl xxdi.pl t.txt` 实测输出完整声明与 _len，
+  变量名规则与 vim xxd 一致），patch --dry-run PASS。
+  证据：~/tmp/uc2/DS-30-metaeuk/、reports/conan-create.log（首错原文）、
+  ~/tmp/uc2/DS-30/probe-cppflags/（xxd/xxdi.pl 对照产物）。
+authors: DS-30
+source_pr: metaeuk 7-bba0d80 交付 PR（随本 PR 原子申报）
+source_commit: (提交后回填)
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 1.0
+metrics_last_used: 2026-09-22

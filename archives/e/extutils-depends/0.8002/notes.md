@@ -4,9 +4,9 @@
 
 - **软件名称**：ExtUtils::Depends
 - **版本**：0.8002
-- **编译日期**：2026-06-10
+- **编译日期**：2026-08-06
 - **编译系统**：Perl Module Build
-- **状态**：published
+- **状态**：built
 
 ## 编译过程
 
@@ -219,9 +219,8 @@ perl -e 'use ExtUtils::Depends; print "OK\n"'
 - [ExtUtils::Depends 文档](https://metacpan.org/pod/ExtUtils::Depends)
 - [Perl XS 开发](https://perldoc.perl.org/perlxs)
 - [ExtUtils::MakeMaker](https://metacpan.org/pod/ExtUtils::MakeMaker)
-
+**预编译包**: ExtUtils-Depends-0.8002-ohos-aarch64.tar.gz
 ---
 
-**编译结束**: 2026-06-10
-**最终状态**: published
-**预编译包**: ExtUtils-Depends-0.8002-ohos-aarch64.tar.gz
+**编译结束**: 2026-08-06 09:37
+**最终状态**: built

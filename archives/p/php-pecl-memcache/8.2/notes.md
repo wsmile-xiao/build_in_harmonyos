@@ -79,5 +79,5 @@ ls ~/usr/local/lib/php/extensions/no-debug-non-zts-20250925/memcache.so
 5. make install DESTDIR 模式不适用于 PHP 扩展，需手动 staging
 ---
 
-**编译结束**: 2026-06-12 18:41
+**编译结束**: 2026-09-04 02:10
 **最终状态**: built

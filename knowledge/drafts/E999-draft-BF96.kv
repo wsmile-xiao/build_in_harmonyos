@@ -1,0 +1,107 @@
+#====================================================================
+# E999 draft — conan glib 2.88 组件化配方的 PkgConfigDeps 消费三坑
+# 触发事件: libcloudproviders 0.4.0 HarmonyOS PC 适配（meson + glib/2.88.3.1）
+# 差异点: E348（glib2 单 pkg_config_name）与 E216（glib 2.84 flat cpp_info）
+#         未覆盖：①组件名（glib/gio）≠ pkg_config_name（glib-2.0/gio-2.0）
+#         导致 cpp_info.requires 误引用；②glib 组件 requires 内联
+#         proxy-libintl 的 -lintl，传递依赖不可见 → 链接期缺 -L；
+#         ③gio-unix-2.0.pc 组件未声明，meson dependency 失败。
+# 格式规则见 _template.kv
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E999
+trigger_tool:           meson|conan|pkg-config|link
+phase:                  configuration|linking
+error_signature:        unable to find library -lintl|Component 'glib::glib-2.0' not found|No package 'gio-unix-2\.0' found|Error in generator 'CMakeDeps'.*Component.*not found
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               build-system, pkg-config, dependency, conan
+match_keywords:         glib, glib-2.0, gio-2.0, gio-unix-2.0, PkgConfigDeps,
+                        pkg_config_name, cpp_info.requires, proxy-libintl,
+                        libintl, -lintl, unable to find library, components,
+                        CMakeDeps, meson dependency
+title:                  glib 2.88 组件化 conan 配方 PkgConfigDeps/CMakeDeps 消费三坑：组件名≠pkg_config_name、内联 -lintl 缺 -L、gir 组件未声明的 gio-unix pc
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: glib≥2.88 的 conan 配方（archives/g/glib/2.88.x）改用多组件声明：
+                components[] 名是 glib/gobject/gio…（无 -2.0 后缀），pkg_config_name
+                才是 glib-2.0/gio-2.0（glib 2.84 及更早是 flat cpp_info 或组件名≡pc 名）。
+                三个独立坑叠加：(1) 消费方 package_info().cpp_info.requires 必须引用
+                组件名（glib::glib、glib::gio），写 glib::glib-2.0 会报
+                "Component 'glib::glib-2.0' not found"（CMakeDeps 生成时），meson
+                侧 find_package 用 cmake_file_name（glib2）；(2) glib 组件 requires
+                内联 proxy-libintl::proxy-libintl 使 PkgConfigDeps 生成的 glib-2.0.pc
+                带裸 -lintl，但 proxy-libintl 是传递依赖、在消费方 dependencies.host
+                不可见，PkgConfigDeps 不生成其 .pc/不附加 -L → 链接期
+                "unable to find library -lintl"；(3) glib 包内 gio-unix-2.0.pc 存在
+                但配方未声明该组件，PkgConfigDeps 不生成 → meson dependency('gio-unix-2.0') 失败。
+
+affected_scope:         所有用 meson/CMake 依赖 conan glib/2.88+ 的库
+                        （GNOME/GLib 生态库适用），消费端 package_info()
+                        声明与本配方同名库的 requires 传递时。
+verification_cmd:   cd ${ARCHIVE_DIR} && conan create . -pr:h=ci/conan/profiles/ohos-aarch64 \
+                        -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing 2>&1 | grep -E "built|unable to find|not found"
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           glib288-component-consumer-fix
+rec_description: >
+  ①package_info().cpp_info.requires 写作组件名（glib::glib、glib::gio），
+  不带 -2.0 后缀；test_package find_package 用 cmake_file_name（glib2）。
+  ②显式 self.requires("proxy-libintl/0.5", options={"shared": False}) +
+  cpp_info.requires 追加 "proxy-libintl::proxy-libintl"（无 components 包用
+  pkg::pkg 形式），使 PkgConfigDeps 生成 intl.pc / 附加 -L，链接期 -lintl 可解析。
+  ③generate() 从 glib 包 lib/pkgconfig 复制 gio-unix-2.0.pc 到 generators_folder
+  并把 prefix=/ 重写为实际包路径（E348 复制改名式别名同款；不可只加
+  pkg_config_path 不重写 prefix，meson 依赖目录变量时 prefix 必须为真实路径）。
+rec_command: >
+  # 配方代码示例（尽量贴合实际）
+  # def requirements(self):
+  #     self.requires("glib/2.88.3.1", transitive_headers=True, transitive_libs=True)
+  #     self.requires("proxy-libintl/0.5", options={"shared": False})
+  # def package_info(self):
+  #     self.cpp_info.requires = ["glib::glib", "glib::gio", "proxy-libintl::proxy-libintl"]
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      use-glib-2.84-pattern
+fallback_description:   若 glib 版本可自由选择，退回 glib/2.84.x（组件名≡pkg_config_name，
+                        无内联 -lintl 链接坑，E216 有 CMakeDeps include 传播坑需注意），
+                        或参考已合入 accountsservice 26.27.3 的 2.84 消费模式。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+forbid_1_pattern:       cpp_info\.requires.*glib::glib-2\.0|find_package\(glib\b|find_package\(glib-2\.0
+forbid_1_reason:        glib 2.88 组件名没有 -2.0 后缀，写组件名带后缀 CMakeDeps 直接报错；
+                        find_package 用 cmake_file_name（glib2）而非组件名。
+forbid_1_consequence:   消费端 CMakeDeps 生成失败（Component not found），test_package 编译不过。
+forbid_2_pattern:       visible=False.*proxy-libintl|requires\(.*proxy-libintl.*visible
+forbid_2_reason:        visible=False 会从消费方 dependencies.host 移除 proxy-libintl，
+                        PkgConfigDeps 不生成其 .pc，-lintl 的 -L 又丢失（实测链接失败）。
+forbid_2_consequence:   链接期 unable to find library -lintl 复现，且 lint 报
+                        "direct dependency not used" 或反向可见性混乱。
+principles:             P014
+causes:                 []
+caused_by:              []
+similar_to:             E348, E216, E508
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               doc/E999.md
+last_updated:           2026-09-18
+source_event:           libcloudproviders 0.4.0 HarmonyOS PC 适配（meson + glib/2.88.3.1）
+authors:                default <noreply@gitcode.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-18
+
+draft:                  true
+contributor_id:         BF96

@@ -92,3 +92,13 @@ tar czf libspng-0.7.4-ohos-aarch64.tar.gz lib/ include/
 2. 当 meson 不可用时，CMake 是可行的替代方案
 3. 手动测试可以有效验证核心功能
 4. 记录真实的测试执行时间和结果至关重要
+---
+
+**编译结束**: 2026-09-04 23:42
+**最终状态**: built
+
+## 2026-09-05 CI 修复记录
+- PR #8200 CI checkout-pr 失败根因：test_package 内嵌 202 个二进制 PNG → CI patch 机制无法应用二进制 diff
+- 修复：test_package 改为零二进制——test.c 用 zlib compress2 在内存构造合法 PNG（手写 IHDR/IDAT/IEND chunk + CRC32），spng 解码后逐像素比对
+- 上游 203 用例全量引入方案在 CI 不可行（二进制限制），改为 1 CTest / 6 assertions 的实质 API 验证（R34 合规）
+- libpng 1.6.39 先例同模式：test_type=explicit + 源码级 API 测试，零二进制

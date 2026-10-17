@@ -1,0 +1,176 @@
+--- a/src/librecast.c
++++ b/src/librecast.c
+@@ -334,21 +334,23 @@
+ }
+ 
+ int lc_channel_set_pub_key(lc_channel_t *chan, unsigned char *key, size_t len)
+ {
+ 	lc_key_t k = { .key = key, .keylen = len };
+ 	return lc_channel_setkey(chan, &k, LC_CODE_PUBK);
+ }
+ 
+ static void lc_close_nack_logger(lc_channel_logging_t *logging)
+ {
+-	pthread_cancel(logging->nack_thread);
++	/* OHOS/musl has no working pthread_cancel(): ask the logger to stop and
++	 * wait for it (it polls the socket with a 1s timeout, so it exits promptly). */
++	logging->stop = 1;
+ 	pthread_join(logging->nack_thread, NULL);
+ 	pthread_mutex_destroy(&logging->mutex);
+ 	while (logging->oldest) {
+ 		lc_packet_log_t * go = logging->oldest;
+ 		logging->oldest = go->next;
+ 		free(go);
+ 	}
+ 	free(logging);
+ }
+ 
+@@ -721,22 +723,24 @@
+ 	if (logging->chan_nack) lc_channel_free(logging->chan_nack);
+ 	if (logging->sock_nack) lc_socket_close(logging->sock_nack);
+ 	free(logging);
+ 	errno = saveerrno;
+ 	return -1;
+ }
+ 
+ static void *nack_thread(void * _logging)
+ {
+ 	lc_channel_logging_t * logging = _logging;
++#if !(defined(__linux__) && !defined(__GLIBC__))
+ 	pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+-	while (1) {
++#endif
++	while (!logging->stop) {
+ 		/* wait for a NACK request for up to a second; if one arrives, process it;
+ 		 * also go through the list of logged messages to see if anything needs
+ 		 * to be removed */
+ 		struct pollfd pfd = {
+ 			.fd = logging->sock_nack->sock,
+ 			.events = POLLIN,
+ 		};
+ 		int ok;
+ 		ok = poll(&pfd, 1, 1000);
+ 		if (ok > 0) {
+@@ -828,21 +832,23 @@
+ 	size_t len = 0;
+ 	size_t ohead = 0;
+ 	ssize_t bytes = 0;
+ 	struct timespec t = {0};
+ 	int state = 0;
+ 	int err = 0;
+ 
+ 	if (!chan->sock) return LC_ERROR_SOCKET_REQUIRED;
+ 	if (msg->len > 0 && !msg->data) return LC_ERROR_MESSAGE_EMPTY;
+ 
++#if !(defined(__linux__) && !defined(__GLIBC__))
+ 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &state);
++#endif
+ 
+ 	head = calloc(1, sizeof(lc_message_head_t));
+ 	if (!head) return LC_ERROR_MALLOC;
+ 
+ 	if (msg->timestamp)
+ 		head->timestamp = htobe64(msg->timestamp);
+ 	else if (!clock_gettime(CLOCK_REALTIME, &t))
+ 		head->timestamp = htobe64(t.tv_sec * 1000000000 + t.tv_nsec);
+ 
+ 	head->seq = htobe64(++chan->seq);
+@@ -879,21 +885,23 @@
+ 
+ 	if (chan->logging)
+ 		/* chan->seq could have been changed by another thread in the meantime,
+ 		 * so use head->seq which we know hasn't */
+ 		lc_channel_logmsg(chan->logging, buf, len + ohead, be64toh(head->seq));
+ 	bytes = chan_sendto(chan, buf, len + ohead, 0, (struct sockaddr *)sa, sizeof(struct sockaddr_in6));
+ 	if (bytes == -1) err = errno;
+ 
+ 	free(head);
+ 	free(buf);
++#if !(defined(__linux__) && !defined(__GLIBC__))
+ 	pthread_setcancelstate(state, NULL);
++#endif
+ 
+ 	if (err) errno = err;
+ 	return bytes;
+ }
+ 
+ #ifndef IPV6_MULTICAST_ALL
+ static int lc_socket_group_joined(lc_socket_t *sock, struct in6_addr *grp)
+ {
+ 	for (lc_grplist_t *g = sock->grps; g; g = g->next) {
+ 		if (!memcmp(&g->grp, grp, sizeof(struct in6_addr))) return 1;
+@@ -935,21 +943,23 @@
+ 	iov[0].iov_base = buf;
+ 	iov[0].iov_len = sizeof buf;
+ 	msgh.msg_control = ctl;
+ 	msgh.msg_controllen = sizeof ctl;
+ 	msgh.msg_name = &from;
+ 	msgh.msg_namelen = sizeof from;
+ 	msgh.msg_iov = iov;
+ 	msgh.msg_iovlen = 1;
+ 	if (setsockopt(sock->sock, IPPROTO_IPV6, IPV6_RECVPKTINFO, &opt, sizeof opt) == -1)
+ 		return -1;
++#if !(defined(__linux__) && !defined(__GLIBC__))
+ 	pthread_testcancel();
++#endif
+ 	if ((zi = recvmsg(sock->sock, &msgh, 0)) <= 0) return zi;
+ 	for (cmsg = CMSG_FIRSTHDR(&msgh); cmsg; cmsg = CMSG_NXTHDR(&msgh, cmsg)) {
+ 		if (cmsg->cmsg_type == IPV6_PKTINFO) {
+ 			/* may not be aligned, copy */
+ 			memcpy(&pi, CMSG_DATA(cmsg), sizeof(struct in6_pktinfo));
+ 			/* if we have a channel, we can use it for gap detection */
+ 			chan = lc_channel_by_address(sock->ctx, &pi.ipi6_addr);
+ #ifndef IPV6_MULTICAST_ALL
+ 			/* destination is group we haven't joined - drop it */
+ 			if (!lc_socket_group_joined(sock, &pi.ipi6_addr)) goto recv_again;
+@@ -976,22 +986,25 @@
+ 	if (chan && chan->gap_detect) do_gap_detection(chan->gap_detect, msg->seq);
+ 	if (zi > (ssize_t)sizeof(lc_message_head_t)) {
+ 		memcpy(msg->data, buf + sizeof(lc_message_head_t), msg->len);
+ 	}
+ 	return zi;
+ }
+ 
+ int lc_socket_listen_cancel(lc_socket_t *sock)
+ {
+ 	if (sock->thread) {
+-		if (pthread_cancel(sock->thread))
+-			return LC_ERROR_THREAD_CANCEL;
++		/* Cooperative shutdown: OHOS/musl has no working pthread_cancel(),
++		 * so flag the thread and shut the socket down to release the
++		 * blocking recvmsg() in lc_msg_recv(). */
++		sock->stop = 1;
++		shutdown(sock->sock, SHUT_RDWR);
+ 		if (pthread_join(sock->thread, NULL))
+ 			return LC_ERROR_THREAD_JOIN;
+ 		sock->thread = 0;
+ 	}
+ 	return 0;
+ }
+ 
+ static void lc_op_pong_handler(lc_socket_call_t *sc, lc_message_t *msg)
+ {
+ 	if (sc->callback_msg) sc->callback_msg(msg);
+@@ -1387,21 +1400,21 @@
+ }
+ 
+ void *lc_socket_listen_thread(void *arg)
+ {
+ 	ssize_t len;
+ 	lc_message_t msg = {0};
+ 	lc_socket_call_t *sc = arg;
+ 
+ 	pthread_cleanup_push(free, arg);
+ 	pthread_cleanup_push(lc_msg_free, &msg);
+-	while(1) {
++	while (!sc->sock->stop) {
+ 		len = lc_msg_recv(sc->sock, &msg);
+ 		if (len > 0) {
+ 			msg.bytes = len;
+ 			process_msg(sc, &msg);
+ 		}
+ 		if (len < 0) {
+ 			lc_msg_free(&msg);
+ 			if (sc->callback_err) sc->callback_err(len);
+ 		}
+ 		lc_msg_free(&msg);

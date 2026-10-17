@@ -1,0 +1,116 @@
+# ═══ Draft knowledge entry — out-of-tree(VPATH) 构建下上游 shell 用例用 `pwd` 拼绝对 ${top_srcdir} 期望路径必失败 ═══
+# Timestamp: 2026-09-19
+# Software: libxdg-basedir 1.2.3 (freedesktop.org XDG Base Directory Specification)
+# Gate: L1 (make check) / rule4 真实通过率
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-libxdg-1.2.3-vpath-absolute-top-srcdir-test-paths
+trigger_tool:           make|automake|test
+phase:                  testing
+error_signature:        FAIL: querycf\.2|
+                         FAIL: querydf\.2|
+                         expected:.*/[^ ]*/tests/query|
+                         tests/query-harness\.sh.*fail
+
+severity:               2
+category:               testing, autotools, build-system, portability, conan
+match_keywords:         VPATH, top_srcdir, top_builddir, TESTS_ENVIRONMENT,
+                         query-harness.sh, make check, out-of-tree, in-tree,
+                         pwd, expected, automake parallel-tests, test-suite.log,
+                         libxdg, xdg-basedir, conan
+
+title:                  out-of-tree(VPATH) 构建下上游 shell 用例用 `pwd` 拼绝对
+                         ${top_srcdir} 期望路径必失败（Conan 一律绝对路径 configure）
+
+root_cause: >
+  automake 的 TESTS_ENVIRONMENT 把 top_srcdir=$(top_srcdir) 传进测试脚本，
+  其取值形态取决于 configure 被如何调用：
+    - in-tree / 相对路径调用（`cd build && ../configure`）→ top_srcdir 是相对
+      路径 `..`，脚本里 `"$(pwd)/${top_srcdir}/tests/x"` 恰好能拼回真实路径；
+    - Conan 这类 out-of-tree 构建 → autotools.py 用
+      `configure_cmd = "{}/configure".format(source_folder)` 传入 source_folder
+      的**绝对路径**，top_srcdir 遂为绝对路径，同一句拼成
+      `/<abs>/<abs>/tests/x`（例如 `/src/libxdg//src/libxdg/tests/querycf.2`），
+      期望值与实际输出永不相等。
+  这是上游用例把"相对路径假设"写死在 shell 里的可移植性缺陷，不是库的功能 bug；
+  但它会让 rule4 的"上游实测通过率"永远差 N 个用例，且随 configure 调用方式变化，
+  本地/CI 结论不一致。libxdg 1.2.3 中受影响的是
+  `tests/querycf.2` 与 `tests/querydf.2`（30 个 QUERYTESTS 中的 2 个），
+  表现固定为 29/31。
+affected_scope: >
+  一切"TESTS 是一堆 shell 脚本、脚本内用 `pwd` + `${top_srcdir}` 拼期望路径"的
+  automake 项目，在 Conan / 任何以绝对路径调用 configure 的 out-of-tree 构建下。
+  libxdg 1.2.3 实证（29/31 → 31/31）；判据是脚本里同时出现 `pwd`、`${top_srcdir}`
+  与 `expected=`/`export XDG_*_DIRS=`。
+
+verification_cmd: >
+  # 复现（改 configure 调用方式即可，无需改任何库代码）：
+  #   相对路径调用 → 31/31；绝对路径调用 → 29/31
+  grep -n 'pwd\|top_srcdir\|expected=' tests/querycf.2 tests/querydf.2
+  grep -n 'TOTAL\|FAIL' tests/test-suite.log
+
+rec_priority:           1
+rec_approach:           patch-resolve-srcdir-with-pwd-P
+rec_description: >
+  在 patches/ 里改这 2 个用例：把
+      wd="`pwd`"
+      td="${top_srcdir}/tests"
+      expected="$wd/$td/$basename"
+  换成先解析出真实绝对目录再拼
+      td="$(cd "${top_srcdir}/tests" && pwd -P)"
+      expected="$td/$basename"
+  并把 `export XDG_CONFIG_DIRS="$wd/$td"` 同样改成 `"$td"`（XDG_DATA_DIRS 同理）。
+  `cd ... && pwd -P` 对相对与绝对两种 top_srcdir 都得到同一真实路径，因此
+  in-tree 与 out-of-tree 两种构建方式下用例都成立——补丁可原样向上游提交（P005），
+  只动 tests/ 下的 shell 用例，不触碰被安装的库代码。
+rec_command:            >
+  make -j1 check   # 期望 # TOTAL: 31 / # PASS: 31 / # FAIL: 0
+rec_auto_fix:           false
+rec_impl:               patch
+
+fallback_priority:      2
+fallback_approach:      force-relative-srcdir
+fallback_description:   >
+  绕开补丁，让 configure 相对路径调用（先 cwd 到 build_folder 再跑
+  <absolute>/configure），把 top_srcdir 变回相对路径，用例即可原样通过。
+  但这依赖调用方额外协调、且违反 Conan Autotools 默认行为，属于"绕过而非降级"
+  （P013），还会让同一配方在不同 Conan 版本下行为漂移；仅在补丁不可行时选。
+fallback_command:       （不推荐）
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       TESTS\s*=\s*$|TESTS\s*=\s*testdump\s*$
+forbid_1_reason:        为了让 make check 全绿而删/缩 TESTS 列表 = 少报上游用例数，
+                        直接踩 rule4。
+forbid_1_consequence:   评审判 rule4 少报，PR 驳回返工。
+forbid_2_pattern:       SKIP_TESTS|skip.*querycf|\.skip\b
+forbid_2_reason:        把失败用例标记为 skip 属伪造通过率；rule4 要求如实统计
+                        "执行集 X/X + 未执行 Z"。
+forbid_2_consequence:   通过率造假，评审不可信。
+forbid_3_pattern:       修改.*tests/query-harness\.sh.*比对逻辑|always.*exit 0
+forbid_3_reason:        改公共 harness 的比对逻辑（而非修路径解析）会同时废掉
+                        其余 29 个用例的断言语义。
+forbid_3_consequence:   测试假通过，回归保护失效。
+
+principles:             P005, P003, P013
+causes:                 []
+caused_by:              []
+similar_to:             E434（automake copystamp：in-tree 构建 cp 同文件失败，须
+                        VPATH 构建——本条目方向相反：VPATH 构建让上游用例的路径假设
+                        失效）、E041/E071（VPATH 构建下的 autotools 时间戳/版本
+                        重生成——同属"VPATH 构建暴露上游假设"家族）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-libxdg-1.2.3-vpath-absolute-top-srcdir-test-paths.md
+last_updated:           2026-09-19
+source_event:           archives/l/libxdg/1.2.3 适配（make check 29/31 → 打补丁后 31/31）
+
+authors:                2301_76770579
+source_pr:              11307
+source_commit:          2ff42c0837e89a8d686c4837ac1ade534f8ffb3f
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-19

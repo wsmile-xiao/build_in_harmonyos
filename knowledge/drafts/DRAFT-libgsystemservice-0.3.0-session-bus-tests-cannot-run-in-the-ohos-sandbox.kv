@@ -1,0 +1,187 @@
+# ═══ Draft knowledge entry — 沙箱内跑不了 session bus 的测试：不许删也不许 SKIP，只能如实声明；而且「允许失败」的白名单必须以**失败数量+失败身份**为判据，不能以失败文本为判据 ═══
+# Timestamp: 2026-09-20
+# Software: libgsystemservice 0.3.0 (meson + GTestDBus)
+# Gate: L1 (meson test) / rule4 真实通过率 / rule 1.2 平台限制如实声明
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-libgsystemservice-0.3.0-session-bus-tests-cannot-run-in-the-ohos-sandbox
+trigger_tool:           meson|ninja|conan|dbus-daemon|g_test_dbus_up
+phase:                  test|build
+error_signature:        g_test_dbus_up|GTestDBus|start_daemon|Failed to execute child
+                         process.{0,3}dbus-daemon|Failed to start message bus|
+                         Failed to connect to socket|AF_UNIX|Operation not permitted|
+                         peer-manager.*Fail:.*1|Fail:\s+[1-9]
+severity:               2
+category:               testing,sandbox-limitation,false-pass,allowlist-semantics,dbus
+match_keywords:         g_test_dbus_up, GTestDBus, dbus-daemon, session bus, system bus,
+                        AF_UNIX bind, Operation not permitted, 沙箱 sandbox,
+                        私有总线 private bus, meson 汇总块 summary block,
+                        Fail: 1, 允许失败 allowed failure, 白名单 allowlist,
+                        删测试 delete test, SKIP, rule4 通过率, 如实声明 declare honestly
+
+title:                  有些测试程序在 OHOS 沙箱里**根本跑不起来**（要私有 D-Bus
+                        总线 → 要 dbus-daemon 在 AF_UNIX socket 上监听）。处理方式不是
+                        删掉、也不是 SKIP，而是如实声明；而且「允许它失败」的判据
+                        必须是**失败数量 + 失败身份**——不能依赖失败文本，
+                        因为 GLib 在这条路上有两条给出不同结果的失败路径
+
+root_cause: >
+  两件事，一件是平台事实，一件是判定方法。
+
+  (a) **平台事实**：`g_test_dbus_up ()` 会 fork 一个私有 `dbus-daemon`，
+  `--print-address` 把总线地址写到管道，daemon 在 AF_UNIX socket 上监听。
+  OHOS worker 上这做不到，两条路都断：
+
+    · 沙箱拒绝 AF_UNIX bind（`Operation not permitted`，已记录在
+      `archives/d/dbus/1.14.10.2/manifest.yaml`）；
+    · 已发布的 `dbus/1.14.10` 只构建客户端库，**没有 `dbus-daemon` 二进制**
+      （`dbus/1.14.10.1` 才加 `bin/dbus-daemon`）。
+
+  于是 `libgsystemservice` 的 `peer-manager` 测试程序（2 个用例）在这台机器上
+  **必然失败**。这是平台限制，不是适配缺陷——同一个配方在允许 AF_UNIX
+  且 PATH 里有 `dbus-daemon` 的 Linux 主机上，该程序通过。
+
+  (b) **判定方法**：这里最容易犯的两种错正好相反，而且都坏：
+
+    · **把它删掉/跳过** —— 从 meson 的 `test_programs` 里删一条，或者加
+      SKIP。退出码立刻变 0，报表很好看，但等于「为了让报表好看而减少覆盖」，
+      rule4 会判少报，真实回归保护也被永久删掉。
+    · **只看失败文本** —— 反过来，如果你允许失败、但把「失败原因」写成必须
+      匹配某个字符串，就会踩到 GLib 的实现细节。读 GLib 2.84 的
+      `gio/gtestdbus.c` 的 `start_daemon ()`：
+
+          g_spawn_async_with_pipes_and_fds (NULL, argv, NULL,
+                                            G_SPAWN_DO_NOT_REAP_CHILD |
+                                            G_SPAWN_SEARCH_PATH | ...,
+                                            ..., &error);
+          g_assert_no_error (error);           /* ← 没有 dbus-daemon 时在这里 abort */
+
+      也就是说：**PATH 里没有 `dbus-daemon` 时进程直接 abort**，文本是
+      `Failed to execute child process “dbus-daemon” (No such file or directory)`；
+      而**有 `dbus-daemon` 但 bind 被拒时**，spawn 本身成功，问题发生在后面
+      读地址 / 建连接的路径上（那段没有等价的 `g_assert_no_error` 兜底），
+      失败文本完全是另一套，甚至可能直接段错误。**两条路给不出稳定的错误文本。**
+      把文本当硬门禁 = 迟早产生假阴性（真实回归被当平台限制放过），
+      或者假阳性（平台限制因为措辞变化把构建打红）。
+
+affected_scope: >
+  所有用 GNOME 测试框架 `GTestDBus`（`g_test_dbus_up`）的套件；所有把
+  「私有 session bus」当前提的集成测试（D-Bus 服务、polkit、systemd
+  sd-bus 相关）；以及**任何「允许某个测试失败」的白名单机制**——不论语言或
+  构建系统，白名单的判据都应当是「数量 + 身份」而不是「错误文本」。
+
+verification_cmd: >
+  # 1) 看清是不是「需要 bus」这一类失败
+  grep -n 'g_test_dbus_up\|g_test_dbus_new' <src>/tests/*.c
+  # 2) 沙箱事实：AF_UNIX bind 被拒（不是网络问题，是确定性限制）
+  grep -n 'AF_UNIX\|Operation not permitted' archives/d/*/*/manifest.yaml
+  # 3) 平台有没有 dbus-daemon —— 这条决定失败**走哪条路**（文本因此不稳定）
+  command -v dbus-daemon ; echo "exit=$?"          # 缺失 → g_assert_no_error abort
+  # 4) 判据在汇总块，不在退出码
+  meson test -C <builddir>
+  sed -n '/^Ok:/,/^Timeout:/p' <builddir>/meson-logs/testlog.txt
+  #   → Ok: 2 / Fail: 1   ← 注意 Ok 只有 2，不是 3；吃退出码只会得到一个笼统的「有失败」
+  # 5) 反向对照：把这一个程序从 tests 列表里删掉，退出码立刻变 0 —— 这就是假通过
+  #    （别真的这么做，只是为了理解「退出码 0」在这里意味着什么）
+
+rec_priority:           1
+rec_approach:           declare-the-blocked-program-and-key-the-allowlist-on-identity-and-count
+rec_description: >
+  在配方的 build() 里照常全量跑上游套件，然后：
+
+    · **不删、不 SKIP** 那个跑不起来的程序——它仍然被构建、被执行，失败如实
+      留在汇总块里；
+    · 把「允许失败」的判据钉成**数量 + 身份**两个硬条件：
+        - `Fail` 不得超过已声明的受阻程序数（并把受阻程序名钉成模块级常量）；
+        - 出现失败时，失败的那个程序名必须**就是**已声明的那个（在测试日志里
+          必须能找到它的名字）；
+      再加两条防哑火的硬条件：`Timeout` / `Unexpected Pass` 必须为 0；
+      `Ok` 必须 ≥ 必须通过的程序数，且那些程序名必须出现在日志里
+      （否则就是「套件被静默截断」或「用例根本没注册」）。
+    · 失败**文本**只降级为诊断：命中已知的「无 session bus」标记就打一条 info，
+      没命中就打一条 warning，**不据此判定成败**（理由见 root_cause (b)）。
+    · 汇总块读不到（文件缺失 / 格式变更）直接抛异常——「读不到结论」不等于
+      「结论是好」。
+    · body / notes / MANIFEST 里同时给出**两个口径**的数：程序数（3，通过 2）
+      与用例数（13，通过 11），并写明受阻的那个程序**为什么**受阻。
+rec_command:            >
+  # conanfile.py 内（模块级常量 + build() 尾部）
+  UPSTREAM_TEST_PROGRAMS = 3
+  REQUIRED_PASSING_PROGRAMS = ("config-file", "service")
+  SANDBOX_BLOCKED_PROGRAMS = ("peer-manager",)
+
+  log = os.path.join(self.build_folder, "meson-logs", "testlog.txt")
+  summary = {...}   # 从汇总块解析 Ok / Fail / Timeout / Unexpected Pass / Skipped
+  for k in ("Timeout", "Unexpected Pass"):
+      if summary.get(k, 0): raise ConanException(...)
+  if summary.get("Fail", 0) > len(SANDBOX_BLOCKED_PROGRAMS): raise ConanException(...)
+  if summary.get("Fail", 0):
+      for p in SANDBOX_BLOCKED_PROGRAMS:
+          if p not in content: raise ConanException(f"expected the failing program to be {p}")
+      if not any(m in content for m in SANDBOX_FAILURE_MARKERS):
+          self.output.warning("failure text differs from the expected one — worth a look")
+  if summary.get("Ok", 0) < len(REQUIRED_PASSING_PROGRAMS): raise ConanException(...)
+  for p in REQUIRED_PASSING_PROGRAMS:
+      if p not in content: raise ConanException(...)
+rec_auto_fix:           true
+rec_impl:               recipe-side-identity-and-count-assertion-plus-declaration
+
+fallback_priority:      2
+fallback_approach:      list-the-blocked-program-in-a-dedicated-manifest-section
+fallback_description:   >
+  如果连「跑一次」的代价都不愿意付（例如该程序会挂住而不是快速失败），
+  那也**不要**删测试，改为在 `test_package/MANIFEST.yml` 里单列一节
+  （如 `upstream_unrunnable_on_platform:`）写明程序名 + 用例数 + 受阻原因 +
+  平台/环境条件，并在 body 的验证结果段把执行集写成「X/X（其中 Z 个因平台
+  限制未执行，理由如下）」。措辞必须让评估侧能一眼看出「少的那几个不是
+  没适配，是这台机器做不到」，并且给出「换到条件满足的机器上即通过」的判据。
+fallback_command:       sed -n '/upstream_unrunnable_on_platform/,/^[a-z]/p' test_package/MANIFEST.yml
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       把跑不起来的测试从 tests .*列表里删掉|删掉 peer-manager|
+                        因为跑不起来就 remove.*test\(
+forbid_1_reason:        删注册表 = 减少覆盖 + 退出码变 0 的假通过；适配目标是让库在
+                        OHOS 上跑对，不是让报表好看。
+forbid_1_consequence:   rule4 判少报，且永久丢掉该程序提供的回归保护。
+forbid_2_pattern:       用 SKIP / skip_ 前缀 / --no-suite 把那几个程序过滤掉|
+                        if .*blocked.* skip
+forbid_2_reason:        SKIP 与「真跑过并通过」在报表上被抹平；而且被过滤掉的往往
+                        正是暴露平台问题的那几个程序。
+forbid_2_consequence:   伪造通过率，评审判不实。
+forbid_3_pattern:       允许失败的判据写成.*失败文本.*必须匹配|assert .*error_text == |
+                        assert.*in content.*marker.*else.*raise
+forbid_3_reason:        GLib 的 start_daemon() 在「没有 dbus-daemon」时走
+                        g_assert_no_error abort、在「有 daemon 但 bind 被拒」时走
+                        另一条没有兜底的路径，失败文本不是稳定契约（见 root_cause (b)）。
+forbid_3_consequence:   假阴性（真实回归被文本不匹配白名单放过）或假阳性（措辞一变
+                        就把构建打红）；两种都会让人不再信任这条断言。
+forbid_4_pattern:       只吃 meson test.*退出码.*断言.*通过|if .*meson test.*rc == 0
+forbid_4_reason:        退出码 0 = 「没有失败」，不覆盖 SKIP 与「用例根本没注册」。
+forbid_4_consequence:   把「只跑了 2/3」当成「3/3 全绿」。
+
+principles:             P-BUILD-001, P012（边界与反例）, rule 1.2（平台限制如实声明）
+causes:                 []
+caused_by:              OHOS 沙箱禁止 AF_UNIX bind；已发布的 dbus 包只含客户端库无 dbus-daemon
+similar_to:             DRAFT-libgmobile-0.7.2-meson-not-installed-is-not-skipped-and-exit-code-is-not-coverage
+                        （同一条「判据在汇总块不在退出码」的线；本条往前一步：
+                        连「必须通过的程序数」也可能小于「上游程序数」，
+                        所以还要区分 REQUIRED 与 BLOCKED 两个集合）、
+                        archives/d/dbus/1.14.10.2/manifest.yaml（AF_UNIX 限制的首次记录）、
+                        archives/s/systemd/261/manifest.yaml（47.6% 通过率如实声明的先例）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-libgsystemservice-0.3.0-session-bus-tests-cannot-run-in-the-ohos-sandbox.md
+last_updated:           2026-09-20
+source_event:           archives/l/libgsystemservice/0.3.0 适配（tests/meson.build 3 程序 /
+                        13 用例，其中 peer-manager 用 g_test_dbus_up 拉起私有 dbus-daemon）
+
+authors:                2301_76770579
+source_pr:              11565
+source_commit:          1b6e7ef6bf
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-20

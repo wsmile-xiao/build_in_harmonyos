@@ -1,0 +1,134 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,43 +1,82 @@
+ # SPDX-License-Identifier: BSD-2-Clause
+ # SPDX-FileCopyrightText: 2021 Arjen Hiemstra <ahiemstra@heimr.nl>
+ 
+ cmake_minimum_required(VERSION 3.16)
+ 
+ set(PROJECT_VERSION "6.7.2")
+ project(ksystemstats VERSION ${PROJECT_VERSION})
+ 
+ set(PROJECT_DEP_VERSION "6.7.0")
+ set(QT_MIN_VERSION "6.10.0")
+-set(KF6_MIN_VERSION "6.26.0")
++set(KF6_MIN_VERSION "6.18.0")
+ set(KDE_COMPILERSETTINGS_LEVEL "5.82")
++
++# HarmonyOS is Linux-kernel based and its toolchain defines __linux__, so the
++# upstream Linux code paths (the sensor and rtnetlink backends, the /proc
++# readers) are the correct ones for HarmonyOS as well. Treat Linux and
++# HarmonyOS as a single "Linux-like" platform family so the CMake gates below
++# select exactly the sources the preprocessor branches already compile.
++if (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS")
++    set(KSYSTEMSTATS_LINUX_PLATFORM TRUE)
++else()
++    set(KSYSTEMSTATS_LINUX_PLATFORM FALSE)
++endif()
++
++# KIO is used by the disks plugin only, for a single statfs call. Keeping it
++# selectable lets a dependency set without a KF6KIO provider build the
++# equivalent QStorageInfo path instead (see plugins/disks/).
++option(KSYSTEMSTATS_USE_KIO "Report filesystem free space through KIO" ON)
+ 
+ find_package(ECM ${KF6_MIN_VERSION} REQUIRED NO_MODULE)
+ set(CMAKE_MODULE_PATH ${ECM_MODULE_PATH}  ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+ 
+ include(CheckIncludeFiles)
+ include(KDEInstallDirs)
+ include(KDECMakeSettings)
+ include(KDECompilerSettings NO_POLICY_SCOPE)
+ include(KDEClangFormat)
+ include(ECMAddTests)
+ include(ECMInstallIcons)
+ include(FeatureSummary)
+ include(ECMConfiguredInstall)
+ include(ECMGenerateDBusServiceFile)
+ include(ECMDeprecationSettings)
+ include(ECMQtDeclareLoggingCategory)
+ include(ECMSetupVersion)
+ 
+ find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED COMPONENTS Core Test)
+-find_package(KF6 ${KF6_MIN_VERSION} REQUIRED COMPONENTS CoreAddons Solid KIO Crash)
++if (KSYSTEMSTATS_USE_KIO)
++    find_package(KF6 ${KF6_MIN_VERSION} REQUIRED COMPONENTS CoreAddons Solid KIO Crash)
++else()
++    find_package(KF6 ${KF6_MIN_VERSION} REQUIRED COMPONENTS CoreAddons Solid Crash)
++endif()
+ find_package(KSysGuard ${PROJECT_DEP_VERSION} REQUIRED)
++
++# KSysGuard's exported targets reference Qt6::Qml, Qt6::Quick and KF6::Service
++# in their link interfaces, but the shipped KSysGuardConfig.cmake only
++# resolves Qt6Core/Qt6Network/Qt6Widgets and KF6Config/KF6I18n. Import the
++# remaining components before the KSysGuard import so those targets exist
++# (they ship in the separate qtdeclarative and kservice packages).
++find_package(Qt6Qml CONFIG REQUIRED)
++find_package(Qt6Quick CONFIG REQUIRED)
++find_package(KF6Service CONFIG REQUIRED)
++
++# The lm-sensors based temperature sensors need lm-sensors itself plus a
++# KSysGuard package exporting makeSensorsFeatureSensor, which the latter only
++# provides when it was configured with lm-sensors. Builders whose dependency
++# set lacks either can turn KSYSTEMSTATS_WITH_LM_SENSORS off (or simply not
++# provide lm-sensors) and still get the CPU/memory/disk/network/pressure
++# plugins.
++option(KSYSTEMSTATS_WITH_LM_SENSORS
++       "Build the lm-sensors based temperature sensors (also requires a KSysGuard package built with lm-sensors)"
++       ON)
+ 
+ # there's no NetworkManager on FreeBSD'
+ if (LINUX)
+     find_package(KF6NetworkManagerQt ${KF6_MIN_VERSION} CONFIG REQUIRED)
+ endif()
+ 
+ add_definitions(-DQT_NO_URL_CAST_FROM_STRING)
+ add_definitions(-DQT_USE_QSTRINGBUILDER)
+ 
+ ecm_setup_version(PROJECT VARIABLE_PREFIX KSYSTEMSTATS
+@@ -45,27 +84,44 @@
+                   )
+ 
+ ecm_set_disabled_deprecation_versions(QT 5.15.2
+     KF 6.26.0
+ )
+ 
+ 
+ set(CMAKE_CXX_STANDARD 20)
+ set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
+ 
+-if (${CMAKE_SYSTEM_NAME} MATCHES "Linux")
++if (KSYSTEMSTATS_LINUX_PLATFORM)
++    # lm-sensors stays RECOMMENDED rather than REQUIRED here: the platform
++    # dependency set may not provide it, and the sensors based temperature
++    # sensors additionally need a KSysGuard package that was itself built with
++    # lm-sensors (its SystemStats only compiles SensorsFeatureSensor.cpp when
++    # SENSORS_FOUND, so makeSensorsFeatureSensor is only exported then). The
++    # KSYSTEMSTATS_HAVE_SENSORS switch below keeps both conditions together and
++    # lets a dependency set fall back to the sensors-free paths instead of
++    # failing to link.
+     find_package(Sensors)
+     set_package_properties(Sensors PROPERTIES
+-            TYPE REQUIRED
++            TYPE RECOMMENDED
+             PURPOSE "Used for reading hardware sensors that aren't covered by other plugins."
+             URL "https://github.com/lm-sensors/lm-sensors"
+         )
++
++    # Evaluated here, after both find_package(Sensors) and the KSysGuard import
++    # above: SENSORS_FOUND is only defined once Sensors has been searched for, so
++    # this switch has to be set after that point.
++    if (KSYSTEMSTATS_LINUX_PLATFORM AND SENSORS_FOUND AND KSYSTEMSTATS_WITH_LM_SENSORS)
++        set(KSYSTEMSTATS_HAVE_SENSORS TRUE)
++    else()
++        set(KSYSTEMSTATS_HAVE_SENSORS FALSE)
++    endif()
+ 
+     find_package(NL)
+     set_package_properties(NL PROPERTIES
+         TYPE REQUIRED
+         PURPOSE "Used for gathering socket info via the sock_diag netlink subsystem and for the network plugin when NetworkManagerQt is not available."
+         URL "https://github.com/thom311/libnl/"
+     )
+     find_package(Libcap)
+     set_package_properties(Libcap PROPERTIES
+         TYPE OPTIONAL

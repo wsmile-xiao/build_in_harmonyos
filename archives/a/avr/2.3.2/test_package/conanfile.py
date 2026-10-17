@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""Consumer test for the AVR target artifacts in avr."""
+
+import os
+import re
+import shlex
+import shutil
+import tempfile
+from pathlib import Path
+
+from conan import ConanFile
+from conan.errors import ConanInvalidConfiguration
+
+
+class AvrTestConan(ConanFile):
+    settings = "os", "arch", "compiler", "build_type"
+    generators = "VirtualBuildEnv"
+    test_type = "explicit"
+    exports_sources = "test_avr.c"
+
+    def requirements(self):
+        self.requires(self.tested_reference_str)
+
+    def build_requirements(self):
+        self.tool_requires("avr-binutils/2.43.1")
+        self.tool_requires("avr-gcc-bootstrap/14.2.0")
+
+    def test(self):
+        package_folder = self.dependencies["avr"].package_folder
+        avr_root = os.path.join(package_folder, "avr")
+        include_dir = os.path.join(avr_root, "include")
+        compiler = self._required_build_tool("avr-gcc")
+        temp_root = Path(os.environ.get("TMPDIR", self.build_folder))
+        temp_root.mkdir(parents=True, exist_ok=True)
+        work_dir = Path(tempfile.mkdtemp(prefix="avr-test-", dir=str(temp_root)))
+        dispatcher_bin = self._materialize_target_tool_root(work_dir)
+        lib_dir = self._atmega328p_libdir(
+            avr_root, compiler, dispatcher_bin, work_dir
+        )
+        objdump = self._required_build_tool("avr-objdump")
+        nm = self._required_build_tool("avr-nm")
+
+        crt = os.path.join(lib_dir, "crtatmega328p.o")
+        libc = os.path.join(lib_dir, "libc.a")
+        libm = os.path.join(lib_dir, "libm.a")
+        device = os.path.join(lib_dir, "libatmega328p.a")
+        for artifact in (crt, libc, libm, device):
+            if not os.path.isfile(artifact):
+                raise ConanInvalidConfiguration(
+                    "Required tested-package artifact is missing: {}".format(
+                        artifact
+                    )
+                )
+
+        source = os.path.join(self.source_folder, "test_avr.c")
+        elf = str(work_dir / "test_avr.elf")
+        map_file = str(work_dir / "test_avr.map")
+        command = [
+            compiler,
+            "-B{}{}".format(dispatcher_bin, os.sep),
+            "-mmcu=atmega328p",
+            "-Os",
+            "-fno-builtin",
+            "-I{}".format(include_dir),
+            "-nostdlib",
+            crt,
+            source,
+            "-Wl,-Map,{}".format(map_file),
+            "-Wl,--start-group",
+            libc,
+            libm,
+            device,
+            "-lgcc",
+            "-Wl,--end-group",
+            "-o",
+            elf,
+        ]
+        self.run(" ".join(shlex.quote(item) for item in command), env="conanbuild")
+
+        objdump_report = str(work_dir / "objdump.txt")
+        nm_report = str(work_dir / "nm.txt")
+        self.run(
+            "{} -f {} > {}".format(
+                shlex.quote(objdump), shlex.quote(elf), shlex.quote(objdump_report)
+            ),
+            env="conanbuild",
+        )
+        self.run(
+            "{} -g {} > {}".format(
+                shlex.quote(nm), shlex.quote(elf), shlex.quote(nm_report)
+            ),
+            env="conanbuild",
+        )
+
+        with open(objdump_report, encoding="utf-8", errors="replace") as handle:
+            objdump_text = handle.read()
+        if "architecture: avr" not in objdump_text:
+            raise ConanInvalidConfiguration("Consumer output is not an AVR ELF")
+
+        with open(nm_report, encoding="utf-8", errors="replace") as handle:
+            symbols = handle.read()
+        expected_symbols = {"memcpy": "T", "strlen": "T", "sin": "W"}
+        for symbol, symbol_type in expected_symbols.items():
+            pattern = r"\b{}\s+{}$".format(symbol_type, symbol)
+            if not re.search(pattern, symbols, re.MULTILINE):
+                raise ConanInvalidConfiguration(
+                    "Linked AVR ELF does not contain {} as symbol type {}".format(
+                        symbol, symbol_type
+                    )
+                )
+
+        self.output.info("avr consumer compile/link test passed for ATmega328P")
+
+    def _atmega328p_libdir(self, avr_root, compiler, dispatcher_bin, work_dir):
+        report = str(work_dir / "multidir.txt")
+        self.run(
+            "{} {} -mmcu=atmega328p -print-multi-directory > {}".format(
+                shlex.quote(compiler),
+                shlex.quote("-B{}{}".format(dispatcher_bin, os.sep)),
+                shlex.quote(report),
+            ),
+            env="conanbuild",
+        )
+        with open(report, encoding="utf-8", errors="replace") as handle:
+            multidir = handle.read().strip()
+        if not multidir or os.path.isabs(multidir):
+            raise ConanInvalidConfiguration(
+                "avr-gcc returned an invalid ATmega328P multilib path: {!r}".format(
+                    multidir
+                )
+            )
+
+        lib_root = os.path.realpath(os.path.join(avr_root, "lib"))
+        lib_dir = os.path.realpath(os.path.join(lib_root, multidir))
+        if lib_dir != lib_root and not lib_dir.startswith(lib_root + os.sep):
+            raise ConanInvalidConfiguration(
+                "avr-gcc multilib path escapes the tested package: {}".format(
+                    multidir
+                )
+            )
+        return lib_dir
+
+    def _materialize_target_tool_root(self, work_dir):
+        binutils_root = self.dependencies.build["avr-binutils"].package_folder
+        root = work_dir / ".avr-binutils-dispatch"
+        bin_dir = root / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("as", "ld", "nm"):
+            shutil.copy2(
+                Path(binutils_root) / "bin" / "avr-{}".format(name),
+                bin_dir / name,
+            )
+
+        source_scripts = Path(binutils_root) / "avr" / "lib" / "ldscripts"
+        if not source_scripts.is_dir():
+            raise ConanInvalidConfiguration(
+                "AVR linker scripts were not found: {}".format(source_scripts)
+            )
+        shutil.copytree(
+            source_scripts,
+            root / "avr" / "lib" / "ldscripts",
+            dirs_exist_ok=True,
+        )
+        return bin_dir
+
+    def _required_build_tool(self, executable):
+        for dependency in self.dependencies.build.values():
+            package_folder = dependency.package_folder
+            if not package_folder:
+                continue
+            for bindir in dependency.cpp_info.bindirs or []:
+                root = (
+                    bindir
+                    if os.path.isabs(bindir)
+                    else os.path.join(package_folder, bindir)
+                )
+                candidate = os.path.join(root, executable)
+                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    return candidate
+        raise ConanInvalidConfiguration(
+            "Required AVR test tool '{}' was not provided by tool_requires".format(
+                executable
+            )
+        )

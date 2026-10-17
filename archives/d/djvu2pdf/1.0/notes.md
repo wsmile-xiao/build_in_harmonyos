@@ -2,9 +2,9 @@
 
 ## 编译环境
 - 构建系统: makefile (自定义 Makefile)
-- 编译日期: 2026-05-27
+- 编译日期: 2026-08-06
 - 编译器: 无编译器（Shell脚本项目）
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
@@ -36,8 +36,8 @@ djvu2pdf 是一个 Shell 脚本工具，不需要编译。安装步骤如下：
 ## 验证结果
 
 ```bash
-bash -n /storage/Users/currentUser/usr/local/bin/djvu2pdf && echo "djvu2pdf: syntax OK"
-python3 -c "import py_compile; py_compile.compile('/storage/Users/currentUser/usr/local/bin/djvu2pdf_toc_parser.py', doraise=True)" && echo "djvu2pdf_toc_parser.py: syntax OK"
+bash -n $PREFIX/bin/djvu2pdf && echo "djvu2pdf: syntax OK"
+python3 -c "import py_compile; py_compile.compile('$PREFIX/bin/djvu2pdf_toc_parser.py', doraise=True)" && echo "djvu2pdf_toc_parser.py: syntax OK"
 ```
 
 ## 交付物
@@ -53,5 +53,5 @@ python3 -c "import py_compile; py_compile.compile('/storage/Users/currentUser/us
 - 此包仅提供脚本本身，不包含运行时依赖
 ---
 
-**编译结束**: 2026-05-27 15:32
-**最终状态**: published
+**编译结束**: 2026-08-06 07:24
+**最终状态**: built

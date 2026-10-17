@@ -9,63 +9,56 @@
 
 ## 编译过程
 
-### 问题发现
-运行 configure 时遇到 HMDFS 文件系统限制：
+### 问题发现（已解决）
+运行 configure 时，config.status 脚本使用 `umask 077 && mktemp -d "./confXXXXXX"` 创建临时目录。
+HMDFS 文件系统在 `umask 077` 下创建的目录（权限 `drwx--S---`）无法写入文件，
+导致 `subs1.awk` 文件创建失败：
 ```
-cat: -: Permission denied
-configure: error: could not make ./config.status
+./config.status[705]: can't create ./confDpHnmh/subs1.awk: Permission denied
+config.status: error: could not setup config files machinery
 ```
 
-**根本原因**：configure 脚本使用 `cat -`（读取标准输入）创建临时文件，
-但 HMDFS 文件系统不支持此操作，导致 config.status 无法创建。
+**根本原因**：HMDFS 文件系统对 `umask 077` 创建的目录有写入限制。SGID 位被设置，
+且文件创建被拒绝。使用 `umask 022`（权限 `drwxr-sr-x`）则正常工作。
 
 ### 解决方案
-由于 iso-codes 是数据包（JSON 文件 + 翻译文件），不包含需编译的二进制文件，
-采用简化方案：
+修补 configure 脚本中 config.status 的临时目录创建逻辑：
+1. `umask 077` → `umask 022`（HMDFS 兼容）
+2. `./confXXXXXX` → `${TMPDIR:-/tmp}/confXXXXXX`（使用系统 TMPDIR）
 
-1. 手动创建 Makefile
-2. 直接安装数据文件到目标位置
-3. 手动配置 pkg-config 文件
-
-### 安装内容
-- JSON 数据文件：`~/usr/local/share/iso-codes/json/`
-  - iso_15924.json（语言脚本）
-  - iso_3166-1.json（国家代码）
-  - iso_3166-2.json（国家 subdivisions）
-  - iso_3166-3.json（旧国家代码）
-  - iso_4217.json（货币代码）
-  - iso_639-2.json（语言代码）
-  - iso_639-3.json（语言代码）
-  - iso_639-5.json（语言家族）
-  - schema-*.json（JSON schemas）
-
-- 翻译文件：`~/usr/local/share/{domain}//*.po`
-
-- pkg-config 文件：`~/usr/local/share/pkgconfig/iso-codes.pc`
-
-## 验证结果
-
+### 编译步骤
 ```bash
-$ export PKG_CONFIG_PATH="$HOME/usr/local/share/pkgconfig"
-$ pkg-config --modversion iso-codes
-4.16.0
-
-$ pkg-config --variable=prefix iso-codes
-/storage/Users/currentUser/usr/local
-
-$ pkg-config --variable=domains iso-codes
-iso_639-2 iso_639-3 iso_639-5 iso_3166-1 iso_3166-2 iso_3166-3 iso_4217 iso_15924
+./configure --prefix=$PREFIX
+make -j2
+make install DESTDIR=$DESTDIR
+make check
 ```
 
-## 平台适配发现
+### 验证结果
+- configure: 通过
+- make: 通过（所有 .mo 翻译文件编译成功）
+- make install: 通过（703 个文件安装成功）
+- make check: 通过（所有 UTF-8 验证通过）
 
-**知识提取（L1 - 平台真理）**：
-- HMDFS 文件系统限制：`cat -`（标准输入读取）失败
-- 影响范围：所有使用 autotools configure 的软件
-- 解决策略：对于数据型软件，可直接安装；对于需编译的软件，需修改 configure 或使用替代构建系统
+### 安装内容
+- JSON 数据文件：`share/iso-codes/json/`（8 个 ISO 标准 + 8 个 schema 文件）
+- 翻译文件：`share/locale/{lang}/LC_MESSAGES/{domain}.mo`（约 680 个 .mo 文件）
+- XML 文件：`share/xml/iso-codes/`（8 个 .xml 文件）
+- pkg-config 文件：`share/pkgconfig/iso-codes.pc`
+
+### 依赖
+- msgfmt (GNU gettext-tools) - 可用
+- msgfilter - 可用
+- msgattrib - 可用
+- recode-sr-latin - 可用
+- msgmerge - 不可用（非必需，仅用于更新 .pot 文件）
+- python3 - 可用（用于 check_valid_utf8.py 验证）
 
 ## 编译状态
-- 状态：built
-- 原因：configure 失败（平台限制），但数据文件已成功安装
-- 功能：完整（pkg-config 可用，数据文件完整）
-- 建议：后续可考虑使用 meson 构建系统（若上游提供）或创建补丁绕过 configure
+- 状态：published（conan recipe 验证通过）
+- 功能：完整（configure + make + make install + make check 全部通过）
+- 补丁：configure umask 077 → umask 022 + TMPDIR 路径修复
+---
+
+**编译结束**: 2026-08-06 22:02
+**最终状态**: built

@@ -1,0 +1,91 @@
+#====================================================================
+# vendored FindSDL2*.cmake ↔ Conan CMakeDeps 桥接（OHOS 交叉编译）
+# Conan 2.29.1 + OHOS aarch64 + clang 15
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E447
+trigger_tool: cmake
+phase: compilation
+error_signature: SDL_audio.h file not found|SDL_gamecontroller.h file not found|undefined symbol: WebPGetFeaturesInternal|undefined symbol: TIFFClientOpen|undefined symbol: pb_decode|No rule to make target .*msg\.pb\.c
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 3
+category:               cmake, cross-compile, conan, sdl2
+match_keywords: SDL2, SDL2_image, SDL2_mixer, FindSDL2.cmake, vendored Find module, CMakeDeps, INTERFACE_INCLUDE_DIRECTORIES, transitive dependency, static library, libwebp, libtiff, SDL_audio.h, SDL_gamecontroller.h, cache variable bridge, nanopb pre-generated, user_presets_path
+title: Bridge Conan SDL2 family include/link requirements into vendored FindSDL2* module consumers under OHOS cross-compile
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: cdogs-sdl 1.0.0 ships vendored FindSDL2.cmake / FindSDL2_image.cmake / FindSDL2_mixer.cmake (build/cmake/). 在 OHOS aarch64 交叉编译 + Conan 2 CMakeDeps 下： (1) 若启用 CMAKE_FIND_PACKAGE_PREFER_CONFIG=TRUE，find_package(SDL2) 走 CMakeDeps CONFIG，只定义 sdl2::sdl2 target，不设置 SDL2_INCLUDE_DIRS 变量 → 上游 include_directories(${SDL2_INCLUDE_DIRS}) 为空 → SDL_audio.h/SDL_gamecontroller.h not found； (2) 若关闭 PREFER_CONFIG 保持 MODULE（含 generators=CMakeDeps 时），MODULE 的 find_path/find_library 在交叉编译环境找不到 Conan 包内头文件，或返回裸库路径而不含传递依赖（libwebp/libtiff/zlib）→ 链接期 undefined symbol； (3) 上游自身依赖 nanopb 的 nanopb_generate_cpp 宏（需要 protoc + Python google.protobuf + pkg_resources），交叉环境工具缺失。 全套问题不能靠参数开关/粒度替换解决——需要显式缓存变量桥接。
+affected_scope: 携带 vendored FindFoo*.cmake 模块、用 find_path/find_library 解析 CMake 变量风格的 SDL2 系（或类似 FFmpeg/GStreamer/SDL 系）项目，在 OHOS/arm64 交叉编译 + Conan 2 CMakeDeps 下消费静态依赖的场景。
+verification_cmd: grep -R 'SDL2_INCLUDE_DIRS\|SDL2_LIBRARY\|SDL2_IMAGE_LIBRARIES\|nanopb_generate_cpp' CMakeLists.txt src/
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority: 1
+rec_approach: conan-recipe cache-variable bridge (E300 扩展)
+rec_description: 在 conanfile.py generate() 中遍历 self.dependencies[sdl2/sdl2_image/sdl2_mixer]，将 cpp_info.includedirs（含 include/SDL2 子目录）与 cpp_info.libs 映射为上游 vendored Find 模块期望的缓存变量（SDL2_INCLUDE_DIRS/SDL2_LIBRARY/SDL2_IMAGE_* 等），经 CMakeToolchain cache_variables 注入；库变量直接指向 Conan CMakeDeps imported target（sdl2::sdl2 等）以携带 INTERFACE_LINK_LIBRARIES 传递依赖。不设置 CMAKE_FIND_PACKAGE_PREFER_CONFIG（避免 MODULE→CONFIG 变量丢失回归）。
+rec_command: |
+  def generate(self):
+      tc = CMakeToolchain(self)
+      tc.cache_variables["CMAKE_POLICY_VERSION_MINIMUM"] = "3.5"
+      for dep, prefix in ((self.dependencies["sdl2"], "SDL2"),
+                          (self.dependencies["sdl2_image"], "SDL2_IMAGE"),
+                          (self.dependencies["sdl2_mixer"], "SDL2_MIXER")):
+          inc = "".join(...)  # cpp_info.includedirs + include/SDL2 子目录
+          tc.cache_variables[f"{prefix}_INCLUDE_DIR"] = inc
+          tc.cache_variables[f"{prefix}_INCLUDE_DIRS"] = inc
+          tgt = dep.ref.name + "::" + dep.ref.name
+          tc.cache_variables[f"{prefix}_LIBRARY"] = tgt
+          tc.cache_variables[f"{prefix}_LIBRARY_TEMP"] = tgt
+          tc.cache_variables[f"{prefix}_LIBRARIES"] = tgt
+      tc.generate()
+  # build() 中再对源做三处补丁：
+  #  (a) 顶层 CMakeLists.txt 注入 find_package(sdl2/sdl2_image/sdl2_mixer/nanopb CONFIG QUIET)
+  #      + add_definitions(-Wno-implicit-const-int-float-conversion)（clang 15 RAND_MAX 转换）
+  #  (b) src/proto/CMakeLists.txt：msg.pb.c/.h 已预生成时跳过 nanopb_generate_cpp
+  #      （避免 protoc/Google protobuf 依赖），并给 cdogs_proto 追加
+  #      target_link_libraries(cdogs_proto nanopb::nanopb)
+  #  (c) src/cdogs 与 src/tests 的 target_link_libraries 保留上游 MODULE 变量并追加
+  #      CMakeDeps targets（sdl2::sdl2 sdl2_image::sdl2_image ...）
+rec_auto_fix: false
+rec_impl: conan-recipe
+
+# 回退方案
+fallback_priority: 2
+fallback_approach: conan-toolchain pkg-config bridging
+fallback_description: 若目标和依赖可用 pkg-config，可用 CMakeToolchain 的 pkg_config conditioned…由 pkg_check_modules 替代 find_path，配合 pkg-config 文件的 Libs.private 传递静态依赖。
+fallback_command: |
+  # 依赖方产出 .pc（含 Libs.private）时：
+  # CMakeLists：find_package(PkgConfig); pkg_check_modules(SDL2_IMAGE IMPORTED_TARGET SDL2_image)
+  # 链接：target_link_libraries(cdogs PkgConfig::SDL2_IMAGE)
+fallback_auto_fix: false
+
+# ★ 禁止策略 ★
+forbid_1_pattern: CMAKE_FIND_PACKAGE_PREFER_CONFIG.*TRUE
+forbid_1_reason: 把 vendored MODULE 解析导向 CONFIG，SDL2_INCLUDE_DIRS 等变量丢失，include 目录为空。
+forbid_1_consequence: SDL_audio.h/SDL_gamecontroller.h not found（r08 实测回归）。
+forbid_2_pattern: 把 ${SDL2_IMAGE_LIBRARIES} 直接清空或仅替换为裸库路径
+forbid_2_reason: 丢失 libwebp/libtiff 等传递依赖。
+forbid_2_consequence: 链接期 undefined symbol: WebP*/TIFF*（r08 实测）。
+forbid_3_pattern: 手动生成/伪造 msg.pb.c 而不用上游预生成文件
+forbid_3_reason: 上游已带预生成产物，直接用即可；protoc 在交叉环境不可用。
+forbid_3_consequence: nanopb 生成失败或引入不一致产物。
+
+# ═══ Layer 4: 原则引用 ═══
+
+# ═══ 关系图 (Relations) ═══
+# ═══ 元数据 ═══
+doc_file: doc/E447.md
+last_updated: 2026-08-26
+source_event: cdogs-sdl 1.0.0 r08-r10 OHOS CMake adaptation with Conan 2.29.1 CMakeDeps
+
+# ═══ 知识协作 ═══
+authors: junshi_liu <liujsh2023@lzu.edu.cn>
+source_pr: !6719
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count: 1
+metrics_fail_count: 6
+metrics_confidence: 0.143
+metrics_last_used: 2026-08-26

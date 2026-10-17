@@ -1,36 +1,38 @@
-# libdbi — Database Independent Abstraction Layer
+# libdbi
 
-libdbi implements a database-independent abstraction layer in C, similar to the DBI/DBD layer in Perl.
+libdbi is a database-independent abstraction layer for C applications. This
+archive adapts upstream 0.9.0 for OpenHarmony aarch64. The `r5` suffix is the
+competition task revision and does not change the upstream API version.
 
-## Available Versions
+## Package contents
 
-| Version | Status | Date |
-|---------|--------|------|
-| 0.9.0-r5 | built | 2026-06-02 |
+- Shared `libdbi` core library
+- Public `dbi/dbi.h`, `dbi/dbi-dev.h` and `dbi/dbd.h` headers
+- `dbi.pc` pkg-config metadata
+- LGPL-2.1-or-later license text
 
-## Description
+Database drivers are distributed separately by upstream and are not bundled.
 
-libdbi provides a database-independent abstraction layer for writing database applications in C. It provides a simple and clean API that allows developers to use different database backends without changing their code.
+## OpenHarmony adaptation
 
-## Dependencies
+- Recognize `aarch64-unknown-linux-ohos` for native and cross builds.
+- Avoid configure-time temporary-directory permissions incompatible with HMDFS.
+- Disable documentation and optional libltdl integration.
+- Use the system dynamic-loader API and package only the core library.
 
-None (pure C library, only requires libc).
+## Validation
 
-## Links
+- Official source SHA256: verified.
+- Upstream `make check`: executed by the recipe; no runnable tests are declared.
+- Consumer API test: 29/29 assertions passed, including initialization with no drivers.
+- OpenHarmony API 20 target: AArch64 library and consumer compiled and linked.
+- Target library: ELF64 AArch64, SONAME `libdbi.so.1`, only `libc.so` required.
+- HarmonyOS PC runtime: not claimed because no device was borrowed.
 
+The competition pipeline remains the final target-runtime verification.
+
+## References
+
+- Homepage: https://libdbi.sourceforge.net/
 - Source: https://sourceforge.net/projects/libdbi/
-- License: LGPL-2.1
-
-## HarmonyOS Compatibility
-
-- ✅ 编译成功（autotools + clang 15.0.4）
-- ✅ ELF 签名完整（.note.ohos.ident + .codesign）
-- ✅ pkg-config 元数据正确
-- ✅ 核心库 API 功能正常
-- ⚠️ dbi_initialize_r 需指定驱动目录（默认路径不存在）
-
-## Known Limitations
-
-1. `dbi_initialize_r(NULL, &inst)` 返回 -1：默认驱动目录 `/usr/lib/dbd/` 在鸿蒙平台不存在，需安装驱动插件或指定路径
-2. 旧式 API (`dbi_initialize`, `dbi_shutdown`) 已标记 deprecated，推荐使用 `_r` 线程安全版本
-3. ldconfig 不可用，共享库通过 LD_LIBRARY_PATH 或 RPATH 定位
+- License: LGPL-2.1-or-later

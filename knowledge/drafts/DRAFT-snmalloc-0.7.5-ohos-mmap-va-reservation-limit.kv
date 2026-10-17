@@ -1,0 +1,67 @@
+#====================================================================
+# DRAFT-snmalloc-0.7.5-ohos-mmap-va-reservation-limit — OHOS mmap 虚拟地址空间预留上限导致分配器启动失败
+#====================================================================
+
+id:                     DRAFT-snmalloc-0.7.5-ohos-mmap-va-reservation-limit
+trigger_tool:           clang|cmake|conan|test|runtime
+phase:                  runtime|testing
+error_signature:        Failed to initialise snmalloc\.|PAL::error.*Failed to initialise|mmap.*Out of memory|Cannot allocate memory.*mmap|reserve.*nullptr.*pagemap
+
+severity:               3
+category:               ohos|mmap|memory|allocator|pagemap|virtual-address-space
+match_keywords:         snmalloc, pagemap, FlatPagemap, random_pagemap, mmap, ENOMEM, Out of memory, virtual address space, reservation, SNMALLOC_CHECK_CLIENT, mitigations
+title:                  OHOS 平台 mmap 单次虚拟地址空间预留上限导致分配器 pagemap 初始化失败（禁用 random_pagemap mitigation）
+
+root_cause:             HarmonyOS 平台对单次 mmap 匿名映射的虚拟地址空间预留有上限（实测 256GB 成功、384GB 失败，errno=12 ENOMEM）。snmalloc 0.7.5 的 check 变体（SNMALLOC_CHECK_CLIENT）默认启用 full_checks mitigations（含 random_pagemap），FlatPagemap::init() 按 REQUIRED_SIZE + 4*next_pow2(REQUIRED_SIZE) 预留约 1280GB（256GB + 4×256GB），超过平台上限导致 mmap 返回 ENOMEM，PAL::reserve 返回 nullptr，pagemap.h 触发 PAL::error("Failed to initialise snmalloc.") 并 SIGABRT。非 check 变体（无 random_pagemap）仅预留 256GB，恰好可通过。
+affected_scope:         HarmonyOS 平台上需要大虚拟地址空间预留给 pagemap/metadata 的内存分配器类库（snmalloc 0.7.5 等）；SNMALLOC_CHECK_CLIENT 测试变体全部受影响。
+verification_cmd:       python3 - <<'PY'
+import mmap, ctypes, errno
+libc = ctypes.CDLL(None)
+for gb in (256, 384):
+    size = gb << 30
+    p = libc.mmap(None, size, 3, 0x22, -1, 0)  # PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS
+    print(gb, "OK" if p not in (0, -1) else "FAIL errno=%d" % errno.errno)
+    if p not in (0, -1):
+        libc.munmap(p, size)
+PY
+
+rec_priority:           1
+rec_approach:           disable-pagemap-randomization-for-ohos
+rec_description:        在 src/snmalloc/mitigations/mitigations.h 增加 __OHOS__ 平台分支（参照上游已有 OPEN_ENCLAVE / NetBSD / CHERI 平台特例先例）：CHECK_CLIENT ? full_checks - random_pagemap : no_checks。仅禁用 pagemap 随机化 mitigation，保留其余全部检查（metadata_protection、freelist 边等）。这样 pagemap 只预留 REQUIRED_SIZE（256GB），低于平台上限。
+rec_command:            patch 增加 __OHOS__ 分支：`#elif defined(__OHOS__) CHECK_CLIENT ? full_checks - random_pagemap : no_checks;`；重新 cmake --build && ctest 验证 check 变体通过。
+rec_auto_fix:           false
+rec_impl:               upstream-mitigation-platform-branch
+
+fallback_priority:      2
+fallback_approach:      reduce-pagemap-granularity
+fallback_description:   若需保留 random_pagemap，可增大 MIN_CHUNK_BITS 缩小 pagemap 预留（上游 SNMALLOC_QEMU_WORKAROUND 即把 MIN_CHUNK_BITS 从 14 提到 17），但会改变分配粒度语义，且实测 QEMU_WORKAROUND 宏在该平台未改变 MIN_CHUNK_BITS（需 SNMALLOC_VA_BITS_64 与宏同时定义才生效），不推荐作为首选。
+fallback_command:       不适用。
+fallback_auto_fix:      false
+fallback_impl:          manual-review
+
+forbid_1_pattern:       skip.*check.*test|DISABLE.*SNMALLOC_CHECK_CLIENT|EXCLUDE.*check.*variant
+forbid_1_reason:        check 变体测试是分配器内存安全检查的关键覆盖；失败根因是平台 mmap 预留上限而非源码缺陷，禁用测试会掩盖真实覆盖缺口。
+forbid_1_consequence:   Conan 构建表面成功但 check 变体边界检查从未运行，安全覆盖被虚假标记为通过。
+
+principles:             P005
+causes:
+caused_by:
+similar_to:
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-snmalloc-0.7.5-ohos-mmap-va-reservation-limit.md
+last_updated:           2026-09-03
+source_event:           snmalloc 0.7.5 OHOS 上游测试 check 变体启动失败
+
+authors:                atomcode
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-03
+
+draft:                  true
+contributor_id:         SNMALLOC

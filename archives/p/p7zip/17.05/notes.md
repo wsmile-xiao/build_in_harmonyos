@@ -1,83 +1,46 @@
 # p7zip 17.05 — 编译进度
 
-> 档案创建时间: 2026-04-24 00:00:00
-> 最后更新: 2026-04-24 (当前状态)
-> 当前会话 ID: (可选，用于多轮对话追踪)
+> 档案创建时间: 2026-08-07
+> 最后更新: 2026-08-07
 
 ## 一、基本信息
 | 项目 | 值 |
 |------|-----|
 | 软件 | p7zip |
 | 版本 | 17.05 |
-| 状态 | ✅ success |
-| 构建系统 | autotools |
-| 源码路径 | file:///storage/Users/currentUser/tmp/p7zip_17.05_src_all.tar.bz2 |
+| 状态 | ✅ built |
+| 构建系统 | makefile |
+| 源码路径 | https://github.com/p7zip-project/p7zip/archive/refs/tags/v17.05.tar.gz |
 
-## 二、编译阶段（checkbox 实时更新）
+## 二、编译阶段
 
 ### Phase 1: 环境准备
-- [x] ohc-run.py init-build 完成 / 源码下载解压
+- [x] init-build 完成，源码下载解压
 
-### Phase 2: 编译（configure + make + make install）
-- [x] configure 完成（记录参数和耗时）
-- [x] make 编译完成（记录错误和修复）
-- [x] make install 完成
-
-### Phase 2.5: 独立目录安装验证（⭐ 必须做）
-- [x] 干净源码 + 补丁应用
-- [x] 独立 TEST_PREFIX configure + make install
-- [x] 功能回归测试结果
+### Phase 2: 编译（make）
+- [x] make 7z 完成（控制台版，支持外部编解码器）
+- [x] make 7za 完成（独立版，内置所有编解码器）
 
 ### Phase 3: 测试验证
-- [x] make check / make test 结果
-- [x] 安全弹窗触发确认
+- [x] 7za 版本输出正常
+- [x] 7za 创建归档 (a) 正常
+- [x] 7za 列表归档 (l) 正常
+- [x] 7za 测试归档 (t) 正常
 
-### Phase 4: 预编译包制作（⭐ verify PASS 后必须）
-- [x] Step 1-10 打包流程（见 packaging.md）
+### Phase 4: Conan 配方
+- [x] conan-init 生成 conanfile.py + conandata.yml + test_package/
+- [x] conan-verify G2 通过 (conan create)
+- [x] conan-verify G3 通过 (系统同名库隔离)
+- [x] conan-verify G4 通过 (产物完整性)
+- [x] 本地 CI 模拟 (W3) 通过
 
-### Phase 5: 归档收尾
-- [x] 补丁生成（ohc-run.py refresh-patch --auto）
-- [x] manifest.yaml / README.md / PROGRESS.md 更新
-- [x] ohc-run.py verify-build 质量门禁
-
-## 三、对话记录（⭐ 断点续传核心）
-
-> **每轮对话结束时必须更新此节。新 AI 会从这里恢复上下文。**
-
-### 对话 #N — YYYY-MM-DD HH:MM
-**操作**: （做了什么，如"执行 configure"、"修复 xxx bug"、"制作预编译包"）
-**结果**: （成功/失败/部分成功，附关键输出摘要）
-**发现的问题**: （遇到的坑、错误信息、根因分析）
-**当前状态**: （精确到哪个步骤，下一步该做什么）
-**遗留问题**: （未解决的、需要下轮继续的）
-
----
-
-### 对话 #1 — 2026-04-24 00:00
-**操作**: 执行 ./configure --prefix=$DEFAULT_PREFIX
-**结果**: （待填写）
-**发现的问题**: （待填写）
-**当前状态**: Phase 2 configure 进行中
-**遗留问题**: 无
-
-（后续每轮对话追加...）
-
-## 四、源码修改清单
-| 文件 | 原因 | 方式 | 补丁状态 |
-|------|------|------|---------|
-| 文件 | 原因 | 方式 | 补丁状态 |
-|------|------|------|---------|
-| CPP-myWindows-config.h | 平台适配/问题修复 | 源码修改 | ✅ 已生成 |
-| makefile.machine | 平台适配/问题修复 | 源码修改 | ✅ 已生成 |
-
-## 五、预编译包交付物
-| 文件 | 大小 | 说明 |
+## 三、源码修改清单
+| 文件 | 原因 | 方式 |
 |------|------|------|
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| p7zip-17.05-ohos-aarch64-debug.tar.gz | 25KB | debug包 |
-| p7zip-17.05-ohos-aarch64.tar.gz | 3151KB | 主包 |
+| C/hashes/hash.h | uint32_t/uint64_t typedef 与系统头冲突 | __OHOS__ 守卫 + include stdint.h |
+| CPP/myWindows/config.h | getpass 在鸿蒙不可用 | __OHOS__ 守卫 |
+| makefile.machine | 默认使用 gcc/g++ | 改为 clang/clang++ |
 
-## 六、结束记录
-- **最终状态**: success
-- **结束时间**: 2026-04-24
+## 四、结束记录
+- **最终状态**: built
+- **结束时间**: 2026-08-07

@@ -1,0 +1,102 @@
+#====================================================================
+# E581.kv — CMAKE_SKIP_RPATH=TRUE 防止 cmake.install() 用 patchelf 破坏 OHOS ELF
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E581
+trigger_tool: cmake|conan|readelf|runtime|patchelf
+phase: installation|runtime|packaging
+error_signature: Error loading shared library lib.*\.so\.[0-9]+: \(needed by .*\)|
+                         Error relocating .*: .* symbol not found|
+                         conan create.*test package.*Error in test\(\)|
+                         .rela\.dyn.*不同|SONAME.*存在.*仍加载失败
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               cmake, conan, linking, runtime, ohos
+match_keywords:         CMAKE_SKIP_RPATH, cmake.install, RPATH, RUNPATH,
+                         patchelf, OHOS ELF, .rela, 安装后库无法加载,
+                         Error loading shared library, conan create,
+                         build 树库可加载 pkg 库不可加载, libdrumstick
+title:                  CMAKE_SKIP_RPATH=TRUE 防止 cmake.install() 用 patchelf 破坏 OHOS ELF
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             conan 配方 build() 手动 cmake configure/build 产出的库
+                        可正常加载（有 RUNPATH 指向依赖 Qt 库）；但 package()
+                        阶段 cmake.install() 默认（CMAKE_SKIP_RPATH=NO）会用
+                        patchelf 清理/重写安装后库的 RPATH/RUNPATH。OHOS 动态
+                        加载器/文件系统对 patchelf 重写过的 ELF 敏感：实验证实
+                        安装后（pkg）库与 build 库 .rela.dyn/.rela.plt 段大小
+                        不同（patchelf 重排痕迹），运行期报 "Error loading
+                        shared library libdrumstick-file.so.2"，即使 LD_LIBRARY_PATH
+                        完整注入也失败；对 build 库手动 patchelf --remove-rpath /
+                        --set-rpath 后同样无法加载（patchelf 本身破坏 OHOS ELF）。
+                        设置 CMAKE_SKIP_RPATH=TRUE 后安装库保持 build 产物原样，
+                        运行期依赖由 build()/test() 显式注入的 LD_LIBRARY_PATH 提供。
+affected_scope:         所有用 CMake 构建共享库并在 conan package() 用
+                        cmake.install() 安装的 OHOS/HarmonyOS PC 适配；尤其
+                        库被 test_package/下游动态链接且依赖 Qt 等其他包动态库
+                        的场景（实测 libdrumstick 2.10.0：build 库 7109282d
+                        可加载、pkg 库 09a92fe3 不可加载）。
+verification_cmd:       readelf -d pkg/lib/lib*.so | grep -E "RUNPATH|RPATH";
+                        md5sum build/Release/lib/lib*.so pkg/lib/lib*.so;
+                        conan create <recipe> -pr:h=ohos-aarch64 --build=missing
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           cmake-skip-rpath-true
+rec_description:        在 conanfile.py generate() 的 CMakeToolchain 中设置
+                        tc.variables["CMAKE_SKIP_RPATH"] = "TRUE"，让
+                        cmake.install() 不重写安装后库的 RPATH，安装库与
+                        build 产物逐字节一致；运行期共享库依赖（Qt/fluidsynth/
+                        libc++_shared.so）由 build()/test() 中 cmake -E env
+                        LD_LIBRARY_PATH=... 显式注入。
+rec_command:            tc.variables["CMAKE_SKIP_RPATH"] = "TRUE"
+rec_auto_fix:           false
+rec_impl:               conan-recipe-cmake-toolchain-variable
+
+fallback_priority:      2
+fallback_approach:      install-rpath-absolute
+fallback_description:   若不关闭 RPATH 处理，可设置 CMAKE_INSTALL_RPATH 指向依赖
+                        库绝对路径使安装库保留 RUNPATH；但 OHOS 上 cmake.install()
+                        内部 patchelf 重写本身可能仍破坏 ELF，可靠性不如 SKIP_RPATH。
+fallback_command:       tc.variables["CMAKE_INSTALL_RPATH"] = "/path/to/qtbase/lib;/path/to/qt5compat/lib"
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe-cmake-toolchain-variable
+
+forbid_1_pattern:       patchelf --.*\.so|patchelf --remove-rpath|patchelf --set-rpath
+forbid_1_reason:        OHOS 上 patchelf 重写 ELF 会破坏加载器所需结构
+                        （.rela 段重排），即使恢复 RUNPATH 也加载失败。
+forbid_1_consequence:   运行期 "Error loading shared library" / dlopen 失败。
+forbid_2_pattern:       CMAKE_SKIP_RPATH.*FALSE
+forbid_2_reason:        默认 FALSE 会让 cmake.install() 用 patchelf 重写安装库 RPATH。
+forbid_2_consequence:   安装后（conan package 内）库无法加载，test_package 失败。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P010, P012
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              [E537]
+similar_to:             [E537, E274, E330]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E581.md
+last_updated: 2026-09-17
+source_event:           libdrumstick 2.10.0 HarmonyOS PC adaptation, conan-verify round 15 (pkg 库无法加载)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                OpenDesk <opendesk@localhost>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-17
+
+draft: true
+contributor_id: AADB

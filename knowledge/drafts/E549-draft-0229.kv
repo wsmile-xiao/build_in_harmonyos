@@ -1,0 +1,87 @@
+#====================================================================
+# E549 draft — can_run() 导入路径陷阱（Conan 2.x / OHOS 适配版 2.29.1）
+#
+# 场景: primer3 2.6.1 (2026-09-04) test_package/conanfile.py 需要按
+#       can_run() 分支决定是否运行打包的 primer3_core 二进制
+#       （OHOS arm64 交叉编译时宿主 x86/arm64 Linux 无法运行 OHOS
+#       ELF）。写成 from conan.tools.can_run import can_run 后
+#       conan create 在 recipe 加载阶段直接崩溃。
+# 适用: 所有 test_package 或主配方中用 can_run() 做 host/target
+#       分支的 Conan 2.x 配方。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E549
+trigger_tool:           conan|python
+phase:                  testing
+error_signature:        ModuleNotFoundError: No module named 'conan\.tools\.can_run'|ImportError: cannot import name 'can_run' from 'conan\.tools'|No module named 'conan\.tools\.can_run'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan, testing, cross-build, ohos, packaging
+match_keywords:         can_run, ModuleNotFoundError, conan.tools.can_run, conan.tools.build, test_package, import, cross-compile, OHOS, basic_layout, self.run, conan create, recipe load
+title:                  can_run() 必须从 conan.tools.build 导入——顶层模块 conan.tools.can_run 不存在
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             Conan 2.x（含 OHOS 适配版 2.29.1）中 can_run() 是 conan.tools.build 包内的函数，不存在独立的 conan.tools.can_run 模块。配方顶部写 from conan.tools.can_run import can_run 会在 recipe 加载阶段抛 ModuleNotFoundError；由于报错行只提 conan.tools.can_run，易被误判为"conan 版本太旧缺组件"而走错排查方向（实际版本支持该函数，只是导入路径不同）。
+affected_scope:         所有 test_package/conanfile.py 需要用 can_run() 判断宿主能否运行目标二进制的配方。OHOS arm64 交叉编译场景尤其高频：can_run() 为 False 时应跳过 self.run（L2 等门禁按 capability 判定），为 True 时（本机自测）才执行。凡是照抄了错误教程/旧笔记 `from conan.tools.can_run import ...` 的配方全部中招。
+verification_cmd:       python3 -c "from conan.tools.build import can_run; print('OK', can_run)" ; python3 -c "import conan.tools.can_run" 2>&1 | grep -o "No module named 'conan.tools.can_run'"
+
+# 真实证据: primer3 2.6.1 (2026-09-04) conan create 第 4 次迭代
+# 报错: ModuleNotFoundError: No module named 'conan.tools.can_run'
+# 修复: 改为 from conan.tools.build import can_run → conan create EXIT=0
+# 佐证: 官方文档 conan 2.x "can_run" 属于 conan.tools.build（与
+#       check_min_cppstd/BUILD_SHARED_LIBS 处理同包）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           fix-import-path
+rec_description:        导入语句改为 from conan.tools.build import can_run，test() 内用 if can_run(self): 包裹 self.run(...)，跨平台分支语义不变。
+rec_command:            sed -i 's/from conan.tools.can_run import can_run/from conan.tools.build import can_run/' test_package/conanfile.py
+rec_auto_fix:           true
+rec_impl:               sed-replace
+
+fallback_priority:      2
+fallback_approach:      capability-guard-via-profile
+fallback_description:   不导入 can_run，改用 self.settings.os == "OHOS"（或 self.info.settings.os）判断目标平台，交叉到 OHOS 时跳过运行测试；缺点是丢失"同架构本机可运行"的精确判定，只在导入修复不可用时使用。
+fallback_command:       if self.settings.os == "OHOS": return  # skip runtime test in cross build
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       from conan\.tools\.can_run import
+forbid_1_reason:        conan.tools.can_run 模块在 Conan 2.x 任何版本（含 OHOS 适配版 2.29.1）中都不存在，该导入必然抛 ModuleNotFoundError。
+forbid_1_consequence:   conan create 在 recipe 加载阶段崩溃，test_package 无法到达编译阶段；排查者可能误升级/降级 conan 版本浪费时间。
+
+forbid_2_pattern:       import conan\.tools(\s|$)
+forbid_2_reason:        裸 import conan.tools 虽然成功但取不到 can_run 符号，后续 conan.tools.can_run(...) 属性访问同样失败，且错误信息更具误导性。
+forbid_2_consequence:   AttributeError: module 'conan.tools' has no attribute 'can_run'，报错位置后移到运行期，比导入期错误更难定位。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E392]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E549.md
+last_updated: 2026-09-04
+source_event:           primer3 2.6.1 OHOS arm64 适配，conan create 第 4 次迭代修复导入后 EXIT=0（2026-09-04）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                Compile Collaborator <collaborator@opendesk.local>
+source_pr:
+source_commit:          1690d3e0c
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-04
+
+draft: true
+contributor_id: 0229

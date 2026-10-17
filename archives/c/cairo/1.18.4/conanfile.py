@@ -9,6 +9,7 @@ from conan.tools.layout import basic_layout
 class CairoConan(ConanFile):
     name = "cairo"
     version = "1.18.4"
+    exports_sources = "patches/*"
     settings = "os", "arch", "compiler", "build_type"
     options = {"shared": [True, False], "fPIC": [True, False]}
     default_options = {"shared": True, "fPIC": True}
@@ -38,7 +39,12 @@ class CairoConan(ConanFile):
         self.requires("pixman/0.46.4")
         self.requires("libpng/1.6.58")
         self.requires("freetype/2.14.3")
-        self.requires("fontconfig/2.18.1")
+        # 2.18.1 的 libfontconfig.so 的 DT_NEEDED 烤着构建机的 conan cache 绝对路径
+        # （指向 expat/2.8.2 —— 那版 expat 的 .so 无 SONAME），换机器必然加载失败。
+        # 2.18.1.1 是同一份配方只改了 expat 的 pin 后重建的干净版本。
+        # 注：requires 是 minor_mode（fontconfig/2.18.Z），故本次改动**不改变 cairo 的 package_id**，
+        # 已发布的 cairo 二进制无需重建，只需新 recipe revision 让消费方解析到干净的 fontconfig。
+        self.requires("fontconfig/2.18.1.1")
         self.requires("zlib/1.3.1.1")
 
     def layout(self):
@@ -65,7 +71,7 @@ class CairoConan(ConanFile):
         tc.project_options["spectre"] = "disabled"     # libspectre
         tc.project_options["symbol-lookup"] = "disabled"  # binutils/libbfd
         tc.project_options["glib"] = "disabled"        # 不建 cairo-gobject，避免 glib 依赖
-        tc.project_options["tests"] = "disabled"
+        tc.project_options["tests"] = "auto"
         tc.generate()
         # conan MesonToolchain 不把 tools.build:compiler_executables 的 ar/ranlib 写进 native file，
         # meson 便按裸名 llvm-ar 探归档器，而 clang 工具链在 /data/service/hnp/bin，PATH 上无 llvm-ar

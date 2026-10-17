@@ -1,0 +1,107 @@
+draft: DRAFT-kio-http-to-qtnetwork-transport-replacement
+status: pending-editor-review
+title: "KIO HTTP 传输层替换为 Qt6::Network：KDE 库在 kio 未发布平台的完整映射方案（信号槽 arity/manager 生命周期/sync exec 三大陷阱）"
+category:               conan, cmake, kde, qt, linking, porting
+match_keywords: >
+  KIO, KIO::get, KIO::http_post, KIO::TransferJob, KJob, KJob::exec,
+  addMetaData, customHTTPHeader, KIOCore, KIOWidgets, kio 未发布,
+  QNetworkAccessManager, QNetworkReply, QNetworkRequest, finished signal,
+  readAll, deleteLater, QEventLoop, slot requires more arguments than the
+  signal provides, KF6, KDE Frameworks, find_package KF6 KIO, KDE HTTP
+error_signature: >
+  Could NOT find KF6 (missing: KIO)|Could NOT find KF6KIO|KIO/TransferJob
+  file not found|KJob file not found|static assertion failed.*slot requires
+  more arguments than the signal provides|no member named.*KIO|undefined
+  reference to.*KIO::
+root_cause: >
+  KDE Gear / KF6 库普遍用 KIO 做网络传输（KIO::get HTTP GET、
+  KIO::http_post POST、KIO::TransferJob::data 流式信号、KJob::result/
+  KJob::exec 同步等待）。ohpcd 制品仓未发布 kio（及其依赖链 kcmutils/
+  solid），导致 find_package(KF6 COMPONENTS KIO) 直接失败。多数场景下
+  库只用 KIO 的"纯 HTTP 传输"子集，与 KIO 的 ioslave/权限/进度框等平台
+  机制无关，可用 Qt6::Network（qtbase 自带 QNetworkAccessManager）等价
+  替换。三个编译期/运行期陷阱：(1) Qt 新式 connect 的参数数断言——
+  KJob::result 传 job 指针而 QNetworkReply::finished 零参，旧槽签名
+  slotResult(KJob*) 直连会 static_assert 失败；(2) 栈上
+  QNetworkAccessManager 在函数返回后析构，其发出的异步 QNetworkReply
+  变悬空——必须 new QNetworkAccessManager(this) 挂 QObject 父子链；
+  (3) KJob::exec() 的同步语义需用 QEventLoop + connect(finished, quit)
+  复刻，否则 sync 路径直接返回未完成的结果。
+solution: |
+  补丁级映射表（公开 API 不变，只换内部传输实现）：
+
+  | upstream (KIO) | replacement (Qt6::Network) |
+  |---|---|
+  | KIO::TransferJob* job = KIO::get(url, KIO::NoReload, KIO::HideProgressInfo) | QNetworkAccessManager *nam = new QNetworkAccessManager(this); QNetworkReply *job = nam->get(QNetworkRequest(url)); |
+  | KIO::http_post(url, data, KIO::HideProgressInfo) | nam->post(request, body)（request.setHeader(ContentTypeHeader, ...) 预设 Content-Type）|
+  | job->addMetaData("customHTTPHeader", multi-line-header) | request.setRawHeader(...) 逐头设置 |
+  | connect(job, &KIO::TransferJob::data, this, &X::slotData) 分块累积 | 删除 slotData——QNetworkReply finished 后 readAll() 一次性取全量 |
+  | connect(job, &KJob::result, this, &X::slotResult(KJob*)) | connect(job, &QNetworkReply::finished, this, &X::slotResult())——槽改零参，内部 qobject_cast<QNetworkReply*>(sender()) 取回 reply |
+  | job->exec()（同步）| QEventLoop loop; connect(job, &QNetworkReply::finished, &loop, &QEventLoop::quit); loop.exec(); |
+  | job->error() != 0 | job->error() != QNetworkReply::NoError |
+  | （reply 清理）| job->deleteLater() 在槽/同步路径尾部调用 |
+
+  代码骨架（async 查询，sync 场景把 connect 换 QEventLoop）：
+  ```cpp
+  // 头文件：class QNetworkReply; 前置声明（替换 namespace KIO { class Job; }）
+  void X::slotResult()  // 零参槽——QNetworkReply::finished 无参数
+  {
+    QNetworkReply *job = qobject_cast<QNetworkReply *>(sender());
+    if (nullptr == job) { /* error path */ return; }
+    if (job->error() != QNetworkReply::NoError) {
+      job->deleteLater(); /* ServerError path */ return;
+    }
+    data_.append(job->readAll());  // 替代逐块 slotData
+    job->deleteLater();
+    /* continue with parsed data */
+  }
+
+  Result X::fetchURL()
+  {
+    QNetworkAccessManager *nam = new QNetworkAccessManager(this);  // 必须挂 this！栈对象悬空
+    QNetworkRequest request(cgiURL_);
+    QNetworkReply *job = nam->get(request);
+    if (nullptr == job) return ServerError;
+    connect(job, &QNetworkReply::finished, this, &X::slotResult);
+    return Success;
+  }
+  ```
+  配方侧：requirements 去 kio，qtbase 已含 Network 组件；CMakeLists
+  target_link_libraries 把 KF6::KIOCore 换成 Qt6::Network。
+fallback: >
+  若库用到的 KIO 面超出纯 HTTP（ioslave 注册、KIO::listDir、权限代理、
+  KPropertiesDialog 等），QNetworkAccessManager 不等价——此时不要硬替：
+  (a) 若该子功能非下游所需（如 KCM 设置面板），用 option(BUILD_KCM) +
+  BUILD_KCM=OFF 整块禁用（libkcddb kcmcddb 先例）；(b) 若是核心功能，
+  先立项适配发布 kio 再回来（R36 拓扑序），或在配方 validate() 里
+  env_unsupported 止损。
+transport_test_solution: |
+  ⭐ 重写后传输代码的零外网验证方案（AI review 实战采纳，PR #9143）：
+  test_package 内起 QTcpServer 监听 127.0.0.1 随机端口，模拟 CDDB CGI/submit
+  端点（单次应答预烘焙 body + 状态行），再用被测库的公开入口
+  （libkcddb 场景 = KCDDB::Client）连 127.0.0.1:port 驱动完整传输路径：
+
+  1. Success 路径：应答 "200 rock <discid>\n" → 断言 KCDDB::Success，
+     并回读 QTcpSocket 捕获的原始请求验证 CGI 参数（cmd=cddb query/hello/
+     proto=6）——同时覆盖 QEventLoop 同步等待、零参槽+qobject_cast<
+     QNetworkReply*>(sender())、readAll()、deleteLater
+  2. ServerError 路径：HTTP 500 状态行 → 断言 KCDDB::ServerError
+     （HTTP 状态码→库错误码映射）
+  3. NoRecordFound 路径：CDDB "202" → KCDDB::NoRecordFound
+  4. submit 路径：应答 "320 ...\n" → 断言 POST /~cddb/submit.cgi +
+     Category/Discid/User-Email/Submit-Mode/Charset 逐头 setRawHeader +
+     Content-Type: text/plain + 320→Success 映射
+
+  实现要点：LoopbackHttpServer 用 lambda 捕获 socket 处理 readyRead，
+  收到完整请求头（\r\n\r\n）后写响应并 disconnectFromHost；
+  conanfile.py 的 test() 需给 QT_QPA_PLATFORM=offscreen + HOME 隔离。
+  该方案让"重写传输层在 CI 零执行"的验证盲区完全闭合（无外网依赖，
+  conan create 门禁内跑）。
+
+verify_builds: "#42915/#42935/#42946/#42955（PR #9143 四轮 CI 绿，libkcddb 26.04.3 首个实例）"
+reference_impl: >
+  libkcddb 26.04.3 archives/l/libkcddb/26.04.3/patches/0001-ohos-adaptation.patch
+  （asynchttplookup/synchttplookup/sites/httpsubmit/submit/asynchttpsubmit/
+  synchttpsubmit 七文件完整替换，公开 Lookup/Submit/Sites API 不变）
+id: E543
+doc_file: doc/E543.md
