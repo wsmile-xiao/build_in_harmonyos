@@ -41,7 +41,7 @@ class Utf8procConan(ConanFile):
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
-        cmake.test(cli_args=["--no-tests=error"])
+        cmake.test()
 
     def package(self):
         include_dir = os.path.join(self.package_folder, "include")
