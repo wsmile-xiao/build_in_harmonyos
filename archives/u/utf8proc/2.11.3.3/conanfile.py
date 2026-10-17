@@ -8,7 +8,7 @@ from conan.tools.files import apply_conandata_patches, copy, export_conandata_pa
 
 class Utf8procConan(ConanFile):
     name = "utf8proc"
-    version = "2.11.3"
+    version = "2.11.3.3"
     description = "Clean C library for processing UTF-8 Unicode data"
     homepage = "https://github.com/JuliaStrings/utf8proc"
     license = "MIT"
